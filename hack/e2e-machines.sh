@@ -138,7 +138,7 @@ check "move: a moved event in each namespace" 'for t in "$T-mv2" "$T-mv3"; do br
 MF=$(briqyard machine fork "$MV" --name mvfork --namespace "$T-mv4" | jq -r .id)
 check "fork into another namespace: in it, on a network of its own" '[ "$(briqyard machine get "$MF" | jq -r .namespace)" = "$T-mv4" ] && [ "$(briqyard machine get "$MF" | jq -r .ip | cut -d. -f3)" != "$(briqyard machine get "$MV" | jq -r .ip | cut -d. -f3)" ]'
 briqyard machine wait "$MF" >/dev/null
-check "fork keeps its source's command and keeps running (ADR 0097)" '[ "$(briqyard machine get "$MF" | jq -c "[.state, .cmd, .exit]")" = "[\"running\",[\"sleep\",\"3600\"],null]" ]'
+check "fork keeps its source's command and keeps running (ADR 0097)" '[ "$(briqyard machine get "$MF" | jq -r ".state, .exit")" = "$(printf "running\nnull")" ] && [ "$(briqyard machine get "$MF" | jq -c .cmd)" = "$(briqyard machine get "$MV" | jq -c .cmd)" ]'
 check "fork into another namespace: its source's disk" '[ "$(briqyard machine exec "$MF" -- cat /root/moved)" = kept ]'
 for id in "$MF" "$MV" "$MN"; do briqyard machine rm "$id" >/dev/null; done
 for t in mv2 mv3 mv4; do briqyard namespace rm "$T-$t" >/dev/null 2>&1 || true; done
