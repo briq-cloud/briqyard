@@ -344,8 +344,10 @@ check "admission: nothing leaked, nothing committed" 'invariants && [ "$(statusq
 # ======================================================================================
 echo "== chaos: SIGKILL in the middle of an operation, then recovery"
 # Owners with a counter on both disks; the counter is what must survive.
-mkowner() { # NAME MEMORY
-  local id; id=$(run --image alpine:3.20 --name "$1" --namespace "$T-c" --memory "$2" --volume 2G:/data -- sleep 7200)
+mkowner() { # NAME MEMORY [IMAGE: one whose own command keeps running, since a fork starts the image's, not the source's]
+  local id
+  if [ -n "${3:-}" ]; then id=$(run --image "$3" --name "$1" --namespace "$T-c" --memory "$2" --volume 2G:/data)
+  else id=$(run --image alpine:3.20 --name "$1" --namespace "$T-c" --memory "$2" --volume 2G:/data -- sleep 7200); fi
   on "$id" 'echo 7 > /root/n; echo 7 > /data/n; sync' && echo "$id"
 }
 ctr() { on "$1" 'cat /root/n /data/n' | tr '\n' ' '; }
@@ -372,7 +374,7 @@ check "mid-create: the same create again succeeds" '[ "$(on "$CR" hostname)" = c
 rm_all "$CR"
 
 echo "-- mid-fork"
-SRC=$(mkowner src 256)
+SRC=$(mkowner src 256 nginx:alpine)
 caught=0
 for attempt in 1 2 3; do
   destroy_named "$T-c" fk; settle || true
@@ -390,9 +392,7 @@ fi
 destroy_named "$T-c" fk; settle || true
 check "mid-fork: destroyed, invariants hold, nothing leaked" 'invariants'
 FK=$(briqyard machine fork "$SRC" --name fk2 --namespace "$T-c" | jq -r .id)
-briqyard machine wait --for running "$FK" >/dev/null || true
-diag "$FK"
-diag "$SRC"
+briqyard machine wait --for running "$FK" >/dev/null
 check "mid-fork: a fork again works and holds the counter" '[ "$(ctr "$FK")" = "7 7 " ]'
 rm_all "$FK"
 
