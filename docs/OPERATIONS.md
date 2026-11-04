@@ -549,6 +549,50 @@ In the store, per machine: `backups/<machine>/<id>.json` (the record) and
 `backups/<machine>/<disk>/<id>.zfs` (a stream, `root` or `data`). Ids are times to the
 millisecond, `20261021T101500.123Z`. A deletion removes the streams first, then the record.
 
+### Qualify workload restores
+
+Run from a checkout matching the installed runtime. Requires Python 3, a reachable
+API, permission to create and destroy machines, a configured backup store and the
+host's registry mirror. It uses stock digest-pinned Postgres and Python images,
+512 MiB guests, 1 GiB data volumes and the host's normal root disk size. Up to three
+guests coexist. It writes only into fresh `restore-q-…` namespaces. It deletes its
+machines and backup chains on success, failure and handled signals. An unreachable
+API can prevent cleanup: use the namespace and machine ids in `results.jsonl` to
+finish it; never delete another run's namespace. Do not kill the harness with SIGKILL.
+
+```bash
+BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN="$BRIQYARD_TOKEN" \
+  python3 hack/restore-qualify.py --output restore-evidence
+```
+
+Use `--cafile /path/to/ca.pem` for a private CA. Tokens can stay in the environment;
+never put one into a report. The output directory must not already exist. Keep its
+`ledger.jsonl`, `results.jsonl`, file manifest and guest logs together. Exit 0 requires
+all selected checks and cleanup. A fallback to `unsynced`, missing pre-request data,
+a hole, a failed integrity check or an inconclusive loss control fails the run.
+Read `lost_ack_ids`, `loss_window_seconds` and `backup_start_to_last_ack_seconds`
+together: the window is the span of missing acknowledgements, not a promised RPO.
+
+For two hosts, use a fleet with distinct existing regions and a shared backup store:
+
+```bash
+BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN="$BRIQYARD_TOKEN" \
+  python3 hack/restore-qualify.py --source-region source --destination-region target \
+  --output restore-offhost-evidence
+```
+
+The result requires different host ids. Choose regions that identify the intended
+hosts; the harness does not change placement or host settings. Omit
+`--store-transfer`: that option belongs to the disposable CI directory-store fixture.
+Run without `--allow-daemon-kill` on shared hosts. The kill check is disabled by
+default and additionally requires the disposable native CI environment; it kills
+only the daemon and this run's exact ZFS sender, never a name pattern.
+
+Collect real allocated disk sizes, object-store latency, restore-to-first-query times
+and seconds per stream GiB on the real hardware. CI uses small workloads and a
+QEMU second host; it provides no real-host performance or capacity qualification.
+There are no performance pass thresholds. See ADR 0103 for the consistency promise.
+
 The state itself (`state/`) is small and lives only on the host; a lost host loses the records
 of machines that were never backed up, and their disks. A machine's own `POST
 /v1/machines/{id}/snapshots` is a local snapshot of its disks: instant, copy-on-write, not a

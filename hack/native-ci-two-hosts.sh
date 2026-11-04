@@ -33,7 +33,8 @@ c['capacity']={'memory_mb':4608,'vcpus':8}
 p.write_text(yaml.safe_dump(c,sort_keys=False))
 p=Path('/etc/briqyard/fleet.yaml'); c=yaml.safe_load(p.read_text())
 c['listen']='0.0.0.0:7430'; c['tls']='off'
-c['hosts'].append({'id':'fc2','url':'http://127.0.0.2:27420','token':'fc2-token','region':'dev'})
+c['hosts'][0]['region']='restore-source'
+c['hosts'].append({'id':'fc2','url':'http://127.0.0.2:27420','token':'fc2-token','region':'restore-target'})
 p.write_text(yaml.safe_dump(c,sort_keys=False))
 PY
 sudo systemctl restart briqyardd briqyard-fleet
@@ -56,6 +57,8 @@ python3 - <<'PY'
 from pathlib import Path
 import yaml
 p=Path('/etc/briqyard/config.yaml'); c=yaml.safe_load(p.read_text())
+c['backup']={'store':'file:///var/lib/briqyard/backups'}
+c['registry_mirrors']={'docker.io':'http://10.0.2.2:7440'}
 c['api_tls']=False
 c['listen']='0.0.0.0:7420'
 c['ingress']['bind']='0.0.0.0'
@@ -113,4 +116,10 @@ for suite in fleet-two-hosts fleet-restore; do
   printf '%s duration seconds: %s\n' "$suite" "$((SECONDS-start))" | tee -a native-logs/durations.log
   if [ "${statuses[0]}" != 0 ] || [ "${statuses[1]}" != 0 ]; then rc=1; fi
 done
+if [ "$rc" = 0 ]; then
+  BRIQYARD_URL=http://127.0.0.1:7430 python3 -u hack/restore-qualify.py \
+    --source-region restore-source --destination-region restore-target \
+    --store-transfer "$PWD/hack/native-restore-transfer.sh" \
+    --output native-logs/restore-offhost | tee native-logs/restore-offhost.log
+fi
 exit "$rc"

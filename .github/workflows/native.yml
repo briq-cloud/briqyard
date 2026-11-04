@@ -141,7 +141,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [stress, monitoring, alerts, qualification]
+        suite: [stress, monitoring, alerts, qualification, restore]
     name: ${{ matrix.suite }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -205,7 +205,9 @@ jobs:
         if: always()
         with:
           name: native-${{ matrix.suite }}-log
-          path: native-logs/${{ matrix.suite }}.log
+          path: |
+            native-logs/${{ matrix.suite }}.log
+            native-logs/${{ matrix.suite }}/
           if-no-files-found: ignore
 
   two-hosts:
