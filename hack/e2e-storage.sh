@@ -143,6 +143,20 @@ check "deleted with what continues from it" 'briqyard backup rm "$SB" "$S3" --ch
 echo "== snapshots: restore in place, a fork and backups around it, memory (ADR 0031)"
 CK=$(briqyard machine run --image alpine:3.20 --name ckpt --namespace "$T" --memory 256 --volume 1G:/data -- sleep 3600 | jq -r .id)
 on() { briqyard machine exec "$CK" -- sh -c "$1"; }
+# Isolated regression: keep the checkpoint suite's boot counts unchanged.
+R27=$(briqyard machine run --image alpine:3.20 --name fresh27 --namespace "$T" --memory 256 -- sleep 3600 | jq -r .id)
+briqyard machine exec "$R27" -- sh -c 'printf 123456789012345678901234567 > /root/fresh'
+FRESH_SNAP=$(briqyard machine snapshot create --name fresh "$R27")
+check "fresh snapshot filesystem consistency" '[ "$(echo "$FRESH_SNAP" | jq -r .consistency)" = filesystem ]'
+briqyard machine exec "$R27" -- sh -c 'printf 123456789012345678901234567 > /root/fork-fresh'
+FRESH_FORK=$(briqyard machine fork "$R27" --name freshfork | jq -r .id)
+briqyard machine set "$FRESH_FORK" -- sleep 3600 >/dev/null
+briqyard machine restart "$FRESH_FORK" >/dev/null
+check "disk fork preserves 27 unsynced bytes" '[ "$(briqyard machine exec "$FRESH_FORK" -- sh -c "wc -c < /root/fork-fresh" | tr -d " ")" = 27 ]'
+briqyard machine snapshot restore "$R27" fresh >/dev/null
+check "snapshot preserves 27 unsynced bytes" '[ "$(briqyard machine exec "$R27" -- sh -c "wc -c < /root/fresh" | tr -d " ")" = 27 ]'
+briqyard machine rm "$FRESH_FORK" >/dev/null
+briqyard machine rm "$R27" >/dev/null
 on 'echo v1 > /data/f; echo r1 > /root/r; sync' >/dev/null
 CB1=$(briqyard machine backup "$CK" | jq -r .id)
 briqyard machine snapshot create --name before "$CK" >/dev/null

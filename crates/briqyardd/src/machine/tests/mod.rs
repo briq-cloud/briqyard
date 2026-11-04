@@ -107,6 +107,8 @@ pub(in crate::machine) fn record() -> Record {
         last_used_at: None,
         console_offset: 0,
         suspended: false,
+        suspend_synced: false,
+        fork: None,
         backup_bytes: 0,
         backup: Schedule::default(),
         version: 0,
@@ -137,6 +139,12 @@ pub(super) struct Harness {
 }
 
 impl Harness {
+    pub(in crate::machine) fn fs_freeze_fault(&self, fault: u32) {
+        self.host.fs_freeze_fault.store(fault, Relaxed);
+    }
+    pub(in crate::machine) fn thaw_count(&self) -> u32 {
+        self.host.fs_thaws.load(Relaxed)
+    }
     pub(in crate::machine) fn fs_sync_fault(&self, fault: u32) {
         self.host.fs_sync_fault.store(fault, Relaxed);
     }

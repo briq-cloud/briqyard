@@ -37,6 +37,7 @@ impl Manager {
             ));
         }
         let fork = api::ForkSpec {
+            consistency: None,
             machine_id: source.id.clone(),
             copy: "disk".into(),
             snapshot: Some(snapshot.id.clone()),

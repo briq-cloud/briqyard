@@ -70,7 +70,7 @@ pub(super) fn machine_table(ms: &[api::Machine]) -> String {
 pub(super) fn snapshot_table(ss: &[api::Snapshot]) -> String {
     let templates = ss.iter().any(|s| s.clone_profile.is_some());
     let mut out = format!(
-        "{:<16} {:<20} {:<21} {:<10} MEMORY",
+        "{:<16} {:<20} {:<21} {:<10} MEMORY CONSISTENCY",
         "ID", "NAME", "CREATED", "DISKS"
     );
     if templates {
@@ -86,6 +86,7 @@ pub(super) fn snapshot_table(ss: &[api::Snapshot]) -> String {
             s.disks.join(","),
             if s.memory { "yes" } else { "no" }
         ));
+        out.push_str(&format!(" {}", s.copy_consistency.consistency));
         if templates {
             out.push_str(&format!(
                 " {} {} {}",

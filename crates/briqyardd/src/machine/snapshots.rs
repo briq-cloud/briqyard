@@ -13,6 +13,8 @@ pub(super) const DISKS: [&str; 2] = ["root", "data"];
 /// A snapshot as the machine's record keeps it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotRec {
+    #[serde(flatten, default)]
+    pub copy_consistency: api::CopyConsistency,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -38,6 +40,7 @@ pub struct SnapshotRec {
 impl SnapshotRec {
     fn view(&self, machine_id: &str) -> api::Snapshot {
         api::Snapshot {
+            copy_consistency: self.copy_consistency.clone(),
             id: self.id.clone(),
             machine_id: machine_id.to_string(),
             name: self.name.clone(),
@@ -267,17 +270,33 @@ impl Manager {
         };
         let datasets: Vec<String> = disks.iter().map(|d| r.disk_dataset(d)).collect();
         let snap = new_id("s");
+        let copy_consistency;
         let (memory, vmm_version) = match req.memory {
             true => {
+                copy_consistency = if req.template {
+                    consistency::achieved("synced", None)
+                } else {
+                    self.sync_copy(&e, req.consistency).await
+                };
                 self.snapshot_with_memory(&e, &r, &datasets, &snap).await?;
                 (Some(memory_spec(&r)), r.vmm_version.clone())
             }
             false => {
-                self.inner.zfs.snapshot_all(&datasets, &snap).await?;
+                copy_consistency = self
+                    .frozen_copy(&e, &datasets, &snap, "snapshot", req.consistency)
+                    .await?;
                 (None, String::new())
             }
         };
+        if req.memory {
+            self.inner.stats.copies.lock().unwrap().record(
+                "snapshot",
+                &copy_consistency.consistency,
+                None,
+            );
+        }
         let mut s = SnapshotRec {
+            copy_consistency,
             id: snap,
             name: req.name,
             created_at: Utc::now(),
@@ -304,11 +323,16 @@ impl Manager {
             } else {
                 ""
             };
-            let ev = Ev::normal(
+            let event = if s.copy_consistency.consistency == "crash" {
+                Ev::warning
+            } else {
+                Ev::normal
+            };
+            let ev = event(
                 reason::SNAPSHOT_TAKEN,
                 format!("snapshot {}{named} of {}{with}", s.id, s.disks.join(" and ")),
             )
-            .data(json!({ "snapshot": s.id, "name": s.name, "disks": s.disks, "memory": s.memory.is_some() }));
+            .data(json!({ "consistency": s.copy_consistency.consistency, "consistency_reason": s.copy_consistency.consistency_reason, "snapshot": s.id, "name": s.name, "disks": s.disks, "memory": s.memory.is_some() }));
             e.note_locked(&mut rec, ev);
         }
         self.save(&e)?;
@@ -580,7 +604,7 @@ impl Manager {
                     s.id
                 ),
             )
-            .data(json!({ "snapshot": s.id, "name": s.name, "disks": s.disks, "memory": resume }));
+            .data(json!({ "consistency": s.copy_consistency.consistency, "consistency_reason": s.copy_consistency.consistency_reason, "snapshot": s.id, "name": s.name, "disks": s.disks, "memory": resume }));
             e.note_locked(&mut rec, ev);
         }
         self.save(e)?;

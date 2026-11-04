@@ -5,9 +5,14 @@ use super::*;
 pub(super) async fn make_backup(
     State(st): S,
     Path(id): Path<String>,
+    req: Option<Json<api::BackupRequest>>,
 ) -> Result<(StatusCode, Json<api::Backup>), AppError> {
     let m = st.mgr.clone();
-    let b = detached(async move { m.backup(&id).await }).await?;
+    let b = detached(async move {
+        m.backup_requested(&id, req.map(|r| r.0).unwrap_or_default())
+            .await
+    })
+    .await?;
     Ok((StatusCode::CREATED, Json(b)))
 }
 

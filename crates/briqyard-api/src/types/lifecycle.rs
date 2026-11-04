@@ -2,6 +2,47 @@
 
 use super::*;
 
+/// A caller may explicitly request the crash-consistent fast path.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyConsistencyRequest {
+    Crash,
+}
+
+/// Consistency achieved by a disk copy. Legacy records conservatively default to crash.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CopyConsistency {
+    #[serde(default = "legacy_consistency")]
+    pub consistency: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consistency_reason: Option<String>,
+}
+fn legacy_consistency() -> String {
+    "crash".into()
+}
+impl Default for CopyConsistency {
+    fn default() -> Self {
+        Self {
+            consistency: "crash".into(),
+            consistency_reason: Some("legacy_record".into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BackupRequest {
+    #[serde(default)]
+    pub consistency: Option<CopyConsistencyRequest>,
+}
+
+/// Provenance of a disk fork.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForkOrigin {
+    pub machine_id: String,
+    #[serde(flatten)]
+    pub copy_consistency: CopyConsistency,
+}
+
 /// Which backup to restore: a machine's latest, or one by id.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RestoreSpec {
@@ -15,6 +56,8 @@ pub struct RestoreSpec {
 /// A backup of a machine's disks in the object store.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Backup {
+    #[serde(flatten, default)]
+    pub copy_consistency: CopyConsistency,
     /// Size captured in this backup, for placement before a restore. Older sealed records
     /// may omit it; their restores through the fleet must supply an explicit size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -286,6 +329,8 @@ pub struct StopRequest {
 /// A snapshot to take now (ADR 0031).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SnapshotRequest {
+    #[serde(default)]
+    pub consistency: Option<CopyConsistencyRequest>,
     /// A name to find it by again (`before-migration`), unique among the machine's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -300,6 +345,8 @@ pub struct SnapshotRequest {
 /// A point-in-time copy of a machine's disks, and of its memory when taken with it (ADR 0031).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(flatten, default)]
+    pub copy_consistency: CopyConsistency,
     pub id: String,
     pub machine_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -29,6 +29,7 @@ async fn harness() -> Harness {
 
 fn named(name: &str) -> api::SnapshotRequest {
     api::SnapshotRequest {
+        consistency: None,
         template: false,
         name: Some(name.into()),
         memory: false,
@@ -37,6 +38,7 @@ fn named(name: &str) -> api::SnapshotRequest {
 
 fn with_memory() -> api::SnapshotRequest {
     api::SnapshotRequest {
+        consistency: None,
         template: false,
         name: None,
         memory: true,
@@ -656,9 +658,11 @@ async fn a_snapshot_with_memory_resumes_where_it_was_while_the_spec_is_the_same(
     assert!(s.memory);
     // Paused for the snapshot, then running on: the same process.
     let calls = h.host_calls();
-    // Unsynced while paused; the files synced by the daemon after the resume.
+    assert!(calls[0].starts_with("fs_sync "));
+    assert_eq!(s.copy_consistency.consistency, "synced");
+    // Memory files are synced by the daemon after the resume.
     assert_eq!(
-        calls,
+        &calls[1..],
         [format!("snapshot {pid} unsynced"), format!("resume {pid}")]
     );
     assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
@@ -733,4 +737,88 @@ async fn a_new_image_drops_the_root_halves_and_keeps_the_old_root_for_its_forks(
     assert!(!h.snapshot_exists(&retired[0], &s.id));
     h.m.destroy(&fork.id, None).await.unwrap();
     assert!(h.retired(&m.id).await.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn frozen_copy_fallbacks_are_bounded_and_the_opt_out_skips_guest_calls() {
+    for (fault, reason) in [
+        (0, None),
+        (1, Some("init_too_old")),
+        (2, Some("freeze_refused")),
+        (3, Some("freeze_timeout")),
+        (4, Some("freeze_expired")),
+    ] {
+        let h = harness().await;
+        let e = h.add("m_frozen", state::STOPPED, 256);
+        h.disks(&e).await;
+        h.m.start("m_frozen", None).await.unwrap();
+        h.fs_freeze_fault(fault);
+        let s = h.m.snapshot("m_frozen", named("frozen")).await.unwrap();
+        assert_eq!(s.copy_consistency.consistency_reason.as_deref(), reason);
+        assert_eq!(
+            s.copy_consistency.consistency,
+            if fault == 0 { "filesystem" } else { "crash" }
+        );
+        h.host_calls();
+        let mut req = named("opt-out");
+        req.consistency = Some(api::CopyConsistencyRequest::Crash);
+        let s = h.m.snapshot("m_frozen", req).await.unwrap();
+        assert_eq!(
+            s.copy_consistency.consistency_reason.as_deref(),
+            Some("requested")
+        );
+        assert!(!h.host_calls().iter().any(|c| c.starts_with("fs_")));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn suspend_proceeds_when_sync_never_answers_and_records_unsynced() {
+    let h = harness().await;
+    let e = h.add("m_sleep", state::STOPPED, 256);
+    h.disks(&e).await;
+    h.m.start("m_sleep", None).await.unwrap();
+    h.fs_sync_fault(3);
+    let started = tokio::time::Instant::now();
+    h.m.stop("m_sleep", Duration::from_secs(1), true, None)
+        .await
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(26));
+    assert!(e.snapshot().suspended);
+    assert!(!e.snapshot().suspend_synced);
+    assert!(!h.host_calls().iter().any(|c| c.starts_with("fs_freeze")));
+}
+
+#[tokio::test]
+async fn storage_failure_thaws_before_returning() {
+    let h = harness().await;
+    let e = h.add("m_thaw", state::STOPPED, 256);
+    h.disks(&e).await;
+    h.m.start("m_thaw", None).await.unwrap();
+    let lock = e.lock.lock().await;
+    let datasets = vec![e.snapshot().root_dataset()];
+    h.m.inner
+        .zfs
+        .snapshot_all(&datasets, "failed")
+        .await
+        .unwrap();
+    let result =
+        h.m.frozen_copy(&e, &datasets, "failed", "snapshot", None)
+            .await;
+    assert!(result.is_err());
+    assert_eq!(h.thaw_count(), 1);
+    drop(lock);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_sync_also_falls_back_without_freezing() {
+    for fault in [1, 2, 3] {
+        let h = harness().await;
+        let e = h.add("m_sync", state::STOPPED, 256);
+        h.disks(&e).await;
+        h.m.start("m_sync", None).await.unwrap();
+        h.fs_sync_fault(fault);
+        let s = h.m.snapshot("m_sync", named("sync-failure")).await.unwrap();
+        assert_eq!(s.copy_consistency.consistency, "crash");
+        assert!(!h.host_calls().iter().any(|c| c.starts_with("fs_freeze")));
+    }
 }

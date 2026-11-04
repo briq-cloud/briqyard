@@ -441,6 +441,21 @@ impl Manager {
             );
             // A suspend keeps a memory snapshot: the next start resumes in well under a
             // second. Refused, the machine is stopped the plain way.
+            let synced = if suspend {
+                let sync_started = Instant::now();
+                let synced = self.bounded_sync(&live.vsock).await.is_ok();
+                stage(
+                    operation,
+                    "fs_sync",
+                    &machine,
+                    live.pid,
+                    sync_started,
+                    synced,
+                );
+                synced
+            } else {
+                false
+            };
             let started = Instant::now();
             let suspended = suspend
                 && match self.inner.vmm.snapshot(&live, true).await {
@@ -469,6 +484,7 @@ impl Manager {
                 {
                     let mut rec = e.rec.lock().unwrap();
                     rec.suspended = true;
+                    rec.suspend_synced = synced;
                     rec.boot_identity = identity;
                 }
                 let saved = self.save(e);

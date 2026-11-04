@@ -6,6 +6,10 @@ on:
         description: Source ref to build and test (empty uses workflow ref)
         required: false
         type: string
+      measure_freeze:
+        description: Run only baseline and candidate freeze measurements
+        default: false
+        type: boolean
       two_hosts_only:
         description: Run only the two-host suites
         required: false
@@ -22,11 +26,11 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: native-${{ github.event.pull_request.number || inputs.ref || github.ref }}
+  group: native-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 jobs:
   suites:
-    if: ${{ !inputs.two_hosts_only }}
+    if: ${{ !inputs.two_hosts_only && !inputs.measure_freeze }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -117,7 +121,7 @@ jobs:
           path: native-logs/fleet-smoke.log
           if-no-files-found: ignore
   more-suites:
-    if: ${{ !inputs.two_hosts_only }}
+    if: ${{ !inputs.two_hosts_only && !inputs.measure_freeze }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -191,6 +195,7 @@ jobs:
           if-no-files-found: ignore
 
   two-hosts:
+    if: ${{ !inputs.measure_freeze }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -246,3 +251,53 @@ jobs:
           name: native-two-host-logs
           path: native-logs/
           if-no-files-found: ignore
+
+  measure:
+    if: ${{ inputs.measure_freeze }}
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: [baseline, candidate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ matrix.revision == 'baseline' && '5e4d04a0' || inputs.ref }}
+          persist-credentials: false
+      # Keep the harness from the workflow revision when dispatch tests an older source ref.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: .native-harness
+          persist-credentials: false
+      - name: Record tested identity and host
+        run: |
+          git -C "$GITHUB_WORKSPACE" rev-parse HEAD | tee -a "$GITHUB_STEP_SUMMARY"
+          uname -a | tee -a "$GITHUB_STEP_SUMMARY"
+          ls -l /dev/kvm
+          free -m
+          df -h /
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Build the head
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools pkg-config libssl-dev bc jq openssl postgresql-client openssh-server python3-yaml
+          cargo build --release --locked --workspace --exclude briqyard-init
+          cargo build --release --locked -p briqyard-init --target x86_64-unknown-linux-musl
+      - name: Install isolated native host and fleet
+        run: bash .native-harness/hack/native-ci.sh "$GITHUB_WORKSPACE"
+      - name: Measure shared hosted x86_64 runner
+        run: |
+          mkdir -p native-logs
+          set -o pipefail
+          bash .native-harness/hack/measure-freeze.sh | tee native-logs/freeze.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: freeze-${{ matrix.revision }}
+          path: native-logs/freeze.json

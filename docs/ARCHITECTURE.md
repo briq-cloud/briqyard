@@ -141,7 +141,8 @@ attached with Firecracker's `Writeback` cache mode, so a guest `fsync` reaches t
 a database on it is as safe as the host's drive. Both disks the guest writes take its discards,
 and both are mounted with `discard` (the root by the kernel, the volume by the init): what a guest
 deletes goes back to the pool, unless a snapshot still holds it (ADR 0037). A fork is a clone of a snapshot of both disks,
-taken while the source runs (crash-consistent for the data volume). That snapshot (`@fork-<id>`
+taken with the running guest’s filesystems frozen; both disks share one ZFS snapshot command.
+The fork reports achieved consistency and any fallback reason (ADR 0092). That snapshot (`@fork-<id>`
 on the source) pins every block the source has since rewritten, so it goes with the last machine
 cloned from it.
 

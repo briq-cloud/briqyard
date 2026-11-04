@@ -45,6 +45,8 @@
     Backup:
       type: object
       properties:
+        consistency: { type: string, enum: [filesystem, synced, crash], description: "Achieved disk consistency; legacy records default to crash" }
+        consistency_reason: { type: string, description: "Fallback or opt-out reason" }
         size: { allOf: [{ $ref: "#/components/schemas/Size" }], description: "size captured in the backup; older sealed records may omit it, requiring an explicit restore size through the fleet" }
         runtime_class: { type: string, description: "the runtime class (ADR 0088) the machine ran under; absent for `default`. A restore that names no class runs in it, and through the fleet is placed on a host that serves it" }
         id: { type: string, description: "a timestamp to the millisecond (20261021T101500.123Z), later ids sort later" }
@@ -82,6 +84,7 @@
       type: object
       required: [machine_id]
       properties:
+        consistency: { type: string, enum: [crash], description: "Skip guest sync and freeze for this request" }
         machine_id: { type: string }
         copy: { type: string, enum: [disk, config], default: disk }
         snapshot: { type: string, description: "sealed named memory snapshot ID or name; strict same-owner/source-host restore without cold fallback; config copy and workload overrides are refused" }
@@ -170,6 +173,12 @@
     Machine:
       type: object
       properties:
+        fork:
+          type: object
+          properties:
+            machine_id: { type: string }
+            consistency: { type: string, enum: [filesystem, synced, crash] }
+            consistency_reason: { type: string }
         id: { type: string }
         namespace: { type: string }
         name: { type: string }
@@ -363,12 +372,15 @@
     SnapshotRequest:
       type: object
       properties:
+        consistency: { type: string, enum: [crash], description: "Skip guest sync and freeze for this request" }
         template: { type: boolean, default: false, description: "seal a reviewed init-ready builder with memory=true; ordinary machines cannot be promoted" }
         name: { type: string, description: "to find it by again: a-z, 0-9, _ and -, at most 64, not starting with s_; unique on the machine" }
         memory: { type: boolean, description: "its memory too, on a running machine, paused while it is written: a restore resumes its processes where they were" }
     Snapshot:
       type: object
       properties:
+        consistency: { type: string, enum: [filesystem, synced, crash], description: "Achieved disk consistency; legacy records default to crash" }
+        consistency_reason: { type: string, description: "Fallback or opt-out reason" }
         id: { type: string }
         machine_id: { type: string }
         name: { type: string }

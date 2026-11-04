@@ -1,6 +1,6 @@
 # ADR 0092: Filesystem-consistent copies: the guest freezes its filesystems around a disk snapshot, syncs before a memory one
 
-Date: 2026-11-04 · Status: accepted (primitives and seal sync implemented; copy integration follows); amends ADR 0031 (a snapshot's consistency is recorded), ADR 0008 and ADR 0023 (a backup of a running machine is filesystem-consistent by default), ADR 0005 (a suspend syncs the guest first), ADR 0076 (a seed is sealed after a sync); adds three ops to the guest protocol (ADR 0004)
+Date: 2026-11-04 · Status: accepted (primitives and seal sync merged; slice C copy integration implemented, native qualification and measurements pending); amends ADR 0031 (a snapshot's consistency is recorded), ADR 0008 and ADR 0023 (a backup of a running machine is filesystem-consistent by default), ADR 0005 (a suspend syncs the guest first), ADR 0076 (a seed is sealed after a sync); adds three ops to the guest protocol (ADR 0004)
 
 ## Context
 
@@ -37,7 +37,7 @@ Volume-free machines are normal: only root and configured writable mounts are op
 
 **Where a copy's source is not running.** A stopped machine's disks are consistent already: the init synced before the reset and nothing writes to them; recorded `filesystem`. A suspended machine's disks are `synced` once the suspend above ran; a machine suspended by an older daemon, or whose init did not know `fs_sync`, is `crash`, and the record says which (`suspend_synced`). A `created` or `error` machine has either no disks or a clean clone of its image.
 
-**The result says what it got.** `consistency: filesystem | synced | crash` on `Snapshot` and `Backup`, on the forked machine (`fork: {machine_id, consistency}` in its record and view) and in the data of `snapshot_taken`, `backed_up` and the fork's `created` event. `filesystem` only when the freeze held through the ZFS command and the thaw confirmed it; `synced` when the guest flushed just before (a memory snapshot, a suspended source); `crash` otherwise, with `consistency_reason` naming why: `init_too_old` (`UnknownOp`), `freeze_refused` (the guest's `error`, with the filesystem), `freeze_timeout` (the control timeout), `freeze_expired` (the guest's deadline fired first), `unsynced_suspend` (a suspended source without `suspend_synced`). For a snapshot, backup or fork, a fallback never fails the operation (a seal fails closed): the backup is sent, the snapshot kept, the fork made, and the event is a `warning` instead of `normal`. On `/metrics`: `briqyard_copies_total{operation, consistency}` and `briqyard_fs_freeze_seconds` (a histogram of the frozen interval, as the guest measured it), so an operator sees a fleet drifting to `crash` or a workload that stalls on every backup.
+**The result says what it got.** `consistency: filesystem | synced | crash` on `Snapshot` and `Backup`, on the forked machine (`fork: {machine_id, consistency}` in its record and view) and in the data of `snapshot_taken`, `backed_up` and the fork's `created` event. `filesystem` only when the freeze held through the ZFS command and the thaw confirmed it; `synced` when the guest flushed just before (a memory snapshot, a suspended source); `crash` otherwise, with `consistency_reason` naming why: `init_too_old` (`UnknownOp`), `freeze_refused` (the guest's `error`, with the filesystem), `freeze_timeout` (the control timeout), `freeze_expired` (the guest's deadline fired first), `unsynced_suspend` (a suspended source without `suspend_synced`). For a snapshot, backup or fork, a fallback never fails the operation (a seal fails closed): the backup is sent, the snapshot kept, the fork made, and the event is a `warning` instead of `normal`. On `/metrics`: `briqyard_copies_total{operation, consistency}` and `briqyard_fs_freeze_seconds` (a histogram of the host-observed hold from the freeze acknowledgment through the thaw acknowledgment), so an operator sees a fleet drifting to `crash` or a workload that stalls on every backup.
 
 **Opt-out, per request, never a default.** `consistency: "crash"` on `SnapshotRequest`, on `ForkSpec` and on the backup request body skips the guest calls for a caller that knows its workload does its own consistency or needs the fork a round trip sooner. The scheduled backup policy has no such field: a schedule is for the data's sake.
 
@@ -65,6 +65,21 @@ Rejected, one line each:
 - Reopen when a memory-image resume can run a hook in the guest: a freeze before the pause would then be thawed on resume, and memory snapshots could say `filesystem` too.
 
 
-Only the guest primitives, daemon client and seal sync ship in this slice. Snapshot, backup, fork and suspend integration, consistency records and metrics remain slice C or later. Every root disk, seed and warm template must be rebuilt for the changed init digest, before the next release; the runtime owner sequences it.
+Slice A and the seal sync are merged. Slice C integrates snapshots, backups, disk forks and bounded suspend sync, consistency records, request opt-out and metrics; native qualification is pending. Every root disk, seed and warm template must be rebuilt for the changed init digest, before the next release; the runtime owner sequences it.
 
 Legacy `put` writes run on the blocking pool: two writers blocked by a freeze must not occupy both async runtime threads and prevent host thaw. This does not affect barrier sync, since the barrier rejects `put`. The daemon reads a buffered deadline terminal even if sending thaw encounters a closed peer, and reports `FreezeExpired`.
+
+## Slice C measurement method and qualification
+
+`hack/measure-freeze.sh` runs on shared hosted x86_64 runners (4 vCPU).
+These are relative figures, not hardware measurements. The native workflow’s `measure_freeze` dispatch builds
+the baseline and candidate separately, records the exact SHA and host, and uploads raw samples
+and p50/p95/max in milliseconds. Twenty paired crash/default disk forks are taken idle and
+with a 32 MiB write/fsync loop. Fork timings end at `created`, before deletion. The write/fsync
+loop records stalls, and backups run during that loop. Twenty stop-to-stopped samples follow
+1 MiB and 128 MiB dirty writes; create is a control. Different shared runners introduce noise.
+Warm claims require a qualified catalog; that control is not yet measured by the script.
+
+No latency numbers or stress pass counts are claimed yet. Qualification remains pending.
+The protocol has no guest duration field; the histogram is host-observed, and includes thaw
+transport latency, rather than requiring an init change solely for measurement.

@@ -264,6 +264,7 @@ impl Harness {
         let mut req = self.request(name);
         req.image = String::new();
         req.fork = Some(api::ForkSpec {
+            consistency: None,
             snapshot: None,
             machine_id: src.into(),
             copy: String::new(),
@@ -357,6 +358,7 @@ async fn the_sweep_frees_fork_snapshots_with_no_clone() {
     z.snapshot("m/m_kept/root", "s_mine").await.unwrap();
     z.snapshot("m/m_kept/root", "s_lost").await.unwrap();
     kept.rec.lock().unwrap().snapshots.push(SnapshotRec {
+        copy_consistency: Default::default(),
         id: "s_mine".into(),
         name: None,
         created_at: Utc::now(),

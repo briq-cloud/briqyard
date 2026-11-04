@@ -90,6 +90,7 @@ async fn sandbox_selector_pins_source_host_generation_and_existing_namespace_pla
         host.named_memory_profiles = vec!["sandbox-ready-v1".into()];
     }
     ds[0].stub.snapshots.lock().unwrap().push(api::Snapshot {
+        copy_consistency: Default::default(),
         id: "s_one".into(),
         machine_id: "m_operator".into(),
         name: None,
@@ -372,6 +373,7 @@ async fn new_request_after_namespace_cleanup_may_use_another_host_without_replay
         host.named_memory_profiles = vec!["sandbox-ready-v1".into()];
     }
     ds[1].stub.snapshots.lock().unwrap().push(api::Snapshot {
+        copy_consistency: Default::default(),
         id: "s_two".into(),
         machine_id: "m_second".into(),
         name: None,
@@ -453,6 +455,7 @@ fn approve_sandbox_host(st: &Arc<AppState>, daemon: &Arc<daemon::Daemon>) {
         host.named_memory_profiles = vec!["sandbox-ready-v1".into()];
     }
     daemon.snapshots.lock().unwrap().push(api::Snapshot {
+        copy_consistency: Default::default(),
         id: "s_one".into(),
         machine_id: "m_operator".into(),
         name: None,

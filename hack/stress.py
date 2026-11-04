@@ -670,8 +670,7 @@ class Run:
             made = [mid]
             try:
                 self.wait_state(mid, {"running"}, timeout=self.a.boot_timeout)
-                # Synced: a snapshot holds what is on the disk, not in the guest's page cache.
-                self.exec(mid, ["sh", "-c", "echo one > /root/mark; sync"])
+                self.exec(mid, ["sh", "-c", "echo one > /root/mark"])
                 blob = rand_bytes(256 << 10)
                 self.api.call("PUT", f"/v1/machines/{mid}/files", {"path": "/tmp/blob", "base64": base64.b64encode(blob).decode()}, op="put")
                 got = self.api.call("GET", f"/v1/machines/{mid}/files?path=/tmp/blob", op="get_file")

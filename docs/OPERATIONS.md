@@ -493,8 +493,10 @@ what changed since the last backup whose snapshot is still on the host (`zfs sen
 the pool's ciphertext, ADR 0035).
 Each backup is a record (`backups/<machine>/<id>.json`: ids, names, sizes, the chain in clear;
 the machine's spec, its env and files, sealed under the pool's key) plus one object per disk. A backup of a
-running machine is crash-consistent, what a power cut would leave; stop the machine first for
-a clean one, or let the application do its own consistency (Postgres does). A stream goes up
+running machine freezes its filesystems around one snapshot of both disks. The record reports
+`consistency` (`filesystem`, `synced`, or `crash`) and a fallback reason. Old or unresponsive
+inits fall back to crash consistency. A request may opt out with `consistency: "crash"`.
+Application consistency remains the application’s responsibility. A stream goes up
 in 32 MB parts, four at a time, each request tried again with backoff for up to 10 minutes
 (ADR 0034). Give the bucket a lifecycle rule that aborts incomplete multipart uploads after a
 day: a daemon cut mid-upload leaves one.
