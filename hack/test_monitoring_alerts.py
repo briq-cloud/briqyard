@@ -8,10 +8,9 @@ spec.loader.exec_module(alerts)
 
 
 class TestConfig(unittest.TestCase):
-    def test_only_the_declared_timings_and_contact_point_differ(self):
+    def test_only_the_declared_timings_differ(self):
         prod = alerts.production_rules()
-        test = alerts.test_config(prod, "http://127.0.0.1:1/notify")
-        self.assertEqual(test["contactPoints"][0]["receivers"][0]["type"], "webhook")
+        test = alerts.test_overrides(prod)
         for g, tg in zip(prod["groups"], test["groups"]):
             self.assertEqual(tg["interval"], alerts.EVALUATION_INTERVAL)
             for r, tr in zip(g["rules"], tg["rules"]):
@@ -19,6 +18,20 @@ class TestConfig(unittest.TestCase):
                 if r["uid"] in alerts.FOR_OVERRIDES:
                     want["for"] = alerts.FOR_OVERRIDES[r["uid"]]
                 self.assertEqual(tr, want, r["uid"])
+        self.assertEqual(test["contactPoints"], prod["contactPoints"])
+
+    def test_slack_message(self):
+        doc = {"attachments": [{"title": "[FIRING:1] Not answering briqyard (local)", "text":
+               "**Firing**\n\nValue: A=0\nLabels:\n - alertname = Not answering\n - instance = local\n - region = \nAnnotations:\n - summary = x\n"
+               "\n**Resolved**\n\nValue: A=1\nLabels:\n - alertname = Not answering\n - instance = other\n"}]}
+        got = alerts.parse_slack(doc)
+        self.assertEqual([a["status"] for a in got], ["firing", "resolved"])
+        self.assertEqual(got[0]["labels"], {"alertname": "Not answering", "instance": "local", "region": ""})
+        self.assertEqual(got[1]["labels"]["instance"], "other")
+
+    def test_episodes(self):
+        self.assertEqual(alerts.episodes(["firing", "firing", "resolved"]), (1, 1))
+        self.assertEqual(alerts.episodes(["firing", "resolved", "firing", "firing", "resolved"]), (2, 2))
 
     def test_threshold_is_substituted_as_a_number(self):
         prod = alerts.production_rules()

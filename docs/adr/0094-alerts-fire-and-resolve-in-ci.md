@@ -11,29 +11,42 @@ resolves, looks the same as a healthy fleet.
 
 ## Decisions
 
-**The job loads the production file and changes only what it names.** `hack/monitoring-alerts-check.py`
-reads `hack/monitoring/grafana/alerting.yaml`, applies the install's `LARGEST_SLOT_MB` substitution, and
-writes a provisioning file with these changes, printed in the job output and pinned by
-`hack/test_monitoring_alerts.py` (every other field of every rule must be equal):
+**The job runs the real install and changes only timings.** The CI script writes
+`/etc/briqyard-monitoring/alerting.env` with `SLACK_WEBHOOK_URL` set to a receiver on loopback
+(`hack/monitoring-alerts-check.py`, port 18199) and runs `hack/install-monitoring.sh` with
+`LARGEST_SLOT_MB=8192`. So the install's gating on `alerting.env`, the unit's `EnvironmentFile`, the
+`$SLACK_WEBHOOK_URL` expansion, the Slack contact point and the `@LARGEST_SLOT_MB@` substitution
+(`hack/render-alerting.sh`, one `sed` the install and the check both call) are the production path.
+Grafana's Slack integration posts to any URL; the receiver reads each alert's status and labels from the
+message as Grafana's default template writes it (`[FIRING:1]` title, `**Firing**` / `**Resolved**`
+sections, `Labels:` lists). Only these are changed on top of the installed file, printed in the job
+output and pinned by `hack/test_monitoring_alerts.py` (every other field of every rule and the
+contact points must be equal):
 
 | Changed for the job | Production | Why |
 |---|---|---|
-| Contact point: a webhook on loopback | Slack | no external service, no secret |
 | Group evaluation interval 10 s | 1 m | firing and resolving are seen within seconds of the data |
 | Policy `group_wait` 5 s, `group_interval` 10 s | 30 s, 5 m | `resolved` is sent at the next group flush |
 | `Largest slot too small` `for: 1m` | 10 m | the wait, not the expression |
-| `LARGEST_SLOT_MB=8192` | 16384 (default) | the fixture holds 12288 MB; the install's own knob |
+| `LARGEST_SLOT_MB=8192`, given to the install | 16384 (default) | the fixture holds 12288 MB; the install's own knob |
 
-After Grafana starts, the script reads every rule back from Grafana's provisioning API and fails unless
-its queries, thresholds, labels, states and annotations equal the file's, and its `for` equals the file's
-or the override above. Expressions are never shortened: the backup alert's ten-minute and the capacity
-alert's five-minute windows are waited out.
+The Slack endpoint is the only thing replaced: the URL is a loopback receiver. After Grafana restarts, the
+script reads every rule back from Grafana's provisioning API and fails unless its queries, thresholds,
+labels, states, annotations, `for` and `keepFiringFor` equal the rendered file's (the `for` override
+aside), and the installed file equals the rendered one. Expressions are never shortened: the backup
+alert's ten-minute and the capacity alert's five-minute windows are waited out.
+
+**Without `alerting.env` there is no notification path at all.** The install then provisions no alert
+rule and no contact point: a host can be down and nobody is told. The install now prints a warning to
+stderr at that point and again in its last line (it said only `alerting off` before).
 
 **Causes are real; recoveries are real.** A notification counts when the webhook receives an alert whose
 `alertname` and labels match (host, region, resource, condition, instance) with status `firing`, then
 `resolved` after it. An alert over a window cannot truly resolve before the window has passed, so a
 `resolved` earlier than the window minus a minute is not accepted as the recovery. Every alert must also
-show exactly one `firing` and one `resolved`: a flap fails the job.
+show one firing episode and one resolved episode: Grafana re-sends still-firing members whenever another
+alert of the group changes, so repeats of a status are one episode, while a `resolved` followed by a new
+`firing` is a flap and fails the job.
 
 | Alert | Cause | Recovery | Synthetic? |
 |---|---|---|---|
@@ -67,26 +80,34 @@ loaded definition only; a fault in it is not found here. Not answering is proved
   `nowhere` and requires a `firing` and a `resolved` for each. The rule is unchanged.
   "Creates refused: host under pressure" has no such problem: it is counted in the refused host's own
   region, which has its series at zero.
-- **"Machine in a crash loop" fired, resolved and fired again at exactly three restarts.**
-  `round(increase(...[10m])) > 2` reads about 2.4 to 3.3 for three restarts, depending on the first
-  sample the series was seen at and the gaps while the machine is stopped between restarts. Fixed in the
-  rule with `keepFiringFor: 3m` (supported by Grafana 13.2.5, pinned in the install): once true the alert
-  is held through the gaps and resolves once, three minutes after the window. The expression is unchanged,
-  so a Prometheus restart raises no false alert. The job requires exactly one `firing` and one `resolved`.
+- **"Machine in a crash loop" fired, resolved and fired again, and could miss a loop.**
+  `round(increase(...[10m])) > 2` reads about N-1 to 1.2 N for N restarts: a series is first seen at its
+  first sample, and a machine that restarted before it, or stops between restarts (the daemon leaves gaps),
+  has that restart outside the window. Three restarts read 2.0 to 3.6, so the alert crossed its threshold
+  back and forth, and a loop of three whose first restart came before the first sample (about 2.0 to 2.4)
+  never fired at all, at any evaluation interval (the job's 10 s, production's 1 m: the reading holds for the
+  window, so a slower evaluation does not change which side of 2.5 it falls on). Fixed in the rule:
+  the threshold is now `> 1` on the rounded value (two restarts seen or more, so a loop of three is always
+  seen; the alert says "at least twice"), and `keepFiringFor: 3m` (Grafana 13.2.5 supports it) holds the
+  alert through readings that cross the threshold. `increase()` keeps its reset handling, and the
+  expression has no first-sample branch, so a Prometheus restart raises no false alert. The price: a
+  machine that restarts exactly twice in ten minutes also alerts. The job requires one firing episode and
+  one resolved.
 - No rule was found that never fires or never resolves when its cause is driven as above.
 
 ## Consequences
 
 - This proves rule → Grafana → webhook: a real cause becomes a firing and a resolved notification with the
-  right labels, for seven of the eight rules. It does not prove Slack or any real receiver (that needs a
-  secret and belongs to the operator), nor real saturation: the memory is committed, not used, and the
+  right labels, for seven of the eight rules, along the install's own path from `alerting.env` to a posted
+  Slack message. It does not prove Slack's endpoint or any real receiver (that needs a secret and belongs to
+  the operator), nor real saturation: the memory is committed, not used, and the
   fixture is a 12 GiB host.
 - A resolved notification of the window alerts says the event left its window, not that backups work or
   capacity came back (ADR 0054).
-- The production Slack contact point and the policy's real timings (30 s, 5 m) are not exercised; the
-  file's `group_wait` and `group_interval` are replaced for the job only.
+- Slack's own endpoint, the message as Slack renders it, and the policy's real timings (30 s, 5 m) are not
+  exercised; `group_wait` and `group_interval` are replaced for the job only.
 - Cost: the `alerts` suite is a runner of its own, about 14 minutes (3 for the build and install, 10.6 for
   the alerts, bounded at 20); in parallel with the others, it adds no wall time. The `monitoring` suite
-  grows by about 3 minutes (Not answering fires after 143 s, resolves 29 s after the daemon is back).
+  grows by about 3 minutes (Not answering fires after 133 to 143 s, resolves 29 s after the daemon is back).
 - A rule that never fires or resolves fails the job, with Grafana's rule states, the receiver's
   notifications, each rule's query result, Prometheus samples, the fleet's hosts and Grafana's journal printed.

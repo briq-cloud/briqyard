@@ -2,6 +2,13 @@
 # Harness from the workflow revision; suites and monitoring stack from the tested source.
 set -euo pipefail
 [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || { echo 'requires a disposable GitHub-hosted runner' >&2; exit 2; }
+# The real install's alerting path: alerting.env sets SLACK_WEBHOOK_URL to the check's loopback
+# receiver (hack/monitoring-alerts-check.py, port 18199). Grafana's Slack contact point posts there.
+alerting_env() {
+  sudo install -d -m 0755 /etc/briqyard-monitoring
+  sudo sh -c 'umask 077; echo SLACK_WEBHOOK_URL=http://127.0.0.1:18199/ > /etc/briqyard-monitoring/alerting.env'
+}
+
 # The fleet's hosts settled and the monitoring stack installed. $1 is "unreachable" to
 # register a host nothing listens on beside the real daemon (a host that is down).
 monitoring_stack() {
@@ -34,7 +41,7 @@ PY
   fi
   # Ephemeral credential stays outside artifacts and command arguments.
   sudo sh -c 'umask 077; openssl rand -hex 24 > /etc/briqyard-monitoring-password'
-  sudo env GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password bash hack/install-monitoring.sh
+  sudo env GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password LARGEST_SLOT_MB=8192 bash hack/install-monitoring.sh
 }
 
 case "${1:-}" in
@@ -89,13 +96,17 @@ PY
       sudo journalctl -u briqyard-grafana --no-pager -n 30 | cut -c1-300 || true
       exit 1
     fi
-    # The daemon stopped and started again: Not answering fires and resolves (ADR 0094).
+    # The install again with alerting on, as an operator does after writing alerting.env; then the
+    # daemon stopped and started: Not answering fires and resolves (ADR 0094).
+    alerting_env
+    sudo env GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password LARGEST_SLOT_MB=8192 bash hack/install-monitoring.sh
     GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password python3 -u hack/monitoring-alerts-check.py host-down
     ;;
   alerts)
     # The production alerts fire and resolve, received by a local webhook (ADR 0094). The
     # backup, capacity, condition and crash-loop causes need the daemon up for the whole
     # run, so the daemon-down alert is in the monitoring suite.
+    alerting_env
     monitoring_stack none
     trap 'rc=$?; trap - EXIT; sudo rm -f /etc/briqyard-monitoring-password; exit "$rc"' EXIT
     trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Drives the production alerts to firing and resolved, received by a local webhook (ADR 0094).
 
-Grafana loads the rules of hack/monitoring/grafana/alerting.yaml (the same file the install
-reads), with a webhook contact point on loopback in place of Slack, and a few timings
-shortened (printed below). Real causes then drive each alert and this script waits for a
+The real install (hack/install-monitoring.sh, with an alerting.env whose SLACK_WEBHOOK_URL is
+this script's loopback receiver, and LARGEST_SLOT_MB=8192) provisions the rules of
+hack/monitoring/grafana/alerting.yaml and its Slack contact point; Grafana posts Slack-shaped
+messages to the receiver, which reads each alert's status and labels from them. Only a few
+timings are shortened on top of the installed file (printed below). Real causes then drive each alert and this script waits for a
 `firing` and a `resolved` notification naming it. Run it after hack/install-monitoring.sh
 on a disposable host (the native CI runner): it breaks the backup store, fills the host's
 memory with a machine, and stops the daemon, and puts everything back.
@@ -40,13 +42,13 @@ GRAFANA = os.environ.get("GRAFANA_URL", "http://127.0.0.1:3000")
 PROMETHEUS = os.environ.get("PROMETHEUS_URL", "http://127.0.0.1:9090")
 STORE = "/var/lib/briqyard/backups"
 
-# What this job changes, and nothing else. The rules' expressions, labels, thresholds,
-# states and annotations are the file's.
-LARGEST_SLOT_MB = 8192  # the install's LARGEST_SLOT_MB knob (16384 by default); the fixture holds 12288 MB
+# What this job changes on top of the installed file, and nothing else. The rules' expressions,
+# labels, thresholds, states and annotations, and the Slack contact point, are the install's.
+LARGEST_SLOT_MB = 8192  # given to the install (its knob, 16384 by default); the fixture holds 12288 MB
+RECEIVER_PORT = int(os.environ.get("ALERT_RECEIVER_PORT", "18199"))  # in alerting.env, written by the CI script
 EVALUATION_INTERVAL = "10s"  # the rules' 1m
 NOTIFY = {"group_wait": "5s", "group_interval": "10s"}  # the policy's 30s and 5m; repeat_interval stays
 FOR_OVERRIDES = {"briqyard-slots-small": "1m"}  # 10m
-CONTACT = "briqyard alert test webhook"
 
 # The CLI asks the fleet, not the daemon: placement and its refusals are the fleet's.
 os.environ["BRIQYARD_URL"] = os.environ.get("FLEET_URL", "http://127.0.0.1:7430")
@@ -85,21 +87,15 @@ def sudo(*cmd, **kw):
 # ---- the rules as the install reads them -------------------------------------------------
 
 def production_rules():
-    """The file after the install's substitution (hack/install-monitoring.sh), parsed."""
-    text = SOURCE.read_text()
-    text = text.replace('"@LARGEST_SLOT_MB@"', str(LARGEST_SLOT_MB)).replace("@LARGEST_SLOT_MB@", str(LARGEST_SLOT_MB))
+    """The file as the install renders it (hack/render-alerting.sh, the install's own step), parsed."""
+    text = run("bash", str(ROOT / "hack/render-alerting.sh"), str(LARGEST_SLOT_MB), check=True).stdout
     return yaml.safe_load(text)
 
 
-def test_config(prod, url):
-    c = copy.deepcopy(prod)
-    c["contactPoints"] = [{
-        "orgId": 1, "name": CONTACT,
-        "receivers": [{"uid": "briqyard-test-webhook", "type": "webhook",
-                       "settings": {"url": url, "httpMethod": "POST"}}],
-    }]
+def test_overrides(installed):
+    """The installed file with the job's timings: nothing else."""
+    c = copy.deepcopy(installed)
     for p in c["policies"]:
-        p["receiver"] = CONTACT
         p.update(NOTIFY)
     for g in c["groups"]:
         g["interval"] = EVALUATION_INTERVAL
@@ -161,6 +157,54 @@ def wait_for(what, cond, timeout, every=3):
     return None
 
 
+def strings(x):
+    if isinstance(x, str):
+        yield x
+    elif isinstance(x, dict):
+        for v in x.values():
+            yield from strings(v)
+    elif isinstance(x, list):
+        for v in x:
+            yield from strings(v)
+
+
+def parse_slack(doc):
+    """The alerts of a Slack message as Grafana's default template writes it: a title
+    `[FIRING:1] ...`, then `**Firing**` / `**Resolved**` sections, each alert a `Labels:` list."""
+    text = "\n".join(strings(doc))
+    m = re.search(r"\[(FIRING|RESOLVED)", text, re.I)
+    status = m.group(1).lower() if m else None
+    alerts, cur, in_labels = [], None, False
+    for line in text.splitlines():
+        l = line.strip()
+        m = re.fullmatch(r"\W*(firing|resolved)\W*", l, re.I)
+        if m:
+            status, cur, in_labels = m.group(1).lower(), None, False
+        elif l.lower().startswith("labels:"):
+            cur = {"status": status, "labels": {}}
+            alerts.append(cur)
+            in_labels = True
+        elif in_labels and cur is not None:
+            m = re.match(r"[-*\u2022]\s*([A-Za-z_][\w.]*)\s*=\s*(.*)$", l)
+            if m:
+                if m.group(2).strip():  # Grafana drops empty labels
+                    cur["labels"][m.group(1)] = m.group(2).strip()
+            else:
+                in_labels = False
+    return alerts
+
+
+def episodes(seq):
+    """(firing episodes, resolved episodes): a repeated status is a re-send, not a new episode."""
+    firing = resolved = 0
+    prev = None
+    for st in seq:
+        firing += st == "firing" and prev != "firing"
+        resolved += st == "resolved" and prev != "resolved"
+        prev = st
+    return firing, resolved
+
+
 # ---- the receiver --------------------------------------------------------------------------
 
 class Receiver:
@@ -176,6 +220,8 @@ class Receiver:
                     doc = json.loads(body)
                 except ValueError:
                     doc = {"raw": body.decode(errors="replace")}
+                if isinstance(doc, dict) and "alerts" not in doc:
+                    doc["alerts"] = parse_slack(doc)
                 with outer.lock:
                     outer.events.append({"t": time.time(), "path": self.path, "body": doc})
                 self.send_response(200)
@@ -186,8 +232,8 @@ class Receiver:
             def log_message(self, *a):
                 pass
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/notify"
+        self.server = ThreadingHTTPServer(("127.0.0.1", RECEIVER_PORT), H)
+        self.url = f"http://127.0.0.1:{RECEIVER_PORT}/"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def alerts(self):
@@ -301,7 +347,9 @@ def drive(cases, actions, total):
                if a.get("labels", {}).get("alertname") == c.title and subset(c.labels, a.get("labels", {}))
                and not any(k in a.get("labels", {}) for k in c.absent)]
         if c.resolved:
-            (ok if seq == ["firing", "resolved"] else bad)(f"{c.name}: one firing and one resolved, no flap (received {seq})")
+            f, r = episodes(seq)
+            (ok if (f, r) == (1, 1) and seq[-1] == "resolved" else bad)(
+                f"{c.name}: one firing episode and one resolved, no flap ({f} firing, {r} resolved; received {seq})")
 
 
 # ---- setup, and what the rules under test are -------------------------------------------------
@@ -311,18 +359,21 @@ def setup():
     password = sudo("cat", os.environ["GRAFANA_PASSWORD_FILE"], check=True).stdout.strip()
     rx = Receiver()
     prod = production_rules()
-    cfg = test_config(prod, rx.url)
     for g in prod["groups"]:
         for r in g["rules"]:
             EXPR[r["uid"]] = next(d for d in r["data"] if d["refId"] == "A")["model"]["expr"]
     say(f"receiver on {rx.url}")
-    print("test-only changes to the production alerting file:", flush=True)
-    print(f"  contact point: Slack -> webhook on loopback ({CONTACT})", flush=True)
+    installed = yaml.safe_load(PROVISIONED.read_text())
+    (ok if installed == prod else bad)("the install provisioned the file hack/render-alerting.sh renders, with its Slack contact point")
+    receivers = [r for c in installed["contactPoints"] for r in c["receivers"]]
+    (ok if [r["type"] for r in receivers] == ["slack"] and receivers[0]["settings"]["url"] == "$SLACK_WEBHOOK_URL" else bad)(
+        "the contact point is Slack, its URL from SLACK_WEBHOOK_URL (alerting.env)")
+    print("test-only changes on top of the installed alerting file:", flush=True)
     print(f"  group interval {EVALUATION_INTERVAL} (production 1m); policy {NOTIFY} (production group_wait 30s, group_interval 5m)", flush=True)
     print(f"  for: {FOR_OVERRIDES} (production Largest slot too small 10m)", flush=True)
-    print(f"  LARGEST_SLOT_MB={LARGEST_SLOT_MB} (production default 16384); every other field, every expression, label and threshold is the file's", flush=True)
+    print(f"  the install ran with LARGEST_SLOT_MB={LARGEST_SLOT_MB} (default 16384) and SLACK_WEBHOOK_URL={rx.url}; every expression, label, threshold and the contact point is the file's", flush=True)
     tmp = Path("/tmp/briqyard-alerting-test.yaml")
-    tmp.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    tmp.write_text(yaml.safe_dump(test_overrides(installed), sort_keys=False))
     sudo("install", "-m", "0644", str(tmp), str(PROVISIONED), check=True)
     sudo("systemctl", "restart", "briqyard-grafana", check=True)
     if not wait_for("grafana", lambda: get(GRAFANA + "/api/health").get("database") == "ok", 90, 2):
@@ -332,6 +383,8 @@ def setup():
         bad("Grafana loaded every rule of the file")
         raise RuntimeError("rules not loaded")
     verify(prod, rules)
+    cps = grafana("/api/v1/provisioning/contact-points")
+    (ok if [c["type"] for c in cps] == ["slack"] else bad)(f"Grafana's contact point is Slack ({[c['type'] for c in cps]})")
 
 
 def verify(prod, loaded):
