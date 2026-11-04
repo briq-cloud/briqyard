@@ -33,6 +33,8 @@ The watched paths, with the reason for each:
 | `hack/native-ci.sh`, `hack/native-ci-more.sh` | the host and the suites' bodies |
 | `.github/workflows/native.yml`, `hack/native-suites.py` | the selection itself and the jobs |
 | `crates/briqyardd/src/metrics.rs`, `metrics/` | the host's series: names, labels, types |
+| `crates/briqyardd/src/machine/observe.rs` | the host's lifecycle counters that `host.json` reads: boots, resumes, suspends, execs, failed starts, backups |
+| `crates/briqyard-api/src/metrics.rs` | the exposition format of every series: the family header, label escaping |
 | `crates/briqyard-fleet/src/signals.rs` | the fleet's series: `briqyard_fleet_*` (room, host state, refusals) |
 | `crates/briqyard-fleet/src/scrape.rs` | what Prometheus scrapes: the relayed `/metrics` and the target labels (`instance`, `host`, `region`) |
 | `Cargo.toml`, `Cargo.lock` (root) | the release PR, and a dependency change under the daemon |
@@ -41,7 +43,7 @@ The rules read `briqyard_host_condition`, `briqyard_pool_bytes`, `briqyard_machi
 
 ## Consequences
 
-- **The residual risk.** A series is defined in one place but changed by its call sites: the restart counter, the refusal counter, `backup_failed`, the host condition and the pool read are set from the machine manager, the fleet's create path and the store. A behaviour change there that breaks an alert (a restart no longer counted, a refusal no longer recorded) does not run `alerts` or `monitoring` on that PR. `native` does not run on a push to `main`, so the next release PR, or a dispatch, is the first run that sees it. A crate directory is not watched whole because a counter incremented from many call sites would then watch most of `crates/`, and the saving would go.
+- **The residual risk.** A series is defined in one place but changed by its call sites: the restart counter, the refusal counter, `backup_failed`, the host condition and the pool read are set from the machine manager, the fleet's create path and the store. A behaviour change there that breaks an alert (a restart no longer counted, a refusal no longer recorded) does not run `alerts` or `monitoring` on that PR. `native` does not run on a push to `main`, so the next release PR, or a dispatch, is the first run that sees it. That catch is by convention, since `native` is not a required check, and by then the cause is on `main`, among every PR since the last release. The relay's answers that `monitoring-check.sh` reads (`crates/briqyardd/src/api/`, `crates/briqyard-fleet/src/main.rs`) are unwatched for the same reason: those files are too broad. A crate directory is not watched whole because a counter incremented from many call sites would then watch most of `crates/`, and the saving would go.
 - Saved on a PR that touches none of the paths: 27.7 runner minutes, and the wall time falls to the longest of the other jobs. A PR that touches one runs as before.
 - The unit tests of `hack/test_native_suites.py` (in the `check` job) prove the decisions: a crate outside the list, docs, each watched path, a release's files, `--all`, empty input and a malformed use. The skip is first seen on a PR that touches a crate only: this change edits `native.yml`, so its own run selects every suite.
 - Adding a suite to the matrix is a change to `hack/native-suites.py`; adding a path the two suites read is a line in its table.

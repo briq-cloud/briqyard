@@ -53,6 +53,8 @@ class NativeSuites(unittest.TestCase):
             "hack/native-suites.py",
             "crates/briqyardd/src/metrics.rs",
             "crates/briqyardd/src/metrics/warm.rs",
+            "crates/briqyardd/src/machine/observe.rs",
+            "crates/briqyard-api/src/metrics.rs",
             "crates/briqyard-fleet/src/signals.rs",
             "crates/briqyard-fleet/src/scrape.rs",
         ]:

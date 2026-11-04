@@ -52,7 +52,7 @@ jobs:
           set -o pipefail
           all=$(python3 hack/native-suites.py --all)
           if [ "$EVENT" = pull_request ]; then
-            suites=$(git diff --name-only HEAD^1 HEAD | python3 hack/native-suites.py)
+            suites=$(git -c core.quotePath=off diff --name-only HEAD^1 HEAD | python3 hack/native-suites.py)
           else
             suites=$all
           fi

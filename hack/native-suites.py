@@ -25,6 +25,8 @@ WATCHED_PATHS = {
     "hack/install-monitoring.sh",
     "hack/render-alerting.sh",
     "crates/briqyardd/src/metrics.rs",  # the host's series, with metrics/ below
+    "crates/briqyardd/src/machine/observe.rs",  # the names of the host's lifecycle counters
+    "crates/briqyard-api/src/metrics.rs",  # the exposition format of every series
     "crates/briqyard-fleet/src/signals.rs",  # the fleet's series
     "crates/briqyard-fleet/src/scrape.rs",  # what Prometheus scrapes
 }
