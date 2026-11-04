@@ -55,9 +55,31 @@ fn a_backup_policy_absent_is_kept_and_null_removes_it() {
 }
 
 #[test]
+fn records_with_the_old_consistency_value_read_as_unsynced() {
+    let old = json!({
+        "consistency": "crash", "consistency_reason": "oom_killed", "id": "a", "machine_id": "m1",
+        "namespace": "t1", "name": "db", "created_at": "2026-01-02T03:04:05Z", "bytes": 0,
+        "incremental": false, "disks": [], "machine": {"id": "m1"}
+    });
+    let b: Backup = serde_json::from_value(old).unwrap();
+    assert_eq!(b.copy_consistency.consistency, "unsynced");
+    assert_eq!(
+        b.copy_consistency.consistency_reason.as_deref(),
+        Some("oom_killed")
+    );
+    let s: Snapshot = serde_json::from_value(
+        json!({"consistency": "crash", "id": "s", "machine_id": "m1", "created_at": "2026-01-02T03:04:05Z"}),
+    )
+    .unwrap();
+    assert_eq!(s.copy_consistency.consistency, "unsynced");
+    assert!(serde_json::from_value::<SnapshotRequest>(json!({"consistency": "crash"})).is_err());
+    assert!(serde_json::from_value::<SnapshotRequest>(json!({"consistency": "unsynced"})).is_ok());
+}
+
+#[test]
 fn backups() {
     let b: Backup = same(json!({
-        "consistency": "crash", "id": "20261021T101500.123Z", "machine_id": "m1", "namespace": "t1", "name": "db",
+        "consistency": "unsynced", "id": "20261021T101500.123Z", "machine_id": "m1", "namespace": "t1", "name": "db",
         "created_at": "2026-01-02T03:04:05Z", "bytes": 30, "incremental": true,
         "disks": [
             {"disk": "root", "key": "backups/m1/root/20261021T101500.123Z.zfs", "bytes": 10,
@@ -71,7 +93,7 @@ fn backups() {
     assert_eq!(b.deletes_at, Some(ts()));
     // A stored record carries the machine and no deletion time.
     let r: Backup = same(json!({
-        "consistency": "crash", "id": "a", "machine_id": "m1", "namespace": "t1", "name": "db",
+        "consistency": "unsynced", "id": "a", "machine_id": "m1", "namespace": "t1", "name": "db",
         "created_at": "2026-01-02T03:04:05Z", "bytes": 0, "incremental": false,
         "disks": [], "machine": {"id": "m1"}
     }));

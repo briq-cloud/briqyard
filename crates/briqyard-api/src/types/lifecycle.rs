@@ -2,28 +2,36 @@
 
 use super::*;
 
-/// A caller may explicitly request the crash-consistent fast path.
+/// A caller may explicitly request the fast path that leaves the guest's filesystems unsynced.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CopyConsistencyRequest {
-    Crash,
+    Unsynced,
 }
 
-/// Consistency achieved by a disk copy. Legacy records conservatively default to crash.
+/// Consistency achieved by a disk copy. Legacy records conservatively default to unsynced; the `crash` v0.1.20 and v0.1.21 wrote reads as `unsynced`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CopyConsistency {
-    #[serde(default = "legacy_consistency")]
+    #[serde(
+        default = "legacy_consistency",
+        deserialize_with = "stored_consistency"
+    )]
     pub consistency: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consistency_reason: Option<String>,
 }
 fn legacy_consistency() -> String {
-    "crash".into()
+    "unsynced".into()
+}
+/// Records written by v0.1.20 and v0.1.21 say `crash` for what is now `unsynced`.
+fn stored_consistency<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let v = String::deserialize(d)?;
+    Ok(if v == "crash" { "unsynced".into() } else { v })
 }
 impl Default for CopyConsistency {
     fn default() -> Self {
         Self {
-            consistency: "crash".into(),
+            consistency: "unsynced".into(),
             consistency_reason: Some("legacy_record".into()),
         }
     }
