@@ -1063,3 +1063,36 @@ async fn requested_restore_source_key_keeps_its_own_authorization_during_key_adm
     assert_eq!(status, StatusCode::FORBIDDEN);
     drop(turn);
 }
+
+#[tokio::test]
+async fn the_listing_shows_a_hosts_disk_as_placement_sees_it_and_omits_it_when_unreported() {
+    let f = fleet(config::Config::default());
+    seed(&f.st, "full", 64_000, 0, 0, &[]);
+    seed(&f.st, "roomy", 64_000, 0, 0, &[]);
+    seed(&f.st, "silent", 64_000, 0, 0, &[]);
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        reg.hosts.get_mut("full").unwrap().disk_free_mb = 3_000;
+        reg.hosts.get_mut("roomy").unwrap().disk_free_mb = 900_000;
+        // A hold in flight takes its disk out of the figure, as it does for placement.
+        reg.hold("roomy", 512, 100_000, 0);
+    }
+    let (s, _, body) = call(&f.st, "GET", "/v1/hosts", "", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let listed = json(&body);
+    let of = |id: &str| {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["id"] == id)
+            .unwrap_or_else(|| panic!("{id} not listed: {body}"))
+    };
+    assert_eq!(of("full")["disk_free_mb"], 3_000);
+    assert_eq!(of("roomy")["disk_free_mb"], 800_000);
+    assert!(
+        of("silent").get("disk_free_mb").is_none(),
+        "a host that reports none shows none: {}",
+        of("silent")
+    );
+}

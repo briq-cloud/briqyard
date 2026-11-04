@@ -241,6 +241,7 @@ fn the_host_table() {
             vcpus: 6,
             cpu_millis: None,
         },
+        disk_free_mb: Some(4096),
         machines: 3,
         namespaces: vec!["t1".into(), "t2".into()],
         last_seen: ts(),
@@ -272,6 +273,7 @@ fn the_host_table() {
         state: "provisioning".into(),
         capacity: api::Capacity::default(),
         used: api::Capacity::default(),
+        disk_free_mb: None,
         machines: 0,
         namespaces: vec![],
         note: "bootstrap attempt 2: ssh: connect to host 10.0.0.9 port 22: Connection refused"
@@ -297,7 +299,7 @@ fn the_host_table() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines.len(),
-        9,
+        10,
         "an SSH address, a pin, public ports, a true condition and a note take a line each"
     );
     assert_eq!(
@@ -309,32 +311,36 @@ fn the_host_table() {
         "h_byard-1        https://10.0.0.9:7420        ready        par      8192/64000     6000/32000 3         2          0.1.0                v1:+256MB          2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
-        lines[2],
-        format!("                 tls: {}", "ab".repeat(32))
+        lines[2], "                 disk free: 4096 MB",
+        "shown when the host reports it"
     );
     assert_eq!(
         lines[3],
+        format!("                 tls: {}", "ab".repeat(32))
+    );
+    assert_eq!(
+        lines[4],
         "                 disk_pressure since 2026-10-19 08:30:00: pool 4.0 GB free of 100.0 (4%), under 10%",
         "a false condition takes no line"
     );
     assert_eq!(
-        lines[4],
+        lines[5],
         "h_srv-9          -                            provisioning -        0/0            0/0        0         0          -                    legacy             2026-10-19T08:30:00+00:00",
         "no address, region nor version yet shows as -"
     );
     assert_eq!(
-        lines[5],
+        lines[6],
         "                 note: bootstrap attempt 2: ssh: connect to host 10.0.0.9 port 22: Connection refused"
     );
     assert_eq!(
-        lines[6],
+        lines[7],
         "h_10-42-0-11     https://10.42.0.11:7420      provisioning gra      0/0            0/0        0         0          -                    legacy             2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
-        lines[7], "                 ssh: 51.68.1.2",
+        lines[8], "                 ssh: 51.68.1.2",
         "the SSH address when it is not the API's"
     );
-    assert_eq!(lines[8], "                 public tcp: 80,443,5432");
+    assert_eq!(lines[9], "                 public tcp: 80,443,5432");
     assert!(out.ends_with('\n'));
 }
 
@@ -454,6 +460,7 @@ fn a_rolling_upgrade_goes_host_by_host_over_those_in_service() {
         state: state.into(),
         capacity: api::Capacity::default(),
         used: api::Capacity::default(),
+        disk_free_mb: None,
         machines: 0,
         namespaces: vec![],
         last_seen: ts(),
