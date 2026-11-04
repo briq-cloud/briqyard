@@ -124,7 +124,7 @@ try:
     sealed=api('POST','/machines/'+builder['id']+'/snapshots',{'memory':True,'template':True})
     phase='warm_catalog'
     entry={'id':'freeze-control','namespace':ns,'type':'shell','source_machine':builder['id'],'snapshot':sealed['id'],'generation':sealed['clone_generation'],'size':{'vcpus':1,'memory_mb':256,'cpu_millis':1000},'max_ready':1}
-    configure="from pathlib import Path; import yaml,json,sys; p=Path('/etc/briqyard/config.yaml'); c=yaml.safe_load(p.read_text()); c['templates'].update(warm_pools=True,warm_policy={'budget':{'memory_mb':2048,'cpu_millis':4000,'root_disk_gb':32},'headroom':{'memory_mb':128,'cpu_millis':0,'disk_free_gb':1},'min_mem_available_mb':128,'max_fills':1,'catalog':[json.loads(sys.argv[1])]}); p.write_text(yaml.safe_dump(c,sort_keys=False))"
+    configure="from pathlib import Path; import yaml,json,sys; p=Path('/etc/briqyard/config.yaml'); c=yaml.safe_load(p.read_text()); c['templates'].update(warm_pools=True,warm_policy={'budget':{'memory_mb':2048,'cpu_millis':4000,'root_disk_gb':32},'headroom':{'memory_mb':128,'cpu_millis':1000,'disk_free_gb':1},'min_mem_available_mb':128,'max_fills':1,'catalog':[json.loads(sys.argv[1])]}); p.write_text(yaml.safe_dump(c,sort_keys=False))"
     subprocess.run(['sudo','python3','-c',configure,json.dumps(entry)],check=True)
     prior=subprocess.check_output(['systemctl','show','-p','MainPID','--value','briqyardd'],text=True).strip()
     subprocess.run(['sudo','systemctl','kill','--kill-whom=main','--signal=SIGUSR2','briqyardd'],check=True)
@@ -136,6 +136,7 @@ try:
     for _ in range(30):
         try:api('GET','/namespaces');break
         except Exception:time.sleep(1)
+    else:raise RuntimeError('warm catalog handover did not become ready')
     api('PUT','/namespaces/'+ns+'/warm-catalog/freeze-control',{'desired':1})
     phase='warm_claim'
     for i in range(20):
