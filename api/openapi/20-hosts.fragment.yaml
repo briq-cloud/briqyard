@@ -229,6 +229,7 @@
         memory_policy: { $ref: "#/components/schemas/MemoryPolicy" }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
+        disk_free_mb: { type: integer, minimum: 1, description: "free space in the host's disk pool, in MB, as placement sees it: its last report less the disk of creates placed since; absent when the host reports none, and then placement does not hold it to a disk figure (fleet only)" }
         machines: { type: integer }
         namespaces: { type: array, items: { type: string } }
         last_seen: { type: string, format: date-time }

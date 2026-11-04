@@ -225,6 +225,9 @@ pub(super) fn host_table(hs: &[api::Host]) -> String {
         if !h.ssh.is_empty() {
             out.push_str(&format!("{:<16} ssh: {}\n", "", h.ssh));
         }
+        if let Some(mb) = h.disk_free_mb {
+            out.push_str(&format!("{:<16} disk free: {mb} MB\n", ""));
+        }
         for c in &h.runtime_classes {
             out.push_str(&format!("{:<16} class: {}\n", "", class_label(c)));
         }

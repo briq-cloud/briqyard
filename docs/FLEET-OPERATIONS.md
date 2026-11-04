@@ -5,6 +5,7 @@
 `briqyard-fleet` runs anywhere that reaches every host (`/etc/briqyard/fleet.yaml`, unit in
 `hack/briqyard-fleet.service`). Clients use the fleet's URL and `token` as they would a
 daemon's; `briqyard host ls` shows the hosts.
+`GET /v1/hosts` (and `host ls`) show each host's `disk_free_mb`: the free space of its pool that placement decides on (its last report less the disk of creates placed since); absent when the host reports none, and placement then does not hold it to a disk figure.
 
 On a server with no host, keep needrestart from restarting the fleet, as the bootstrap does on
 a host (ADR 0050):

@@ -129,6 +129,10 @@ pub struct Host {
     pub state: String,
     pub capacity: Capacity,
     pub used: Capacity,
+    /// Free space in the host's disk pool, in MB, as placement sees it: the host's last report
+    /// less what the fleet placed since; absent when the host reports none (fleet only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_free_mb: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_policy: Option<MemoryPolicy>,
     pub machines: usize,

@@ -256,6 +256,8 @@ impl HostRec {
             state: self.state.clone(),
             capacity: self.capacity,
             used: self.used,
+            // 0 is "reports none", as in `has_disk`.
+            disk_free_mb: (self.disk_free_mb != 0).then_some(self.disk_free_mb),
             machines: self.machines,
             namespaces: self.namespaces.clone(),
             last_seen: self.last_seen,
