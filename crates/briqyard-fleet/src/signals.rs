@@ -71,7 +71,9 @@ pub fn regions(reg: &Registry, policy: &Policy, refusals: &Refusals) -> Vec<Regi
 
 /// The fleet's `/metrics`: hosts by state and each host's, then each region's room and refusals. A region a
 /// host is in has every series, zeros included, so a rate is defined from the first scrape; a
-/// region with refusals only has the counter alone.
+/// region with refusals only has the counter alone. The refusal counter is also there at zero for
+/// `""` and `OTHER` from the start, so the first refusal of an ask without a region, or of a
+/// region no host is in, is an increase and not a series born at 1.
 pub fn render(reg: &Registry, regions: &[RegionRoom]) -> String {
     let mut out = String::new();
     let o = &mut out;
@@ -141,10 +143,21 @@ pub fn render(reg: &Registry, regions: &[RegionRoom]) -> String {
         "The most free memory and disk, in MB, on one of the region's hosts that take a new namespace.",
         per_resource(|r| r.largest_slot),
     );
-    let refused = regions
+    // Every region a host is in, and the two a refusal can be counted in without one: no region
+    // asked (`""`) and a region no host is in (`OTHER`). All start at zero, so `increase()` sees
+    // the first refusal; the labels stay the fixed set, never a caller's string.
+    let mut counted: Vec<(&str, Unschedulable)> = regions
         .iter()
-        .flat_map(|r| {
-            let u = r.unschedulable;
+        .map(|r| (r.region.as_str(), r.unschedulable))
+        .collect();
+    for fixed in ["", OTHER] {
+        if !counted.iter().any(|(region, _)| *region == fixed) {
+            counted.push((fixed, Unschedulable::default()));
+        }
+    }
+    let refused = counted
+        .into_iter()
+        .flat_map(|(region, u)| {
             Resource::ALL.map(|resource| {
                 let n = match resource {
                     Resource::Memory => u.memory,
@@ -156,7 +169,7 @@ pub fn render(reg: &Registry, regions: &[RegionRoom]) -> String {
                     format!(
                         "resource=\"{}\",region=\"{}\"",
                         resource.as_str(),
-                        label_value(&r.region)
+                        label_value(region)
                     ),
                     n.to_string(),
                 )
@@ -191,4 +204,29 @@ pub fn render_backup(observation: &crate::backup::Observation) -> String {
     family(&mut out, "briqyard_fleet_registry_backup_caller_outcomes_total", "counter", "Process-local settled registry push caller outcomes; failed or canceled callers may still have a worker commit a later ACK.", ["acknowledged", "unchanged", "failed", "canceled"].into_iter().zip(observation.caller_outcomes).map(|(outcome, value)| (format!("outcome=\"{outcome}\""), value.to_string())).collect());
     family(&mut out, "briqyard_fleet_registry_backup_last_ack_current_durable_match", "gauge", "Process-local comparison of the last acknowledged snapshot with the valid cached durable-file digest; assumes exclusive file ownership, not current store or recovery coverage.", ["match", "mismatch", "unknown"].into_iter().enumerate().map(|(i, state)| (format!("state=\"{state}\""), u8::from(i == observation.durable_match).to_string())).collect());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The first refusal of an ask without a region, or of a region no host is in, must be an
+    /// increase: both counters are there at zero before any refusal, four resources each, and
+    /// nothing else is added (a caller's region never makes a series).
+    #[test]
+    fn unlabelled_and_other_refusals_start_at_zero() {
+        let text = render(&Registry::default(), &[]);
+        let rows: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("briqyard_fleet_unschedulable_total{"))
+            .collect();
+        assert_eq!(rows.len(), 8, "{rows:#?}");
+        for region in ["", OTHER] {
+            for resource in ["memory", "cpu", "disk", "pressure"] {
+                let want =
+                    format!("briqyard_fleet_unschedulable_total{{resource=\"{resource}\",region=\"{region}\"}} 0");
+                assert!(rows.contains(&want.as_str()), "{want}\n{rows:#?}");
+            }
+        }
+    }
 }

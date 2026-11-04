@@ -823,7 +823,7 @@ GRAFANA_URL=https://grafana.example.com bash /root/briqyard/hack/install-monitor
 | Not answering | a target's `up == 0` for 2 minutes: a host down, or the fleet itself |
 | Host condition | a host condition true for a minute (`memory_pressure`, `disk_pressure`…) |
 | Pool over 80 % | for 5 minutes |
-| Machine in a crash loop | restarted 3 times in 10 minutes by its policy |
+| Machine in a crash loop | restarted at least twice in 10 minutes by its policy (a first restart can predate the first sample), held 3 minutes after |
 | Backup failure observed | a host's `backup_failed` counter grew in 10 minutes, or is positive without a ten-minute baseline; one observed failure is enough |
 | Creates refused: no room | `briqyard_fleet_unschedulable_total{resource=~"memory\|cpu\|disk"}` grew: check regional capacity and host compatibility |
 | Creates refused: host under pressure | `{resource="pressure"}` grew: free the namespace's host |

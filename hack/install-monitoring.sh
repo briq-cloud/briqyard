@@ -212,13 +212,16 @@ for f in "$ETC"/dashboards/*.json; do [ -f "hack/monitoring/dashboards/$(basenam
 # Alerting with a Slack webhook in alerting.env (root's, 0600, written by you).
 if [ -f "$ETC/alerting.env" ] && grep -q '^SLACK_WEBHOOK_URL=.' "$ETC/alerting.env"; then
   private "$ETC/alerting.env"
-  sed "s/\"@LARGEST_SLOT_MB@\"/$LARGEST_SLOT_MB/; s/@LARGEST_SLOT_MB@/$LARGEST_SLOT_MB/g" hack/monitoring/grafana/alerting.yaml > "$tmp/alerting.yaml"
+  bash hack/render-alerting.sh "$LARGEST_SLOT_MB" > "$tmp/alerting.yaml"
   put "$tmp/alerting.yaml" "$ETC/grafana/alerting/briqyard.yaml" 644 root restart_grafana
   alerting=on
 elif [ -f "$ETC/grafana/alerting/briqyard.yaml" ]; then
   rm -f "$ETC/grafana/alerting/briqyard.yaml"; restart_grafana=1; alerting=off
 else
   alerting=off
+fi
+if [ "$alerting" = off ]; then
+  echo "WARNING: alerting is OFF. $ETC/alerting.env has no SLACK_WEBHOOK_URL, so no alert rule is installed and nothing will tell anyone when a host is down, a backup fails or creates are refused." >&2
 fi
 cat > "$tmp/briqyard-grafana.service" <<EOF
 [Unit]
@@ -265,3 +268,4 @@ fi
 echo "$PROMETHEUS_VERSION" > "$OPT/prometheus/VERSION"
 echo "$GRAFANA_VERSION" > "$OPT/grafana/VERSION"
 echo "== done: Grafana at http://$GRAFANA_LISTEN (admin), Prometheus at http://$PROMETHEUS_LISTEN, alerting $alerting"
+[ "$alerting" = on ] || echo "== alerting is OFF: no notification path exists on this host (see the warning above)" >&2
