@@ -11,19 +11,65 @@ pub(super) fn achieved(level: &str, reason: Option<&str>) -> api::CopyConsistenc
         consistency_reason: reason.map(str::to_owned),
     }
 }
-fn fallback(error: &anyhow::Error) -> api::CopyConsistency {
+fn fallback(error: &anyhow::Error, phase: &str) -> api::CopyConsistency {
     let reason = if error.is::<guestc::UnknownOp>() {
         "init_too_old"
     } else if error.is::<guestc::FreezeExpired>() {
         "freeze_expired"
     } else if error.is::<tokio::time::error::Elapsed>() {
-        "freeze_timeout"
+        if phase == "sync" {
+            "sync_timeout"
+        } else {
+            "freeze_timeout"
+        }
     } else {
-        "freeze_refused"
+        if phase == "sync" {
+            "sync_refused"
+        } else {
+            "freeze_refused"
+        }
     };
     tracing::warn!(reason, error = %error, "guest copy consistency fallback");
     achieved("crash", Some(reason))
 }
+/// A stopped state alone does not prove the init completed its halt path.
+fn stopped_consistency(r: &Record) -> api::CopyConsistency {
+    if r.state == state::CREATED && r.started_at.is_none() {
+        return if !r.from_source {
+            achieved("filesystem", None)
+        } else {
+            r.fork
+                .as_ref()
+                .map(|origin| origin.copy_consistency.clone())
+                .unwrap_or_else(|| achieved("crash", Some("unverified_source")))
+        };
+    }
+    if r.state != state::STOPPED {
+        return achieved("crash", Some("unverified_stop"));
+    }
+    let Some(exit) = r
+        .exit
+        .as_ref()
+        .filter(|exit| r.started_at.is_none_or(|started| exit.at >= started))
+    else {
+        return achieved("crash", Some("unverified_stop"));
+    };
+    if exit.oom_killed {
+        return achieved("crash", Some("oom_killed"));
+    }
+    if exit.code == 255 {
+        return achieved(
+            "crash",
+            Some(if r.stopped_reason == stop::EXIT {
+                "unclean_exit"
+            } else {
+                "forced_stop"
+            }),
+        );
+    }
+    achieved("filesystem", None)
+}
+
 impl Manager {
     pub(super) async fn bounded_sync(&self, vsock: &Path) -> Result<()> {
         tokio::time::timeout(guestc::CONTROL_TIMEOUT, self.inner.guest.fs_sync(vsock))
@@ -54,7 +100,7 @@ impl Manager {
         );
         match result {
             Ok(()) => achieved("synced", None),
-            Err(err) => fallback(&err),
+            Err(err) => fallback(&err, "sync"),
         }
     }
     pub(super) async fn frozen_copy(
@@ -106,7 +152,7 @@ impl Manager {
                             held_since = Some(Instant::now());
                             achieved("filesystem", None)
                         }
-                        Err(err) => fallback(&err),
+                        Err(err) => fallback(&err, "freeze"),
                     }
                 } else {
                     achieved("crash", Some("not_running"))
@@ -115,7 +161,7 @@ impl Manager {
                 synced
             }
         } else {
-            achieved("filesystem", None)
+            stopped_consistency(&r)
         };
         let started = Instant::now();
         let result = self.inner.zfs.snapshot_all(datasets, snap).await;
@@ -137,7 +183,7 @@ impl Manager {
                 .and_then(|r| r);
             stage("copy", "fs_thaw", &r.id, r.pid, started, thaw.is_ok());
             if let Err(err) = thaw {
-                consistency = fallback(&err);
+                consistency = fallback(&err, "freeze");
             }
             if held_since.is_some_and(|t| t.elapsed() >= HOLD) {
                 consistency = achieved("crash", Some("freeze_expired"));
@@ -157,5 +203,103 @@ impl Manager {
             .unwrap()
             .record(operation, &consistency.consistency, None);
         Ok(consistency)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn stopped_copy_reports_each_exit_kind_conservatively() {
+        for (kind, reason, code, oom, expected) in [
+            ("graceful stop", stop::USER, Some(143), false, None),
+            ("normal exit", stop::EXIT, Some(0), false, None),
+            (
+                "guest kills workload then halts",
+                stop::USER,
+                Some(137),
+                false,
+                None,
+            ),
+            (
+                "application error through init",
+                stop::EXIT,
+                Some(1),
+                false,
+                None,
+            ),
+            ("OOM", stop::EXIT, Some(137), true, Some("oom_killed")),
+            (
+                "VMM crash",
+                stop::EXIT,
+                Some(255),
+                false,
+                Some("unclean_exit"),
+            ),
+            (
+                "kill after grace",
+                stop::USER,
+                Some(255),
+                false,
+                Some("forced_stop"),
+            ),
+            (
+                "unconfirmed old stop",
+                stop::USER,
+                None,
+                false,
+                Some("unverified_stop"),
+            ),
+        ] {
+            let mut r = crate::machine::tests::record();
+            r.state = state::STOPPED.into();
+            r.stopped_reason = reason.into();
+            r.exit = code.map(|code| api::Exit {
+                code,
+                oom_killed: oom,
+                at: Utc::now(),
+                restarting: false,
+            });
+            let got = stopped_consistency(&r);
+            assert_eq!(got.consistency_reason.as_deref(), expected, "{kind}");
+            assert_eq!(
+                got.consistency,
+                if expected.is_some() {
+                    "crash"
+                } else {
+                    "filesystem"
+                },
+                "{kind}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod lineage_tests {
+    use super::*;
+    #[test]
+    fn prior_exit_cannot_bless_an_error_or_an_unbooted_restored_copy() {
+        let mut r = crate::machine::tests::record();
+        r.state = state::ERROR.into();
+        r.exit = Some(api::Exit {
+            code: 0,
+            oom_killed: false,
+            at: Utc::now(),
+            restarting: false,
+        });
+        assert_eq!(stopped_consistency(&r).consistency, "crash");
+        r.state = state::CREATED.into();
+        r.started_at = None;
+        r.from_source = true;
+        assert_eq!(stopped_consistency(&r).consistency, "crash");
+        r.fork = Some(api::ForkOrigin {
+            machine_id: "m_parent".into(),
+            copy_consistency: achieved("crash", Some("requested")),
+        });
+        assert_eq!(stopped_consistency(&r).consistency, "crash");
+        r.fork = None;
+        r.from_source = false;
+        assert_eq!(stopped_consistency(&r).consistency, "filesystem");
     }
 }

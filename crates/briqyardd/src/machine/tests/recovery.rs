@@ -182,7 +182,7 @@ async fn the_exit_is_the_inits_report_never_the_console() {
         (r.state.as_str(), r.stopped_reason.as_str()),
         (state::STOPPED, stop::USER)
     );
-    assert!(r.exit.is_none());
+    assert_eq!(r.exit.as_ref().map(|exit| exit.code), Some(0));
 }
 
 #[tokio::test]

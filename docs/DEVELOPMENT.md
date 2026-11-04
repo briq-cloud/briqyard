@@ -561,7 +561,9 @@ microVM gates remain required before push.
 
 Native e2e additionally runs `hack/e2e-seals.sh` (4 checks): both sandbox seed disk shapes seal, create and execute their first command. The init root-only `--ignored run_as` filter includes loopback ext4 sync, freeze rollback, thaw, deadline and connection-close tests (ADR 0092).
 
-ADR 0092 adds three native storage checks: the achieved consistency and two unsynced
-27-byte regressions (snapshot restore and running-source disk fork).
+ADR 0092 checks achieved consistency and two timed unsynced 27-byte regressions
+(snapshot restore and running-source disk fork), plus up to five crash opt-out controls.
+Copy completion must be within one second; a slower trial is inconclusive and fails.
+At least one crash control must lose bytes; the summary counts include each timed trial.
 `hack/measure-freeze.sh`, dispatched with native workflow input `measure_freeze=true`,
 records relative latency and stalls on shared hosted x86_64; its artifacts include all raw samples.

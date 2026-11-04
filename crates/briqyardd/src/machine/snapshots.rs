@@ -249,6 +249,11 @@ impl Manager {
         }
         let _lock = e.lock.lock().await;
         let r = e.snapshot();
+        if req.memory && (r.state != state::RUNNING || e.live.lock().unwrap().is_none()) {
+            return Err(MError::NotRunning(
+                "a snapshot with memory needs the machine running".into(),
+            ));
+        }
         let template_marker = self
             .check_template_seal(&e, req.memory, req.template)
             .await?;
@@ -545,7 +550,11 @@ impl Manager {
         let s = r.snapshots.iter().find(|s| s.id == id).cloned();
         let Some(s) = s else {
             // Not ours to restore any more: nothing a later call could finish.
-            e.rec.lock().unwrap().restoring = None;
+            let mut rec = e.rec.lock().unwrap();
+            rec.restoring = None;
+            // The previous stop described the replaced disks, not this restored lineage.
+            rec.exit = None;
+            drop(rec);
             self.save(e)?;
             return Ok(Vec::new());
         };
@@ -582,6 +591,8 @@ impl Manager {
         {
             let mut rec = e.rec.lock().unwrap();
             rec.restoring = None;
+            // The previous stop described the replaced disks, not this restored lineage.
+            rec.exit = None;
             rec.suspended = resume;
             // Its filesystem is the snapshot's: it grows at the next boot, cold since the
             // memory of a smaller disk is not resumed. A start under way is that boot.

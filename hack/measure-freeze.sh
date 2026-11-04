@@ -49,18 +49,23 @@ def measure(fn):
     t=time.monotonic();fn();return (time.monotonic()-t)*1000
 def summary(xs):
     xs=sorted(xs);return {'n':len(xs),'p50_ms':statistics.median(xs),'p95_ms':xs[max(0,__import__('math').ceil(.95*len(xs))-1)],'max_ms':max(xs),'samples_ms':xs}
+source_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
 samples={}
+copy_levels={}
 def record(name,fn,n=20): samples[name]=[measure(fn) for _ in range(n)]
 ns='freeze-measure-'+str(os.getpid());ids=[];serial=itertools.count();backup_owners=set()
 def create(cmd=None):
-    m=api('POST','/machines',{'namespace':ns,'name':'create-'+str(next(serial)),'image':'python:3.12-alpine','size':{'vcpus':1,'memory_mb':512},'cmd':cmd or ['sleep','3600'],'sleep':'never','disk_limits':{'bandwidth_mb':32,'burst_sec':0} if cmd else None})
+    m=api('POST','/machines',{'namespace':ns,'name':'create-'+str(next(serial)),'image':'python:3.12-alpine','size':{'vcpus':1,'memory_mb':512},'cmd':cmd or ['sleep','3600'],'sleep':'never','disk_limits':{'bandwidth_mb':32,'iops':0,'burst_sec':0} if cmd else None})
     ids.append(m['id']);wait(m['id'],'running');return m['id']
 def fork(crash=False):
     spec={'machine_id':source}
     if crash:spec['consistency']='crash'
     t=time.monotonic()
     m=api('POST','/machines',{'namespace':ns,'name':'fork-'+str(next(serial)),'size':{'vcpus':1,'memory_mb':512},'fork':spec,'start':False});ids.append(m['id'])
-    wait(m['id'],'created');elapsed=(time.monotonic()-t)*1000
+    copied=wait(m['id'],'created');elapsed=(time.monotonic()-t)*1000
+    level=(copied.get('fork') or {}).get('consistency','legacy')
+    copy_levels[level]=copy_levels.get(level,0)+1
+    if level!='legacy' and level!=('crash' if crash else 'filesystem'):raise RuntimeError('fork did not achieve requested measurement consistency')
     api('DELETE','/machines/'+m['id']);ids.remove(m['id']);return elapsed
 phase='create_source'
 try:
@@ -72,6 +77,12 @@ try:
         if busy:
             writer="import os,time,json; f=open('/root/busy','wb',buffering=0); log=open('/tmp/stalls','w',buffering=1); b=os.urandom(1048576)\nwhile not os.path.exists('/tmp/end-writer'):\n t=time.monotonic(); f.seek(0); f.write(b*32); os.fsync(f.fileno()); log.write(str((time.monotonic()-t)*1000)+'\\n')"
             source=create(['python3','-c',writer])
+            phase='writer_ready'
+            # RUNNING proves the init listener is ready, not that main opened its log.
+            # Its first twenty completed writes are the no-copy writer control.
+            cli('exec',source,'--','python3','-c',"import pathlib,time; p=pathlib.Path('/tmp/stalls'); end=time.monotonic()+60\nwhile time.monotonic()<end:\n if p.exists() and len(p.read_text().splitlines())>=20: break\n time.sleep(.01)\nelse: raise RuntimeError('writer never completed twenty control samples')")
+            samples['writer_control_ms']=[float(x) for x in cli('exec',source,'--','cat','/tmp/stalls').splitlines()]
+            phase='busy_forks'
         for i in range(20):
             for crash in (True,False):
                 name=('busy' if busy else 'idle')+('_crash_fork_ms' if crash else '_frozen_fork_ms')
@@ -141,7 +152,7 @@ try:
     api('DELETE','/namespaces/'+ns+'/warm-pools/freeze-control')
     for load in ('idle','busy'):
         samples[load+'_fork_added_ms']=[f-c for f,c in zip(samples[load+'_frozen_fork_ms'],samples[load+'_crash_fork_ms'])]
-    print(json.dumps({'runner':platform.machine(),'cpus':os.cpu_count(),'shared_hosted_runner':True,'measurements':{k:summary(v) if v else {'n':0} for k,v in samples.items()},'warm_claim':'qualified init-ready-v1, admission through host readiness'},indent=2))
+    print(json.dumps({'source_sha':source_sha,'copy_levels':copy_levels,'runner':platform.machine(),'cpus':os.cpu_count(),'shared_hosted_runner':True,'measurements':{k:summary(v) if v else {'n':0} for k,v in samples.items()},'warm_claim':'qualified init-ready-v1, admission through host readiness'},indent=2))
 except Exception as error:
     api_code=None
     if isinstance(error,urllib.error.HTTPError):
@@ -149,7 +160,7 @@ except Exception as error:
             response=json.loads(error.read(4096))
             if response.get('code') in ('invalid','not_found','conflict','unauthorized','capacity','bad_state','pool_empty','other_host'):api_code=response['code']
         except Exception:pass
-    print(json.dumps({'runner':platform.machine(),'cpus':os.cpu_count(),'complete':False,'error':type(error).__name__,'phase':phase,'http_status':getattr(error,'code',None),'api_code':api_code,'measurements':{k:summary(v) if v else {'n':0} for k,v in samples.items()}},indent=2),flush=True)
+    print(json.dumps({'source_sha':source_sha,'copy_levels':copy_levels,'runner':platform.machine(),'cpus':os.cpu_count(),'complete':False,'error':type(error).__name__,'phase':phase,'http_status':getattr(error,'code',None),'api_code':api_code,'measurements':{k:summary(v) if v else {'n':0} for k,v in samples.items()}},indent=2),flush=True)
     raise
 finally:
     try:api('DELETE','/namespaces/'+ns+'/warm-pools/freeze-control')

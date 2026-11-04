@@ -4,6 +4,30 @@ use super::*;
 use crate::profile::stage;
 use std::time::Instant;
 
+/// Preserve host-forced termination even if an init report raced the kill. Reports
+/// are emitted before halt's sync, so a host kill cannot be blessed by that report.
+fn stop_exit(e: &Entry, report: Option<&guest::ExitReport>, forced: bool) {
+    let mut r = e.rec.lock().unwrap();
+    // A failed boot is settled as an error, not a workload exit (ADR 0011).
+    if r.state == state::STARTING {
+        return;
+    }
+    let forced = forced
+        || r.exit.as_ref().is_some_and(|exit| {
+            exit.code == 255 && r.started_at.is_none_or(|start| exit.at >= start)
+        });
+    r.exit = Some(api::Exit {
+        code: if forced {
+            255
+        } else {
+            report.map_or(255, |report| report.code)
+        },
+        oom_killed: report.is_some_and(|report| report.oom),
+        at: Utc::now(),
+        restarting: false,
+    });
+}
+
 impl Manager {
     /// Settles the state after the Firecracker process exited.
     pub(super) async fn settle_exit(&self, e: &Arc<Entry>, pid: u32) {
@@ -68,6 +92,7 @@ impl Manager {
             self.exited(e, code, oom, code != 0);
             return;
         }
+        stop_exit(e, Some(&report), false);
         let Some(why) = stop_req else {
             e.set_state(state::STOPPED, |r| {
                 r.pid = 0;
@@ -267,6 +292,7 @@ impl Manager {
         grace: Duration,
     ) -> Result<()> {
         let mut exited = live.exited.clone();
+        let mut forced = false;
         if !*exited.borrow() {
             let asked = !grace.is_zero()
                 && tokio::time::timeout(
@@ -280,6 +306,8 @@ impl Manager {
                     .await
                     .is_ok_and(|r| r.is_ok());
             if !gone {
+                forced = true;
+                stop_exit(e, None, true);
                 self.inner.vmm.kill_checked(live)?;
                 let confirmed =
                     tokio::time::timeout(Duration::from_secs(10), exited.wait_for(|x| *x))
@@ -310,6 +338,9 @@ impl Manager {
                 .unwrap()
                 .mapping_exited = true;
             let _ = self.save(e);
+        }
+        if !e.snapshot().suspended {
+            stop_exit(e, live.exit.borrow().as_ref(), forced);
         }
         *e.live.lock().unwrap() = None;
         *e.stop_req.lock().unwrap() = None;
@@ -536,6 +567,7 @@ impl Manager {
         .and_then(|r| r)
         {
             tracing::warn!(machine = e.snapshot().id, err = %err, "guest shutdown request failed, killing");
+            stop_exit(e, None, true);
             self.inner.vmm.kill(live.pid);
         }
         let mut exited = live.exited.clone();
@@ -548,6 +580,7 @@ impl Manager {
                 machine = e.snapshot().id,
                 "guest did not stop in time, killing"
             );
+            stop_exit(e, None, true);
             self.inner.vmm.kill(live.pid);
         }
         let _ = tokio::time::timeout(Duration::from_secs(10), settled).await;
@@ -754,4 +787,24 @@ const CRASH_LOOP_AT: u32 = 3;
 pub(super) fn restart_delay(n: u32) -> Duration {
     let doubled = 10u64 << n.saturating_sub(1).min(5);
     Duration::from_secs(doubled.min(300))
+}
+
+#[cfg(test)]
+mod stop_evidence_tests {
+    use super::*;
+    #[tokio::test]
+    async fn forced_kill_cannot_be_blessed_by_a_racing_init_report() {
+        let h = crate::machine::tests::harness("10.64.0.0/22", 4096).await;
+        let e = h.add("m_stop_evidence", state::STOPPED, 256);
+        let report = guest::ExitReport {
+            code: 143,
+            requested: true,
+            ..Default::default()
+        };
+        stop_exit(&e, Some(&report), false);
+        assert_eq!(e.snapshot().exit.as_ref().unwrap().code, 143);
+        stop_exit(&e, None, true);
+        stop_exit(&e, Some(&report), false);
+        assert_eq!(e.snapshot().exit.as_ref().unwrap().code, 255);
+    }
 }

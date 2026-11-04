@@ -849,3 +849,60 @@ async fn a_copy_during_a_plain_stop_does_not_claim_clean_stopped_disks() {
     assert!(calls[1].starts_with("fs_freeze "));
     assert_eq!(h.thaw_count(), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn nonrunning_memory_snapshot_does_not_attempt_sync() {
+    let h = harness().await;
+    let e = h.add("m_not_running", state::STOPPED, 256);
+    h.disks(&e).await;
+    h.m.start("m_not_running", None).await.unwrap();
+    e.set_state(state::STOPPING, |_| None);
+    h.fs_sync_fault(3);
+    h.host_calls();
+    assert!(matches!(
+        h.m.snapshot("m_not_running", with_memory()).await,
+        Err(MError::NotRunning(_))
+    ));
+    assert!(!h.host_calls().iter().any(|call| call.starts_with("fs_")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn memory_sync_failures_have_sync_reasons_and_never_freeze() {
+    for (fault, reason) in [(2, "sync_refused"), (3, "sync_timeout")] {
+        let h = harness().await;
+        let e = h.add("m_sync_reason", state::STOPPED, 256);
+        h.disks(&e).await;
+        h.m.start("m_sync_reason", None).await.unwrap();
+        h.fs_sync_fault(fault);
+        h.host_calls();
+        let snapshot = h.m.snapshot("m_sync_reason", with_memory()).await.unwrap();
+        assert_eq!(
+            snapshot.copy_consistency.consistency_reason.as_deref(),
+            Some(reason)
+        );
+        assert!(!h
+            .host_calls()
+            .iter()
+            .any(|call| call.starts_with("fs_freeze")));
+    }
+}
+
+#[tokio::test]
+async fn restoring_disks_invalidates_the_previous_stop_evidence() {
+    let h = harness().await;
+    let e = h.add("m_restore_evidence", state::STOPPED, 256);
+    h.disks(&e).await;
+    h.m.start("m_restore_evidence", None).await.unwrap();
+    let saved =
+        h.m.snapshot("m_restore_evidence", named("evidence"))
+            .await
+            .unwrap();
+    h.m.stop("m_restore_evidence", Duration::from_secs(1), false, None)
+        .await
+        .unwrap();
+    assert!(e.snapshot().exit.is_some());
+    h.m.restore_snapshot("m_restore_evidence", &saved.id, None)
+        .await
+        .unwrap();
+    assert!(e.snapshot().exit.is_none());
+}

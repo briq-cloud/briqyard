@@ -151,7 +151,7 @@ pub struct ForkSpec {
     pub snapshot: Option<String>,
 }
 
-/// How the main process last ended on its own.
+/// Last process exit: 255 when no guest report confirms it or the host forced termination.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Exit {
     pub code: i32,
