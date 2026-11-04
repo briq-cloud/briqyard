@@ -57,6 +57,9 @@ fn stopped_consistency(r: &Record) -> api::CopyConsistency {
     if exit.oom_killed {
         return achieved("crash", Some("oom_killed"));
     }
+    if exit.vmm_oom_killed {
+        return achieved("crash", Some("vmm_oom_killed"));
+    }
     if exit.code == 255 {
         return achieved(
             "crash",
@@ -237,6 +240,13 @@ mod tests {
                 Some("unclean_exit"),
             ),
             (
+                "VMM over its memory ceiling",
+                stop::EXIT,
+                Some(255),
+                false,
+                Some("vmm_oom_killed"),
+            ),
+            (
                 "kill after grace",
                 stop::USER,
                 Some(255),
@@ -257,6 +267,7 @@ mod tests {
             r.exit = code.map(|code| api::Exit {
                 code,
                 oom_killed: oom,
+                vmm_oom_killed: kind == "VMM over its memory ceiling",
                 at: Utc::now(),
                 restarting: false,
             });
@@ -285,6 +296,7 @@ mod lineage_tests {
         r.exit = Some(api::Exit {
             code: 0,
             oom_killed: false,
+            vmm_oom_killed: false,
             at: Utc::now(),
             restarting: false,
         });

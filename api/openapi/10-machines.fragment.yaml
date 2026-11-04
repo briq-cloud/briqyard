@@ -167,7 +167,8 @@
       type: object
       properties:
         code: { type: integer }
-        oom_killed: { type: boolean }
+        oom_killed: { type: boolean, description: "the guest's kernel killed the workload (the init's report)" }
+        vmm_oom_killed: { type: boolean, description: "the host's kernel killed the VMM over its memory ceiling and the init sent no report; omitted when false" }
         at: { type: string, format: date-time }
         restarting: { type: boolean }
     Machine:

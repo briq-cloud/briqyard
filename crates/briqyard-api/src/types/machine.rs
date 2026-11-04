@@ -155,7 +155,12 @@ pub struct ForkSpec {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Exit {
     pub code: i32,
+    /// The guest's kernel killed the workload (the init's report).
     pub oom_killed: bool,
+    /// The host's kernel killed the VMM over its cgroup's memory ceiling, and the init sent
+    /// no report. Distinct from `oom_killed`, which is the guest's own word (ADR 0096).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vmm_oom_killed: bool,
     pub at: DateTime<Utc>,
     pub restarting: bool,
 }

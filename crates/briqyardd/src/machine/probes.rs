@@ -511,7 +511,7 @@ impl Manager {
         let _ = exit.wait_for(|r| r.is_some()).await;
         let report = exit.borrow().clone();
         let (code, oom) = report.map_or((255, false), |r| (r.code, r.oom));
-        self.exited(e, code, oom, true);
+        self.exited(e, code, oom, false, true);
     }
 }
 

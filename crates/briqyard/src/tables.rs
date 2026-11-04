@@ -425,6 +425,9 @@ pub(super) fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
         if x.oom_killed {
             exit.push_str(", out of memory");
         }
+        if x.vmm_oom_killed {
+            exit.push_str(", VMM over its memory ceiling");
+        }
         if x.restarting {
             exit.push_str(", restarting");
         }
