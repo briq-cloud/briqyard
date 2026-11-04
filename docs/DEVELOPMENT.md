@@ -7,8 +7,8 @@ runs its test binary as root (`--ignored run_as`, `.github/workflows/ci.yml`); i
 same step.
 
 Native PR evidence comes from the `native` GitHub Actions workflow on `ubuntu-24.04`
-with KVM and a disposable encrypted ZFS pool. Relevant PRs test their exact head;
-manual dispatch accepts a ref. The job summaries contain e2e, fleet-smoke, stress, monitoring, two-hosts and restore counts
+with KVM and a disposable encrypted ZFS pool. Relevant PRs test their exact head, except a draft (marking it ready starts the run);
+manual dispatch accepts a ref. Main's `native-cache` job in `ci.yml` writes the build cache these jobs read ([ADR 0108](adr/0108-ci-builds-once-per-cache.md)). The job summaries contain e2e, fleet-smoke, stress, monitoring, two-hosts and restore counts
 and durations; the `native-*-log` artifacts contain their complete output. These checks are
 not required checks yet. Stress, monitoring, alerts, qualification and restore run on separate runners in parallel. The qualification suite (`hack/qualify.sh`, [ADR 0095](adr/0095-qualification-batch.md)) kills the daemon, the fleet and the VMMs mid-operation, checks isolation and OOM containment against real attempts, and fills the pool. The alerts suite drives the production Grafana rules to firing and resolved against a local webhook, and the monitoring suite does so for Not answering ([ADR 0094](adr/0094-alerts-fire-and-resolve-in-ci.md)). Monitoring covers a
 ready daemon and an explicitly unreachable registered host (18 checks). The two-host job boots
