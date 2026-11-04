@@ -1,5 +1,5 @@
 //! A backup in flight, written down before its first byte, so that a kill does not leave its
-//! stream in the store with nothing to own it (ADR 0099).
+//! stream in the store with nothing to own it (ADR 0100).
 
 use super::*;
 

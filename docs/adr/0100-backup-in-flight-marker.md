@@ -1,4 +1,4 @@
-# ADR 0099: A backup in flight is written down, and a stream with no record goes at the next start
+# ADR 0100: A backup in flight is written down, and a stream with no record goes at the next start
 
 2026-11-04 · Status: accepted; extends ADR 0008 and ADR 0083
 

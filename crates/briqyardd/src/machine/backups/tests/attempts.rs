@@ -1,4 +1,4 @@
-//! A backup killed mid-stream leaves a marker, and the next start removes its streams (ADR 0099).
+//! A backup killed mid-stream leaves a marker, and the next start removes its streams (ADR 0100).
 
 use super::*;
 use crate::machine::backups::attempts::{Attempt, ATTEMPTS};

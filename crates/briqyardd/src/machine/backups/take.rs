@@ -235,7 +235,7 @@ impl Manager {
             self.frozen_copy(&e, &snapped, &snap, "backup", opt).await?
         };
         // Written down before the first byte: a kill from here leaves a marker, and the next
-        // start removes the streams of a backup that has no record (ADR 0099).
+        // start removes the streams of a backup that has no record (ADR 0100).
         let disks: Vec<&str> = [("root", rec.root_dataset()), ("data", rec.data_dataset())]
             .iter()
             .filter(|(_, ds)| snapped.contains(ds))
