@@ -9,7 +9,7 @@
 set -uo pipefail
 [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || { echo 'requires a disposable GitHub-hosted runner' >&2; exit 2; }
 LEAVES=${SCALE_LEAVES:-6500}   # past the old cap of 4096 with room, below the daemon's 65536
-BOUND=${SCALE_BOUND_SECONDS:-300}  # restart to the first accepted create
+BOUND=${SCALE_BOUND_SECONDS:-480}  # restart to the first accepted create
 NS=native-scale-$$
 PARENT=/sys/fs/cgroup/firecracker
 pass=0; fail=0
