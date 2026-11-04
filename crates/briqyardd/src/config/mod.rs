@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
+mod classes;
+pub use classes::*;
 mod sandbox;
 pub use sandbox::SandboxRecipe;
 mod warm;
@@ -39,6 +41,9 @@ pub struct Config {
     pub jail_uid_base: u32,
     /// The uncompressed guest kernel every machine boots.
     pub kernel: PathBuf,
+    /// The kernels the host serves besides its own, by class name (ADR 0088). `default` is
+    /// `kernel`, never written here.
+    pub runtime_classes: BTreeMap<String, RuntimeClass>,
     /// Appended to the default boot arguments.
     pub kernel_args: String,
     /// Firecracker's PCI transport (needs a guest kernel with PCI support).
@@ -115,6 +120,7 @@ impl Default for Config {
             jail_dir: PathBuf::new(),
             jail_uid_base: 100_000,
             kernel: "/var/lib/briqyard/vmlinux".into(),
+            runtime_classes: BTreeMap::new(),
             kernel_args: String::new(),
             pci: false,
             balloon: Balloon::default(),

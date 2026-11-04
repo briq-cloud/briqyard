@@ -118,6 +118,15 @@
       properties:
         events: { type: array, items: { $ref: "#/components/schemas/Event" } }
         next: { type: string, description: "the `since` to read on from: the last event returned when the page is full, else the host's last seq; through the fleet without a namespace or machine, `<host>:<seq>,…`" }
+    RuntimeClass:
+      type: object
+      description: "A runtime class a host serves (ADR 0088): a kernel its machines boot, written in the daemon's `runtime_classes`"
+      required: [name]
+      properties:
+        name: { type: string }
+        nested: { type: boolean, default: false, description: "its machines see the CPU's virtualization extensions (`/dev/kvm` works in them) and take no memory snapshot" }
+        kernel_release: { type: string, description: "the kernel's release, `6.18.54-briqyard-nested`" }
+        openzfs: { type: string, description: "the OpenZFS version of the class's modules, when it has them" }
     Status:
       type: object
       properties:
@@ -125,6 +134,7 @@
         named_memory_fork_v1: { type: boolean, default: false, description: "explicit availability of configured named memory cloning; supported profiles are listed separately; absent or stale reports are unsupported" }
         named_memory_profiles: { type: array, items: { type: string, enum: [init-ready-v1] }, description: "implemented configured profiles; init-ready does not clone already-running services" }
         warm_pool_profiles: { type: array, items: { type: string }, description: "implemented configured paused-pool profiles; absent means unsupported" }
+        runtime_classes: { type: array, items: { $ref: "#/components/schemas/RuntimeClass" }, description: "the runtime classes it serves besides `default`, which every host serves (ADR 0088); a create naming one is placed only on a host that lists it" }
         version: { type: string, description: "this build: the release and its commit, `0.1.0+fdad892eeefa` (ADR 0027)" }
         host_id: { type: string }
         memory_policy: { $ref: "#/components/schemas/MemoryPolicy" }
@@ -205,6 +215,7 @@
         named_memory_fork_v1: { type: boolean, default: false, description: "explicit availability of configured named memory cloning; supported profiles are listed separately; absent or stale reports are unsupported" }
         named_memory_profiles: { type: array, items: { type: string, enum: [init-ready-v1] }, description: "implemented configured profiles; init-ready does not clone already-running services" }
         warm_pool_profiles: { type: array, items: { type: string }, description: "implemented configured paused-pool profiles; absent means unsupported" }
+        runtime_classes: { type: array, items: { $ref: "#/components/schemas/RuntimeClass" }, description: "the runtime classes it serves besides `default`, which every host serves (ADR 0088); a create naming one is placed only on a host that lists it" }
         id: { type: string }
         url: { type: string }
         ssh: { type: string, description: "where the fleet reaches the server over SSH, when not at the API's address (its API on the private network); absent otherwise" }
@@ -290,6 +301,7 @@
         named_memory_fork_v1: { type: boolean, default: false, description: "explicit availability of configured named memory cloning; supported profiles are listed separately; absent or stale reports are unsupported" }
         named_memory_profiles: { type: array, items: { type: string, enum: [init-ready-v1] }, description: "implemented configured profiles; init-ready does not clone already-running services" }
         warm_pool_profiles: { type: array, items: { type: string }, description: "implemented configured paused-pool profiles; absent means unsupported" }
+        runtime_classes: { type: array, items: { $ref: "#/components/schemas/RuntimeClass" }, description: "the runtime classes it serves besides `default`, which every host serves (ADR 0088); a create naming one is placed only on a host that lists it" }
         id: { type: string, description: The daemon's own id, for the fleet's log; the fleet keeps the host under its own }
         url: { type: string }
         region: { type: string }

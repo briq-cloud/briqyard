@@ -76,7 +76,7 @@ fn the_machine_table() {
     assert!(out.ends_with('\n'));
     assert_eq!(
         lines[0],
-        "ID               NAMESPACE    NAME           IMAGE                    STATE              READY IP           SIZE      CPU m   SLEEP  EGRESS             LIMITS                   DISK             BACKUP   PENDING      HOST"
+        "ID               NAMESPACE    NAME           IMAGE                    CLASS    STATE              READY IP           SIZE      CPU m   SLEEP  EGRESS             LIMITS                   DISK             BACKUP   PENDING      HOST"
     );
     // Every column starts where its header does.
     let cols = [
@@ -84,17 +84,18 @@ fn the_machine_table() {
         (17, 12),
         (30, 14),
         (45, 24),
-        (70, 18),
-        (89, 5),
-        (95, 12),
-        (108, 9),
-        (118, 7),
-        (126, 6),
-        (133, 18),
-        (152, 24),
-        (177, 16),
-        (194, 8),
-        (203, 12),
+        (70, 8),
+        (79, 18),
+        (98, 5),
+        (104, 12),
+        (117, 9),
+        (127, 7),
+        (135, 6),
+        (142, 18),
+        (161, 24),
+        (186, 16),
+        (203, 8),
+        (212, 12),
     ];
     let heads: Vec<String> = cols.iter().map(|(at, w)| col(lines[0], *at, *w)).collect();
     assert_eq!(
@@ -104,6 +105,7 @@ fn the_machine_table() {
             "NAMESPACE",
             "NAME",
             "IMAGE",
+            "CLASS",
             "STATE",
             "READY",
             "IP",
@@ -125,6 +127,7 @@ fn the_machine_table() {
             "t1",
             "db",
             "nginx:1.27",
+            "default",
             "stopped (idle)",
             "no",
             "",
@@ -143,15 +146,15 @@ fn the_machine_table() {
     );
     assert_eq!(
         lines[2].len(),
-        203 + 12 + 1,
+        212 + 12 + 1,
         "no host: nothing after the pending fields"
     );
-    assert_eq!(col(lines[1], 177, 16), "-", "no disk limit");
-    assert_eq!(col(lines[1], 194, 8), "-", "no schedule");
-    assert_eq!(col(lines[1], 203, 12), "-", "nothing pending");
-    assert_eq!(col(lines[1], 89, 5), "yes");
-    assert_eq!(col(lines[1], 133, 18), "open");
-    assert_eq!(col(lines[1], 152, 24), "-", "nothing limited");
+    assert_eq!(col(lines[1], 186, 16), "-", "no disk limit");
+    assert_eq!(col(lines[1], 203, 8), "-", "no schedule");
+    assert_eq!(col(lines[1], 212, 12), "-", "nothing pending");
+    assert_eq!(col(lines[1], 98, 5), "yes");
+    assert_eq!(col(lines[1], 142, 18), "open");
+    assert_eq!(col(lines[1], 161, 24), "-", "nothing limited");
     // A value wider than its column is not cut: the rest of that row moves right.
     assert!(
         lines[3].contains("a-rather-long-name-indeed ghcr.io/org/some-image:v1.2.3 "),
@@ -159,10 +162,15 @@ fn the_machine_table() {
         lines[3]
     );
     assert_eq!(col(lines[1], 0, 16), "m_01HZX");
-    assert_eq!(col(lines[1], 70, 18), "running");
-    assert_eq!(col(lines[1], 95, 12), "10.1.0.2");
+    assert_eq!(col(lines[1], 79, 18), "running");
+    assert_eq!(col(lines[1], 104, 12), "10.1.0.2");
     assert!(lines[1].ends_with(" d1"));
     assert_eq!(col(lines[1], 45, 24), "nginx:1.27");
+    assert_eq!(
+        col(lines[1], 70, 8),
+        "default",
+        "an empty class is the default"
+    );
     assert_eq!(machine_table(&[]).lines().count(), 1, "the header alone");
 }
 
@@ -216,6 +224,7 @@ fn the_host_table() {
         named_memory_fork_v1: false,
         named_memory_profiles: Vec::new(),
         warm_pool_profiles: Vec::new(),
+        runtime_classes: Vec::new(),
         id: "h_byard-1".into(),
         url: "https://10.0.0.9:7420".into(),
         ssh: String::new(),
@@ -394,6 +403,7 @@ fn a_rolling_upgrade_goes_host_by_host_over_those_in_service() {
         named_memory_fork_v1: false,
         named_memory_profiles: Vec::new(),
         warm_pool_profiles: Vec::new(),
+        runtime_classes: Vec::new(),
         id: id.into(),
         url: String::new(),
         ssh: String::new(),

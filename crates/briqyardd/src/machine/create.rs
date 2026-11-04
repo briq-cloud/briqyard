@@ -142,6 +142,14 @@ impl Manager {
             ));
         }
         check_namespace_id(&req.namespace)?;
+        let requested_class = classes::normalized(&req.runtime_class);
+        if !requested_class.is_empty()
+            && (req.template_build.is_some() || req.sandbox_seed.is_some() || warm_slot.is_some())
+        {
+            return Err(invalid(
+                "a warm slot, a seed and a template build are of the default runtime class",
+            ));
+        }
         let template_birth = self.template_birth(&req, role)?;
         if let Some(rs) = &req.restore {
             if !api::valid_id(&rs.machine_id) {
@@ -202,6 +210,7 @@ impl Manager {
             env: req.env.clone(),
             files: req.files.clone(),
             size: req.size,
+            runtime_class: requested_class.to_string(),
             volume: req.volume.clone(),
             ports: req.ports.clone(),
             sleep: sleep_setting(&req.sleep),
@@ -289,6 +298,12 @@ impl Manager {
             rec.image_config = was.image_config;
             // The root disk comes from the backup: made from what it was made from.
             rec.root_key = was.root_key;
+            rec.runtime_class = classes::inherited(
+                &req.runtime_class,
+                &was.runtime_class,
+                "a restore",
+                "the backup's",
+            )?;
             if rec.entrypoint.is_none() {
                 rec.entrypoint = was.entrypoint;
             }
@@ -342,6 +357,12 @@ impl Manager {
                 other => other,
             })?;
             let sr = s.snapshot();
+            rec.runtime_class = classes::inherited(
+                &req.runtime_class,
+                &sr.runtime_class,
+                "a fork",
+                "its source's",
+            )?;
             if fork.snapshot.is_some() {
                 if unbound_factory {
                     self.unbound_warm_clone_spec(&req, &mut rec, &sr, fork)?;
@@ -382,6 +403,15 @@ impl Manager {
             src = Some((source, fork));
         } else {
             rec.image = req.image.clone();
+        }
+        self.served_class(&rec.runtime_class)?;
+        if let (true, Some(class)) = (
+            req.fork.as_ref().is_some_and(|f| f.snapshot.is_some()),
+            self.memory_refusal(&rec),
+        ) {
+            return Err(MError::Refused(format!(
+                "a memory fork needs a memory snapshot, and {class} takes none"
+            )));
         }
         if req.sandbox_seed.is_some() {
             self.ensure_namespace(&req.namespace).await?;

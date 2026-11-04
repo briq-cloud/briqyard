@@ -212,6 +212,11 @@ fn error_codes() {
     );
     let e = AppError::from(MError::GatewayInUse);
     assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "gateway_in_use"));
+    let e = AppError::from(MError::Refused(
+        "a snapshot with memory is refused for runtime class nested".into(),
+    ));
+    assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "bad_state"));
+    assert!(e.error.contains("runtime class nested"));
     let e = AppError::from(MError::Gateway("t1".into()));
     assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "gateway"));
     assert_eq!(

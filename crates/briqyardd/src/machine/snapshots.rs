@@ -256,6 +256,11 @@ impl Manager {
                 )));
             }
         }
+        if let (true, Some(class)) = (req.memory, self.memory_refusal(&r)) {
+            return Err(MError::Refused(format!(
+                "a snapshot with memory is refused for {class}: Firecracker saves no nested-virtualization state"
+            )));
+        }
         let disks: Vec<&str> = match r.volume {
             Some(_) => DISKS.to_vec(),
             None => vec!["root"],

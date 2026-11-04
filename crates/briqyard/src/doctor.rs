@@ -121,9 +121,12 @@ pub(super) fn doctor() {
     if let Some(nested) =
         briqyard_api::kvm::nested(std::path::Path::new(briqyard_api::kvm::SYS_MODULE))
     {
+        // A host that serves the nested runtime class asks for it (ADR 0088).
+        let serves_nested = std::fs::read_to_string("/etc/briqyard/config.yaml")
+            .is_ok_and(|conf| config_serves_nested(&conf));
         warn(
             "KVM nested virtualization off",
-            !nested,
+            !nested || serves_nested,
             "guests may be given virtualization extensions of their own (ADR 0087): \
              hack/bootstrap-host.sh writes /etc/modprobe.d/briqyard-kvm.conf, applied at the next boot",
         );
@@ -132,6 +135,23 @@ pub(super) fn doctor() {
         eprintln!("{bad} missing");
         std::process::exit(1);
     }
+}
+
+/// Whether the daemon's configuration lists a `nested: true` runtime class (ADR 0088): the
+/// host is then meant to run KVM with `nested` on. A configuration that does not parse says no.
+pub(super) fn config_serves_nested(config: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Config {
+        #[serde(default)]
+        runtime_classes: std::collections::BTreeMap<String, Class>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Class {
+        #[serde(default)]
+        nested: bool,
+    }
+    serde_yaml::from_str::<Config>(config)
+        .is_ok_and(|c| c.runtime_classes.values().any(|c| c.nested))
 }
 
 /// needrestart's configuration in the order it evaluates it: `needrestart.conf`, then each

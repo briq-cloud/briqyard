@@ -80,7 +80,7 @@ PRIVATE_ADDRESS=10.42.0.11/16 ALLOWED_CLIENTS=10.42.0.0/16 \
 bash bootstrap-host.sh
 ```
 
-It installs the packages (ZFS, nftables, conntrack-tools, e2fsprogs, gdisk), caps the ZFS cache, loads KVM with `nested` off from the next boot (ADR 0087; `briqyard doctor` warns while it is on, the daemon logs `kvm_nested`), turns swap off
+It installs the packages (ZFS, nftables, conntrack-tools, e2fsprogs, gdisk), caps the ZFS cache, loads KVM with `nested` off from the next boot (ADR 0087, on for a host that serves the `nested` class, ADR 0088; `briqyard doctor` warns while it is on, the daemon logs `kvm_nested`), turns swap off
 for good, puts the API on the private network and closes the public interface when
 `PRIVATE_ADDRESS` is set, makes the pool encrypted (on the devices given, or on a file for a
 trial; ADR 0026), downloads Firecracker, its jailer and a guest kernel, installs the binaries
@@ -129,6 +129,43 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 `briqyardd tls-fingerprint`, or `openssl x509 -in /var/lib/briqyard/api-cert.pem -noout
 -fingerprint -sha256` (colons and case do not matter).
 
+### Runtime classes (ADR 0088)
+
+A machine that runs a hypervisor of its own (a sandbox that tests briqyard, an emulator) needs
+`/dev/kvm`: it is created in the `nested` class (`--runtime-class nested`). Enable the class on
+an x86_64 host by adding `BRIQYARD_RUNTIME_CLASSES=nested` to the bootstrap, with
+`BRIQYARD_RELEASE` (set it on every run, upgrades included):
+
+```
+BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.19 \
+BRIQYARD_RUNTIME_CLASSES=nested ... bash bootstrap-host.sh
+```
+
+It downloads the release's `nested-vmlinux-x86_64`, `nested-modules-x86_64.ext4` and
+`nested-versions-x86_64.json` (checked against `SHA256SUMS-x86_64`), keeps them by digest under
+`/var/lib/briqyard/classes/nested/`, writes the class into the config and leaves KVM's `nested`
+on. A loaded KVM keeps its setting: the script reloads the module when no machine runs, and
+otherwise stops with "reboot the host, then run this again", before it activates anything.
+
+```yaml
+runtime_classes:
+  nested:
+    kernel: /var/lib/briqyard/classes/nested/<digest>/vmlinux
+    modules: /var/lib/briqyard/classes/nested/<digest>/modules.ext4  # optional, needs release
+    release: 6.18.54-briqyard-nested       # the modules' directory: uname -r in the guest
+    versions: /var/lib/briqyard/classes/nested/<digest>/versions.json # optional: the status shows its OpenZFS version
+    nested: true                           # x86_64, KVM's nested parameter on
+```
+
+The daemon refuses to start when a class's file is missing, or a `nested` class is configured on
+aarch64 or with KVM's `nested` off. `briqyard status` lists the classes (kernel release, OpenZFS
+version); `machine ls` has a `CLASS` column. A `nested` machine takes no memory snapshot: a
+suspend is a plain stop, and its wake a cold boot. Serve the class on dedicated hosts: a host that
+serves it exposes KVM's nested emulation to the machines of that class, and the fleet puts
+`default` namespaces elsewhere when a host has room. `briqyard doctor` does not warn about
+`nested` on a host whose `/etc/modprobe.d/briqyard-kvm.conf` asks for it. An image's ZFS tools must
+be of the OpenZFS version of the class's `zfs.ko` (`status`).
+
 ### A registry mirror per region (ADR 0036)
 
 One host of each region runs Zot, a pull-through mirror of Docker Hub, on its private address;
@@ -162,6 +199,7 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `data_dir` | `/var/lib/briqyard` | State (`state/`), run files (`run/`), image metadata (`images/`), jails (`jail/`). All of it `0700`, root's: records and config drives hold namespace secrets |
 | `firecracker`, `jailer`, `kernel`, `init` | `/usr/local/bin/...`, `/var/lib/briqyard/vmlinux` | The binaries and the guest kernel. No `jailer`: Firecracker runs as root (development only) |
 | `jail_dir`, `jail_uid_base` | `<data_dir>/jail`, `100000` | Where chroots and memory snapshots go: the daemon mounts `<pool>/jail` there, so they land on the pool, not on `/` (ADR 0014). Each machine gets a uid of its own from this base |
+| `runtime_classes` | none | Kernels served besides `kernel` (the `default` class), by name (ADR 0088); see [Runtime classes](#runtime-classes-adr-0088) |
 | `kernel_args` | none | Appended to the boot arguments |
 | `pci` | `false` | Firecracker's PCI transport (needs a guest kernel with PCI) |
 | `root_disk_gb` | `8` | Size of every root disk (thin) |

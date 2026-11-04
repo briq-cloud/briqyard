@@ -322,7 +322,7 @@ pub(in crate::machine) fn entries(drive: &[u8]) -> Vec<(String, u32, Vec<u8>)> {
 fn config_drive_carries_the_guest_config() {
     let r = record();
     let gw = Ipv4Addr::new(10, 64, 1, 1);
-    let drive = config_drive(&r, gw).unwrap();
+    let drive = config_drive(&r, gw, None).unwrap();
     assert_eq!(drive.len() % 512, 0, "{}", drive.len());
     let es = entries(&drive);
     assert_eq!(es.len(), 1);
@@ -355,7 +355,7 @@ fn config_drive_carries_the_guest_config() {
     let mut r = record();
     r.volume = None;
     let cfg: guest::Config =
-        serde_json::from_slice(&entries(&config_drive(&r, gw).unwrap())[0].2).unwrap();
+        serde_json::from_slice(&entries(&config_drive(&r, gw, None).unwrap())[0].2).unwrap();
     assert!(cfg.mounts.is_empty());
 }
 
@@ -363,7 +363,7 @@ fn config_drive_carries_the_guest_config() {
 fn config_drive_follows_docker_for_entrypoint_and_cmd() {
     let gw = Ipv4Addr::new(10, 64, 1, 1);
     let cfg_of = |r: &Record| -> guest::Config {
-        serde_json::from_slice(&entries(&config_drive(r, gw).unwrap())[0].2).unwrap()
+        serde_json::from_slice(&entries(&config_drive(r, gw, None).unwrap())[0].2).unwrap()
     };
     // A cmd alone keeps the image's entrypoint.
     let mut r = record();
@@ -411,7 +411,7 @@ fn config_drive_carries_the_boot_files() {
             mode: Some(String::new()),
         },
     ];
-    let drive = config_drive(&r, gw).unwrap();
+    let drive = config_drive(&r, gw, None).unwrap();
     assert_eq!(drive.len() % 512, 0);
     let es = entries(&drive);
     assert_eq!(es.len(), 4);
@@ -449,7 +449,7 @@ fn config_drive_refuses_a_bad_file() {
         base64: "not base64!".into(),
         mode: None,
     }];
-    let err = config_drive(&r, gw).unwrap_err();
+    let err = config_drive(&r, gw, None).unwrap_err();
     assert!(err.to_string().starts_with("file /x: "), "{err}");
 
     r.files = vec![api::File {
@@ -457,7 +457,7 @@ fn config_drive_refuses_a_bad_file() {
         base64: guest::base64_encode(b"ok"),
         mode: Some("rw-r--r--".into()),
     }];
-    let err = config_drive(&r, gw).unwrap_err();
+    let err = config_drive(&r, gw, None).unwrap_err();
     assert_eq!(err.to_string(), "file /x: mode \"rw-r--r--\"");
 }
 
@@ -465,7 +465,7 @@ fn config_drive_refuses_a_bad_file() {
 fn a_drive_is_written_whole_then_renamed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.tar");
-    let data = config_drive(&record(), Ipv4Addr::new(10, 64, 1, 1)).unwrap();
+    let data = config_drive(&record(), Ipv4Addr::new(10, 64, 1, 1), None).unwrap();
     write_drive(&path, &data).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), data);
     assert!(!path.with_extension("tar.tmp").exists());

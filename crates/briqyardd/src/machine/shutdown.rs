@@ -362,6 +362,13 @@ impl Manager {
         };
         let total = Instant::now();
         let machine = e.rec.lock().unwrap().id.clone();
+        // A class that takes no memory snapshot (ADR 0088) stops the plain way.
+        let refused = if suspend {
+            self.memory_refusal(&e.snapshot())
+        } else {
+            None
+        };
+        let suspend = suspend && refused.is_none();
         let operation = if suspend { "suspend" } else { "stop" };
         let live = {
             let started = Instant::now();
@@ -414,8 +421,12 @@ impl Manager {
                 Some(tokio::time::Instant::now() + timeout + Duration::from_secs(20));
             let started = Instant::now();
             e.set_state(state::STOPPING, |_| {
+                let text = match &refused {
+                    Some(class) => format!("stopping ({why}); suspend: refused ({class})"),
+                    None => format!("stopping ({why})"),
+                };
                 Some(
-                    Ev::normal(reason::STOPPING, format!("stopping ({why})"))
+                    Ev::normal(reason::STOPPING, text)
                         .data(json!({ "reason": why, "suspend": suspend })),
                 )
             });

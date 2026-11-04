@@ -218,6 +218,11 @@ the edge's own bootstrap with dummy secrets, its image built on the Mac and copi
 on the host's ingress, and `hack/e2e.sh` on `https://10.99.0.2:7420` beside it. Undo it as above,
 plus `apt-get purge docker.io` and the edge's files.
 
+## In a briq kvm sandbox
+
+TODO: filled after the acceptance run (ADR 0088): `cargo test --workspace`, `hack/e2e.sh` and
+`hack/fleet-smoke.sh` inside a `nested` machine on an x86_64 host that serves the class.
+
 ## Tests
 
 Every test and suite ends what it starts, however it ends (ADR 0049):
@@ -402,7 +407,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   into another namespace and a fork into one (ADR 0056: a rename with the address, the
   uptime marker and the disk kept; into a namespace that exists a new address, a boot and the
   neighbour reached by name; a `moved` event in each namespace; the fork on a network of its own
-  with its source's disk). 280 checks, 276 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  with its source's disk), runtime classes (ADR 0088: the status lists them, an unknown class is refused by name, the default class shown; where the daemon serves `nested`, 8 more: `/dev/kvm` and `vmx|svm` in the guest, its modules mounted read-only, a memory snapshot refused, a suspend a plain stop, a cold wake, a fork in the class). 283 checks, 279 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl

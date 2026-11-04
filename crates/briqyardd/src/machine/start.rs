@@ -257,6 +257,7 @@ impl Manager {
         let console_offset = console::end(&dir).unwrap_or(0);
         e.rec.lock().unwrap().console_offset = console_offset;
         let ip: Ipv4Addr = rec.ip.parse().unwrap();
+        let class = self.class_of(&rec).map_err(fail)?;
         let mut boot = fc::Boot {
             id: rec.id.clone(),
             dir,
@@ -264,7 +265,9 @@ impl Manager {
             oom_class: rec.oom_class(),
             vcpus: rec.size.vcpus,
             memory_mb: rec.size.memory_mb,
-            kernel: cfg.kernel.clone(),
+            kernel: class.map_or_else(|| cfg.kernel.clone(), |c| c.kernel.clone()),
+            modules: class.and_then(|c| c.modules.clone()),
+            virtualization: class.is_some_and(|c| c.nested),
             boot_args: self.boot_args(),
             config_drive,
             root: root_dev,
@@ -464,7 +467,11 @@ impl Manager {
     }
 
     pub(super) fn resume_compatible(&self, rec: &Record) -> bool {
-        match (&rec.boot_identity, self.inner.vmm.boot_identity(false)) {
+        let host = self
+            .inner
+            .vmm
+            .class_boot_identity(&rec.runtime_class, false);
+        match (&rec.boot_identity, host) {
             (Some(saved), Some(host)) => {
                 rec.vmm_version == self.inner.vmm.version() && saved.compatible(&host)
             }
@@ -478,7 +485,11 @@ impl Manager {
 
     /// A cold identity must be durable before a VMM may start, including load fallback.
     fn persist_cold_identity(&self, e: &Entry) -> Result<Option<fc::BootIdentity>> {
-        let identity = self.inner.vmm.boot_identity(self.inner.cfg.balloon.enabled);
+        let class = classes::normalized(&e.rec.lock().unwrap().runtime_class).to_string();
+        let identity = self
+            .inner
+            .vmm
+            .class_boot_identity(&class, self.inner.cfg.balloon.enabled);
         if self.inner.cfg.balloon.enabled && identity.is_none() {
             bail!("balloon reporting requires boot artifact identity");
         }
@@ -618,7 +629,8 @@ impl Manager {
     // --- config drive ---
 
     fn write_config_drive(&self, path: &Path, r: &Record, t: &Namespace) -> Result<()> {
-        write_drive(path, &config_drive(r, t.subnet.gateway())?)
+        let modules = self.modules_mount(r);
+        write_drive(path, &config_drive(r, t.subnet.gateway(), modules)?)
     }
 }
 
@@ -713,8 +725,13 @@ pub(super) fn resolved_guest_config(
     Ok((cfg, files))
 }
 
-pub(super) fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
+pub(super) fn config_drive(
+    r: &Record,
+    gateway: Ipv4Addr,
+    modules: Option<guest::Mount>,
+) -> Result<Vec<u8>> {
     let (mut cfg, files) = resolved_guest_config(r, gateway)?;
+    cfg.mounts.extend(modules);
     if let Some(birth) = &r.template_birth {
         cfg = if birth.profile == guest::SANDBOX_READY_V1 {
             templates::sandbox::builder_config(

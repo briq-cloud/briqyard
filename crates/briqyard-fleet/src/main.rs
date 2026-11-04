@@ -227,6 +227,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         named_memory_fork_v1: false,
         named_memory_profiles: Vec::new(),
         warm_pool_profiles: Vec::new(),
+        runtime_classes: Vec::new(),
         id: if h.id.is_empty() {
             h.url.clone()
         } else {
@@ -296,6 +297,7 @@ async fn run(args: Args) -> Result<()> {
         require_egress_siblings: false,
         require_named_memory: false,
         named_memory_profile: "init-ready-v1".into(),
+        runtime_class: String::new(),
         fill_ceiling: cfg.placement.fill_ceiling,
         down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
     };

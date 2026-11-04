@@ -108,7 +108,11 @@ async fn run(
     // own, the API on the private network.
     let ip = bootstrap::ssh_address(was).to_string();
     tracing::info!(host = was.id, release, "host upgrade");
-    let env = bootstrap::upgrade_env(release, &st.cfg.bootstrap.release_token);
+    let env = bootstrap::upgrade_env(
+        release,
+        &st.cfg.bootstrap.release_token,
+        &was.runtime_classes,
+    );
     let installed = bootstrap::install(st, &was.id, &ip, &env)
         .await
         .map_err(|e| format!("install: {e:#}"))?;

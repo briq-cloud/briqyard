@@ -13,6 +13,11 @@ pub struct Boot {
     pub vcpus: u32,
     pub memory_mb: u32,
     pub kernel: PathBuf,
+    /// The runtime class's modules image, attached read-only after the machine's other drives
+    /// (ADR 0088).
+    pub modules: Option<PathBuf>,
+    /// The guest sees the CPU's virtualization extensions: no CPU template (ADR 0087, 0088).
+    pub virtualization: bool,
     pub boot_args: String,
     pub config_drive: PathBuf,
     pub root: PathBuf,
@@ -29,6 +34,24 @@ pub struct Boot {
     pub disk: DiskRate,
     /// Where its disks' metrics add up.
     pub disk_io: Arc<DiskIo>,
+}
+
+impl Boot {
+    /// The drives a snapshot's devices open again: the name each has in the jail, its host
+    /// path, and whether it is a block device rather than a file. The same names as at boot.
+    pub(super) fn snapshot_drives(&self) -> Vec<(&'static str, &Path, bool)> {
+        let mut drives = vec![
+            ("config.tar", self.config_drive.as_path(), false),
+            ("root", self.root.as_path(), true),
+        ];
+        if let Some(d) = &self.data {
+            drives.push(("data", d, true));
+        }
+        if let Some(m) = &self.modules {
+            drives.push(("modules", m, false));
+        }
+        drives
+    }
 }
 
 /// A machine's VMM as the manager keeps it: the process, its sockets, and when it is gone.
@@ -248,6 +271,15 @@ pub trait Vmm: Send + Sync {
         None
     }
 
+    /// The same for a runtime class (ADR 0088): its kernel's digest, and the CPU template its
+    /// machines boot with. The empty name is the default class.
+    fn class_boot_identity(&self, class: &str, reporting: bool) -> Option<BootIdentity> {
+        match class {
+            "" => self.boot_identity(reporting),
+            _ => None,
+        }
+    }
+
     fn cpu_fingerprint(&self) -> Option<String> {
         None
     }
@@ -271,6 +303,8 @@ pub struct Firecracker {
     /// [`vmm_version`] of `binary`, read once at the daemon's start.
     pub version: String,
     pub identity: BootIdentity,
+    /// The boot identity of each runtime class besides the default, by name (ADR 0088).
+    pub classes: std::collections::BTreeMap<String, BootIdentity>,
     /// The CPU template of every cold boot, built once at the daemon's start (ADR 0087).
     pub cpu_template: Option<serde_json::Value>,
 }
@@ -461,10 +495,12 @@ impl Vmm for Firecracker {
                 // same name. Nothing boots: the guest carries on where it was paused.
                 let load = async {
                     // What the snapshot's devices open again: the drives, by the names given at boot.
-                    proc.expose_file(&b.config_drive, "config.tar")?;
-                    proc.expose_block(&b.root, "root")?;
-                    if let Some(d) = &b.data {
-                        proc.expose_block(d, "data")?;
+                    for (name, path, block) in b.snapshot_drives() {
+                        if block {
+                            proc.expose_block(path, name)?;
+                        } else {
+                            proc.expose_file(path, name)?;
+                        }
                     }
                     if let Some(artifact) = &b.memory_clone {
                         let root = proc
@@ -528,7 +564,7 @@ impl Vmm for Firecracker {
                 let config = proc.expose_file(&b.config_drive, "config.tar")?;
                 let root = proc.expose_block(&b.root, "root")?;
                 c.machine_config(b.vcpus, b.memory_mb).await?;
-                if let Some(template) = &self.cpu_template {
+                if let Some(template) = self.cpu_template.as_ref().filter(|_| !b.virtualization) {
                     c.cpu_config(template).await?;
                 }
                 c.boot_source(&kernel, &b.boot_args).await?;
@@ -539,6 +575,12 @@ impl Vmm for Firecracker {
                 if let Some(d) = &b.data {
                     let data = proc.expose_block(d, "data")?;
                     c.drive("data", &data, false, false, "Writeback", Some(&b.disk))
+                        .await?;
+                }
+                // After the volume, so its device name follows the machine's other disks'.
+                if let Some(m) = &b.modules {
+                    let modules = proc.expose_file(m, "modules")?;
+                    c.drive("modules", &modules, false, true, "Unsafe", None)
                         .await?;
                 }
                 c.network_interface("eth0", &b.tap, &b.mac).await?;
@@ -765,6 +807,13 @@ impl Vmm for Firecracker {
 
     fn boot_identity(&self, reporting: bool) -> Option<BootIdentity> {
         Some(self.identity.with_reporting(reporting))
+    }
+
+    fn class_boot_identity(&self, class: &str, reporting: bool) -> Option<BootIdentity> {
+        match class {
+            "" => self.boot_identity(reporting),
+            _ => self.classes.get(class).map(|i| i.with_reporting(reporting)),
+        }
     }
 
     async fn balloon_statistics(&self, vm: &Vm) -> Result<Option<BalloonStatistics>> {
