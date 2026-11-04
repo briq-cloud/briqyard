@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.25 — 2026-11-04
+
+### Features
+
+- report each host's disk in the host listing (#156) ([fce11c0a](https://github.com/briq-cloud/briqyard/commit/fce11c0a8a994311e8eaf4c5d93092a01f5239de))
+
+
+### Fixes
+
+- a full disk is not an unreported one (#157) ([fcd83d20](https://github.com/briq-cloud/briqyard/commit/fcd83d20d0a311ea40fadc952a7d96015d01a2b2))
+
+- a changed webhook reaches Grafana (#158) ([3f768288](https://github.com/briq-cloud/briqyard/commit/3f768288d5382a2c3e19d3941cc142408b800918))
+
 ## 0.1.24 — 2026-11-04
 
 ### Documentation
