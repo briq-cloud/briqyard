@@ -173,6 +173,13 @@ impl Manager {
         );
         let watch = m.clone();
         tokio::spawn(async move { watch.storage_watch().await });
+        // Backups a previous process was making: their streams have no record. Read now, before
+        // a backup of this process writes a marker; the store is asked off the start's path.
+        let left = m.attempts_left();
+        if !left.is_empty() {
+            let settle = m.clone();
+            tokio::spawn(async move { settle.settle_attempts(left).await });
+        }
         if m.recovery_fault().is_some() {
             // Nothing is reconciled against records that recovery could not settle.
             return Ok(m);

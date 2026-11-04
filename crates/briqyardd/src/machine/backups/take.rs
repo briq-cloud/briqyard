@@ -234,6 +234,18 @@ impl Manager {
             }
             self.frozen_copy(&e, &snapped, &snap, "backup", opt).await?
         };
+        // Written down before the first byte: a kill from here leaves a marker, and the next
+        // start removes the streams of a backup that has no record (ADR 0099).
+        let disks: Vec<&str> = [("root", rec.root_dataset()), ("data", rec.data_dataset())]
+            .iter()
+            .filter(|(_, ds)| snapped.contains(ds))
+            .map(|(disk, _)| *disk)
+            .collect();
+        let attempt = Attempt::new(&rec.id, &bid, &disks);
+        if let Err(err) = self.begin_attempt(&attempt) {
+            self.take_back(store, &snapped, &snap, &[]).await;
+            return Err(err.into());
+        }
         let mut sent = Vec::new();
         let disks = async {
             let mut disks = Vec::new();
@@ -297,7 +309,9 @@ impl Manager {
                 deletes_at: None,
             },
             Err(err) => {
-                self.take_back(store, &snapped, &snap, &sent).await;
+                if self.take_back(store, &snapped, &snap, &sent).await {
+                    self.end_attempt(&attempt);
+                }
                 return Err(err.into());
             }
         };
@@ -316,9 +330,13 @@ impl Manager {
             .await
             .context("backup record");
         if let Err(err) = stored {
-            self.take_back(store, &snapped, &snap, &sent).await;
+            // A stream that could not be removed keeps the marker: the next start tries again.
+            if self.take_back(store, &snapped, &snap, &sent).await {
+                self.end_attempt(&attempt);
+            }
             return Err(err.into());
         }
+        self.end_attempt(&attempt);
         // The newest snapshots stay as the base of the next send; the rest go.
         let keep = self.inner.cfg.backup.keep_snapshots.max(1) as usize;
         for ds in &snapped {
@@ -340,16 +358,18 @@ impl Manager {
         Ok((b, all))
     }
 
-    /// Removes what a failed backup made, as far as it can.
+    /// Removes what a failed backup made, as far as it can; whether every stream is gone.
     pub(super) async fn take_back(
         &self,
         store: &ObjectStore,
         snapped: &[String],
         snap: &str,
         sent: &[String],
-    ) {
+    ) -> bool {
+        let mut clean = true;
         for key in sent {
             if let Err(err) = store.delete(key).await {
+                clean = false;
                 tracing::warn!(key, err = %err, "stream of a failed backup left in the store");
             }
         }
@@ -358,6 +378,7 @@ impl Manager {
                 tracing::warn!(dataset = ds, snapshot = snap, err = %err, "snapshot of a failed backup kept");
             }
         }
+        clean
     }
 
     /// A backup that did not reach the store: a warning, and a scheduled machine tries again
