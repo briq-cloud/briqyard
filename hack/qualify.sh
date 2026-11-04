@@ -133,9 +133,9 @@ check "no host condition is true (memory_protection and accounting included)" '[
 # ======================================================================================
 echo "== isolation: namespaces, the host, the metadata address (a failure for its reason, a control beside it)"
 PY=python:3.12-alpine
-A=$(run --image $PY --name iso-a --namespace "$T-n1" --memory 256 --volume 1G:/data -e "SECRET_A=tok-a-7f3c" -- sh -c 'mkdir -p /www && echo secret-a > /www/s && exec httpd -f -p 8000 -h /www')
+A=$(run --image $PY --name iso-a --namespace "$T-n1" --memory 256 --volume 1G:/data -e "SECRET_A=tok-a-7f3c" -- sh -c 'mkdir -p /www && echo secret-a > /www/s && exec python3 -m http.server 8000 --directory /www')
 A2=$(run --image $PY --name iso-a2 --namespace "$T-n1" --memory 256 --cpu-millis 500 -e "SECRET_A2=tok-a2-91be" -- sleep 7200)
-O=$(run --image $PY --name iso-o --namespace "$T-n2" --memory 256 -- sh -c 'mkdir -p /www && echo secret-o > /www/s && exec httpd -f -p 8000 -h /www')
+O=$(run --image $PY --name iso-o --namespace "$T-n2" --memory 256 -- sh -c 'mkdir -p /www && echo secret-o > /www/s && exec python3 -m http.server 8000 --directory /www')
 NN=$(run --image $PY --name iso-none --namespace "$T-n1" --memory 256 --egress none -- sleep 7200)
 aip=$(briqyard machine get "$A" | jq -r .ip); oip=$(briqyard machine get "$O" | jq -r .ip)
 a2ip=$(briqyard machine get "$A2" | jq -r .ip)
