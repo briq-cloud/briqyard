@@ -203,3 +203,29 @@ async fn a_store_that_cannot_be_listed_deletes_nothing() {
     assert_eq!(h.streams(&id).await.len(), 2);
     assert_eq!(h.ids(&h.listed(&id).await), vec![b.id]);
 }
+
+#[test]
+fn a_get_that_finds_the_record_or_fails_beats_a_listing_that_lacks_it() {
+    use crate::machine::backups::attempts::removable;
+    let streams = vec!["backups/m_v/root/20261104T101010.123Z.zfs".to_string()];
+    // The listing lags behind a record just written: the GET finds it.
+    assert!(removable(streams.clone(), Some(true)).is_empty());
+    // The GET cannot say.
+    assert!(removable(streams.clone(), None).is_empty());
+    // Both agree there is no record.
+    assert_eq!(removable(streams.clone(), Some(false)), streams);
+}
+
+#[tokio::test]
+async fn a_record_that_a_lagging_listing_lacks_keeps_the_backup() {
+    let h = harness(|_| {}).await;
+    let id = machine(&h).await;
+    let b = h.m.backup(&id).await.unwrap();
+    // The listing the code reads is the store's; here the record is present for the GET and the
+    // marker is the crash-after-record case: nothing is removed and the marker ends.
+    h.m.begin_attempt(&Attempt::new(&id, &b.id, &["root", "data"]))
+        .unwrap();
+    h.restart().await;
+    assert_eq!(h.streams(&id).await.len(), 2);
+    assert!(h.markers().is_empty());
+}

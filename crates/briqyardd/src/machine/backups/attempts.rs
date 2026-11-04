@@ -75,6 +75,17 @@ pub(super) enum Verdict {
     Streams(Vec<String>),
 }
 
+/// The streams that may go, given the listed ones and what a GET of the record said
+/// (`Some(true)` found it, `Some(false)` absent, `None` it could not say). Both must agree
+/// that there is no record: a listing can lag behind a record just written, and "not found"
+/// can be a store's 404 for something else. Any disagreement removes nothing.
+pub(super) fn removable(listed_streams: Vec<String>, record_by_get: Option<bool>) -> Vec<String> {
+    match record_by_get {
+        Some(false) => listed_streams,
+        _ => Vec::new(),
+    }
+}
+
 impl Attempt {
     pub(super) fn verdict(&self, listed: &[String]) -> Verdict {
         if listed.contains(&self.record()) {
@@ -169,6 +180,34 @@ impl Manager {
                     continue;
                 }
                 Verdict::Streams(streams) => streams,
+            };
+            // The listing found streams and no record. The record's own GET must say absent too.
+            let streams = if streams.is_empty() {
+                streams
+            } else {
+                let by_get = match store.get_bytes_if_present(&attempt.record()).await {
+                    Ok(record) => Some(record.is_some()),
+                    Err(_) => None,
+                };
+                if by_get == Some(true) {
+                    tracing::warn!(
+                        machine = attempt.machine_id,
+                        backup = attempt.id,
+                        "backup marker ended: its record is there though the listing lacks it"
+                    );
+                    self.end_attempt(&attempt);
+                    continue;
+                }
+                let streams = removable(streams, by_get);
+                if streams.is_empty() {
+                    tracing::warn!(
+                        machine = attempt.machine_id,
+                        backup = attempt.id,
+                        "backup marker kept: the record could not be looked up"
+                    );
+                    continue;
+                }
+                streams
             };
             let mut left_over = 0;
             for key in &streams {
