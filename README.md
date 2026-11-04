@@ -1,14 +1,27 @@
-<img src="docs/images/hero.png" alt="Bots laid into a brick wall, each running machines: postgres and its fork, two sandboxes, and a web app asleep. Beside them: briqyard, open-source microVMs for sandboxes and services that sleep, wake and fork." width="830">
+<div align="center">
 
-# 🧱 briqyard
+<h1>🧱<br>briqyard</h1>
 
 **Open-source microVMs for sandboxes and services that sleep, wake and fork.**
 
-briqyard runs any OCI image in a Firecracker microVM on servers you own. Each machine gets a durable disk, a private network shared with its namespace, and a sleep window: it stops when unused and wakes on the next connection or command. It is written in Rust and licensed AGPL-3.0.
+[![Release](https://img.shields.io/github/v/release/briq-cloud/briqyard?style=flat&label=release&color=b5533c)](https://github.com/briq-cloud/briqyard/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/briq-cloud/briqyard/ci.yml?branch=main&style=flat&label=CI)](https://github.com/briq-cloud/briqyard/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-b5533c?style=flat)](LICENSE)
+[![Built with Rust](https://img.shields.io/badge/built_with-Rust-b5533c?style=flat&logo=rust&logoColor=white)](Cargo.toml)
+[![API: pre-1.0](https://img.shields.io/badge/API-pre--1.0-b5533c?style=flat)](docs/ARCHITECTURE.md)
 
-**briqyard powers [briq.cloud](https://briq.cloud).** For managed sandboxes and microVMs for your agents, without running servers, [start on briq.cloud](https://briq.cloud).
+[**Install**](docs/INSTALL.md) &nbsp;&bull;&nbsp; [Architecture](docs/ARCHITECTURE.md) &nbsp;&bull;&nbsp; [Operations](docs/OPERATIONS.md) &nbsp;&bull;&nbsp; [Releases](https://github.com/briq-cloud/briqyard/releases) &nbsp;&bull;&nbsp; [Contributing](CONTRIBUTING.md)
 
-> **Status:** under active development toward a stable 1.0 API.
+</div>
+
+> <img src="docs/images/briq.svg" alt="briq" width="20" height="20" align="absmiddle"> **Sponsored by [briq.cloud](https://briq.cloud)**<br>
+> Managed sandboxes and microVMs for your agents, without running servers.
+
+## Why briqyard
+
+Agents need isolated, durable machines that mostly sit idle. A container shares the host's kernel, a Kubernetes pod keeps no identity, and an idle VM pins its memory.
+
+briqyard runs any OCI image in a Firecracker microVM, on servers you own. An idle machine stops and keeps its disk. The next connection or exec wakes it, in 0.15–0.25 s from a memory snapshot. A fork is a copy-on-write clone.
 
 ## Key features
 
