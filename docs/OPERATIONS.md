@@ -133,19 +133,21 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 
 A machine that runs a hypervisor of its own (a sandbox that tests briqyard, an emulator) needs
 `/dev/kvm`: it is created in the `nested` class (`--runtime-class nested`). Enable the class on
-an x86_64 host by adding `BRIQYARD_RUNTIME_CLASSES=nested` to the bootstrap, with
-`BRIQYARD_RELEASE` (set it on every run, upgrades included):
+an x86_64 host through its upgrade (the host keeps running; the release must build the class,
+and a repeat of `--runtime-class` adds more). The upgrade also keeps every class the host already
+serves, and it runs for the version the host already has:
 
 ```
-BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.19 \
-BRIQYARD_RUNTIME_CLASSES=nested ... bash bootstrap-host.sh
+briqyard host upgrade h_123456 --release 0.1.19 --runtime-class nested
 ```
 
-It downloads the release's `nested-vmlinux-x86_64`, `nested-modules-x86_64.ext4` and
-`nested-versions-x86_64.json` (checked against `SHA256SUMS-x86_64`), keeps them by digest under
+One host per call (`--all` refuses the flag). The bootstrap then downloads the release's
+`nested-vmlinux-x86_64`, `nested-modules-x86_64.ext4` and `nested-versions-x86_64.json` (checked against `SHA256SUMS-x86_64`), keeps them by digest under
 `/var/lib/briqyard/classes/nested/`, writes the class into the config and leaves KVM's `nested`
 on. A loaded KVM keeps its setting: the script reloads the module when no machine runs, and
-otherwise stops with "reboot the host, then run this again", before it activates anything.
+otherwise stops with "reboot the host, then run this again" (the upgrade), before it activates
+anything: the upgrade fails, the host stays as it was, `draining` with that message in its note (`host
+undrain` once it is done). A class name the release does not build fails the same way, first.
 
 ```yaml
 runtime_classes:

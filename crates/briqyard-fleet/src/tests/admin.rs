@@ -487,6 +487,14 @@ async fn an_upgrade_refuses_what_it_cannot_do() {
         json(&body)["error"],
         "release \"latest\": a URL, or a version such as 0.2.0"
     );
+    // A class that is not a name is refused up front, the host untouched.
+    for bad in ["Nested", "default", "a b", "", "-x"] {
+        let req = Some(serde_json::json!({ "release": "0.2.0", "runtime_classes": [bad] }));
+        let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/upgrade", "", req).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad:?}");
+        assert_eq!(json(&body)["code"], "invalid", "{body}");
+        assert_eq!(hosts(&f.st)[0].state, "ready", "{bad:?}");
+    }
     let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_x/upgrade", "", up("0.2.0")).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     for state in ["down", "retiring", "provisioning", "upgrading"] {
@@ -563,6 +571,20 @@ async fn an_upgrade_waits_for_a_new_start_of_the_version_installed() {
     beat("0.2.0+b", start(now, 1, 0, 1));
     let started = wait(600).await.unwrap();
     assert_eq!((started.at, started.adopted, started.gone), (now, 1, 1));
+    // An upgrade to the version the host already runs (a class enabled, no new build) is not
+    // skipped: it waits for the new start all the same.
+    let again = now + Duration::seconds(30);
+    beat("0.2.0+b", start(again, 2, 0, 0));
+    let started = upgrade::come_back(
+        &f.st,
+        "h_a",
+        Some(now),
+        "0.2.0+b",
+        std::time::Duration::from_millis(600),
+    )
+    .await
+    .unwrap();
+    assert_eq!((started.at, started.adopted), (again, 2));
     // One that stopped a machine it could not take over fails the upgrade.
     beat("0.2.0+b", start(now, 1, 2, 0));
     let err = wait(600).await.unwrap_err();

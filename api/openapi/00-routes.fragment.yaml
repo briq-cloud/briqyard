@@ -709,7 +709,7 @@ paths:
             schema: { $ref: "#/components/schemas/UpgradeHostRequest" }
       responses:
         "200": { description: "upgraded; the note says to what and how many machines were handed over", content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
-        "400": { description: "a release that is neither a URL nor a version, or no SSH key (`bootstrap.ssh_key`)" }
+        "400": { description: "a release that is neither a URL nor a version, a class name that is not a name (`runtime_classes`), or no SSH key (`bootstrap.ssh_key`)" }
         "404": { description: no such host }
         "409": { description: "another upgrade under way, or the host is neither ready nor draining (`conflict`)" }
         "502": { description: "the upgrade failed (`upgrade_failed`): the host is `draining`, the reason in its note" }

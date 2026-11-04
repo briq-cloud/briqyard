@@ -172,6 +172,11 @@ pub struct UpgradeHostRequest {
     /// A release URL (where `briqyardd-linux-<arch>` and its siblings are), or a version
     /// (`0.2.0`, `v0.2.0`) of the project's releases.
     pub release: String,
+    /// Runtime classes (ADR 0088) the host serves from this upgrade on, besides the ones it
+    /// already reports: the upgrade enables a class on a host that is running. Absent or
+    /// empty: the host's classes as they are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_classes: Vec<String>,
 }
 
 /// POST /v1/hosts (fleet only): a server bought by hand, for the fleet to bootstrap.

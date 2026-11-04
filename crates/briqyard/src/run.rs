@@ -692,7 +692,12 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 c.raw(POST, &format!("/v1/hosts/{id}/undrain"), NONE)
                     .await?;
             }
-            HostCmd::Upgrade { id, all, release } => {
+            HostCmd::Upgrade {
+                id,
+                all,
+                release,
+                runtime_classes,
+            } => {
                 let ids = match (id, all) {
                     (Some(id), _) => vec![id],
                     (None, _) => {
@@ -704,7 +709,10 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                         ids
                     }
                 };
-                let req = api::UpgradeHostRequest { release };
+                let req = api::UpgradeHostRequest {
+                    release,
+                    runtime_classes,
+                };
                 for (i, id) in ids.iter().enumerate() {
                     eprintln!("{id}: upgrading");
                     let path = format!("/v1/hosts/{id}/upgrade");
