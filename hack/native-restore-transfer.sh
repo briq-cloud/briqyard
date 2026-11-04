@@ -12,6 +12,14 @@ if [ "$op" = cleanup ]; then
   "$WORK/second-host" rm -rf -- "/var/lib/briqyard/backups/backups/$id"
   exit 0
 fi
+if [ "$op" = offline ]; then
+  sudo systemctl stop briqyardd
+  exit 0
+fi
+if [ "$op" = recover ]; then
+  sudo systemctl start briqyardd
+  exit 0
+fi
 [ "$op" = copy ] || exit 2
 archive=$(mktemp "$RUNNER_TEMP/restore-store.XXXXXX")
 trap 'rm -f "$archive"' EXIT

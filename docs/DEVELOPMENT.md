@@ -10,10 +10,14 @@ Native PR evidence comes from the `native` GitHub Actions workflow on `ubuntu-24
 with KVM and a disposable encrypted ZFS pool. Relevant PRs test their exact head;
 manual dispatch accepts a ref. The job summaries contain e2e, fleet-smoke, stress, monitoring, two-hosts and restore counts
 and durations; the `native-*-log` artifacts contain their complete output. These checks are
-not required checks yet. Stress, monitoring, alerts and qualification run on separate runners in parallel. The qualification suite (`hack/qualify.sh`, [ADR 0095](adr/0095-qualification-batch.md)) kills the daemon, the fleet and the VMMs mid-operation, checks isolation and OOM containment against real attempts, and fills the pool. The alerts suite drives the production Grafana rules to firing and resolved against a local webhook, and the monitoring suite does so for Not answering ([ADR 0094](adr/0094-alerts-fire-and-resolve-in-ci.md)). Monitoring covers a
+not required checks yet. Stress, monitoring, alerts, qualification and restore run on separate runners in parallel. The qualification suite (`hack/qualify.sh`, [ADR 0095](adr/0095-qualification-batch.md)) kills the daemon, the fleet and the VMMs mid-operation, checks isolation and OOM containment against real attempts, and fills the pool. The alerts suite drives the production Grafana rules to firing and resolved against a local webhook, and the monitoring suite does so for Not answering ([ADR 0094](adr/0094-alerts-fire-and-resolve-in-ci.md)). Monitoring covers a
 ready daemon and an explicitly unreachable registered host (18 checks). The two-host job boots
 an independent Ubuntu 24.04 QEMU/KVM host (2 vCPUs, 6 GiB), provisions it through the shared
 bootstrap and development installer, and runs all 29 two-host and 10 restore checks.
+The parallel restore suite emits JSONL results for files, bytecode, both disks,
+Postgres, backup chains and interruption. After the existing two-host suites, the
+off-host qualification uses a fleet-held source key, destroys its source machine,
+stops that daemon and restores the workload on the second host (ADR 0103).
 `native-two-host-logs` retains both suites, host journals and boot measurements. Manual
 dispatch can select `two_hosts_only` for targeted validation
 ([ADR 0089](adr/0089-native-suites-in-ci.md)).

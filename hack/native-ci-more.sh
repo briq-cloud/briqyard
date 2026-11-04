@@ -114,7 +114,12 @@ PY
     ;;
   restore)
     python3 -m unittest discover -s hack -p test_restore_qualify.py
-    python3 -u hack/restore-qualify.py --allow-daemon-kill --output native-logs/restore
+    set +e
+    sudo -E python3 -u hack/restore-qualify.py --allow-daemon-kill --output native-logs/restore
+    rc=$?
+    set -e
+    sudo chown -R "$(id -u):$(id -g)" native-logs/restore
+    exit "$rc"
     ;;
   qualification)
     # Chaos, isolation and OOM on the isolated host (ADR 0095). The suite kills the daemon,

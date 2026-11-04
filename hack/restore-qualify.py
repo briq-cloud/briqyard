@@ -216,23 +216,42 @@ class Suite:
         require(status.get('code') == 'conflict', f'middle delete wrong reason: {status}')
         self.record('chain', status='passed', middle_delete='409 conflict; descendants retained')
         if self.a.destination_region:
+            chain = self.api('GET', f'/v1/machines/{mid}/backups')
             if self.a.store_transfer:
                 subprocess.run([self.a.store_transfer, 'copy', mid], check=True, timeout=180)
-            self.verify_database(mid, *points[2], offhost=True, source_host=m.get('host'))
+            self.destroy(mid)
+            self.record('source_destroyed', machine=mid, host=m.get('host'))
+            if self.a.source_offline_hook:
+                try:
+                    subprocess.run([self.a.source_offline_hook, 'offline', mid], check=True, timeout=90)
+                    self.wait(lambda: any(h['id'] == m['host'] and h['state'] == 'down'
+                                          for h in self.api('GET', '/v1/hosts')),
+                              'fleet observes source host down', 120)
+                    self.record('source_offline', status='passed', host=m['host'])
+                    self.verify_database(mid, *points[2], offhost=True, source_host=m['host'], chain=chain)
+                finally:
+                    subprocess.run([self.a.source_offline_hook, 'recover', mid], check=True, timeout=90)
+                    self.wait(lambda: any(h['id'] == m['host'] and h['state'] == 'ready'
+                                          for h in self.api('GET', '/v1/hosts')),
+                              'source host recovered for cleanup', 120)
+            else:
+                self.verify_database(mid, *points[2], offhost=True, source_host=m.get('host'), chain=chain)
         else:
             self.record('offhost', status='skipped', reason='no destination region supplied')
-        if self.a.allow_daemon_kill:
+        if self.a.allow_daemon_kill and not self.a.destination_region:
             self.failure_restore(mid, *points[2])
         else:
-            self.record('failure', status='skipped', reason='--allow-daemon-kill absent')
-        self.destroy(mid)
+            self.record('failure', status='skipped', reason='interrupted backup runs in the single-host job' if self.a.destination_region else '--allow-daemon-kill absent')
+        if mid in self.machines:
+            self.destroy(mid)
 
-    def verify_database(self, source, b, before, backup_start, offhost=False, source_host=None):
+    def verify_database(self, source, b, before, backup_start, offhost=False, source_host=None, chain=None):
         m, start = self.restore(source, b, offhost)
         mid = m['id']
         self.postgres_ready(mid)
         first_query = time.monotonic() - start
-        chain = self.api('GET', f'/v1/machines/{source}/backups')
+        if chain is None:
+            chain = self.api('GET', f'/v1/machines/{source}/backups')
         by_id = {x['id']: x for x in chain}
         pending = [b['id']]
         seen = set()
@@ -269,7 +288,8 @@ class Suite:
                     restore_to_first_query_seconds=first_query,
                     restored_chain_bytes=stream_bytes,
                     seconds_per_stream_gib=first_query/(stream_bytes/2**30),
-                    source_host=source_host, destination_host=m.get('host'))
+                    source_host=source_host, destination_host=m.get('host'),
+                    source_destroyed=offhost, source_offline=bool(offhost and self.a.source_offline_hook))
         self.destroy(mid)
 
     def destroy(self, mid):
@@ -384,50 +404,96 @@ while True: time.sleep(1)
         self.destroy(r['id'])
         self.destroy(m['id'])
 
+    def pause_backup_send(self, mid, daemon, seconds=30):
+        # Native CI directory store only. Observe this machine's data stream bytes
+        # before stopping its exact daemon-owned sender. pidfd binds both signals
+        # to the observed process even if its numeric pid is later reused.
+        end = time.monotonic()+seconds
+        directory = Path('/var/lib/briqyard/backups/backups')/mid/'data'
+        while time.monotonic() < end:
+            for proc in Path('/proc').iterdir():
+                if not proc.name.isdecimal():
+                    continue
+                fd = None
+                keep = False
+                try:
+                    stat = (proc/'stat').read_text().rsplit(')', 1)[1].split()
+                    args = (proc/'cmdline').read_bytes().split(b'\0')
+                    if (int(stat[1]) != daemon or args[1:2] != [b'send'] or
+                            (proc/'exe').resolve().name != 'zfs'):
+                        continue
+                    snapshot = next((arg for arg in args if b'/m/'+mid.encode()+b'/data@bk-' in arg), None)
+                    if snapshot is None:
+                        continue
+                    bid = snapshot.split(b'@bk-', 1)[1].decode('ascii')
+                    if not any(p.stat().st_size > 0 for p in directory.glob(bid+'.zfs*')):
+                        continue
+                    fd = os.pidfd_open(int(proc.name))
+                    current = (proc/'stat').read_text().rsplit(')', 1)[1].split()
+                    if current[19] != stat[19]:
+                        continue
+                    signal.pidfd_send_signal(fd, signal.SIGSTOP)
+                    keep = True
+                    self.record('backup_paused', machine=mid, backup=bid,
+                                evidence='data stream bytes present; exact daemon child paused')
+                    return fd, bid
+                except (FileNotFoundError, ProcessLookupError):
+                    pass
+                finally:
+                    if fd is not None and not keep:
+                        os.close(fd)
+            time.sleep(0.01)
+        raise Failure('timed out: own data backup stream bytes and sender in flight')
+
     def failure_restore(self, mid, b, before, start):
-        # Deliberately only supported on the disposable native runner. Never discover
-        # or signal unrelated senders; compare this machine's exact dataset argument.
-        require(os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted',
-                'daemon kill requires the disposable native runner')
-        self.execute(mid, ['sh', '-c', 'head -c 134217728 /dev/urandom > /data/cut'])
+        require(os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted' and os.geteuid() == 0,
+                'daemon kill requires root on the disposable native runner')
+        self.execute(mid, ['sh', '-c', 'head -c 300000000 /dev/urandom > /data/cut; sync'], timeout_ms=120000)
         complete_ids = {v['id'] for v in self.api('GET', f'/v1/machines/{mid}/backups')}
+        daemon = int(subprocess.check_output(
+            ['systemctl', 'show', '-p', 'MainPID', '--value', 'briqyardd'], timeout=10))
+        require(daemon > 1, 'daemon MainPID absent')
         outcome = []
         def backup():
             try:
                 outcome.append(self.api('POST', f'/v1/machines/{mid}/backups', {}, timeout=180))
             except Exception:
                 outcome.append(None)
-        t = threading.Thread(target=backup)
-        t.start()
-        sender = None
-        def sending():
-            nonlocal sender
-            for p in Path('/proc').iterdir():
-                if not p.name.isdecimal():
-                    continue
-                try:
-                    args = (p/'cmdline').read_bytes().split(b'\0')
-                except (OSError, PermissionError):
-                    continue
-                if args and args[0].split(b'/')[-1] == b'zfs' and b'send' in args and any(
-                        b'/m/'+mid.encode()+b'/' in a for a in args):
-                    sender = int(p.name)
-                    return True
-            return False
-        self.wait(sending, 'own backup stream in flight', 30)
-        subprocess.run(['sudo', 'kill', '-STOP', str(sender)], check=True, timeout=10)
-        pid = subprocess.check_output(['systemctl', 'show', '-p', 'MainPID', '--value', 'briqyardd'], timeout=10).decode().strip()
+        thread = threading.Thread(target=backup)
+        thread.start()
+        held = None
+        killed = False
         try:
-            subprocess.run(['sudo', 'kill', '-KILL', pid], check=True, timeout=10)
+            held, interrupted = self.pause_backup_send(mid, daemon)
+            # #145 closes admission while any old service helper survives. Kill the
+            # paused sender immediately after the daemon, then require recovery;
+            # do not reset the service, remove markers or bypass the barrier.
+            os.kill(daemon, signal.SIGKILL)
+            killed = True
         finally:
-            subprocess.run(['sudo', 'kill', '-KILL', str(sender)], check=False, timeout=10)
-            subprocess.run(['sudo', 'systemctl', 'start', 'briqyardd'], check=True, timeout=30)
-        t.join(190)
-        require(not t.is_alive() and outcome == [None], 'backup was not interrupted')
+            if held is not None:
+                try:
+                    signal.pidfd_send_signal(held, signal.SIGKILL if killed else signal.SIGCONT)
+                except ProcessLookupError:
+                    pass
+                finally:
+                    os.close(held)
+            thread.join(190)
+        require(not thread.is_alive() and outcome == [None], 'backup was not interrupted: client must fail')
+        def recovered():
+            try:
+                status = self.api('GET', '/v1/status', expected=(200, 503), timeout=3)
+                return 'conditions' in status and not any(
+                    c['type'] == 'memory_protection' and c['status'] for c in status['conditions'])
+            except (urllib.error.URLError, TimeoutError):
+                return False
+        self.wait(recovered, 'automatic daemon recovery after exact sender exit', 120)
         listed = self.api('GET', f'/v1/machines/{mid}/backups')
-        require({v['id'] for v in listed} == complete_ids, 'interrupted backup offered or complete backup missing')
+        require({v['id'] for v in listed} == complete_ids and interrupted not in complete_ids,
+                'interrupted backup offered or complete backup missing')
         self.verify_database(mid, b, before, start)
-        self.record('failure', status='passed', last_complete=b['id'], interrupted_offered=False)
+        self.record('failure', status='passed', last_complete=b['id'], interrupted_offered=False,
+                    recovery='automatic after paused sender killed; no barrier bypass')
 
     def cleanup(self):
         self.stop.set()
@@ -479,10 +545,13 @@ def main():
     p.add_argument('--source-region', default='')
     p.add_argument('--destination-region', default='', help='different fleet region for off-host restore')
     p.add_argument('--store-transfer', help='CI-only executable: receives copy|cleanup and a machine id; operates on store objects only')
+    p.add_argument('--source-offline-hook', help='disposable CI hook receiving offline|recover and source machine id')
     p.add_argument('--allow-daemon-kill', action='store_true')
     a = p.parse_args()
     if a.allow_daemon_kill and os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
         p.error('--allow-daemon-kill requires disposable native CI')
+    if a.source_offline_hook and not (a.allow_daemon_kill and a.destination_region):
+        p.error('--source-offline-hook needs --allow-daemon-kill and --destination-region')
     s = Suite(a)
     def interrupted(signum, _frame):
         raise Failure(f'signal {signum}')
@@ -491,8 +560,8 @@ def main():
     success = False
     try:
         s.record('begin', namespace=s.ns, promise='filesystem, not application transaction consistency')
-        s.database()
         s.files()
+        s.database()
         success = True
     except Exception as err:
         for mid in s.machines:

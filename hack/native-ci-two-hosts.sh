@@ -117,9 +117,11 @@ for suite in fleet-two-hosts fleet-restore; do
   if [ "${statuses[0]}" != 0 ] || [ "${statuses[1]}" != 0 ]; then rc=1; fi
 done
 if [ "$rc" = 0 ]; then
+  sudo -E python3 hack/native-restore-source.py
   BRIQYARD_URL=http://127.0.0.1:7430 python3 -u hack/restore-qualify.py \
     --source-region restore-source --destination-region restore-target \
     --store-transfer "$PWD/hack/native-restore-transfer.sh" \
+    --allow-daemon-kill --source-offline-hook "$PWD/hack/native-restore-transfer.sh" \
     --output native-logs/restore-offhost | tee native-logs/restore-offhost.log
 fi
 exit "$rc"

@@ -581,12 +581,16 @@ BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN="$BRIQYARD_TOKEN" \
   --output restore-offhost-evidence
 ```
 
-The result requires different host ids. Choose regions that identify the intended
+The source must use a fleet-held pool key (`storage.key: fleet`). The harness
+destroys its source machine after backup, then requires the restored ledger on a
+different host in a new namespace. Choose regions that identify the intended
 hosts; the harness does not change placement or host settings. Omit
 `--store-transfer`: that option belongs to the disposable CI directory-store fixture.
 Run without `--allow-daemon-kill` on shared hosts. The kill check is disabled by
 default and additionally requires the disposable native CI environment; it kills
-only the daemon and this run's exact ZFS sender, never a name pattern.
+only the daemon and this run's exact ZFS sender, never a name pattern. The CI-only
+`--source-offline-hook` additionally stops the source daemon for off-host restore
+and restarts it for cleanup. Omit that option on shared hosts.
 
 Collect real allocated disk sizes, object-store latency, restore-to-first-query times
 and seconds per stream GiB on the real hardware. CI uses small workloads and a
