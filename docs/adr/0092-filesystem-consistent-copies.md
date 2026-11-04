@@ -1,6 +1,6 @@
 # ADR 0092: Filesystem-consistent copies: the guest freezes its filesystems around a disk snapshot, syncs before a memory one
 
-Date: 2026-11-04 · Status: accepted (primitives and seal sync merged; slice C candidate measured; one native RSS guard failure remains unresolved); amends ADR 0031 (a snapshot's consistency is recorded), ADR 0008 and ADR 0023 (a backup of a running machine is filesystem-consistent by default), ADR 0005 (a suspend syncs the guest first), ADR 0076 (a seed is sealed after a sync); adds three ops to the guest protocol (ADR 0004)
+Date: 2026-11-04 · Status: accepted (primitives and seal sync merged; slice C candidate measured; the one native RSS guard failure was allocator noise: #130 replaced that check with a trend over cycles); amends ADR 0031 (a snapshot's consistency is recorded), ADR 0008 and ADR 0023 (a backup of a running machine is filesystem-consistent by default), ADR 0005 (a suspend syncs the guest first), ADR 0076 (a seed is sealed after a sync); adds three ops to the guest protocol (ADR 0004)
 
 Renamed 2026-11-04: the `crash` value is now `unsynced` (same meaning: the guest's filesystems were not synced or frozen for this copy). Records written with `crash` (v0.1.20, v0.1.21) load as `unsynced`; a request with `crash` is refused like any invalid value. The measurements below were taken under the old name.
 
@@ -70,7 +70,7 @@ Rejected, one line each:
 - Reopen when a memory-image resume can run a hook in the guest: a freeze before the pause would then be thawed on resume, and memory snapshots could say `filesystem` too.
 
 
-Slice A and the seal sync are merged. Slice C integrates snapshots, backups, disk forks and bounded suspend sync, consistency records, request opt-out and metrics; measurements and native evidence are recorded below, with an unresolved RSS guard failure. Every root disk, seed and warm template must be rebuilt for the changed init digest, before the next release; the runtime owner sequences it.
+Slice A and the seal sync are merged. Slice C integrates snapshots, backups, disk forks and bounded suspend sync, consistency records, request opt-out and metrics; measurements and native evidence are recorded below, with one RSS guard failure, since read as allocator noise (#130 replaced the check). Every root disk, seed and warm template must be rebuilt for the changed init digest, before the next release; the runtime owner sequences it.
 
 Legacy `put` writes run on the blocking pool: two writers blocked by a freeze must not occupy both async runtime threads and prevent host thaw. This does not affect barrier sync, since the barrier rejects `put`. The daemon reads a buffered deadline terminal even if sending thaw encounters a closed peer, and reports `FreezeExpired`.
 
