@@ -132,5 +132,10 @@ PY
     set -e
     exit "$rc"
     ;;
-  *) echo 'expected stress, monitoring, alerts, qualification or restore' >&2; exit 2 ;;
+  scale)
+    # Thousands of idle machine cgroups, a daemon restart: the case of an in-place upgrade
+    # (ADR 0099). Its own runner (ADR 0109); the script is beside this one, from the harness.
+    exec bash "$(dirname "${BASH_SOURCE[0]}")/native-ci-scale.sh"
+    ;;
+  *) echo 'expected stress, monitoring, alerts, qualification, restore or scale' >&2; exit 2 ;;
 esac
