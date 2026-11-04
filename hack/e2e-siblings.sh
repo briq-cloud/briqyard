@@ -86,6 +86,7 @@ if [ -n "$UNIT" ]; then
   check "siblings: $IDLE_LEAVES idle machine cgroups exist before the hand-over" '[ "$(leaves)" -eq $((leaves_before + IDLE_LEAVES)) ]'
   handover
   check "siblings: the barrier passes the idle cgroups" 'briqyard status | jq -e "all(.conditions[] | select(.type == \"memory_protection\"); .status == false)" >/dev/null'
+  for _ in $(seq 1 60); do [ "$(leaves)" -eq "$leaves_before" ] && break; sleep 1; done
   check "siblings: the sweep retires the idle cgroups" '[ "$(leaves)" -eq "$leaves_before" ]'
   check "siblings: daemon adoption rebuilds membership" '[ "$(sibling_sql "$SC")" = 42 ] && [ "$(sibling_proxy "$SC")" = injected=True ]'
 fi
