@@ -495,7 +495,15 @@ Each backup is a record (`backups/<machine>/<id>.json`: ids, names, sizes, the c
 the machine's spec, its env and files, sealed under the pool's key) plus one object per disk. A backup of a
 running machine freezes its filesystems around one snapshot of both disks. The record reports
 `consistency` (`filesystem`, `synced`, or `crash`) and a fallback reason. Old or unresponsive
-inits fall back to crash consistency. A request may opt out with `consistency: "crash"`.
+inits fall back to crash consistency.
+
+Disk-only snapshots, backups and disk forks of a running source use a frozen copy by default.
+A busy source pays more: our 4-vCPU bench measured about 450–600 ms added latency,
+versus about 42 ms for an idle source. These are relative figures from shared runners,
+not hardware guarantees. Set `consistency: "crash"` explicitly in the snapshot or backup
+request, or in the fork specification, to skip guest sync and freeze and accept
+crash consistency.
+
 Application consistency remains the application’s responsibility. A stream goes up
 in 32 MB parts, four at a time, each request tried again with backoff for up to 10 minutes
 (ADR 0034). Give the bucket a lifecycle rule that aborts incomplete multipart uploads after a

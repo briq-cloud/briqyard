@@ -84,7 +84,7 @@
       type: object
       required: [machine_id]
       properties:
-        consistency: { type: string, enum: [crash], description: "Skip guest sync and freeze for this request" }
+        consistency: { type: string, enum: [crash], description: "A disk copy of a running source is frozen by default. A busy source pays more: about 450-600 ms added on our 4-vCPU bench, versus about 42 ms idle. These are relative figures, not hardware guarantees. Set consistency: \"crash\" explicitly to skip guest sync and freeze and accept crash consistency." }
         machine_id: { type: string }
         copy: { type: string, enum: [disk, config], default: disk }
         snapshot: { type: string, description: "sealed named memory snapshot ID or name; strict same-owner/source-host restore without cold fallback; config copy and workload overrides are refused" }
@@ -372,7 +372,7 @@
     SnapshotRequest:
       type: object
       properties:
-        consistency: { type: string, enum: [crash], description: "Skip guest sync and freeze for this request" }
+        consistency: { type: string, enum: [crash], description: "A disk copy of a running source is frozen by default. A busy source pays more: about 450-600 ms added on our 4-vCPU bench, versus about 42 ms idle. These are relative figures, not hardware guarantees. Set consistency: \"crash\" explicitly to skip guest sync and freeze and accept crash consistency." }
         template: { type: boolean, default: false, description: "seal a reviewed init-ready builder with memory=true; ordinary machines cannot be promoted" }
         name: { type: string, description: "to find it by again: a-z, 0-9, _ and -, at most 64, not starting with s_; unique on the machine" }
         memory: { type: boolean, description: "its memory too, on a running machine, paused while it is written: a restore resumes its processes where they were" }
