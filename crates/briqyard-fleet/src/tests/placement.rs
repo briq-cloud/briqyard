@@ -477,7 +477,7 @@ async fn cpu_reservations_survive_reports_and_release_exactly_once() {
             vcpus: 1,
             cpu_millis: None,
         },
-        100_000,
+        Some(100_000),
         Utc::now(),
     );
     assert_eq!(reg.hosts["d1"].used.cpu_millis(), 1750);
@@ -491,7 +491,7 @@ async fn cpu_reservations_survive_reports_and_release_exactly_once() {
             vcpus: 2,
             cpu_millis: Some(1500),
         },
-        100_000,
+        Some(100_000),
         Utc::now() + Duration::seconds(1),
     );
     assert_eq!(reg.hosts["d1"].used.cpu_millis(), 1500);

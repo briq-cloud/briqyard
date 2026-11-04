@@ -213,7 +213,7 @@ pub(super) async fn start_daemon_on(
             },
             machines: ms.len(),
             running: ms.len(),
-            disk_free_mb: 100_000,
+            disk_free_mb: Some(100_000),
             tls_fingerprint: d.tls_fingerprint.clone(),
             conditions: d.conditions.lock().unwrap().clone(),
             started: Default::default(),

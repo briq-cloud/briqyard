@@ -243,8 +243,10 @@ pub struct RegisterHostRequest {
     pub namespaces: Vec<String>,
     #[serde(default)]
     pub version: String,
-    #[serde(default)]
-    pub disk_free_mb: u64,
+    /// Free space for disks, in MB; absent when the host cannot read its pool (0 is a full
+    /// one, and an older host that sends 0 for both reads as full).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_free_mb: Option<u64>,
     /// The SHA-256 of the API's certificate; empty when the API is plain HTTP. The fleet
     /// refuses a heartbeat whose fingerprint is not the one it pinned (ADR 0020).
     #[serde(default)]
@@ -308,9 +310,9 @@ pub struct Status {
     pub memory_policy: Option<MemoryPolicy>,
     pub machines: usize,
     pub running: usize,
-    /// Free space for disks, in MB.
-    #[serde(default)]
-    pub disk_free_mb: u64,
+    /// Free space for disks, in MB; absent when the host cannot read its pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_free_mb: Option<u64>,
     /// The SHA-256 of the API's certificate; empty when the API is plain HTTP (ADR 0020).
     #[serde(default)]
     pub tls_fingerprint: String,
