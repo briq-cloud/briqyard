@@ -84,3 +84,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0089](0089-native-suites-in-ci.md) | Native e2e and fleet-smoke on disposable hosted KVM runners, checked runtime installation, exact source identities and retained suite evidence |
 | [0090](0090-app-console-ownership.md) | The app owns the console it writes to: the init hands it to the app user before dropping privileges, mode kept 0600 |
 | [0091](0091-exec-retries-before-the-request-only.md) | A guest call is retried before its request is written, never after: a reset afterwards is Closed (409) |
+| [0092](0092-filesystem-consistent-copies.md) | Filesystem-consistent copies: guest sync and connection-held freeze; sync before sealing |

@@ -1,6 +1,20 @@
 use super::*;
 #[async_trait::async_trait]
 impl guestc::Guest for Mock {
+    async fn fs_sync(&self, vsock: &Path) -> Result<()> {
+        self.record(format!("fs_sync {}", vsock.display()));
+        match self.fs_sync_fault.load(Relaxed) {
+            1 => Err(guestc::UnknownOp {
+                op: "fs_sync".into(),
+                init: String::new(),
+            }
+            .into()),
+            2 => Err(anyhow!("sync failed")),
+            3 => std::future::pending().await,
+            _ => Ok(()),
+        }
+    }
+
     async fn destination_control(
         &self,
         vsock: &Path,

@@ -2,6 +2,11 @@
 # Fresh, disposable Linux KVM host only. No Lima or shared host state.
 set -euo pipefail
 [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || { echo 'native-ci.sh requires a disposable GitHub-hosted runner' >&2; exit 2; }
+# A daemon that does not start leaves only "see journalctl" in the log: print it on any failure.
+journal_on_failure() {
+  [ "$1" = 0 ] || sudo journalctl -u briqyardd -u briqyard-fleet --no-pager -n 60 >&2 || true
+}
+trap 'journal_on_failure $?' EXIT
 HARNESS=$(cd "$(dirname "$0")" && pwd)
 cd "${1:-$HARNESS/..}"
 # Docker's host-wide FORWARD drop policy also sees packets accepted by briqyard's
