@@ -1,12 +1,17 @@
 //! Versions and their order (ADR 0027). A host binary says its release and commit
 //! (`briqyard_version::VERSION`, `0.1.0+fdad892eeefa`). The guest init says [`GUEST_VERSION`],
-//! which is not the release: the init's bytes do not follow the release or the commit (ADR 0098).
+//! which is not the release: the init's bytes do not follow the release or the commit (ADR 0101).
 
-/// The version the guest init reports in its `pong` and its exit report: the first release
-/// whose guest protocol it speaks. Set it to the workspace release in the change that adds
-/// something the daemon gates on (a [`SESSIONS`]-style constant, compared with [`before`]);
-/// leave it otherwise. A release that does not touch the guest protocol keeps it, so the
-/// init, and the seeds bound to its digest, stay the same.
+/// The version the guest init reports in its `pong` and its exit report: a release at or
+/// after every gate the daemon checks (today [`SESSIONS`]), not the release the init was
+/// built in. Set it to the workspace release in the change that adds a version gate; leave it
+/// otherwise, so a release that does not touch the init keeps the init's digest, and the seeds
+/// bound to it. A forgotten bump fails closed: a gate above `GUEST_VERSION` makes the daemon
+/// refuse the new init (409, naming it), never accept an old one.
+///
+/// A new daemon gate should be a capability flag in the `pong` (as `file_stream_v1` and
+/// `exec_stream_v1` are), which needs no version. A version gate, if ever, gets an assert
+/// beside the one on [`SESSIONS`] below, that `GUEST_VERSION` is not before it.
 pub const GUEST_VERSION: &str = "0.1.20";
 
 /// The release part of a version (`0.1.0` of `0.1.0+fdad892eeefa`), as numbers; None when it

@@ -18,7 +18,7 @@ Most work here is done by agents. Everything an agent needs is in the repo: this
 ```
 crates/briqyard-api      API types and the host–guest protocol (shared by everything)
 crates/briqyardd         the daemon: config, store, zfs, netw (bridge, nft, dns), fc, image, guestc, machine, ingress, api
-crates/briqyard-init     PID 1 inside the guest, static musl; its digest changes only with the init (ADR 0098)
+crates/briqyard-init     PID 1 inside the guest, static musl; its digest changes only with the init (ADR 0101)
 crates/briqyard-version  the release and commit the host binaries say (the init does not link it)
 crates/briqyard          the CLI
 crates/briqyard-fleet    placement, forwarding, host registry, bootstrap, capacity signals, the registry's backup

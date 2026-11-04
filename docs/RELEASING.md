@@ -35,7 +35,7 @@ publication/promotion remain separate steps. Merging the changelog tooling itsel
 not build or publish a new runtime version.
 
 The release's init keeps the digest of the one before it unless the init's code, its
-dependencies or the toolchain changed ([ADR 0098](adr/0098-the-inits-digest-changes-only-when-the-init-does.md)):
+dependencies or the toolchain changed ([ADR 0101](adr/0101-the-inits-digest-changes-only-when-the-init-does.md)):
 CI's `hack/init-digest-check.sh` proves a version or a commit does not change it, and the
 candidate's `SHA256SUMS` line for `briqyard-init-linux-<arch>` shows the digest. The upgrade
 notes in the changelog entry say whether it changed, and so whether seeds are sealed again.

@@ -313,7 +313,7 @@ pub struct Machine {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_since: Option<DateTime<Utc>>,
     /// The guest version of the init its root disk carries, as it said at the last boot (ADR
-    /// 0027, 0098): the release whose guest protocol it speaks; empty before its first boot,
+    /// 0027, 0101): a release at or after every gate the daemon checks; empty before its first boot,
     /// or from an init older than the report.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub init_version: String,

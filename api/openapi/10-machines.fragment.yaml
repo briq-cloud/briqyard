@@ -223,7 +223,7 @@
         version: { type: integer, description: "the seq of the last event about it: every event moves it, a folded readiness flip too (ADR 0047), its last use does not; what `If-Match` compares" }
         pending: { $ref: "#/components/schemas/Pending" }
         pending_since: { type: string, format: date-time, description: "when the oldest change still pending was made" }
-        init_version: { type: string, description: "the guest version the init in its root disk said at its last boot (ADR 0027, 0098), the release whose guest protocol it speaks; empty before it, or from an init older than the report" }
+        init_version: { type: string, description: "the guest version the init in its root disk said at its last boot (ADR 0027, 0101), a release at or after every gate the daemon checks; empty before it, or from an init older than the report" }
         vmm_version: { type: string, description: "what ran its last boot: Firecracker's version and the host kernel's release, `v1.17.0/6.8.0-45-generic`; a memory snapshot resumes only under the same" }
         host: { type: string, description: the host that runs it (fleet) }
     Endpoint:

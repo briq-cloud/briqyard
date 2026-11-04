@@ -1,4 +1,4 @@
-# ADR 0098: The init's digest changes only when the init does
+# ADR 0101: The init's digest changes only when the init does
 
 2026-11-04 · Status: accepted; amends ADR 0027 (what the init reports) and extends ADR 0076 (seeds bound to the init's SHA-256)
 
@@ -23,7 +23,7 @@ Built on a Mac for `x86_64-unknown-linux-musl` with `rust-lld`; CI's digests dif
 
 **The init's identity is its bytes, and they change only when the init's code, its dependencies or the toolchain do.** A release or a commit outside those leaves the digest, and so every seed bound to it, unchanged.
 
-- **The version moves out.** `briqyard_version::VERSION` (the new crate `briqyard-version`, with the `build.rs`) is what the daemon, the fleet and the CLI say; the init does not link it. The init reports `briqyard_api::version::GUEST_VERSION` instead, a constant in source: the release whose guest protocol it speaks. It changes in the change that adds something the daemon gates on (like `SESSIONS`, ADR 0029), set to that release, and never otherwise. Test: it is a release number, and not later than the build's.
+- **The version moves out.** `briqyard_version::VERSION` (the new crate `briqyard-version`, with the `build.rs`) is what the daemon, the fleet and the CLI say; the init does not link it. The init reports `briqyard_api::version::GUEST_VERSION` instead, a constant in source: a release at or after every gate the daemon checks (today `SESSIONS`, ADR 0029), not the release the init was built in. It changes in the change that adds a version gate, set to that release, and never otherwise. Test: it is a release number, not later than the build's, and not before `SESSIONS`. A forgotten bump fails closed: a gate above `GUEST_VERSION` makes the daemon refuse the new init (409, naming it), never accept an old one. A new daemon gate should be a capability flag in the `pong` (as `file_stream_v1` and `exec_stream_v1` are), which needs no version; a version gate, if ever, gets an assert beside `SESSIONS`'s.
 - **The init's crates keep their own package version.** `briqyard-init` and `briqyard-api` are `0.0.0`, not the workspace version. `hack/release.py` leaves them out of the version bump and the lock updates.
 - **CI keeps it true.** `hack/init-digest-check.sh` builds the musl init twice, the second time with another workspace version and `BRIQYARD_COMMIT`, and fails when the digests differ. It runs in the `check` job, on the runner and toolchain that built the first.
 
@@ -42,7 +42,9 @@ The `version` field stays in the `pong`, the exit report and `init_version`, wit
 
 ### What still changes the digest
 
-The init's source and the guest protocol it links (`briqyard-api` outside the version), the versions of its dependencies in `Cargo.lock`, the toolchain (`release.yml` pins `1.97.0`; a new pin is a new digest), the target and the release profile. The other bindings of a seed are not the init's: the manifest and image config digests, the kernel and VMM, the CPU template (ADR 0087, 0088) and the sizes. A release that changes one of those still re-seals.
+The init's source and what it links of `briqyard-api` (`guest`, `files`, `session`, `version`), the versions of its dependencies in `Cargo.lock`, the toolchain (`release.yml` pins `1.97.0`; a new pin is a new digest), the target and the release profile. The other bindings of a seed are not the init's: the manifest and image config digests, the kernel and VMM, the CPU template (ADR 0087, 0088) and the sizes. A release that changes one of those still re-seals.
+
+Measured: a field added to `api::Status`, which only the daemon uses, and a rebuild left the digest unchanged (`85570f75` on both builds, musl, `--release --locked`). Code of `briqyard-api` the init does not link is dropped by the linker, so a daemon-only API change keeps the digest; a change to the modules above, or to `GUEST_VERSION`, moves it.
 
 ### The release that carries this change
 

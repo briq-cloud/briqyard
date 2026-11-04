@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The init's digest changes only when the init does (ADR 0098): build the musl init twice, the
+# The init's digest changes only when the init does (ADR 0101): build the musl init twice, the
 # second time as another release and another commit, and fail if its SHA-256 differs.
 #   hack/init-digest-check.sh            # x86_64-unknown-linux-musl, as the release builds it
 #   TARGET=aarch64-unknown-linux-musl hack/init-digest-check.sh
@@ -38,5 +38,5 @@ b=$(sha ffffffffffff)
 
 echo "release $old, commit 000000000000: $a"
 echo "release $new, commit ffffffffffff: $b"
-[ "$a" = "$b" ] || { echo "the init's digest follows the release or the commit (ADR 0098)" >&2; exit 1; }
+[ "$a" = "$b" ] || { echo "the init's digest follows the release or the commit (ADR 0101)" >&2; exit 1; }
 echo "same digest"

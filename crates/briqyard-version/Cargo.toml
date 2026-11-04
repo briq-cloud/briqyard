@@ -7,4 +7,4 @@ license.workspace = true
 repository.workspace = true
 
 # No dependency, and the guest init does not link it: its bytes must not change with the
-# release or the commit (ADR 0098).
+# release or the commit (ADR 0101).
