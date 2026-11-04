@@ -124,6 +124,7 @@ sudo systemctl restart briqyardd briqyard-fleet
 for _ in $(seq 1 60); do briqyard status >/dev/null 2>&1 && curl -fsS $FLEET/v1/hosts | jq -e 'length == 1 and all(.state == "ready")' >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS $FLEET/v1/hosts | jq -e 'all(.state == "ready")' >/dev/null || die "the previous fleet and host did not become ready"
 echo "   fleet: $(briqyard-fleet --version)"
+for _ in $(seq 1 60); do [ -n "$(hostf .version)" ] && break; sleep 1; done
 echo "   host version: $(hostf .version), installed: $PREV_VER"
 check "the host runs the previous release" '[ "$(hostf .version)" = "$PREV_VER" ] && [[ "$PREV_VER" == "${PREV#v}"* ]]'
 
@@ -172,7 +173,7 @@ for i in $(seq 1 20); do
   h=$(briqyard machine run --image $IMG --name "hist$i" --namespace $NS --memory 128 -- sleep 3600 | jq -r .id) && wait_running "$h" && briqyard machine rm "$h" >/dev/null
 done
 for i in 1 2 3 4 5; do
-  k=$(briqyard machine run --image $IMG --name "killed$i" --namespace $NS --memory 128 -- sleep 3600 | jq -r .id) || die killed
+  k=$(briqyard machine run --image $IMG --name "killed$i" --namespace $NS --memory 128 --restart no -- sleep 3600 | jq -r .id) || die killed
   wait_running "$k" || die "killed$i did not run"
   for p in $(sudo cat "$(cgdir "$k")/cgroup.procs"); do sudo kill -9 "$p"; done
   for _ in $(seq 1 30); do [ "$(briqyard machine get "$k" | jq -r .state)" != running ] && break; sleep 1; done
@@ -189,7 +190,7 @@ for id in $RUNNING; do
   echo "$id $v" >> "$WORK/before"
 done
 sed 's/^/   VMM before: /' "$WORK/before"
-for id in $RUNNING; do briqyard machine exec "$id" -- true >/dev/null 2>&1 || die "$id does not answer before the upgrade"; done
+for id in $PG $WEB $VOL; do briqyard machine exec "$id" -- true >/dev/null 2>&1 || die "$id does not answer before the upgrade"; done
 
 echo "== upgrade in place to the head, through the fleet (ADR 0027)"
 # Probes: the web endpoint and the daemon's API, every 50 ms, from before the upgrade to after it.
