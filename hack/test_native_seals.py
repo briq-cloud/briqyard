@@ -1,5 +1,6 @@
 """Exercise the seal test's actual configuration fixture, outside a native host."""
 import hashlib
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -16,6 +17,38 @@ class NativeSealConfig(unittest.TestCase):
         setup = (HACK / "native-ci.sh").read_text()
         self.assertNotIn("c['templates']", setup)
         self.assertIn("trap 'journal_on_failure $?' EXIT", setup)
+
+    def test_destination_create_explicitly_starts_both_seed_shapes(self):
+        source = (HACK / "e2e-seals.sh").read_text()
+        query = next(line.strip().split("'", 2)[1] for line in source.splitlines() if "sandbox_seed:{" in line)
+        for volume in [None, {"size_gb": 1, "mount": "/work"}]:
+            command = ["jq", "-n"]
+            for key, value in {"ns": "seal-test", "image": "alpine", "name": "sealed-create-0", "source": "m_seed", "snap": "s_seed", "gen": "g_seed"}.items():
+                command.extend(["--arg", key, value])
+            command.extend(["--argjson", "volume", json.dumps(volume), query])
+            request = json.loads(subprocess.check_output(command, text=True))
+            self.assertIs(request.get("start"), True)
+            self.assertEqual(request["volume"], volume)
+            self.assertEqual(request["sandbox_seed"]["machine_id"], "m_seed")
+
+    def test_seals_precede_the_only_final_summary(self):
+        suite = (HACK / "e2e.sh").read_text()
+        self.assertGreater(suite.rfind("suite_summary"), suite.index("e2e-seals.sh"))
+        self.assertNotIn("suite_summary", (HACK / "e2e-storage.sh").read_text())
+
+    def test_failed_api_response_body_is_printed(self):
+        source = (HACK / "e2e-seals.sh").read_text()
+        self.assertIn("seal_api() {", source)
+        helper = "seal_api() {" + source.split("seal_api() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+        with tempfile.TemporaryDirectory() as directory:
+            curl = Path(directory) / "curl"
+            curl.write_text("#!/bin/sh\nprintf '%s\\n' '{\"error\":\"fixture rejection\"}'\nexit 22\n")
+            curl.chmod(0o700)
+            command = 'CURL=("$1"); auth=();\n' + helper + 'seal_api http://fixture/v1/machines'
+            result = subprocess.run(["bash", "-c", command, "fixture", str(curl)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 22)
+            self.assertEqual(result.stdout, "")
+            self.assertIn('{"error":"fixture rejection"}', result.stderr)
 
     def test_seal_scope_binds_authentication_and_the_installed_init(self):
         fixture = (HACK / "e2e-seals.sh").read_text().split("<<'PYCONFIG'\n", 1)[1].split("\nPYCONFIG", 1)[0]
