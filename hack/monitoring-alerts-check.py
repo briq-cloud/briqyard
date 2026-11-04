@@ -484,6 +484,12 @@ def cleanup():
 
 
 def rules_set():
+    # A refusal is an increase only against a sample taken before it: Prometheus must have scraped
+    # the zero of every refusal series (the install was seconds ago).
+    if not wait_for("baseline", lambda: len(prom('count_over_time(briqyard_fleet_unschedulable_total{resource="memory"}[10m]) >= 2')) == 3, 180, 5):
+        bad("Prometheus holds a sample of each refusal counter (dev, no region, other) before any refusal")
+        raise RuntimeError("no baseline")
+    ok("Prometheus holds a sample of each refusal counter (dev, no region, other) before any refusal")
     machine("alert-crash", "crashy", 128, cmd=("sh", "-c", "sleep 10; exit 1"))
     t_crash = time.time()
     say("crash-looping machine started")
