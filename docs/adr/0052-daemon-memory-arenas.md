@@ -63,10 +63,12 @@ from `VmRSS`: the trend to alert on, and what the stress driver reads.
 
 **`hack/stress.py --churn N`**: N cycles per tenant of what a machine goes through, the
 daemon's RSS read after each (the least of the readings until it stops dropping, once idle); the fitted growth of those
-floors over the cycles after the first, past `--rss-growth-mb` (32), is a break, as is growth of
-open files or threads. Single readings swing 32 to 76 MB with no trend on hosted runners, so a
-pair of adjacent readings failed clean runs; the floor does not swing and a leak raises it. The first cycles fill caches and the allocator's pools; a leak keeps its slope
-after them.
+floors over the cycles after the first, past `--rss-growth-mb` (40), is a break, as is growth of
+open files or threads. The level is stable within a cycle and moves between cycles with no
+trend (31 to 101 MB over 14 clean runs, sd 14 MB), so a pair of adjacent readings failed clean
+runs. The fit over six intervals averages that out: a leak of 10 MB a cycle fails 9 runs in 10,
+12 MB 98 %, 16 MB always, against 23 % at 16 MB for the pair; open files and threads are flat
+(38 and 5) and any growth fails.
 
 **The ingress resyncs when it missed endpoint events.** Its broadcast channel holds 64; a
 receiver that lagged skipped what it missed, so a removed endpoint's listener stayed open, its

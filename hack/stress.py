@@ -838,7 +838,7 @@ def main():
     p.add_argument("--seed", type=int, default=int(time.time()) % 100000)
     p.add_argument("--crash", action="store_true", help="SIGKILL the daemon in round 1 (needs sudo on the host)")
     p.add_argument("--churn", type=int, default=0, help="then this many cycles of every feature per namespace, the daemon's RSS read after each")
-    p.add_argument("--rss-growth-mb", type=float, default=32, help="churn: the most the daemon's settled RSS may grow, as the fitted trend over cycles 2..N (cycle 1 is warm-up)")
+    p.add_argument("--rss-growth-mb", type=float, default=40, help="churn: the most the daemon's settled RSS may grow, as the fitted trend over cycles 2..N (cycle 1 is warm-up)")
     p.add_argument("--handle-growth", type=int, default=2, help="churn: the most the daemon's open files, and its threads, may grow (least of the second half of cycles 2..N over the least of the first half)")
     p.add_argument("--phases", default="", help=f"comma-separated, of {','.join(PHASES)} (default: all); endpoints_all relies on exec_all's wait for the web servers")
     p.add_argument("--no-invariants", action="store_true")
