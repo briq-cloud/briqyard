@@ -77,6 +77,11 @@ machine's stop, and prints `exit.oom_killed`; when the fix lands (`vmm_oom_kille
   pressure it names `memory_pressure`.
 - `stress` failed once in validation on its churn bound (`daemon RSS grew 48.3 MB over cycles 3..4`), a job this
   change does not touch.
+- **Known defect, found by this batch:** a backup killed while its stream is being written can leave that stream in
+  the store with no record (seen in 2 of 3 runs; the third kill landed after the record). It is listed and restorable
+  by nothing, and nothing removes it, not even the next successful backup; the census (ADR 0083) only counts. The
+  suite bounds it (at most the interrupted backup's one stream, never listed), prints `KNOWN DEFECT`, and prints
+  `FIXED` once the daemon cleans it, when the check should become `[ -z "$orphans" ]`.
 - Added after review: the invariants now check cgroup leaves (none without a machine, one for every live
   Firecracker); a backup is killed while its stream is on disk and the store is read afterwards (listed ==
   recorded, no stream without a record, every listed backup restores whole); a suspend is killed while the
