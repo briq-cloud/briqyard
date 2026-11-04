@@ -455,7 +455,7 @@ touch "$LOGS/b0.mark"; sleep 1
 # The second backup is under way once a stream newer than the first is on disk and its record is not.
 backup_streaming() { sudo find "$bkdir" -name '*.zfs' -newer "$LOGS/b0.mark" 2>/dev/null | grep -q . && ! sudo find "$bkdir" -name '*.json' -newer "$LOGS/b0.mark" 2>/dev/null | grep -q .; }
 caught=0
-for attempt in 1 2 3; do
+for attempt in 1 2 3 4 5 6; do
   if KILL_NEEDS_FAILURE=1 kill_when backup_streaming briqyard machine backup "$BK"; then caught=1; break; fi
   touch "$LOGS/b0.mark"; sleep 1
 done
