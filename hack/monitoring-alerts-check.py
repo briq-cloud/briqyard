@@ -210,8 +210,9 @@ rx = None
 class Case:
     """One alert: a real cause, `firing` expected, a recovery, `resolved` expected."""
 
-    def __init__(self, name, uid, title, labels, fire_within, resolve_within, action=None, window=0):
+    def __init__(self, name, uid, title, labels, fire_within, resolve_within, action=None, window=0, absent=()):
         self.name, self.uid, self.title, self.labels = name, uid, title, labels
+        self.absent = absent  # labels the alert must not carry (an ask without a region has no region label)
         self.fire_within, self.resolve_within, self.action = fire_within, resolve_within, action
         # An alert over a window of events cannot truly resolve before the window has passed:
         # an earlier `resolved` is a flap, noted but not counted as the recovery.
@@ -225,7 +226,7 @@ class Case:
         for t, a in rx.alerts():
             labels = a.get("labels", {})
             if (t >= after and a.get("status") == status and labels.get("alertname") == self.title
-                    and subset(self.labels, labels)):
+                    and subset(self.labels, labels) and not any(k in labels for k in self.absent)):
                 return t, a
         return None
 
@@ -296,10 +297,11 @@ def drive(cases, actions, total):
     for c in cases:
         if not c.done:
             bad(f"{c.name}: overall bound of {total} s passed")
-        flaps = [a.get("status") for _, a in sorted(rx.alerts(), key=lambda x: x[0])
-                 if a.get("labels", {}).get("alertname") == c.title and subset(c.labels, a.get("labels", {}))]
-        if "resolved" in flaps and "firing" in flaps[flaps.index("resolved"):]:
-            print(f"  note {c.name}: notifications {flaps}: it resolved and fired again", flush=True)
+        seq = [a.get("status") for _, a in sorted(rx.alerts(), key=lambda x: x[0])
+               if a.get("labels", {}).get("alertname") == c.title and subset(c.labels, a.get("labels", {}))
+               and not any(k in a.get("labels", {}) for k in c.absent)]
+        if c.resolved:
+            (ok if seq == ["firing", "resolved"] else bad)(f"{c.name}: one firing and one resolved, no flap (received {seq})")
 
 
 # ---- setup, and what the rules under test are -------------------------------------------------
@@ -348,6 +350,9 @@ def verify(prod, loaded):
             want_for = seconds(FOR_OVERRIDES.get(r["uid"], r["for"]))
             if seconds(got.get("for", 0)) != want_for:
                 wrong.append(f"{r['uid']}.for: want {want_for}, Grafana {got.get('for')!r}")
+            want_keep = seconds(r.get("keepFiringFor", 0))
+            if seconds(got.get("keep_firing_for", got.get("keepFiringFor", 0))) != want_keep:
+                wrong.append(f"{r['uid']}.keepFiringFor: want {want_keep}, Grafana {got.get('keep_firing_for')!r}")
             for want in r["data"]:
                 have = next((d for d in got["data"] if d["refId"] == want["refId"]), None)
                 if have is None or have["datasourceUid"] != want["datasourceUid"] or not subset(want["model"], have["model"]) \
@@ -441,13 +446,15 @@ def rules_set():
     p = run("briqyard", "machine", "backup", bk, timeout=300)
     (ok if p.returncode == 0 else bad)("the store put back, a backup succeeds again")
 
-    # Capacity refusal: more memory than the host holds (12288 MB).
+    # Capacity refusals: more memory than the host holds (12288 MB), asking region dev, no region,
+    # and a region no host is in. The last two are counted under region "" and "other".
     t_room = time.time()
-    p = run("briqyard", "machine", "run", "--image", "alpine:3.20", "--namespace", "alert-room", "--name", "toolarge",
-            "--memory", "20000", "--region", "dev", "--detach", "--", "sleep", "60", timeout=120)
-    (ok if p.returncode != 0 and "room" in (p.stderr + p.stdout).lower() else bad)(
-        f"a create of 20000 MB is refused for capacity ({(p.stderr or p.stdout).strip()[-120:]!r})")
-    namespaces.append("alert-room")
+    for ns, region in (("alert-room", ["--region", "dev"]), ("alert-room-none", []), ("alert-room-other", ["--region", "nowhere"])):
+        p = run("briqyard", "machine", "run", "--image", "alpine:3.20", "--namespace", ns, "--name", "toolarge",
+                "--memory", "20000", *region, "--detach", "--", "sleep", "60", timeout=120)
+        (ok if p.returncode != 0 and "room" in (p.stderr + p.stdout).lower() else bad)(
+            f"a create of 20000 MB {' '.join(region) or 'without a region'} is refused for capacity ({(p.stderr or p.stdout).strip()[-100:]!r})")
+        namespaces.append(ns)
 
     # Host condition, host pressure and the largest slot: one machine takes the host's memory
     # up to its last 50 MB (committed memory counts each machine's 256 MB VMM overhead).
@@ -488,20 +495,23 @@ def rules_set():
     crash = Case("Machine in a crash loop", "briqyard-crash-loop", "Machine in a crash loop", {"namespace": "alert-crash", "host": "local"}, 240, 840, window=600)
     backup = Case("Backup failure observed", "briqyard-backup-failed", "Backup failure observed", {"host": "local"}, 240, 540, window=600)
     room = Case("Creates refused: no room", "briqyard-out-of-room", "Creates refused: no room", {"region": "dev", "resource": "memory"}, 240, 300, window=300)
+    room_none = Case("Creates refused: no room (no region asked)", "briqyard-out-of-room", "Creates refused: no room", {"resource": "memory"}, 240, 300, window=300, absent=("region",))
+    room_other = Case("Creates refused: no room (unknown region)", "briqyard-out-of-room", "Creates refused: no room", {"region": "other", "resource": "memory"}, 240, 300, window=300)
     cond = Case("Host condition", "briqyard-host-condition", "Host condition", {"host": "local", "condition": "memory_pressure"}, 360, 300)
     press = Case("Creates refused: host under pressure", "briqyard-host-pressure", "Creates refused: host under pressure", {"region": "dev"}, 240, 300, window=300)
     slot = Case("Largest slot too small", "briqyard-slots-small", "Largest slot too small", {"region": "dev"}, 420, 300)
-    crash.caused, backup.caused, room.caused = t_crash, t_backup, t_room
+    crash.caused, backup.caused, room.caused, room_none.caused, room_other.caused = t_crash, t_backup, t_room, t_room, t_room
     cond.caused, slot.caused, press.caused = t_big, t_big, t_pressure
     # The window alerts expire by themselves: ten minutes of restarts or backup events, five of refusals.
     # (A destroyed machine's restarts stay in the ten-minute window too: destroying it does not resolve the alert.)
     crash.recovery, backup.recovery, room.recovery, press.recovery = t_crash, t_backup, t_room, t_pressure
-    crash.resolve_within = 600 + 240
+    room_none.recovery = room_other.recovery = t_room
+    crash.resolve_within = 600 + 180 + 240  # the window, then keepFiringFor
     backup.resolve_within = 600 + 240
-    room.resolve_within = press.resolve_within = 300 + 240
+    room.resolve_within = room_none.resolve_within = room_other.resolve_within = press.resolve_within = 300 + 240
     destroy_big = Action("destroy the machine holding the host's memory", [cond, slot], lambda: destroy(big))
     cond.action = slot.action = destroy_big
-    drive([crash, backup, room, cond, press, slot], [destroy_big], 1200)
+    drive([crash, backup, room, room_none, room_other, cond, press, slot], [destroy_big], 1500)
 
 
 def host_down_set():

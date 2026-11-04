@@ -123,6 +123,9 @@ groups:
         noDataState: OK
         execErrState: Error
         for: 0s
+        # Three restarts read 2.4 to 3.3 through increase(), so the expression crosses its
+        # threshold back and forth while a loop is real (ADR 0094): hold it firing.
+        keepFiringFor: 3m
         labels:
           severity: warning
         annotations:
