@@ -22,6 +22,14 @@ T=qual-$$
 LOGS=${QUAL_LOGS:-/tmp/qual-$$}; mkdir -p "$LOGS"
 POOL=$(sudo sed -n 's/^  pool: //p' /etc/briqyard/config.yaml); POOL=${POOL:-byard}
 JAIL=$(sudo sed -n 's/^jail_dir: //p' /etc/briqyard/config.yaml); JAIL=${JAIL:-/var/lib/briqyard/jail}
+# Images pinned by digest (the manifest lists on Docker Hub, checked 2026-11-04): a moved tag
+# changes nothing here, and the pulls go through the host's registry mirror.
+ALPINE=alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+PY=python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8
+PYSLIM=python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
+NODE=node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da
+NGINX=nginx:alpine@sha256:785835ea65db4bba6f021acc0f3be91b0fef76a53fe41f8588c6698d2aed0606
+STORE=$(sudo sed -n 's|^  store: file://||p' /etc/briqyard/config.yaml); STORE=${STORE:-/var/lib/briqyard/backups}
 pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
@@ -130,7 +138,7 @@ settled_state() { api /v1/machines | jq -r --arg n "$2" --arg t "$1" '[.[] | sel
 fleet_refuses() { # REASON NAME NAMESPACE
   local i out=
   for i in $(seq 1 60); do
-    if ! out=$(fleet machine run --sleep never --image alpine:3.20 --name "$2" --namespace "$3" --memory 128 -- sleep 60 2>&1); then
+    if ! out=$(fleet machine run --sleep never --image $ALPINE --name "$2" --namespace "$3" --memory 128 -- sleep 60 2>&1); then
       grep -qiF "$1" <<<"$out" && return 0
     fi
     sleep 2
@@ -147,7 +155,7 @@ diag() {
 fleet_places() { # NAME NAMESPACE: a create through the fleet is accepted again, polled while its view catches up
   local i id
   for i in $(seq 1 60); do
-    if id=$(fleet machine run --sleep never --image alpine:3.20 --name "$1" --namespace "$2" --memory 128 -- sleep 600 2>/dev/null | jq -r .id) && [ -n "$id" ]; then
+    if id=$(fleet machine run --sleep never --image $ALPINE --name "$1" --namespace "$2" --memory 128 -- sleep 600 2>/dev/null | jq -r .id) && [ -n "$id" ]; then
       [ "$(on "$id" hostname)" = "$1" ] && { briqyard machine rm "$id" >/dev/null; return 0; }
     fi
     sleep 2
@@ -163,7 +171,6 @@ check "no host condition is true (memory_protection and accounting included)" '[
 
 # ======================================================================================
 echo "== isolation: namespaces, the host, the metadata address (a failure for its reason, a control beside it)"
-PY=python:3.12-alpine
 A=$(run --image $PY --name iso-a --namespace "$T-n1" --memory 256 --volume 1G:/data -e "SECRET_A=tok-a-7f3c" -- sh -c 'mkdir -p /www && echo secret-a > /www/s && exec python3 -m http.server 8000 --directory /www')
 A2=$(run --image $PY --name iso-a2 --namespace "$T-n1" --memory 256 --cpu-millis 500 -e "SECRET_A2=tok-a2-91be" -- sleep 7200)
 O=$(run --image $PY --name iso-o --namespace "$T-n2" --memory 256 -- sh -c 'mkdir -p /www && echo secret-o > /www/s && exec python3 -m http.server 8000 --directory /www')
@@ -200,13 +207,24 @@ for port in 7420 8080 7430; do
 done
 check "control: the gateway answers DNS" 'on "$A2" "nslookup iso-a.internal 2>&1" | grep -qF "$aip"'
 check "control: the gateway answers ping" 'on "$A2" "ping -c1 -W2 $gw1" >/dev/null'
+hostip=$(ip -4 route get 1.1.1.1 | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i+1); exit } }')
+check "control: the host answers on its uplink address ($hostip)" '[ -n "$hostip" ] && [ "$(curl -fsS -m 3 http://$hostip:9999/s)" = host-secret ]'
+out=$(get "$A2" http://$hostip:9999/s)
+check "the host's uplink address: times out, not read" 'grep -qF "timed out" <<<"$out" && ! grep -qF host-secret <<<"$out"'
+out=$(on "$A2" "nslookup iso-o.internal 2>&1" || true)
+check "DNS: another namespace's machine name does not resolve (NXDOMAIN), its address is not given" '! grep -qF "$oip" <<<"$out" && grep -qiE "NXDOMAIN|can.t find|not found" <<<"$out"'
+nft_fwd=$(sudo nft list chain inet briqyard forward)
+check "IPv6 from a bridge: the forward chain drops it (policy drop and the nfproto ipv6 rule)" 'grep -qF "policy drop" <<<"$nft_fwd" && grep -qF "meta nfproto ipv6 iifname \"by*\" drop" <<<"$nft_fwd"'
+out=$(on "$A2" "wget -qO- -T 4 'http://[2606:4700:4700::1111]/' 2>&1; echo rc=\$?" || true)
+echo "   an IPv6 address from the guest: $(echo "$out" | head -c 120) (the runner has no IPv6 route: this proves a guest cannot reach one, the rule above proves why)"
+check "IPv6 from the guest: nothing is read" '! grep -qF rc=0 <<<"$out"'
 out=$(get "$A2" http://169.254.169.254/latest/meta-data/)
 check "the metadata address: times out" 'grep -qF "timed out" <<<"$out" && grep -qF "rc=1" <<<"$out"'
 out=$(get "$A2" http://10.0.0.1/)
 check "a private range (10/8): times out" 'grep -qF "timed out" <<<"$out"'
 out=$(get "$A2" http://192.168.1.1/)
 check "a private range (192.168/16): times out" 'grep -qF "timed out" <<<"$out"'
-check "control: the internet answers an open machine" 'on "$A2" "wget -qO- -T 10 http://example.com 2>&1" | grep -qi "example domain"'
+check "control: the internet answers an open machine (example.com, else one.one.one.one)" 'on "$A2" "wget -q -O /dev/null -T 10 http://example.com || wget -q -O /dev/null -T 10 http://one.one.one.one/"'
 # Identity: a guest that changes its MAC or takes an address sends nothing.
 dev=$(on "$A2" 'ls /sys/class/net | grep -v "^lo$" | head -1')
 mac=$(on "$A2" "cat /sys/class/net/$dev/address")
@@ -250,6 +268,14 @@ pa=$(fc_pid "$A"); pa2=$(fc_pid "$A2")
 check "a Firecracker per machine, found by its own id" '[ -n "$pa" ] && [ -n "$pa2" ] && [ "$pa" != "$pa2" ]'
 ua=$(sudo awk '/^Uid:/ {print $2}' /proc/$pa/status); ua2=$(sudo awk '/^Uid:/ {print $2}' /proc/$pa2/status)
 check "jailer: not root, and a uid of its own per machine ($ua, $ua2)" '[ "$ua" != 0 ] && [ "$ua2" != 0 ] && [ "$ua" != "$ua2" ]'
+ga=$(sudo awk '/^Gid:/ {print $2}' /proc/$pa/status); ga2=$(sudo awk '/^Gid:/ {print $2}' /proc/$pa2/status)
+check "jailer: a gid of its own per machine, not root ($ga, $ga2)" '[ "$ga" != 0 ] && [ "$ga2" != 0 ] && [ "$ga" != "$ga2" ]'
+echo "   pids.max of a VMM leaf: $(sudo cat "$(leaf "$A")/pids.max" 2>&1)"
+th0=$(sudo awk '/^Threads:/ {print $2}' /proc/$pa2/status)
+n=$(on "$A2" 'i=0; while [ $i -lt 300 ]; do sleep 60 >/dev/null 2>&1 & i=$((i+1)); done; ls /proc | grep -c "^[0-9]"')
+th1=$(sudo awk '/^Threads:/ {print $2}' /proc/$pa2/status)
+check "a guest's processes are not host processes (guest runs $n, its VMM threads $th0 -> $th1)" '[ "$n" -ge 300 ] && [ "$th1" -le $((th0 + 2)) ]'
+on "$A2" 'kill $(pidof sleep)' || true
 check "jailer: no capabilities, no new privileges" '[ "$(cap_eff $pa)" = 0000000000000000 ] && [ "$(sudo awk "/^NoNewPrivs:/ {print \$2}" /proc/$pa/status)" = 1 ]'
 check "jailer: a seccomp filter on every thread" '[ "$(seccomp_all $pa)" = 2 ]'
 check "jailer: chrooted (its root holds the VMM socket, not the host's /usr or /etc/passwd)" 'sudo test -S /proc/$pa/root/run/firecracker.socket && ! sudo test -e /proc/$pa/root/usr/bin && ! sudo test -e /proc/$pa/root/etc/passwd'
@@ -320,23 +346,23 @@ check "OOM: nothing leaked" 'invariants'
 echo "== physical admission: guest memory plus 256 MiB, to the megabyte"
 cap=$(statusq .capacity.memory_mb); used0=$(statusq .used.memory_mb)
 check "an empty host commits nothing ($used0 of $cap MB)" '[ "$used0" = 0 ] && [ "$cap" = 12288 ]'
-P1=$(run --image alpine:3.20 --name adm-1 --namespace "$T-adm" --memory 4096 -- sleep 7200)
-P2=$(run --image alpine:3.20 --name adm-2 --namespace "$T-adm" --memory 4096 -- sleep 7200)
+P1=$(run --image $ALPINE --name adm-1 --namespace "$T-adm" --memory 4096 -- sleep 7200)
+P2=$(run --image $ALPINE --name adm-2 --namespace "$T-adm" --memory 4096 -- sleep 7200)
 check "two 4096 MB machines commit 2 x (4096 + 256) MB" '[ "$(statusq .used.memory_mb)" = 8704 ]'
 before=$(api /v1/machines | jq length)
-set +e; out=$(briqyard machine run --sleep never --image alpine:3.20 --name adm-3 --namespace "$T-adm" --memory 4096 -- sleep 7200 2>&1); rc=$?; set -e
+set +e; out=$(briqyard machine run --sleep never --image $ALPINE --name adm-3 --namespace "$T-adm" --memory 4096 -- sleep 7200 2>&1); rc=$?; set -e
 check "a third is refused as capacity, naming it" '[ "$rc" != 0 ] && grep -qi capacity <<<"$out"'
 check "the refusal made nothing and changed nothing committed" '[ "$(api /v1/machines | jq length)" = "$before" ] && [ "$(statusq .used.memory_mb)" = 8704 ]'
 fit=$(( cap - 8704 - 256 ))
-P3=$(run --image alpine:3.20 --name adm-fit --namespace "$T-adm" --memory "$fit" -- sleep 7200)
+P3=$(run --image $ALPINE --name adm-fit --namespace "$T-adm" --memory "$fit" -- sleep 7200)
 check "the exact remainder ($fit + 256 MB) is admitted: committed == capacity" '[ "$(statusq .used.memory_mb)" = "$cap" ]'
-set +e; out=$(briqyard machine run --sleep never --image alpine:3.20 --name adm-4 --namespace "$T-adm" --memory 128 -- sleep 60 2>&1); rc=$?; set -e
+set +e; out=$(briqyard machine run --sleep never --image $ALPINE --name adm-4 --namespace "$T-adm" --memory 128 -- sleep 60 2>&1); rc=$?; set -e
 check "one machine of 128 MB (384 MB charged) more is refused" '[ "$rc" != 0 ] && grep -qi capacity <<<"$out"'
 check "memory_pressure turns true on the host" 'wait_cond memory_pressure'
 check "memory pressure: the fleet places nothing new on the host" 'fleet_refuses memory_pressure adm-5 "$T-adm-fleet"'
 briqyard machine stop "$P1" >/dev/null
 check "a stop releases its memory at once" '[ "$(statusq .used.memory_mb)" = $(( cap - 4096 - 256 )) ]'
-P4=$(run --image alpine:3.20 --name adm-6 --namespace "$T-adm" --memory 128 -- sleep 7200)
+P4=$(run --image $ALPINE --name adm-6 --namespace "$T-adm" --memory 128 -- sleep 7200)
 check "the released room is taken again" '[ "$(mstate "$P4")" = running ]'
 rm_all "$P1" "$P2" "$P3" "$P4"
 check "admission: nothing leaked, nothing committed" 'invariants && [ "$(statusq .used.memory_mb)" = 0 ]'
@@ -347,7 +373,7 @@ echo "== chaos: SIGKILL in the middle of an operation, then recovery"
 mkowner() { # NAME MEMORY [IMAGE: one whose own command keeps running, since a fork starts the image's, not the source's]
   local id
   if [ -n "${3:-}" ]; then id=$(run --image "$3" --name "$1" --namespace "$T-c" --memory "$2" --volume 2G:/data)
-  else id=$(run --image alpine:3.20 --name "$1" --namespace "$T-c" --memory "$2" --volume 2G:/data -- sleep 7200); fi
+  else id=$(run --image $ALPINE --name "$1" --namespace "$T-c" --memory "$2" --volume 2G:/data -- sleep 7200); fi
   on "$id" 'echo 7 > /root/n; echo 7 > /data/n; sync' && echo "$id"
 }
 ctr() { on "$1" 'cat /root/n /data/n' | tr '\n' ' '; }
@@ -360,7 +386,7 @@ echo "-- mid-create"
 caught=0
 for d in 1 2.5 0.5 4; do
   destroy_named "$T-c" cr; settle || true
-  if kill_during "$d" briqyard machine run --sleep never --image python:3.12-slim --name cr --namespace "$T-c" --memory 256 -- sleep 7200; then caught=1; break; fi
+  if kill_during "$d" briqyard machine run --sleep never --image $PYSLIM --name cr --namespace "$T-c" --memory 256 -- sleep 7200; then caught=1; break; fi
 done
 check "a create was cut short (client failed, delay $d s)" '[ "$caught" = 1 ]'
 check "the daemon is back and the host settles" 'wait_api && settle'
@@ -369,12 +395,12 @@ check "mid-create: a machine settles running, or in error with its reason, or wa
 check "mid-create: invariants hold with what is left" 'invariants || [ "$st" = error ]'
 destroy_named "$T-c" cr; settle || true
 check "mid-create: destroyed, nothing leaked" 'invariants'
-CR=$(run --image python:3.12-slim --name cr --namespace "$T-c" --memory 256 -- sleep 7200)
+CR=$(run --image $PYSLIM --name cr --namespace "$T-c" --memory 256 -- sleep 7200)
 check "mid-create: the same create again succeeds" '[ "$(on "$CR" hostname)" = cr ]'
 rm_all "$CR"
 
 echo "-- mid-fork"
-SRC=$(mkowner src 256 nginx:alpine)
+SRC=$(mkowner src 256 $NGINX)
 caught=0
 for attempt in 1 2 3; do
   destroy_named "$T-c" fk; settle || true
@@ -399,23 +425,37 @@ rm_all "$FK"
 echo "-- mid-backup"
 BK=$(mkowner bk 256)
 on "$BK" 'head -c 500000000 /dev/urandom > /data/blob; sync' || true
+B0=$(briqyard machine backup "$BK" | jq -r .id)
+bkdir=$STORE/backups/$BK
+store_ids() { sudo find "$bkdir" -name "*.$1" 2>/dev/null | sed 's|.*/||; s|\.[a-z]*$||' | sort -u; }
+touch "$LOGS/b0.mark"; sleep 1
+# The second backup is under way once a stream newer than the first is on disk and its record is not.
+backup_streaming() { sudo find "$bkdir" -name '*.zfs' -newer "$LOGS/b0.mark" 2>/dev/null | grep -q . && ! sudo find "$bkdir" -name '*.json' -newer "$LOGS/b0.mark" 2>/dev/null | grep -q .; }
 caught=0
-for d in 0.8 1.5 2.5 0.4 4; do
-  if kill_during "$d" briqyard machine backup "$BK"; then caught=1; break; fi
+for attempt in 1 2 3; do
+  if kill_when backup_streaming briqyard machine backup "$BK"; then caught=1; break; fi
+  touch "$LOGS/b0.mark"; sleep 1
 done
-check "a backup was cut short (delay $d s)" '[ "$caught" = 1 ]'
+check "a backup was killed while its stream was being written (attempt $attempt)" '[ "$caught" = 1 ]'
 check "mid-backup: the source runs on, its counter whole" 'recovered "$BK"'
-n=$(briqyard machine backups "$BK" | jq length); echo "   backups listed after the crash: $n"
-if [ "$n" -gt 0 ]; then
-  last=$(briqyard machine backups "$BK" | jq -r '.[-1].id')
-  RB=$(briqyard machine restore --from "$BK" --backup "$last" --namespace "$T-c" --name bk-r1 | jq -r .id)
-  check "mid-backup: a backup that is listed restores, with the counter" '[ "$(ctr "$RB")" = "7 7 " ]'
+listed=$(briqyard machine backups "$BK" | jq -r '.[].id' | sort -u)
+echo "   listed after the crash: $(echo $listed); records in the store: $(echo $(store_ids json)); streams: $(echo $(store_ids zfs))"
+check "mid-backup: the first backup is still listed" 'grep -qx "$B0" <<<"$listed"'
+check "mid-backup: what is listed is exactly what the store has a record for" '[ "$listed" = "$(store_ids json)" ]'
+orphans=$(comm -13 <(store_ids json) <(store_ids zfs))
+echo "   streams with no record: ${orphans:-none}"
+check "mid-backup: no stream in the store without a recorded backup (no half-written backup left)" '[ -z "$orphans" ]'
+for b in $listed; do
+  RB=$(briqyard machine restore --from "$BK" --backup "$b" --namespace "$T-c" --name "bk-r-${b//[^0-9]/}" | jq -r .id)
+  check "mid-backup: listed backup $b restores, counter and 500 MB blob whole" '[ "$(ctr "$RB")" = "7 7 " ] && [ "$(on "$RB" "wc -c < /data/blob")" = 500000000 ]'
   rm_all "$RB"
-fi
+done
 B2=$(briqyard machine backup "$BK" | jq -r .id)
 RB=$(briqyard machine restore --from "$BK" --backup "$B2" --namespace "$T-c" --name bk-r2 | jq -r .id)
 check "mid-backup: a backup again works and restores whole" '[ "$(ctr "$RB")" = "7 7 " ] && [ "$(on "$RB" "wc -c < /data/blob")" = 500000000 ]'
 rm_all "$RB"
+orphans=$(comm -13 <(store_ids json) <(store_ids zfs))
+echo "   streams with no record after the next backup: ${orphans:-none}"
 check "mid-backup: invariants hold" 'invariants'
 rm_all "$BK"
 
@@ -439,12 +479,13 @@ rm_all "$SN"
 echo "-- mid-suspend"
 SU=$(mkowner su 1024)
 on "$SU" 'dd if=/dev/urandom of=/dev/shm/fill bs=1M count=500 2>/dev/null; sync' || true
+su_stopping() { [ "$(mstate "$SU")" = stopping ]; }
 caught=0
-for d in 0.3 0.6 1 1.6 0.1; do
-  if kill_during "$d" briqyard machine stop --suspend "$SU"; then caught=1; break; fi
+for attempt in 1 2 3; do
+  if kill_when su_stopping briqyard machine stop --suspend "$SU"; then caught=1; break; fi
   restore_running "$SU"
 done
-check "a suspend was cut short (delay $d s)" '[ "$caught" = 1 ]'
+check "a suspend was killed while the machine was stopping (attempt $attempt)" '[ "$caught" = 1 ]'
 settle || true
 st=$(mstate "$SU"); echo "   the machine is: $st"
 check "mid-suspend: stopped or running, never stuck in stopping" 'case "$st" in running|stopped) true;; *) false;; esac'
@@ -474,7 +515,7 @@ check "fleet killed: the machines run on without it" '[ "$(mstate "$K1")" = runn
 sudo systemctl start briqyard-fleet
 check "fleet killed: it comes back, its host ready" 'for i in $(seq 1 90); do curl -fsS -m 3 $FLEET_URL/v1/hosts 2>/dev/null | jq -e "length == 1 and all(.state == \"ready\")" >/dev/null && exit 0; sleep 1; done; exit 1'
 check "fleet killed: it lists the machines again" '[ "$(fleet machine ls --namespace "$T-c" | awk "NR>1" | wc -l)" = 2 ]'
-check "fleet killed: and creates through it" 'F=$(fleet machine run --sleep never --image alpine:3.20 --name viafleet --namespace "$T-c" --memory 128 -- sleep 600 | jq -r .id) && [ "$(on "$F" hostname)" = viafleet ] && briqyard machine rm "$F" >/dev/null'
+check "fleet killed: and creates through it" 'F=$(fleet machine run --sleep never --image $ALPINE --name viafleet --namespace "$T-c" --memory 128 -- sleep 600 | jq -r .id) && [ "$(on "$F" hostname)" = viafleet ] && briqyard machine rm "$F" >/dev/null'
 
 echo "-- power cut: the daemon and every VMM at once"
 CUT=($(pgrep -x firecracker) "$(daemon_pid)")
@@ -497,7 +538,7 @@ sudo zfs create -o reservation=$(( avail - 64 * 1048576 )) "$FILLED"
 left=$(sudo zfs get -Hp -o value available "$POOL")
 check "the pool is full ($left bytes left)" '[ "$left" -lt $(( 100 * 1048576 )) ]'
 dpid=$(daemon_pid)
-set +e; out=$(briqyard machine run --sleep never --image node:22-bookworm-slim --name full-new --namespace "$T-c" --memory 256 -- sleep 600 2>&1); rc=$?; set -e
+set +e; out=$(briqyard machine run --sleep never --image $NODE --name full-new --namespace "$T-c" --memory 256 -- sleep 600 2>&1); rc=$?; set -e
 echo "   refused with: $(echo "$out" | head -c 300)"
 check "full pool: a create fails and says so, the client does not hang" '[ "$rc" != 0 ] && [ -n "$out" ]'
 settle || true
@@ -509,7 +550,7 @@ check "full pool: the fleet places nothing new on the host (503 capacity)" 'flee
 sudo zfs destroy -f "$FILLED"; FILLED=
 destroy_named "$T-c" full-new; settle || true
 check "pool freed: the fleet places a machine again" 'fleet_places full-fleet2 "$T-full-fleet"'
-check "pool freed: a create works again" 'N=$(run --image alpine:3.20 --name after-full --namespace "$T-c" --memory 256 -- sleep 600) && [ "$(on "$N" hostname)" = after-full ] && briqyard machine rm "$N" >/dev/null'
+check "pool freed: a create works again" 'N=$(run --image $ALPINE --name after-full --namespace "$T-c" --memory 256 -- sleep 600) && [ "$(on "$N" hostname)" = after-full ] && briqyard machine rm "$N" >/dev/null'
 check "pool freed: the machine kept its counter, nothing leaked" '[ "$(ctr "$W")" = "7 7 " ] && invariants'
 rm_all "$W"
 

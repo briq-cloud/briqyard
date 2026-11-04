@@ -84,6 +84,15 @@ stray=$(comm -23 <(echo "$fcs") <(echo "$ids"))
 taps=$(ip -o link show type tun 2>/dev/null | awk -F': ' '{print $2}' | grep '^bt' | sort)
 [ "$pending" = 0 ] && check_eq "taps == live machines" "$(echo "$taps" | grep -c . || true)" "$n_running"
 
+# --- cgroups (ADR 0068): a VMM leaf only for a machine the daemon knows ---
+leaves=$(ls /sys/fs/cgroup/firecracker 2>/dev/null | sed 's/^m-/m_/; s/-/_/g' | sort -u)
+stray=$(comm -23 <(echo "$leaves") <(echo "$ids"))
+[ -z "$stray" ] && ok "no cgroup leaf without a machine" || fail "cgroup leaves without a machine: $(echo "$stray" | tr '\n' ' ')"
+if [ "$pending" = 0 ]; then
+  nolive=$(comm -23 <(echo "$fcs") <(echo "$leaves"))
+  [ -z "$nolive" ] && ok "every live firecracker has its cgroup leaf" || fail "firecrackers without a cgroup leaf: $(echo "$nolive" | tr '\n' ' ')"
+fi
+
 # --- namespaces: a bridge per namespace the daemon knows, none else ---
 bridges=$(ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | grep '^by' | grep -c . || true)
 check_eq "bridges == namespaces" "$bridges" "$n_namespaces"

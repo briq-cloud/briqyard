@@ -29,8 +29,7 @@ suites on `main` before this change:
 **One suite, `hack/qualify.sh`, its own parallel job `qualification`** in `native.yml` (a fourth entry of the
 `more-suites` matrix beside stress, monitoring and alerts), run by `hack/native-ci-more.sh qualification` on
 the isolated runner. It kills the daemon, the fleet and every Firecracker, fills the pool and lowers one VMM's
-ceiling, so `hack/native-ci-more.sh` refuses to run it outside a disposable GitHub-hosted runner. `chaos.py` runs inside it for four minutes. 119 checks,
-about 460 s of suite time (about 11 minutes of job). The existing suites are unchanged.
+ceiling, so `hack/native-ci-more.sh` refuses to run it outside a disposable GitHub-hosted runner. `chaos.py` runs inside it for four minutes. about 460 s of suite time (about 10 minutes of job). The images are pinned by digest and pulled through the host's registry mirror. The invariants script gains the cgroup leaf checks, which every stress run uses too.
 
 **An attempt that must fail is checked for its reason, beside a control.** A refused connection is told from a
 dropped one by the client's own words (`timed out` is a drop, `refused` would be a reject), a loss by its
@@ -53,31 +52,35 @@ leftover is destroyed (nothing leaked), and the same operation succeeds again.
 | Fleet killed | "the fleet killed": machines run on, the fleet returns, lists and creates |
 | Power cut | the daemon and every VMM killed at once: nothing stuck, none claims to run without a VMM, counters whole |
 | Pool full | a reservation takes the pool's last space: the create fails with `No space left`, the daemon and the machines live, `disk_pressure`, the fleet refuses, then everything recovers |
-| Network | other namespace both ways, ping, the host through two bridge addresses, the API and ingress ports, the metadata address, two private ranges, a changed MAC, a foreign address, egress `none` (name and address) |
+| Network | other namespace both ways, ping, the host through two bridge addresses and its uplink address, the API and ingress ports, the metadata address, two private ranges, DNS across namespaces, a changed MAC, a foreign address, egress `none` (name and address), IPv6 (the forward chain's rule state plus a probe) |
 | Filesystem, devices, vsock | a guest sees its three disks only, a sibling's file is absent, `/dev/kvm` absent, vsock to the host reset, to another CID not made |
-| Jail and limits | uid per machine, no capabilities, no new privileges, seccomp on every thread, chroot, pid namespace, own cgroup holding one process, another uid denied, VMM ceiling guest + 256 MiB, no swap, group kill, CPU quota, OOM scores +500 and -900 |
+| Jail and limits | uid and gid per machine, no capabilities, no new privileges, seccomp on every thread, chroot, pid namespace, own cgroup holding one process, another uid denied, VMM ceiling guest + 256 MiB, no swap, group kill, CPU quota, OOM scores +500 and -900 |
+| Processes | 300 guest processes add no host thread to the VMM |
 | Secrets | an env secret in its machine only (siblings, host process list, no host credential in the guest) |
 | Guest OOM | a real memory hog killed in the guest (exit 137, the kernel's message on the console); the machine, its VMM, the daemon and the sibling untouched, no cgroup event; the main process killed: `exit.oom_killed` |
 | VMM OOM | one leaf's `memory.max` lowered under what its VMM holds (a guest cannot push Firecracker past guest + 256 MiB): the kernel group-kills it, the machine is `stopped` with exit 255, `oom_killed` false, the daemon logs `vmm_cgroup_oom_evidence` for it, the daemon and the sibling survive, the next start has the policy ceiling |
 | Physical admission | two 4096 MB machines commit 2 × (4096 + 256); a third is refused `capacity` and changes nothing; the exact remainder is admitted to the megabyte; one more is refused; `memory_pressure` follows and the fleet refuses; a stop releases at once |
 
-**How the daemon reports a VMM's OOM.** The record carries no `oom_killed` for it: that flag is the guest's init
-reporting its main process killed by the guest's OOM. A VMM killed by its cgroup ends as exit 255 (no report from
-the init), and the proof is the daemon's log line `VMM local memory events` with
-`reason: vmm_cgroup_oom_evidence` (ADR 0065: exit 137 or `oom_killed` alone never identifies it). The suite checks
-that and checks `oom_killed` is false, so the two causes cannot be confused.
+**How the daemon reports a VMM's OOM (known defect, fixed separately).** Today a VMM killed by its cgroup ends as
+exit 255 with `oom_killed` false, and the only proof is the daemon's log line `VMM local memory events` with
+`reason: vmm_cgroup_oom_evidence`. This is not pinned as correct. The suite asserts the evidence line and the
+machine's stop, and prints `exit.oom_killed`; when the fix lands (`vmm_oom_killed`) the one check to tighten is
+"VMM over its ceiling: not mistaken for a guest OOM", in `hack/qualify.sh`.
 
 ## Findings
 
-No product bug found. Observations:
-
-- A fork starts the image's own command, not the source's. A fork of a machine whose command is `sleep` exits 0
-  at once. The suite forks an image whose command keeps running.
+- **Known, being fixed elsewhere:** the VMM OOM report above.
+- **Known, being decided elsewhere:** a fork starts the image's own command, not the source's, so a fork of a
+  `sleep` machine exits 0 at once. The suite forks an image whose command keeps running and pins neither behaviour.
 - After a freed pool the fleet keeps refusing for a few seconds (its view follows the heartbeat); the suite polls.
 - The fleet's refusal under disk pressure reads `no host has room for this machine (capacity)`, under memory
   pressure it names `memory_pressure`.
-- `stress` failed once in validation on its churn bound (`daemon RSS grew 48.3 MB over cycles 3..4 (bound 32 MB)`),
-  a job this change does not touch.
+- `stress` failed once in validation on its churn bound (`daemon RSS grew 48.3 MB over cycles 3..4`), a job this
+  change does not touch.
+- Added after review: the invariants now check cgroup leaves (none without a machine, one for every live
+  Firecracker); a backup is killed while its stream is on disk and the store is read afterwards (listed ==
+  recorded, no stream without a record, every listed backup restores whole); a suspend is killed while the
+  machine is `stopping`. Their results are in the PR description.
 
 ## Not covered, and why
 
@@ -91,6 +94,8 @@ No product bug found. Observations:
 | Global (host) OOM and victim order | by design not part of normal tests (ADR 0065): it takes the runner down; `hack/oom-group-smoke.sh` stays the by-hand test on an empty host |
 | Sustained soak | hours, not minutes: `stress.py --churn` and `chaos.py` run for minutes here |
 | Noisy neighbours on shared hardware, hostile guest code against Firecracker or KVM | needs dedicated hosts and a threat model, not a nested runner |
+| IPv6 proven by traffic | the runner has no IPv6 route, so a probe cannot distinguish the firewall from no route; the forward chain's rule is checked as state, with no control |
+| A `pids.max` on the VMM leaf | its value is printed; no limit is asserted since none is specified |
 | A second kill during recovery, a kill of the registry's host | the fleet suites own the registry; a second crash during adoption is not tried |
 
 ## Consequences
