@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.24 — 2026-11-04
+
+### Documentation
+
+- record the ruleset that protects main (#151) ([4e456aa8](https://github.com/briq-cloud/briqyard/commit/4e456aa8d44de2ad099da06d35a87cc06577c5d4))
+
+
+### Fixes
+
+- a backup's missing key is a typed error, not a 500 with the fleet's address (#150) ([9ac0a2e2](https://github.com/briq-cloud/briqyard/commit/9ac0a2e29796ad18cec8203d265fea22a9d12772))
+
+- count a host's capacity refusals (#154) ([5d33f6d3](https://github.com/briq-cloud/briqyard/commit/5d33f6d3ca77e863abdd1426e530e02d37112ced))
+
+
+### Maintenance
+
+- stop the daemon before making known machines' leaves (#149) ([22ca2593](https://github.com/briq-cloud/briqyard/commit/22ca2593fc31ac5fdd61b3923849ec1a337e0d06))
+
+- qualify restore with a real workload (#147) ([b4923ea1](https://github.com/briq-cloud/briqyard/commit/b4923ea187117b12bb18f10fc1a19c23ec136d5e))
+
 ## 0.1.23 — 2026-11-04
 
 ### Upgrade notes
