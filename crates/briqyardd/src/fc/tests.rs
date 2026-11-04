@@ -767,6 +767,7 @@ async fn snapshot_keeps_its_durability_choice_and_resumes_after_failure() {
                 incarnation: None,
                 exited,
                 exit,
+                vmm_oom: Default::default(),
             };
             for name in ["snap.state", "snap.mem"] {
                 std::fs::write(dir.path().join(name), b"partial").unwrap();

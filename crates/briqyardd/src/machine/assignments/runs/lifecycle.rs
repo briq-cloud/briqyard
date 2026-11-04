@@ -265,7 +265,9 @@ impl Manager {
         };
         let mut exit = live.exit.clone();
         let _ = exit.wait_for(|report| report.is_some()).await;
-        let report = exit.borrow().clone().unwrap_or(guest::ExitReport {
+        let reported = exit.borrow().clone();
+        let vmm_oom = live.vmm_oom.get() && reported.is_none();
+        let report = reported.unwrap_or(guest::ExitReport {
             code: 255,
             ..Default::default()
         });
@@ -287,7 +289,7 @@ impl Manager {
             self.finish_run_stopped(entry, stop::USER);
         } else {
             self.finish_run_stopped(entry, stop::EXIT);
-            self.exited(entry, report.code, report.oom, report.code != 0);
+            self.exited(entry, report.code, report.oom, vmm_oom, report.code != 0);
         }
     }
     pub(in crate::machine) async fn fail_assigned_probe(
@@ -334,7 +336,7 @@ impl Manager {
             });
             let _ = self.save(entry);
         } else {
-            self.exited(entry, 255, false, true);
+            self.exited(entry, 255, false, false, true);
         }
     }
 }

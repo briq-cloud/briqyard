@@ -267,7 +267,10 @@ exit status is never stolen. When the main process exits, the init connects out 
 `ExitReport` frame (code, oom, requested; with a program it could not start, its reason), waits for the daemon's close, and resets the machine,
 which ends Firecracker; the daemon settles the machine from the report and applies the restart
 policy (ADR 0004). The `[briqyard] exit …` line on the serial console is a trace for a person;
-nothing reads it, so nothing a guest prints can set its exit.
+nothing reads it, so nothing a guest prints can set its exit. A VMM that ends without a report
+reads as code 255. When its cgroup also recorded an OOM group kill during the run, the exit
+carries `vmm_oom_killed: true` (the host's evidence) and the event says "killed: VMM over its
+memory ceiling"; `oom_killed` stays the guest's own word (ADR 0096).
 
 ### Backups
 

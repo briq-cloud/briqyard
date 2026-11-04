@@ -21,6 +21,7 @@ jobs:
           python3 -m unittest discover -s hack -p "test_monitoring_auth.py"
           python3 -m unittest discover -s hack -p "test_monitoring_alerts.py"
           python3 -m unittest discover -s hack -p "test_stress_safety.py"
+          python3 -m unittest discover -s hack -p "test_stress_trend.py"
           python3 hack/release.py check > /dev/null
           python3 hack/monitoring-alert-check.py --check-source
           bash -n hack/bootstrap-host.sh

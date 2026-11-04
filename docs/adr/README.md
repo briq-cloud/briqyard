@@ -90,4 +90,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0092](0092-filesystem-consistent-copies.md) | Filesystem-consistent copies: guest sync and connection-held freeze; sync before sealing |
 | [0093](0093-quiet-boot-and-fast-readiness.md) | The kernel boots `quiet` (errors and panics on the console, the ring buffer keeps the rest, `loglevel=7` in `kernel_args` undoes it) and `wait_ready` polls every 5 ms for 5 s, then every 100 ms, with the same deadline and error; a guest-side ready signal rejected |
 | [0094](0094-alerts-fire-and-resolve-in-ci.md) | The alerts fire and resolve in native CI: real causes, a local webhook, the production rule file |
+| [0096](0096-vmm-memory-kill-is-reported.md) | A VMM killed over its memory ceiling is reported as `exit.vmm_oom_killed`, apart from the guest's `oom_killed`; a stopped copy stays `crash` |
 | [0097](0097-a-fork-keeps-its-sources-command.md) | A disk fork runs its source's entrypoint, command, files, ports and environment unless the request sets them, as a restore does |

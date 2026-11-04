@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.20 — 2026-11-04
+
+### Upgrade notes
+
+Read these before rolling the release. The procedure is [Upgrade](https://github.com/briq-cloud/briqyard/blob/v0.1.20/docs/OPERATIONS.md#upgrade), and the notes of v0.1.19 still apply to a host coming from an earlier release.
+
+- **Startup barrier on hosts with thousands of idle machine cgroups.** A host upgraded in place can hold thousands of empty machine cgroups left by machines that are gone. The barrier now accepts up to 65,536 of them, and so does the bound on recorded machines. The first start after the upgrade removes the idle ones, logging each orphan at `debug`. A v0.1.19 daemon on such a host stays `recovery_unresolved` and starts no machine until this release is installed.
+- **Filesystem-consistent copies** (ADR 0092, the copy integration). A disk snapshot, backup or fork of a running machine now freezes the guest's filesystems around the disk copy by default, and syncs before a memory snapshot. The result says what it got: `consistency` is `filesystem`, `synced` or `crash` on snapshots, backups and forked machines. A busy source pays more than an idle one (about 450-600 ms added on a 4-vCPU bench, against about 42 ms idle; relative figures, not guarantees). Send `consistency: "crash"` on a request to skip the sync and freeze and accept a crash-consistent copy. A machine whose root disk was made before the guest init gained these operations reports `crash` with `init_too_old` until its root disk is made again.
+- **The guest init digest may change with this release.** A host whose `templates.sandbox_recipes[*].init_sha256` (and `templates.init_ready_init_sha256`, if set) names the init must carry the new digest before the upgrade, as for v0.1.19: take it from the `briqyard-init-linux-x86_64` line of `SHA256SUMS-x86_64`. Otherwise the host stops advertising `sandbox-ready-v1` after the upgrade. When the digest changes, root disks, seeds and warm templates are made again and seeds sealed before are refused, not booted cold: follow the roll order in [Upgrade](https://github.com/briq-cloud/briqyard/blob/v0.1.20/docs/OPERATIONS.md#upgrade) and [Sandbox seeds](https://github.com/briq-cloud/briqyard/blob/v0.1.20/docs/SANDBOX-SEEDS.md).
+
+### Features
+
+- freeze a guest's filesystems around a disk copy (#127) ([f46e51f4](https://github.com/briq-cloud/briqyard/commit/f46e51f4a7b900bd16fb458b5b41ba476b5d7a08))
+
+
+### Fixes
+
+- a host with thousands of idle machine cgroups passes the startup barrier (#134) ([98f2c65c](https://github.com/briq-cloud/briqyard/commit/98f2c65c6382ef4c4bc17ece0dafcc8848678547))
+
+
+### Maintenance
+
+- judge daemon memory by its trend over cycles (#130) ([4a63d752](https://github.com/briq-cloud/briqyard/commit/4a63d752eea1d858c7b260b1c5806da47be56280))
+
 ## 0.1.19 — 2026-11-04
 
 ### Upgrade notes

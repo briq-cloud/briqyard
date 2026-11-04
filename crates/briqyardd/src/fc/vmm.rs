@@ -77,6 +77,24 @@ pub struct Vm {
     /// What the init reported when the main process ended; `None` until then, and the
     /// channel closes with the process, so a wait on it ends either way.
     pub exit: watch::Receiver<Option<guest::ExitReport>>,
+    /// Set before `exited` turns true when the VMM's cgroup recorded an OOM group kill.
+    pub vmm_oom: VmmOom,
+}
+
+/// Whether the kernel killed the VMM over its cgroup's memory ceiling (ADR 0096). Shared by
+/// the task that reads the cgroup's events and the machine that settles the exit: the
+/// reader sets it before it publishes the process's exit, so the settling machine never
+/// sees the exit without the evidence.
+#[derive(Clone, Debug, Default)]
+pub struct VmmOom(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl VmmOom {
+    pub fn set(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn get(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 impl Vm {
@@ -387,7 +405,9 @@ impl Vmm for Firecracker {
                 .final_cgroup_use(&id, true)?
                 .reading()
                 .context("orphan leaf disappeared before final counters")?;
-            tracing::info!(
+            // Debug: a host can hold thousands of orphans, and one line each would pass
+            // journald's rate limit and drop the lines that matter. The startup line counts them.
+            tracing::debug!(
                 machine = id,
                 cpu_usec = usage.cpu_usec,
                 "orphan final VMM counters"
@@ -618,6 +638,7 @@ impl Vmm for Firecracker {
             incarnation: Incarnation::read(proc.pid()),
             exited,
             exit,
+            vmm_oom: proc.vmm_oom(),
         };
         tokio::spawn(async move {
             let mut proc = proc;
@@ -1039,6 +1060,9 @@ impl Firecracker {
         let monitor_identity = identity.clone();
         #[cfg(target_os = "linux")]
         let oom_evidence = super::memory::OomEvidence::capture(id, pid);
+        let vmm_oom = VmmOom::default();
+        #[cfg(target_os = "linux")]
+        let vmm_oom_set = vmm_oom.clone();
         tokio::spawn(async move {
             #[cfg(target_os = "linux")]
             let dead = monitor_identity.wait_dead().await.is_ok();
@@ -1055,7 +1079,9 @@ impl Firecracker {
 
             #[cfg(target_os = "linux")]
             if let Some(evidence) = oom_evidence {
-                evidence.record(&machine);
+                if evidence.record(&machine) == Some(super::memory::VMM_OOM_EVIDENCE) {
+                    vmm_oom_set.set();
+                }
             } else {
                 tracing::warn!(
                     machine,
@@ -1091,6 +1117,7 @@ impl Firecracker {
             incarnation: Incarnation::read(pid),
             exited,
             exit,
+            vmm_oom,
         })
     }
 }
