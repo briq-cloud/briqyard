@@ -611,8 +611,8 @@ fn the_snapshot_table() {
         lines,
         [
             "ID               NAME                 CREATED               DISKS      MEMORY CONSISTENCY",
-            "s_0123456789ab   before-migration     2026-10-19 08:30:00   root,data  yes crash",
-            "s_ba9876543210   -                    2026-10-19 08:30:00   data       no crash",
+            "s_0123456789ab   before-migration     2026-10-19 08:30:00   root,data  yes unsynced",
+            "s_ba9876543210   -                    2026-10-19 08:30:00   data       no unsynced",
         ]
     );
 }
