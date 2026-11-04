@@ -27,7 +27,7 @@ CONFIG
 export BRIQYARD_TOKEN=native-freeze-measure
 handover
 python3 - <<'PY'
-import json, os, platform, statistics, subprocess, time, urllib.request
+import json, os, platform, statistics, subprocess, time, urllib.request, urllib.error, itertools
 base=os.getenv('BRIQYARD_URL','http://127.0.0.1:7420')
 assert base.startswith('http://127.0.0.1:'), 'native loopback host required'
 headers={'Content-Type':'application/json'}
@@ -51,22 +51,24 @@ def summary(xs):
     xs=sorted(xs);return {'n':len(xs),'p50_ms':statistics.median(xs),'p95_ms':xs[max(0,__import__('math').ceil(.95*len(xs))-1)],'max_ms':max(xs),'samples_ms':xs}
 samples={}
 def record(name,fn,n=20): samples[name]=[measure(fn) for _ in range(n)]
-ns='freeze-measure-'+str(os.getpid());ids=[]
+ns='freeze-measure-'+str(os.getpid());ids=[];serial=itertools.count();backup_owners=set()
 def create(cmd=None):
-    m=api('POST','/machines',{'namespace':ns,'image':'python:3.12-alpine','size':{'vcpus':1,'memory_mb':512},'cmd':cmd or ['sleep','3600'],'sleep':'never','disk_limits':{'bandwidth_mb':32,'burst_sec':0} if cmd else None})
+    m=api('POST','/machines',{'namespace':ns,'name':'create-'+str(next(serial)),'image':'python:3.12-alpine','size':{'vcpus':1,'memory_mb':512},'cmd':cmd or ['sleep','3600'],'sleep':'never','disk_limits':{'bandwidth_mb':32,'burst_sec':0} if cmd else None})
     ids.append(m['id']);wait(m['id'],'running');return m['id']
 def fork(crash=False):
     spec={'machine_id':source}
     if crash:spec['consistency']='crash'
     t=time.monotonic()
-    m=api('POST','/machines',{'namespace':ns,'fork':spec,'start':False});ids.append(m['id'])
+    m=api('POST','/machines',{'namespace':ns,'name':'fork-'+str(next(serial)),'size':{'vcpus':1,'memory_mb':512},'fork':spec,'start':False});ids.append(m['id'])
     wait(m['id'],'created');elapsed=(time.monotonic()-t)*1000
     api('DELETE','/machines/'+m['id']);ids.remove(m['id']);return elapsed
+phase='create_source'
 try:
     source=create(); idle_source=source
     # Alternate paired samples to reduce drift; delete timing excluded below by separately
     # measuring the admission and creation boundary.
     for busy in (False,True):
+        phase="busy_forks" if busy else "idle_forks"
         if busy:
             writer="import os,time,json; f=open('/root/busy','wb',buffering=0); log=open('/tmp/stalls','w',buffering=1); b=os.urandom(1048576)\nwhile not os.path.exists('/tmp/end-writer'):\n t=time.monotonic(); f.seek(0); f.write(b*32); os.fsync(f.fileno()); log.write(str((time.monotonic()-t)*1000)+'\\n')"
             source=create(['python3','-c',writer])
@@ -80,27 +82,36 @@ try:
                     after=cli('exec',source,'--','cat','/tmp/stalls').splitlines()
                     samples.setdefault('writer_'+('crash' if crash else 'frozen')+'_fork_ms',[]).extend(float(x) for x in after[len(before):])
         if busy:
+            phase="busy_backup"
+            backup_owners.add(source)
             before_backup=cli('exec',source,'--','cat','/tmp/stalls').splitlines()
             record('busy_backup_ms',lambda:api('POST','/machines/'+source+'/backups',{}))
             all_writes=cli('exec',source,'--','cat','/tmp/stalls').splitlines()
             samples['writer_backup_ms']=[float(x) for x in all_writes[len(before_backup):]]
             api('DELETE','/machines/'+source);ids.remove(source);source=idle_source
+    phase='idle_backup'
+    backup_owners.add(source)
     record('backup_ms',lambda:api('POST','/machines/'+source+'/backups',{}))
     for dirty in (1,128):
+        phase="stop_dirty_"+str(dirty)
         def sleep_once():
             cli('exec',source,'--','sh','-c',f'dd if=/dev/zero of=/root/dirty bs=1M count={dirty} 2>/dev/null')
             t=time.monotonic();api('POST','/machines/'+source+'/stop',{'suspend':True});wait(source,'stopped')
             samples.setdefault(f'stop_{dirty}MiB_ms',[]).append((time.monotonic()-t)*1000)
             api('POST','/machines/'+source+'/start',{});wait(source,'running')
         for _ in range(20):sleep_once()
+    phase='create_control'
     # Creation ends at running; cleanup is outside the timed interval.
     def create_control():
         t=time.monotonic();mid=create();elapsed=(time.monotonic()-t)*1000
         api('DELETE','/machines/'+mid);ids.remove(mid);return elapsed
     samples['create_ms']=[create_control() for _ in range(20)]
+    phase='warm_builder'
     builder=api('POST','/machines',{'namespace':ns,'name':'warm-builder','image':'docker.io/library/alpine@sha256:85f2b723e106c34644cd5851d7e81ee87da98ac54672b29947c052a45d31dc2f','size':{'vcpus':1,'memory_mb':256},'template_build':'init-ready-v1','sleep':'never'})
     ids.append(builder['id']);wait(builder['id'],'running')
+    phase='warm_seal'
     sealed=api('POST','/machines/'+builder['id']+'/snapshots',{'memory':True,'template':True})
+    phase='warm_catalog'
     entry={'id':'freeze-control','namespace':ns,'type':'shell','source_machine':builder['id'],'snapshot':sealed['id'],'generation':sealed['clone_generation'],'size':{'vcpus':1,'memory_mb':256,'cpu_millis':1000},'max_ready':1}
     configure="from pathlib import Path; import yaml,json,sys; p=Path('/etc/briqyard/config.yaml'); c=yaml.safe_load(p.read_text()); c['templates'].update(warm_pools=True,warm_policy={'budget':{'memory_mb':2048,'cpu_millis':4000,'root_disk_gb':32},'headroom':{'memory_mb':128,'cpu_millis':0,'disk_free_gb':1},'min_mem_available_mb':128,'max_fills':1,'catalog':[json.loads(sys.argv[1])]}); p.write_text(yaml.safe_dump(c,sort_keys=False))"
     subprocess.run(['sudo','python3','-c',configure,json.dumps(entry)],check=True)
@@ -115,6 +126,7 @@ try:
         try:api('GET','/namespaces');break
         except Exception:time.sleep(1)
     api('PUT','/namespaces/'+ns+'/warm-catalog/freeze-control',{'desired':1})
+    phase='warm_claim'
     for i in range(20):
         deadline=time.monotonic()+180
         while time.monotonic()<deadline:
@@ -131,16 +143,30 @@ try:
         samples[load+'_fork_added_ms']=[f-c for f,c in zip(samples[load+'_frozen_fork_ms'],samples[load+'_crash_fork_ms'])]
     print(json.dumps({'runner':platform.machine(),'cpus':os.cpu_count(),'shared_hosted_runner':True,'measurements':{k:summary(v) if v else {'n':0} for k,v in samples.items()},'warm_claim':'qualified init-ready-v1, admission through host readiness'},indent=2))
 except Exception as error:
-    print(json.dumps({'runner':platform.machine(),'cpus':os.cpu_count(),'complete':False,'error':type(error).__name__,'measurements':{k:summary(v) if v else {'n':0} for k,v in samples.items()}},indent=2),flush=True)
+    api_code=None
+    if isinstance(error,urllib.error.HTTPError):
+        try:
+            response=json.loads(error.read(4096))
+            if response.get('code') in ('invalid','not_found','conflict','unauthorized','capacity','bad_state','pool_empty','other_host'):api_code=response['code']
+        except Exception:pass
+    print(json.dumps({'runner':platform.machine(),'cpus':os.cpu_count(),'complete':False,'error':type(error).__name__,'phase':phase,'http_status':getattr(error,'code',None),'api_code':api_code,'measurements':{k:summary(v) if v else {'n':0} for k,v in samples.items()}},indent=2),flush=True)
     raise
 finally:
     try:api('DELETE','/namespaces/'+ns+'/warm-pools/freeze-control')
     except Exception:pass
+    for owner in backup_owners:
+        try:
+            backups=api('GET','/machines/'+owner+'/backups')
+            for backup in backups:
+                try:api('DELETE','/machines/'+owner+'/backups/'+backup['id']+'?chain=true')
+                except Exception:pass
+        except Exception:pass
     for mid in ids:
         try:api('DELETE','/machines/'+mid)
         except Exception:pass
     for machine in api('GET','/machines?namespace='+ns):
         try:api('DELETE','/machines/'+machine['id'])
         except Exception:pass
-    api('DELETE','/namespaces/'+ns)
+    try:api('DELETE','/namespaces/'+ns)
+    except Exception:pass
 PY
