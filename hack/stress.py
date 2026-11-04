@@ -369,8 +369,7 @@ class Run:
         def one(kv):
             (t, n), m = kv
             self.exec(m["id"], ["sh", "-c", "echo forked > /root/forked; sync"])
-            # A fork takes its source's disks and image, not its command: without one it runs
-            # the image's, which may exit at once.
+            # The request names the command; without one the fork keeps its source's (ADR 0097).
             f = self.api.call("POST", "/v1/machines", {"namespace": t, "name": f"{n}-fork", "fork": {"machine_id": m["id"], "copy": "disk"}, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}, op="fork", timeout=600)
             try:
                 f = self.wait_state(f["id"], {"running"}, timeout=self.a.boot_timeout)

@@ -624,3 +624,76 @@ async fn records_written_before_the_rename_still_load() {
     // The namespaces' records stay in the directory they were first written to.
     assert_eq!(crate::store::NAMESPACES, "tenants");
 }
+
+fn forked(src: &str, name: &str, h: &Harness) -> api::CreateMachineRequest {
+    api::CreateMachineRequest {
+        image: String::new(),
+        start: Some(false),
+        fork: Some(api::ForkSpec {
+            consistency: None,
+            snapshot: None,
+            machine_id: src.into(),
+            copy: String::new(),
+        }),
+        ..h.request(name)
+    }
+}
+
+#[tokio::test]
+async fn a_fork_keeps_its_sources_command_unless_the_request_sets_one() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    let file = |path: &str| api::File {
+        path: path.into(),
+        base64: "aGk=".into(),
+        mode: None,
+    };
+    let src =
+        h.m.create_made(api::CreateMachineRequest {
+            entrypoint: Some(vec!["/bin/sh".into(), "-c".into()]),
+            cmd: Some(vec!["sleep 1000".into()]),
+            env: [("A".into(), "src".into()), ("B".into(), "src".into())].into(),
+            files: vec![file("/etc/a")],
+            ports: vec![8080],
+            start: Some(false),
+            ..h.request("src")
+        })
+        .await
+        .unwrap();
+    // A request that says nothing runs what the source ran.
+    let rec = |id: &str| h.m.entry(id).unwrap().snapshot();
+    let bare = h.m.create_made(forked(&src.id, "bare", &h)).await.unwrap();
+    let r = rec(&bare.id);
+    assert_eq!(r.entrypoint, Some(vec!["/bin/sh".to_string(), "-c".into()]));
+    assert_eq!(r.cmd, Some(vec!["sleep 1000".to_string()]));
+    assert_eq!(r.env.get("B").map(String::as_str), Some("src"));
+    assert_eq!((r.files.len(), r.ports.clone()), (1, vec![8080]));
+    // What the request sets wins: a command, an empty one (the image's own), a variable, the
+    // files and the ports; the variables it leaves out stay the source's.
+    let own =
+        h.m.create_made(api::CreateMachineRequest {
+            entrypoint: Some(vec![]),
+            cmd: Some(vec![]),
+            env: [("A".into(), "fork".into())].into(),
+            files: vec![file("/etc/b"), file("/etc/c")],
+            ports: vec![9090],
+            ..forked(&src.id, "own", &h)
+        })
+        .await
+        .unwrap();
+    let r = rec(&own.id);
+    assert_eq!((r.entrypoint, r.cmd), (Some(vec![]), Some(vec![])));
+    assert_eq!(r.env.get("A").map(String::as_str), Some("fork"));
+    assert_eq!(r.env.get("B").map(String::as_str), Some("src"));
+    assert_eq!((r.files.len(), r.ports), (2, vec![9090]));
+    let other =
+        h.m.create_made(api::CreateMachineRequest {
+            cmd: Some(vec!["true".into()]),
+            ..forked(&src.id, "other", &h)
+        })
+        .await
+        .unwrap();
+    let r = rec(&other.id);
+    assert_eq!(r.cmd, Some(vec!["true".to_string()]));
+    assert_eq!(r.entrypoint, Some(vec!["/bin/sh".to_string(), "-c".into()]));
+}

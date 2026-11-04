@@ -141,13 +141,13 @@
         namespace: { type: string, description: "owns the machine and its network: a-z, 0-9, _ and -, at most 64 characters" }
         name: { type: string, description: a DNS label, unique in the namespace; `<name>.internal` resolves to the machine }
         image: { type: string, description: an OCI reference; required unless `fork` is set }
-        entrypoint: { type: array, items: { type: string } }
-        cmd: { type: array, items: { type: string } }
-        env: { type: object, additionalProperties: { type: string } }
-        files: { type: array, items: { $ref: "#/components/schemas/File" } }
+        entrypoint: { type: array, items: { type: string }, description: "absent: the image's, or for a disk fork and a restore the source's (ADR 0097); `[]` is the image's own" }
+        cmd: { type: array, items: { type: string }, description: "absent: the image's, or for a disk fork and a restore the source's (ADR 0097); `[]` is the image's own" }
+        env: { type: object, additionalProperties: { type: string }, description: "a disk fork and a restore start from the source's variables; these win per key" }
+        files: { type: array, items: { $ref: "#/components/schemas/File" }, description: "empty: for a disk fork and a restore, the source's" }
         size: { $ref: "#/components/schemas/Size" }
         volume: { $ref: "#/components/schemas/VolumeSpec" }
-        ports: { type: array, items: { type: integer } }
+        ports: { type: array, items: { type: integer }, description: "empty: for a disk fork and a restore, the source's" }
         sleep: { type: string, description: '"30m", "2h", "7d" or "never"; stops the machine after that long without use' }
         restart: { $ref: "#/components/schemas/RestartPolicy" }
         metadata: { type: object, additionalProperties: { type: string }, description: "kept as is; the labels `?label=` selects on" }
