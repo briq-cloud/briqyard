@@ -16,10 +16,15 @@ use super::*;
 /// and `set volsize=`, kept by its snapshots, clones and streams, answered by `get`.
 /// Error texts are the real ones,
 /// since the code matches on them.
+/// The shell test the fakes' waits share: the parent that started them still runs. `$PPID` is
+/// read when the shell starts, so a parent that exited by then left it 1 (init, launchd): a
+/// pid that never ends (a root `kill -0 1` succeeds), which would hold the fake forever.
+const PARENT_RUNS: &str = r#"[ "$PPID" != 1 ] && kill -0 "$PPID" 2>/dev/null"#;
+
 const FAKE: &str = r#"#!/bin/sh
 DEV="__DEV__"
 printf '%s\n' "$*" >> "__LOG__"
-while [ -f "$DEV/hold.$1" ] && kill -0 "$PPID" 2>/dev/null; do sleep 0.02; done
+while [ -f "$DEV/hold.$1" ] && __PARENT__; do sleep 0.02; done
 for a in "$@"; do last="$a"; done
 missing() { echo "cannot open '$1': dataset does not exist" >&2; exit 1; }
 # Renames the entries of the creation order that start with $1 to start with $2.
@@ -198,7 +203,7 @@ exit 0
 const FAKE_UDEVADM: &str = r#"#!/bin/sh
 DEV="__DEV__"; LINKS="__LINKS__"; DEVS="__DEVS__"
 printf 'udevadm %s\n' "$*" >> "__LOG__"
-while [ -f "$DEV/hang.udevadm" ] && kill -0 "$PPID" 2>/dev/null; do sleep 0.1; done
+while [ -f "$DEV/hang.udevadm" ] && __PARENT__; do sleep 0.1; done
 for a in "$@"; do last="$a"; done
 # Each volume's inode and name; the kernel's part: a device for each volume that has none.
 find "$DEV" -mindepth 2 -type f ! -name '*@*' ! -name '*.origin' -exec ls -i {} + |
@@ -236,7 +241,7 @@ exit 0
 
 const FAKE_ZVOL_ID: &str = r#"#!/bin/sh
 DEV="__DEV__"
-while [ -f "$DEV/hang.zvol_id" ] && kill -0 "$PPID" 2>/dev/null; do sleep 0.1; done
+while [ -f "$DEV/hang.zvol_id" ] && __PARENT__; do sleep 0.1; done
 i=$(ls -i "$1" 2>/dev/null | awk '{ print $1 }')
 n=$(find "$DEV" -mindepth 2 -type f ! -name '*@*' ! -name '*.origin' -exec ls -i {} + |
   awk -v i="$i" -v d="$DEV/" '$1 == i { sub(d, "", $2); print $2; exit }')
@@ -283,7 +288,8 @@ impl Scripts {
                 .replace("__LINKS__", links.to_str().unwrap())
                 .replace("__DEVS__", devs.to_str().unwrap())
                 .replace("__LOG__", log.to_str().unwrap())
-                .replace("__POOL__", "byard");
+                .replace("__POOL__", "byard")
+                .replace("__PARENT__", PARENT_RUNS);
             std::fs::write(bin, script).unwrap();
         }
         let jail = dir.path().join("jail");
