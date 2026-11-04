@@ -433,8 +433,11 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   invariants between phases (ADR 0010; one is no record on disk the daemon does not hold).
   `--namespaces 6 --per-namespace 4 --rounds 2 --crash`. `--churn N` then runs N cycles per namespace of
   create, files, an endpoint, a snapshot restored, a backup restored, a fork, suspend and
-  resume, destroy, and reads the daemon's `process_resident_memory_bytes` 12 s after each:
-  growth over the second half past `--rss-growth-mb` (32) is a break (ADR 0052). Through a
+  resume, destroy, and reads the daemon's `process_resident_memory_bytes` three times (3 s apart) once it has been idle
+  12 s: the least is the cycle's floor. The fitted growth of the floors over cycles 2..N
+  past `--rss-growth-mb` (32) is a break (ADR 0052); so is growth of the daemon's open files or
+  threads past `--handle-growth` (2). The log prints the series and the slope (`hack/stress_trend.py`).
+  CI runs 8 cycles. Through a
   fleet it needs `--invariants-url` (the daemon's), else the check is skipped and says so.
   The capacity race fails on missing start responses, worker or sampler errors, no valid
   sample, or interruption after the phase begins. Its maximum is sampled guest quota
