@@ -24,9 +24,19 @@ B=firecracker-checked-linux-x86_64.tar.gz
 curl -fsSL "https://github.com/briq-cloud/briqyard/releases/download/v0.1.17/$B" -o "$R/$B"
 BSHA=2e410f2e852d9898fc0193afe28f3c4606421cef58b30fb64bbb69618ec1a65c
 echo "$BSHA  $R/$B" | sha256sum -c -
-(cd "$R" && sha256sum -- briq*-linux-* firecracker-checked-linux-*.tar.gz > SHA256SUMS-x86_64)
+# The nested class (ADR 0088) when the caller built its kernel: the release then holds its
+# three files, and the bootstrap serves the class.
+NESTED_FILES=()
+if [ -n "${NATIVE_NESTED_DIR:-}" ]; then
+  for f in nested-vmlinux-x86_64 nested-modules-x86_64.ext4 nested-versions-x86_64.json; do
+    cp "$NATIVE_NESTED_DIR/$f" "$R/$f"
+    NESTED_FILES+=("$f")
+  done
+fi
+(cd "$R" && sha256sum -- briq*-linux-* firecracker-checked-linux-*.tar.gz "${NESTED_FILES[@]}" > SHA256SUMS-x86_64)
 # Use the real checked release installation path with this head's binaries.
-sudo env BRIQYARD_RELEASE="file://$R" BRIQYARD_POOL_FILE_GB=40 BRIQYARD_ARC_GB=1 LISTEN=127.0.0.1:7420 bash hack/bootstrap-host.sh
+sudo env BRIQYARD_RELEASE="file://$R" BRIQYARD_POOL_FILE_GB="${BRIQYARD_POOL_FILE_GB:-40}" BRIQYARD_ARC_GB=1 LISTEN=127.0.0.1:7420 \
+  BRIQYARD_RUNTIME_CLASSES="${NATIVE_NESTED_DIR:+nested}" bash hack/bootstrap-host.sh
 sudo python3 - <<'PY'
 from pathlib import Path
 import yaml
