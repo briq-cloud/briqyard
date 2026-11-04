@@ -18,11 +18,9 @@
 
 ## Why briqyard
 
-Agents need real machines: their own kernel, a disk that lasts, a private network. Most of the time, those machines sit idle.
+Agents need isolated, durable machines that mostly sit idle. A container shares the host's kernel, a Kubernetes pod keeps no identity, and an idle VM pins its memory.
 
-A container shares its host's kernel. A Kubernetes pod keeps no identity. A VM left running wastes its memory.
-
-briqyard runs any OCI image in a Firecracker microVM, on servers you own. A machine sleeps when unused, wakes on the next connection or command, and forks in one call. Its disk and address stay. With a memory snapshot, it resumes in about a quarter of a second.
+briqyard runs any OCI image in a KVM guest under Firecracker's jailer, on servers you own. Disks are ZFS zvols, so a fork is a copy-on-write clone. An idle machine stops and frees its compute, keeping its disk and address. A TCP or HTTP connection or an exec wakes it; a memory snapshot resumes it in 0.15–0.25 s.
 
 ## Key features
 
