@@ -82,6 +82,11 @@ machine's stop, and prints `exit.oom_killed`; when the fix lands (`vmm_oom_kille
   by nothing, and nothing removes it, not even the next successful backup; the census (ADR 0083) only counts. The
   suite bounds it (at most the interrupted backup's one stream, never listed), prints `KNOWN DEFECT`, and prints
   `FIXED` once the daemon cleans it, when the check should become `[ -z "$orphans" ]`.
+- **Known defect, found by this batch:** a machine whose VMM was killed (`kill -9`) is `stopped` with its empty cgroup
+  leaf still in place; a stop through the API removes the leaf. Nothing else is left behind, and the leaf goes with
+  the machine's next start or destroy. The suite allows that one line and nothing else in that step. The orphan
+  stream above is timing-dependent: a kill that cuts a backup left one in some runs and none in others, so `FIXED`
+  there is evidence only after several runs.
 - Added after review: the invariants now check cgroup leaves (none without a machine, one for every live
   Firecracker); a backup is killed while its stream is on disk and the store is read afterwards (listed ==
   recorded, no stream without a record, every listed backup restores whole); a suspend is killed while the
