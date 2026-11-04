@@ -703,6 +703,7 @@ impl Manager {
         tokio::spawn(async move {
             if exited.wait_for(|gone| *gone).await.is_ok() {
                 m.settle_exit(&e, pid).await;
+                m.retire_after_exit(&e).await;
             } else {
                 tracing::warn!(
                     machine = e.snapshot().id,

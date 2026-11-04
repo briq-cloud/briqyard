@@ -101,6 +101,17 @@ fn strict_paths_records_and_references() {
     assert!(parse(&key(&b), duplicate.as_bytes()).is_none());
 }
 
+#[test]
+fn records_written_with_the_old_consistency_value_are_valid_and_read_as_unsynced() {
+    let b = record(B, Some(A));
+    let mut old = serde_json::to_value(&b).unwrap();
+    old["consistency"] = json!("crash");
+    let parsed = parse(&key(&b), &serde_json::to_vec(&old).unwrap()).expect("old record is valid");
+    assert_eq!(parsed.copy_consistency.consistency, "unsynced");
+    old["consistency"] = json!("torn");
+    assert!(parse(&key(&b), &serde_json::to_vec(&old).unwrap()).is_none());
+}
+
 #[tokio::test]
 async fn transitive_bases_and_key_or_namespace_mismatches_remain_unresolved() {
     let (_dir, store) = store().await;

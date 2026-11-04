@@ -613,7 +613,7 @@ impl Manager {
                 (if r
                     .fork
                     .as_ref()
-                    .is_some_and(|f| f.copy_consistency.consistency == "crash")
+                    .is_some_and(|f| f.copy_consistency.consistency == "unsynced")
                 {
                     Ev::warning
                 } else {

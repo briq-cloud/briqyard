@@ -255,7 +255,7 @@ fn parse(key: &str, bytes: &[u8]) -> Option<api::Backup> {
     let mut b: api::Backup = serde_json::from_slice(bytes).ok()?;
     if !matches!(
         b.copy_consistency.consistency.as_str(),
-        "filesystem" | "synced" | "crash"
+        "filesystem" | "synced" | "unsynced"
     ) || b.machine_id != machine
         || b.id != id
         || !api::valid_id(&b.namespace)

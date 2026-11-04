@@ -36,6 +36,7 @@ mod endpoints;
 mod exec;
 mod gateway;
 mod launch_identity;
+mod leaves;
 mod memory;
 mod memory_host;
 mod moves;
@@ -61,6 +62,7 @@ mod warm;
 use backups::{Backups, Schedule, Turn};
 use create::*;
 use endpoints::*;
+pub use leaves::Leaves;
 pub(crate) use observe::host_capacity;
 pub use observe::Until;
 use observe::*;
@@ -808,6 +810,13 @@ pub struct Stats {
     pub execs: std::sync::atomic::AtomicU64,
     pub starts_failed: std::sync::atomic::AtomicU64,
     pub backups: std::sync::atomic::AtomicU64,
+    /// Idle VMM cgroup leaves removed, and refused, since the daemon started (ADR 0099).
+    pub leaves_retired: std::sync::atomic::AtomicU64,
+    pub leaves_retire_failed: std::sync::atomic::AtomicU64,
+    /// The last pass's count; none until one could read the cgroups.
+    pub leaves: Mutex<Option<leaves::Leaves>>,
+    /// The machines whose leaf was refused at the last pass that looked at them.
+    pub leaves_failing: Mutex<std::collections::HashSet<String>>,
 }
 
 struct Inner {

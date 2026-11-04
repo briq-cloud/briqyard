@@ -497,15 +497,15 @@ the pool's ciphertext, ADR 0035).
 Each backup is a record (`backups/<machine>/<id>.json`: ids, names, sizes, the chain in clear;
 the machine's spec, its env and files, sealed under the pool's key) plus one object per disk. A backup of a
 running machine freezes its filesystems around one snapshot of both disks. The record reports
-`consistency` (`filesystem`, `synced`, or `crash`) and a fallback reason. Old or unresponsive
-inits fall back to crash consistency.
+`consistency` (`filesystem`, `synced`, or `unsynced`) and a fallback reason. Old or unresponsive
+inits fall back to `unsynced`.
 
 Disk-only snapshots, backups and disk forks of a running source use a frozen copy by default.
 A busy source pays more: our 4-vCPU bench measured about 450–600 ms added latency,
 versus about 42 ms for an idle source. These are relative figures from shared runners,
-not hardware guarantees. Set `consistency: "crash"` explicitly in the snapshot or backup
+not hardware guarantees. Set `consistency: "unsynced"` explicitly in the snapshot or backup
 request, or in the fork specification, to skip guest sync and freeze and accept
-crash consistency.
+`unsynced` copies.
 
 Application consistency remains the application’s responsibility. A stream goes up
 in 32 MB parts, four at a time, each request tried again with backoff for up to 10 minutes
@@ -592,6 +592,8 @@ registry backups, operator archives and local backing/reference scopes are exclu
   | `briqyard_host_condition` | `condition` | 1 while true |
   | `briqyard_events_total` | `type`, `reason` | events since the daemon started, folded repeats included |
   | `briqyard_{boots,resumes,suspends,execs,starts_failed,backups}_total`, `briqyard_namespaces`, `briqyard_endpoints` | | counts (`execs`: exec sessions included) |
+  | `briqyard_cgroup_leaves`, `_idle` | | VMM cgroup leaves on the host, and those no running VMM explains (0 when nothing leaks; ADR 0099) |
+  | `briqyard_cgroup_leaves_{retired,retire_failed}_total` | | leaves removed after their VMM went, and removals the kernel refused (retried 15 s later) |
   | `process_resident_memory_bytes` | | the daemon's own resident memory |
   | `briqyard_machine_cpu_seconds_total` | `machine`, `namespace`, `name`, `role` (a gateway's) | its cgroup's CPU time |
   | `briqyard_machine_memory_bytes`, `_memory_limit_bytes` | same | its cgroup's memory, its size |
@@ -604,7 +606,7 @@ registry backups, operator archives and local backing/reference scopes are exclu
   | `briqyard_warm_pool_{desired,max_ready,shortfall,slots,blocked}`, `_reserved_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | namespace, pool, catalog, type, exact numeric size; bounded state/reason | actual warm counts, upper targets and full unclaimed reservations |
   | `briqyard_warm_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | `kind="reserved\|budget\|headroom"` | full recipe charges and configured limits; root headroom is the shared absolute free-space floor; data headroom is zero |
   | `briqyard_warm_{memory_available_bytes,disk_free_bytes,probe_age_seconds,probe_available,probe_valid,accounting_available}` | | cached physical availability, sample age/validity and accounting availability; a scrape runs no probe |
-  | `briqyard_copies_total` | `operation="snapshot\|backup\|fork"`, `consistency="filesystem\|synced\|crash"` | successful copies by achieved consistency, including explicit crash opt-outs |
+  | `briqyard_copies_total` | `operation="snapshot\|backup\|fork"`, `consistency="filesystem\|synced\|unsynced"` | successful copies by achieved consistency, including explicit unsynced opt-outs |
   | `briqyard_fs_freeze_seconds` | histogram buckets | host-observed freeze acknowledgment through thaw acknowledgment, including failed storage operations |
   | `briqyard_warm_operations_total`, `_operation_seconds_total`, `_operation_last_seconds` | `operation="prepare\|claim"`, `outcome="success\|miss\|failure"` | host prepare-worker and claim-to-host-readiness observations; excludes fleet and public API transport |
   | `briqyard_warm_fill_blocked_total` | bounded `reason` | actual refused refill attempts |
