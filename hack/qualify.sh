@@ -458,6 +458,7 @@ echo "-- mid-backup"
 BK=$(mkowner bk 256)
 on "$BK" 'head -c 500000000 /dev/urandom > /data/blob; sync' || true
 B0=$(briqyard machine backup "$BK" | jq -r .id)
+check "real helper: crash, timeout traffic and automatic recovery, hand-over control" 'sudo -E python3 "$HERE/recovery-helper-check.py"'
 bkdir=$STORE/backups/$BK
 store_ids() { sudo find "$bkdir" -name "*.$1" 2>/dev/null | sed 's|.*/||; s|\.[a-z]*$||' | sort -u; }
 # The second backup is under way once a stream newer than the first is on disk and its record is not.

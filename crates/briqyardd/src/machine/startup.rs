@@ -26,16 +26,18 @@ impl Manager {
         dns: Resolver,
         startup: fc::Startup,
     ) -> Result<Self> {
+        let unresolved = startup.unresolved();
         let range = Range::parse(&cfg.network.range).context("network.range")?;
         let host_id = match store.get_meta("host_id")? {
             Some(id) => id,
+            None if unresolved => anyhow::bail!("recovery_unresolved: existing host identity is unavailable; mount the state filesystem before diagnostic startup"),
             None => {
                 let id = new_id("h");
                 store.put_meta("host_id", &id)?;
                 id
             }
         };
-        let egress = if cfg.network.egress.is_empty() {
+        let egress = if !unresolved && cfg.network.egress.is_empty() {
             host::default_egress_interface()
                 .await
                 .context("network.egress")?
@@ -60,7 +62,11 @@ impl Manager {
         let advertise = advertise_address(
             &cfg.ingress.advertise,
             &cfg.ingress.bind,
-            host_ip(&egress).await,
+            if unresolved {
+                None
+            } else {
+                host_ip(&egress).await
+            },
         );
         let inner = Arc::new(Inner {
             stats: Stats::default(),
@@ -96,7 +102,11 @@ impl Manager {
                 }
             }),
             guest: Arc::new(guestc::Vsock),
-            net: Arc::new(host::HostNet::new().await?),
+            net: Arc::new(if unresolved {
+                host::HostNet::default()
+            } else {
+                host::HostNet::new().await?
+            }),
             cfg,
             store,
             zfs,
@@ -130,6 +140,13 @@ impl Manager {
             started: Mutex::new(api::DaemonStart::default()),
         });
         let m = Self { inner };
+        if unresolved {
+            m.load_records(true)?;
+            if let Err(err) = m.inner.vmm.initialize_recovery(&[]).await {
+                m.recovery_failed("native recovery barrier", err);
+            }
+            return Ok(m);
+        }
         if m.inner.cfg.templates.warm_pools {
             m.inner
                 .cfg
@@ -138,6 +155,9 @@ impl Manager {
                 .check_capacity(m.capacity())?;
         }
         m.load_backing_at_start().await?;
+        if m.recovery_fault().is_some() {
+            return Ok(m);
+        }
         host::enable_forwarding()?;
         let namespaces: Vec<Namespace> = m
             .inner
@@ -211,6 +231,9 @@ impl Manager {
         if let Err(err) = self.inner.vmm.initialize_recovery(&recovered).await {
             self.recovery_failed("native recovery barrier", err);
         }
+        if self.recovery_fault().is_some() {
+            return Ok(());
+        }
         self.refresh_memory_host().await;
         self.recover_assigned_update_backing().await?;
         self.prepare_assigned_reboot_exits().await?;
@@ -239,13 +262,14 @@ impl Manager {
 
     /// An anomaly in the VMM domain or in what a previous daemon left must not take the host
     /// down for every namespace (a restart loop): the daemon serves what runs, starts
-    /// nothing, and says why. An operator resolves it and restarts; admission stays refused.
+    /// nothing, and says why. Admission stays refused; service timeouts restart only after
+    /// singleton membership returns, and other anomalies require operator recovery.
     pub(super) fn recovery_failed(&self, what: &str, err: anyhow::Error) {
         tracing::error!(err = %format!("{err:#}"), "{what} unresolved: managed spawning stays closed");
         *self.inner.recovery_fault.lock().unwrap() = Some("recovery_unresolved");
     }
 
-    pub(super) fn recovery_fault(&self) -> Option<&'static str> {
+    pub(crate) fn recovery_fault(&self) -> Option<&'static str> {
         *self.inner.recovery_fault.lock().unwrap()
     }
 
@@ -257,6 +281,10 @@ impl Manager {
     /// endpoint whose port is outside `ingress.tcp_ports`, is refused here, with the fix, rather than found by the first request that needs its subnet. The
     /// event log goes on past every machine's version.
     pub(super) fn load(&self) -> Result<()> {
+        self.load_records(false)
+    }
+
+    pub(super) fn load_records(&self, read_only: bool) -> Result<()> {
         let st = &self.inner.store;
         for rec in st.list::<NamespaceRec>(crate::store::NAMESPACES)? {
             let subnet = self.inner.range.subnet(rec.subnet_index).with_context(|| {
@@ -271,31 +299,38 @@ impl Manager {
                 .unwrap()
                 .insert(rec.id.clone(), Namespace::new(rec, subnet));
         }
-        self.recover_assigned_runs()?;
-        self.recover_destination_assignments()?;
-        self.recover_launch_transitions()?;
-        let records = st.list::<Record>("machines")?;
-        self.recover_launch_holds(&records)?;
-        // An address is one record's at a time: a `destroying` record whose address another
-        // holds is a destroyed machine's, written back after its destroy by an older daemon.
-        // Its destroy ran; another would take the address's counters, and its limits, from
-        // the machine that holds it now. Removed, nothing else done.
-        let held: std::collections::HashSet<String> = records
-            .iter()
-            .filter(|r| r.state != state::DESTROYING && !r.ip.is_empty())
-            .map(|r| r.ip.clone())
-            .collect();
-        let (records, stale): (Vec<Record>, Vec<Record>) = records.into_iter().partition(|r| {
-            r.launch_identity.is_some() || r.state != state::DESTROYING || !held.contains(&r.ip)
-        });
-        for r in stale {
-            st.delete("machines", &r.id)?;
-            tracing::warn!(
-                machine = r.id,
-                ip = r.ip,
-                "record of a destroyed machine, written back after its destroy: removed"
-            );
+        if !read_only {
+            self.recover_assigned_runs()?;
+            self.recover_destination_assignments()?;
+            self.recover_launch_transitions()?;
         }
+        let records = st.list::<Record>("machines")?;
+        let records = if read_only {
+            records
+        } else {
+            self.recover_launch_holds(&records)?;
+            // An address is one record's at a time: a `destroying` record whose address another
+            // holds is a destroyed machine's, written back after its destroy by an older daemon.
+            // Its destroy ran; another would take the address's counters, and its limits, from
+            // the machine that holds it now. Removed, nothing else done.
+            let held: std::collections::HashSet<String> = records
+                .iter()
+                .filter(|r| r.state != state::DESTROYING && !r.ip.is_empty())
+                .map(|r| r.ip.clone())
+                .collect();
+            let (records, stale): (Vec<Record>, Vec<Record>) = records.into_iter().partition(|r| {
+                r.launch_identity.is_some() || r.state != state::DESTROYING || !held.contains(&r.ip)
+            });
+            for r in stale {
+                st.delete("machines", &r.id)?;
+                tracing::warn!(
+                    machine = r.id,
+                    ip = r.ip,
+                    "record of a destroyed machine, written back after its destroy: removed"
+                );
+            }
+            records
+        };
         for mut r in records {
             r.migrate();
             self.inner.events.floor(r.version);
@@ -306,8 +341,10 @@ impl Manager {
                 .unwrap()
                 .insert(id, Entry::new(r, self.inner.events.clone()));
         }
-        self.recover_sandbox_assignments()?;
-        self.drop_renamed_leftovers()?;
+        if !read_only {
+            self.recover_sandbox_assignments()?;
+            self.drop_renamed_leftovers()?;
+        }
         // An endpoint port outside the range would listen where the daemon's table does not
         // hold it for `allowed_clients`: refused, like a namespace outside `network.range`.
         let spec = &self.inner.cfg.ingress.tcp_ports;

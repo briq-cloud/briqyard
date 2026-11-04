@@ -179,3 +179,107 @@ fn a_host_with_thousands_of_idle_leaves_lists_and_a_runaway_directory_says_so() 
     );
     assert_eq!(dir.children(65_536 + 1024).unwrap().len(), 5000);
 }
+
+#[tokio::test(start_paused = true)]
+async fn service_wait_observes_exit_and_fork_without_admitting_survivors() {
+    let mut samples = vec![vec![42, 43], vec![42, 43, 44], vec![42, 44], vec![42]].into_iter();
+    unit::wait_service(42, || Ok((samples.next().unwrap(), false)))
+        .await
+        .unwrap();
+    assert!(samples.next().is_none());
+    assert!(unit::wait_service(42, || Ok((vec![43], false)))
+        .await
+        .is_err());
+    assert!(unit::wait_service(42, || Ok((vec![42], true)))
+        .await
+        .is_err());
+    assert!(
+        unit::wait_service(42, || Err(std::io::Error::other("unreadable")))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn service_wait_timeout_is_closed_and_names_survivors() {
+    let began = tokio::time::Instant::now();
+    let err = unit::wait_service(42, || Ok((vec![42, 43], false)))
+        .await
+        .unwrap_err();
+    assert_eq!(began.elapsed(), std::time::Duration::from_secs(10));
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    assert!(err.to_string().contains("43"));
+    assert!(unit::final_service_pids(&[42, 43], 42, false).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn exited_unreaped_children_are_absent_from_cgroup_procs() {
+    use std::process::Command;
+    let mut child = Command::new("/bin/true").spawn().unwrap();
+    let pid = child.id();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        if stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .trim_start()
+            .starts_with('Z')
+        {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("child did not exit");
+        }
+        std::thread::yield_now();
+    }
+    let group = std::fs::read_to_string("/proc/self/cgroup").unwrap();
+    let result = std::fs::read_to_string(format!(
+        "/sys/fs/cgroup{}/cgroup.procs",
+        group.trim().strip_prefix("0::").unwrap()
+    ));
+    child.wait().unwrap();
+    // Some container test runners hide their own cgroup mount. Native CI exposes it.
+    if let Ok(members) = result {
+        assert!(!super::fs::pids(&members).unwrap().contains(&pid));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn background_service_wait_survives_timeouts_without_clearing_or_restarting() {
+    let began = tokio::time::Instant::now();
+    unit::await_service_settlement(42, || {
+        Ok((
+            if began.elapsed() < std::time::Duration::from_secs(75) {
+                vec![42, 43]
+            } else {
+                vec![42]
+            },
+            false,
+        ))
+    })
+    .await
+    .unwrap();
+    assert_eq!(began.elapsed(), std::time::Duration::from_secs(75));
+    assert!(unit::await_service_settlement(42, || Ok((vec![42], true)))
+        .await
+        .is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_timeout_then_clean_restarts_cannot_exhaust_five_starts_in_ten_seconds() {
+    let began = tokio::time::Instant::now();
+    for _ in 0..5 {
+        assert!(unit::wait_service(42, || Ok((vec![42, 43], false)))
+            .await
+            .is_err());
+        unit::await_service_settlement(42, || Ok((vec![42], false)))
+            .await
+            .unwrap();
+    }
+    assert_eq!(began.elapsed(), std::time::Duration::from_secs(50));
+}

@@ -517,7 +517,38 @@ async fn a_recovery_anomaly_closes_admission_and_is_reported_instead_of_ending_t
             .find(|c| c.kind == "memory_protection")
             .unwrap();
     assert!(condition.status);
-    assert_eq!(condition.message, "recovery_unresolved");
+    assert!(condition.message.contains("recovery_unresolved"));
+    assert!(condition.message.contains("journalctl -u briqyardd"));
+    assert!(condition.message.contains("restart briqyardd"));
+    use tower::ServiceExt;
+    let app = crate::api::router(Arc::new(crate::api::AppState {
+        mgr: h.m.clone(),
+        token: String::new(),
+        metrics_token: String::new(),
+        loopback: true,
+        openapi: "",
+        tls_fingerprint: String::new(),
+    }));
+    for (method, path, status) in [
+        ("POST", "/v1/namespaces", 503),
+        ("POST", "/v1/machines", 503),
+        ("GET", "/v1/machines", 503),
+        ("GET", "/v1/status", 200),
+        ("GET", "/metrics", 200),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), status, "{method} {path}");
+    }
 }
 
 /// Churn: another machine's suspend leaves its handle for a moment on a stopped record, and a
@@ -586,4 +617,68 @@ async fn a_closed_exit_channel_is_success_only_with_a_proven_death() {
             assert!(e.live.lock().unwrap().is_some());
         }
     }
+}
+
+#[tokio::test]
+async fn recovery_timeout_loads_endpoints_read_only_and_keeps_running_traffic() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let h = harness("10.64.0.0/22", 4096).await;
+    let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let running = h.add("m_serving", state::RUNNING, 256);
+    running.rec.lock().unwrap().ip = "127.0.0.1".into();
+    h.m.save(&running).unwrap();
+    let endpoint = EndpointRec {
+        id: "ep_serving".into(),
+        machine_id: "m_serving".into(),
+        namespace: "t1".into(),
+        port: target.local_addr().unwrap().port(),
+        protocol: "http".into(),
+        host_port: None,
+        host: "serving.test".into(),
+        created_at: Utc::now(),
+    };
+    h.m.inner
+        .store
+        .put("endpoints", &endpoint.id, &endpoint)
+        .unwrap();
+    let before = serde_json::to_value(h.stored("m_serving").unwrap()).unwrap();
+    h.m.inner.machines.lock().unwrap().clear();
+    h.m.recovery_failed("native recovery barrier", anyhow::anyhow!("timeout"));
+    h.host_calls();
+    h.pool.calls();
+    h.m.load_records(true).unwrap();
+    assert_eq!(h.m.all_endpoints().len(), 1);
+    let since = h.m.memory_condition().since;
+    assert_eq!(h.m.memory_condition().since, since);
+    let ingress = crate::ingress::Ingress::new(
+        h.m.clone(),
+        "127.0.0.1",
+        "127.0.0.1:0",
+        Duration::from_secs(1),
+        Arc::new(briqyard_api::listeners::Listeners::none()),
+    );
+    let serve = async {
+        let (mut conn, _) = target.accept().await.unwrap();
+        conn.write_all(b"still serving").await.unwrap();
+    };
+    let connect = async {
+        let mut conn = ingress.dial(&h.m.all_endpoints()[0]).await.unwrap();
+        let mut bytes = Vec::new();
+        conn.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(bytes, b"still serving");
+    };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(serve, connect);
+    })
+    .await
+    .unwrap();
+    assert!(h.host_calls().is_empty());
+    assert!(h.pool.calls().is_empty());
+    assert_eq!(
+        serde_json::to_value(h.stored("m_serving").unwrap()).unwrap(),
+        before
+    );
+    h.m.entry("m_serving").unwrap().rec.lock().unwrap().state = state::STOPPED.into();
+    assert!(h.m.ready_addr("m_serving", Duration::ZERO).await.is_err());
+    assert!(h.host_calls().is_empty());
 }
