@@ -55,6 +55,7 @@ impl Store {
             "usage",
             "events",
             "holders",
+            "backup-attempts",
             "clone-readers",
             "warm-pools",
             "sandbox-requests",
