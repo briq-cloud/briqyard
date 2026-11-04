@@ -232,6 +232,21 @@ class Action:
         self.name, self.needs, self.fn, self.at = name, needs, fn, None
 
 
+EXPR = {}
+
+
+def sample(cases):
+    """What each unfinished rule's own query returns now (the file's expression)."""
+    for c in cases:
+        if c.done or c.uid not in EXPR:
+            continue
+        try:
+            got = [({k: v for k, v in r["metric"].items() if k not in ("__name__", "job", "instance")}, r["value"][1]) for r in prom(EXPR[c.uid])]
+        except Exception as e:
+            got = str(e)
+        print(f"         {c.name}: query -> {json.dumps(got)[:300]}", flush=True)
+
+
 def drive(cases, actions, total):
     """Poll the receiver until every case resolved, or a bound passed."""
     end = time.time() + total
@@ -270,6 +285,7 @@ def drive(cases, actions, total):
                 c.done = True
         if now - last > 60:
             last = now
+            sample(cases)
             say("waiting: " + "; ".join(
                 f"{c.name} [{'resolved' if c.resolved else 'firing' if c.fired else 'not yet firing'}]"
                 for c in cases if not c.done))
@@ -287,6 +303,9 @@ def setup():
     rx = Receiver()
     prod = production_rules()
     cfg = test_config(prod, rx.url)
+    for g in prod["groups"]:
+        for r in g["rules"]:
+            EXPR[r["uid"]] = next(d for d in r["data"] if d["refId"] == "A")["model"]["expr"]
     say(f"receiver on {rx.url}")
     print("test-only changes to the production alerting file:", flush=True)
     print(f"  contact point: Slack -> webhook on loopback ({CONTACT})", flush=True)
@@ -356,7 +375,8 @@ def diagnostics():
         except Exception as e:
             print(f"  {q}: {e}", flush=True)
     print(sudo("journalctl", "-u", "briqyard-grafana", "--no-pager", "-n", "40").stdout[-4000:], flush=True)
-    print(run("curl", "-sS", "http://127.0.0.1:7430/v1/hosts").stdout[:1500], flush=True)
+    print(run("curl", "-sS", "http://127.0.0.1:7430/v1/hosts").stdout[:2500], flush=True)
+    print(run("briqyard", "machine", "ls").stdout[:1500], flush=True)
 
 
 # ---- causes -------------------------------------------------------------------------------
@@ -396,7 +416,7 @@ def cleanup():
 
 
 def rules_set():
-    machine("alert-crash", "crashy", 128, cmd=("sh", "-c", "sleep 2; exit 1"), detach=True)
+    machine("alert-crash", "crashy", 128, cmd=("sh", "-c", "sleep 10; exit 1"))
     t_crash = time.time()
     say("crash-looping machine started")
     bk = machine("alert-backup", "bk", 128)
@@ -417,25 +437,44 @@ def rules_set():
     # Capacity refusal: more memory than the host holds (12288 MB).
     t_room = time.time()
     p = run("briqyard", "machine", "run", "--image", "alpine:3.20", "--namespace", "alert-room", "--name", "toolarge",
-            "--memory", "20000", "--detach", "--", "sleep", "60", timeout=120)
+            "--memory", "20000", "--region", "dev", "--detach", "--", "sleep", "60", timeout=120)
     (ok if p.returncode != 0 and "room" in (p.stderr + p.stdout).lower() else bad)(
         f"a create of 20000 MB is refused for capacity ({(p.stderr or p.stdout).strip()[-120:]!r})")
     namespaces.append("alert-room")
 
-    # Host condition, host pressure and the largest slot: one machine of 10600 MB, with the others and their overhead, commits over 95 % of 12288 MB.
+    # Host condition, host pressure and the largest slot: one machine takes the host's memory
+    # up to its last 50 MB (committed memory counts each machine's 256 MB VMM overhead).
     # A new namespace is not placed on a host over the fill ceiling (0.85), so the namespace
     # is made small first and grown into the host it is pinned to.
     machine("alert-big", "anchor", 128)
-    big = machine("alert-big", "big", 10600)
+    time.sleep(20)  # the fleet reads the host's use from its heartbeat
+    host = json.loads(run("curl", "-fsS", f"{os.environ['BRIQYARD_URL']}/v1/hosts").stdout)[0]
+    free = host["capacity"]["memory_mb"] - host["used"]["memory_mb"]
+    say(f"host {host['id']}: {host['used']['memory_mb']} of {host['capacity']['memory_mb']} MB committed before the large machine")
+    big = None
+    for size in (free - 256 - 50, free - 256 - 600, free - 256 - 1500):
+        try:
+            big = machine("alert-big", "big", size)
+            ok(f"a machine of {size} MB takes the host's memory")
+            break
+        except RuntimeError as e:
+            say(f"{size} MB refused: {e}")
+    if big is None:
+        raise RuntimeError("no machine could take the host's memory")
     t_big = time.time()
     if not wait_for("memory_pressure", lambda: prom('briqyard_host_condition{condition="memory_pressure"} == 1'), 240, 5):
-        bad("the host reported memory_pressure with 10600 MB machine added")
+        bad("the host reported memory_pressure")
         raise RuntimeError("no memory_pressure")
-    ok("the host reported memory_pressure with 10600 MB machine added")
+    ok("the host reported memory_pressure")
+    if not wait_for("fleet", lambda: any(c["type"] == "memory_pressure" and c["status"] for c in
+                    json.loads(run("curl", "-fsS", f"{os.environ['BRIQYARD_URL']}/v1/hosts").stdout)[0]["conditions"]), 120, 3):
+        bad("the fleet reads the condition from the host")
     t_pressure = time.time()
     p = run("briqyard", "machine", "run", "--image", "alpine:3.20", "--namespace", "alert-big", "--name", "second",
             "--memory", "128", "--detach", "--", "sleep", "60", timeout=120)
     text = (p.stderr + p.stdout).lower()
+    if p.returncode == 0:
+        machines.append(json.loads(p.stdout)["id"])
     (ok if p.returncode != 0 and "memory_pressure" in text else bad)(
         f"a create into that namespace is refused under pressure ({(p.stderr or p.stdout).strip()[-140:]!r})")
 
@@ -455,7 +494,7 @@ def rules_set():
     room.resolve_within = press.resolve_within = 300 + 240
     destroy_big = Action("destroy the machine holding the host's memory", [cond, slot], lambda: destroy(big))
     cond.action = slot.action = destroy_big
-    drive([crash, backup, room, cond, press, slot], [destroy_big], 1500)
+    drive([crash, backup, room, cond, press, slot], [destroy_big], 1200)
 
 
 def host_down_set():
