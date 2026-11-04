@@ -3,7 +3,7 @@
 # second, read-only drive, and prints what the guest reports (lines starting with SMOKE):
 #   smoke.sh <dir with nested-vmlinux-x86_64 and nested-modules-x86_64.ext4> [work dir]
 # Needs /dev/kvm on this machine, curl, e2fsprogs. Exit 0 when the guest booted, mounted the
-# modules, loaded the pinned OpenZFS with `modprobe zfs` and took the nftables ruleset; the
+# modules, loaded the pinned OpenZFS with `modprobe zfs`, took the nftables ruleset and has no built-in br_netfilter; the
 # SMOKE lines are in $WORK/console.log. Any download or checksum failure fails the script.
 # Whether the guest sees VMX or SVM depends on the machine under it: when it does, /dev/kvm
 # must be there too.
@@ -92,6 +92,7 @@ want "SMOKE modules_mount=ok"
 want "SMOKE zfs=loaded"
 want "SMOKE zfs_version=$OPENZFS-1"   # the module is the pinned release: the userland must match it
 want "SMOKE nft=ok"
+want "SMOKE br_netfilter=module"   # built in, the bridge feeds a namespace's own traffic to the forward chain
 want "SMOKE done"
 cpus=$(sed -n 's/^SMOKE vmx_svm_cpus=//p' <<<"$log")
 if [ "${cpus:-0}" -gt 0 ]; then want "SMOKE kvm_dev=present"; fi
