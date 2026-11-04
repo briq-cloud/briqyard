@@ -20,6 +20,8 @@ import uuid
 
 POSTGRES = 'postgres:17-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5'
 PYTHON = 'python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30'
+BASE_CHECKS = {'files', 'synced', 'multidisk', 'unsynced', 'python_startup', 'postgres', 'chain'}
+ROUND_CHECKS = {'postgres', 'chain', 'offhost', 'failure'}
 
 
 class Failure(Exception):
@@ -29,6 +31,14 @@ class Failure(Exception):
 def require(condition, message):
     if not condition:
         raise Failure(message)
+
+
+def verify_disk_pair(pair, floor):
+    require(len(pair) == 2 and all(p['complement'] == ~p['epoch'] for p in pair),
+            f'DATA INTEGRITY: torn disk epoch payload {pair}')
+    root, data = (p['epoch'] for p in pair)
+    require(data >= floor and root-data in (0, 1),
+            f'DATA INTEGRITY: impossible two-disk state {pair}, pre-request floor {floor}')
 
 
 class Suite:
@@ -51,12 +61,34 @@ class Suite:
         self.writer_error = None
         self.seq = 0
         self.planned = set()
+        self.round = 0
+        self.outcomes = []
+        self.partial_uploads = set()
 
     def record(self, event, **fields):
-        row = dict(event=event, monotonic=time.monotonic(), **fields)
+        row = dict(event=event, round=self.round, monotonic=time.monotonic(), **fields)
+        if event in BASE_CHECKS | ROUND_CHECKS:
+            self.outcomes.append((event, self.round, fields.get('status')))
         line = json.dumps(row)
         self.results.write(line + '\n')
         print(line, flush=True)
+
+    def assert_required(self):
+        selected = BASE_CHECKS | set(filter(None, self.a.require.split(',')))
+        if self.a.destination_region:
+            selected.add('offhost')
+        if self.a.allow_daemon_kill and not self.a.destination_region:
+            selected.add('failure')
+        missing = []
+        for check in sorted(selected):
+            rounds = range(1, self.a.rounds+1) if check in ROUND_CHECKS else [0]
+            for round_id in rounds:
+                statuses = [s for c, r, s in self.outcomes if c == check and r == round_id]
+                minimum = 3 if check == 'multidisk' else 2 if check == 'postgres' else 1
+                if len(statuses) < minimum or any(s != 'passed' for s in statuses):
+                    missing.append(f'{check}[round={round_id}]: {statuses or "missing"}')
+        require(not missing, 'required checks did not pass: '+ '; '.join(missing))
+        self.record('required', status='passed', checks=sorted(selected), rounds=self.a.rounds)
 
     def api(self, method, path, body=None, expected=(200, 201, 204), timeout=180):
         req = urllib.request.Request(self.a.url.rstrip('/') + path,
@@ -124,7 +156,7 @@ class Suite:
             start = time.monotonic()
             before = list(self.acks)
         self.ledger.write(json.dumps(dict(event='backup_begin', machine=mid,
-                                         monotonic=start, acked=[x[0] for x in before])) + '\n')
+                                         round=self.round, monotonic=start, acked=[x[0] for x in before])) + '\n')
         if mid not in self.sources:
             self.sources.append(mid)
         b = self.api('POST', f'/v1/machines/{mid}/backups',
@@ -173,10 +205,14 @@ class Suite:
                       f'(temporary init server excluded); last probe: {last}')
 
     def database(self):
+        self.stop.clear()
+        self.acks = []
+        self.writer_error = None
         m = self.create(POSTGRES, env={'POSTGRES_HOST_AUTH_METHOD': 'trust',
                         'PGDATA': '/data/pg'}, volume={'size_gb': 1, 'mount': '/data'})
         mid = m['id']
         self.postgres_ready(mid)
+        self.database_settings(mid)
         self.sql(mid, 'CREATE TABLE ledger (id bigint PRIMARY KEY, payload text NOT NULL)')
 
         def write():
@@ -184,12 +220,7 @@ class Suite:
                 for i in range(1, 100001):
                     if self.stop.is_set():
                         break
-                    v = self.sql(mid, f"INSERT INTO ledger VALUES ({i}, repeat(md5('{i}'),128)); SELECT {i}")
-                    require(v['stdout'].strip().splitlines()[-1] == str(i), 'unacknowledged commit')
-                    with self.lock:
-                        ack = (i, time.monotonic())
-                        self.ledger.write(json.dumps(dict(event='ack', id=i, monotonic=ack[1])) + '\n')
-                        self.acks.append(ack)
+                    self.commit(mid, i)
             except Exception as err:
                 self.writer_error = str(err)
         self.writer = threading.Thread(target=write)
@@ -245,11 +276,27 @@ class Suite:
         if mid in self.machines:
             self.destroy(mid)
 
+    def commit(self, mid, i):
+        v = self.sql(mid, f"INSERT INTO ledger VALUES ({i}, repeat(md5('{i}'),128)); SELECT {i}")
+        require(v['stdout'].strip().splitlines()[-1] == str(i), 'unacknowledged commit')
+        with self.lock:
+            ack = (i, time.monotonic())
+            self.ledger.write(json.dumps(dict(event='ack', machine=mid, round=self.round,
+                                             id=i, monotonic=ack[1])) + '\n')
+            self.acks.append(ack)
+
+    def database_settings(self, mid):
+        value = self.sql(mid, 'SHOW synchronous_commit; SHOW fsync;')
+        settings = value['stdout'].splitlines()
+        self.record('postgres_settings', machine=mid, output=value)
+        require(settings == ['on', 'on'], f'Postgres durability settings must be on: {settings}')
+
     def verify_database(self, source, b, before, backup_start, offhost=False, source_host=None, chain=None):
         m, start = self.restore(source, b, offhost)
         mid = m['id']
         self.postgres_ready(mid)
         first_query = time.monotonic() - start
+        self.database_settings(mid)
         if chain is None:
             chain = self.api('GET', f'/v1/machines/{source}/backups')
         by_id = {x['id']: x for x in chain}
@@ -262,11 +309,20 @@ class Suite:
             seen.add(bid)
             pending.extend(d['from'] for d in by_id[bid]['disks'] if d.get('from'))
         stream_bytes = sum(by_id[bid]['bytes'] for bid in seen)
-        values = self.sql(mid, 'SELECT id FROM ledger ORDER BY id')['stdout'].splitlines()
-        ids = [int(x) for x in values]
+        values = self.sql(mid, 'SELECT id, payload = repeat(md5(id::text),128) FROM ledger ORDER BY id')['stdout'].splitlines()
+        ids = []
+        for value in values:
+            ident, matches = value.split('|')
+            require(matches == 't', f'DATA INTEGRITY: payload mismatch at id {ident} on {mid}')
+            ids.append(int(ident))
         require(ids == list(range(1, len(ids)+1)), f'DATA INTEGRITY: holes in restored ledger {mid}')
         require(len(ids) >= len(before), f'DATA INTEGRITY: missing pre-backup ack {mid}')
-        self.execute(mid, ['pg_amcheck', '-U', 'postgres', '--database=postgres', '--install-missing'])
+        amcheck = self.execute(mid, ['pg_amcheck', '-U', 'postgres', '--database=postgres',
+                                    '--install-missing', '--verbose'], check=False)
+        (self.output / f'{mid}-amcheck.json').write_text(json.dumps(amcheck))
+        self.record('pg_amcheck', machine=mid, output=amcheck)
+        require(amcheck['exit_code'] == 0 and not amcheck['timed_out'],
+                f'DATA INTEGRITY: pg_amcheck failed on {mid}: {amcheck}')
         logs = self.api('GET', f'/v1/machines/{mid}/logs?limit=1000')
         (self.output / f'{mid}-logs.json').write_text(json.dumps(logs))
         text = json.dumps(logs)
@@ -282,6 +338,7 @@ class Suite:
             require(source_host and m.get('host') and source_host != m['host'], 'offhost restore landed on source')
         self.record('offhost' if offhost else 'postgres', status='passed', backup=b['id'],
                     consistency=b['consistency'], pre_request_acks=len(before), restored_rows=len(ids),
+                    payloads_verified=len(ids),
                     acked_after_backup_start=len(after), lost_ack_ids=lost,
                     loss_window_seconds=(max(lost_times)-min(lost_times)) if lost_times else 0,
                     backup_start_to_last_ack_seconds=max(0, self.acks[-1][1]-backup_start),
@@ -338,17 +395,38 @@ print(json.dumps(out))
         self.destroy(r['id'])
         self.api('POST', f'/v1/machines/{mid}/start', {})
         self.wait(lambda: self.api('GET', f'/v1/machines/{mid}')['state'] == 'running', 'restart files')
-        # A continuously replaced root/data pair has only these legal interleavings:
-        # root==data or root==data+1. Freeze may happen between the two writes.
-        self.py(mid, "from pathlib import Path; Path('/root/epoch').write_text('0'); Path('/data/epoch').write_text('0')")
-        writer = "from pathlib import Path; import os;\nfor i in range(1,100000):\n for root in ['/root','/data']:\n  p=Path(root+'/epoch.next'); p.write_text(str(i)); os.replace(p,root+'/epoch')"
+        # Each file is atomically replaced, root first, then data. The legal bound
+        # at a common cut is 0 <= root-data <= 1, not simultaneous app writes.
+        self.py(mid, "from pathlib import Path; import json;\nfor root in ['/root','/data']: Path(root+'/epoch').write_text(json.dumps(dict(epoch=0,complement=-1)))")
+        writer = """from pathlib import Path
+import json,os,time
+for i in range(1,10000000):
+ for root in ['/root','/data']:
+  p=Path(root+'/epoch.next')
+  p.write_text(json.dumps(dict(epoch=i,complement=~i)))
+  os.replace(p,root+'/epoch')
+ time.sleep(0.001)
+"""
         self.execute(mid, ['sh', '-c', 'python3 -c ' + shlex.quote(writer) + ' >/tmp/epoch.log 2>&1 &'])
-        b, _, _ = self.backup(mid)
-        r, _ = self.restore(mid, b)
-        pair = json.loads(self.py(r['id'], "from pathlib import Path; import json; print(json.dumps([int(Path(p+'/epoch').read_text()) for p in ['/root','/data']]))"))
-        require(pair[0] in (pair[1], pair[1]+1), f'DATA INTEGRITY: impossible two-disk state {pair}')
-        self.record('multidisk', status='passed', root=pair[0], data=pair[1], consistency=b['consistency'])
-        self.destroy(r['id'])
+        def epoch():
+            return int(self.py(mid, "from pathlib import Path; import json; print(json.loads(Path('/data/epoch').read_text())['epoch'])"))
+        previous = 0
+        for sample in range(1, 4):
+            def advanced():
+                current = epoch()
+                return current if current >= previous+100 else None
+            floor = self.wait(advanced, 'ordered two-disk writer advances 100 epochs')
+            self.record('multidisk_writer', sample=sample, pre_request_epoch=floor)
+            b, _, _ = self.backup(mid)
+            require({d['disk'] for d in b['disks']} == {'root', 'data'}, 'two disks not captured')
+            r, _ = self.restore(mid, b)
+            pair = json.loads(self.py(r['id'], "from pathlib import Path; import json; print(json.dumps([json.loads(Path(p+'/epoch').read_text()) for p in ['/root','/data']]))"))
+            verify_disk_pair(pair, floor)
+            self.record('multidisk', status='passed', sample=sample, pre_request_epoch=floor,
+                        root=pair[0]['epoch'], data=pair[1]['epoch'], consistency=b['consistency'],
+                        bound='0 <= root_epoch - data_epoch <= 1; both >= pre-request epoch')
+            self.destroy(r['id'])
+            previous = epoch()
         self.destroy(mid)
         self.unsynced_control()
         self.python_startup()
@@ -445,6 +523,31 @@ while True: time.sleep(1)
             time.sleep(0.01)
         raise Failure('timed out: own data backup stream bytes and sender in flight')
 
+    def attempt_marker(self, mid, bid):
+        return Path('/var/lib/briqyard/state/backup-attempts')/(mid+'.'+bid+'.json')
+
+    def attempt_artifacts(self, mid, bid):
+        # Read only this native fixture's attempt. Temporary multipart files are
+        # not objects: ADR 0100's marker removes published streams, not those files
+        # or the local bk- snapshot. Keep all three observations distinct.
+        root = Path('/var/lib/briqyard/backups/backups')/mid
+        published = []
+        partial = []
+        for disk in ('root', 'data'):
+            path = root/disk/(bid+'.zfs')
+            if path.exists():
+                published.append(str(path.relative_to(root)))
+            for path in (root/disk).glob(bid+'.zfs#*'):
+                partial.append(dict(file=str(path.relative_to(root)), bytes=path.stat().st_size))
+                self.partial_uploads.add(path)
+        dataset = 'byard/m/'+mid
+        names = subprocess.check_output(['zfs', 'list', '-H', '-o', 'name', '-t', 'snapshot',
+                                         '-r', dataset], text=True, timeout=10).splitlines()
+        snapshots = [n for n in names if n in
+                     {dataset+'/'+d+'@bk-'+bid for d in ('root', 'data')}]
+        return dict(marker_present=self.attempt_marker(mid, bid).exists(),
+                    published_streams=published, partial_uploads=partial, snapshots=snapshots)
+
     def failure_restore(self, mid, b, before, start):
         require(os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted' and os.geteuid() == 0,
                 'daemon kill requires root on the disposable native runner')
@@ -465,6 +568,11 @@ while True: time.sleep(1)
         killed = False
         try:
             held, interrupted = self.pause_backup_send(mid, daemon)
+            prior = self.attempt_artifacts(mid, interrupted)
+            self.record('interrupted_artifacts', phase='paused', backup=interrupted, **prior)
+            require(prior['marker_present'], 'in-flight backup has no durable marker')
+            require(prior['published_streams'] and prior['partial_uploads'] and len(prior['snapshots']) == 2,
+                    'paused data sender must have root stream, partial upload and both snapshots')
             # #145 closes admission while any old service helper survives. Kill the
             # paused sender immediately after the daemon, then require recovery;
             # do not reset the service, remove markers or bypass the barrier.
@@ -488,11 +596,36 @@ while True: time.sleep(1)
             except (urllib.error.URLError, TimeoutError):
                 return False
         self.wait(recovered, 'automatic daemon recovery after exact sender exit', 120)
+        self.wait(lambda: not self.attempt_marker(mid, interrupted).exists(),
+                  'interrupted backup marker settled', 60)
+        after = self.attempt_artifacts(mid, interrupted)
+        self.record('interrupted_artifacts', phase='recovered', backup=interrupted, **after)
         listed = self.api('GET', f'/v1/machines/{mid}/backups')
-        require({v['id'] for v in listed} == complete_ids and interrupted not in complete_ids,
+        offered = interrupted in {v['id'] for v in listed}
+        self.record('interrupted_listing', backup=interrupted, interrupted_offered=offered,
+                    complete_backups_preserved={v['id'] for v in listed} == complete_ids)
+        require({v['id'] for v in listed} == complete_ids and not offered,
                 'interrupted backup offered or complete backup missing')
+        require(not after['marker_present'] and not after['published_streams'],
+                'marker recovery left published interrupted streams or its marker')
         self.verify_database(mid, b, before, start)
-        self.record('failure', status='passed', last_complete=b['id'], interrupted_offered=False,
+        self.postgres_ready(mid)
+        self.database_settings(mid)
+        self.commit(mid, len(self.acks)+1)
+        fresh, fresh_before, fresh_start = self.backup(mid)
+        for disk in fresh['disks']:
+            if any(n.endswith('/'+disk['disk']+'@bk-'+interrupted) for n in after['snapshots']):
+                require(not disk.get('from'), 'new backup used an interrupted snapshot as its base')
+        post = self.attempt_artifacts(mid, interrupted)
+        self.record('interrupted_artifacts', phase='after_new_backup', backup=interrupted, **post)
+        self.verify_database(mid, fresh, fresh_before, fresh_start)
+        self.record('failure', status='passed', last_complete=b['id'], interrupted_offered=offered,
+                    marker_removed=not after['marker_present'],
+                    published_streams_after_recovery=after['published_streams'],
+                    partial_uploads_after_recovery=after['partial_uploads'],
+                    snapshots_after_recovery=after['snapshots'],
+                    snapshots_after_new_backup=post['snapshots'], new_backup=fresh['id'],
+                    new_backup_incremental=fresh['incremental'],
                     recovery='automatic after paused sender killed; no barrier bypass')
 
     def cleanup(self):
@@ -525,6 +658,13 @@ while True: time.sleep(1)
                     subprocess.run([self.a.store_transfer, 'cleanup', mid], check=True, timeout=180)
                 except Exception as err:
                     errors.append(str(err))
+        # Only exact temporary upload files observed in this run's killed attempt;
+        # ADR 0100 intentionally leaves these unlisted files to the store.
+        for path in self.partial_uploads:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception as err:
+                errors.append(str(err))
         for ns in self.namespaces:
             try:
                 self.api('DELETE', '/v1/namespaces/' + ns, expected=(200,204,404))
@@ -547,7 +687,14 @@ def main():
     p.add_argument('--store-transfer', help='CI-only executable: receives copy|cleanup and a machine id; operates on store objects only')
     p.add_argument('--source-offline-hook', help='disposable CI hook receiving offline|recover and source machine id')
     p.add_argument('--allow-daemon-kill', action='store_true')
+    p.add_argument('--require', default='', help='comma-separated additional checks that must pass, including offhost or failure')
+    p.add_argument('--rounds', type=int, default=1, help='independent Postgres/chain rounds (CI: 3)')
     a = p.parse_args()
+    if a.rounds < 1:
+        p.error('--rounds must be positive')
+    unknown = set(filter(None, a.require.split(','))) - (BASE_CHECKS | ROUND_CHECKS)
+    if unknown:
+        p.error('unknown required checks: '+','.join(sorted(unknown)))
     if a.allow_daemon_kill and os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
         p.error('--allow-daemon-kill requires disposable native CI')
     if a.source_offline_hook and not (a.allow_daemon_kill and a.destination_region):
@@ -561,7 +708,10 @@ def main():
     try:
         s.record('begin', namespace=s.ns, promise='filesystem, not application transaction consistency')
         s.files()
-        s.database()
+        for round_id in range(1, a.rounds+1):
+            s.round = round_id
+            s.database()
+        s.assert_required()
         success = True
     except Exception as err:
         for mid in s.machines:

@@ -115,7 +115,7 @@ PY
   restore)
     python3 -m unittest discover -s hack -p test_restore_qualify.py
     set +e
-    sudo -E python3 -u hack/restore-qualify.py --allow-daemon-kill --output native-logs/restore
+    sudo -E python3 -u hack/restore-qualify.py --allow-daemon-kill --require failure --rounds 3 --output native-logs/restore
     rc=$?
     set -e
     sudo chown -R "$(id -u):$(id -g)" native-logs/restore

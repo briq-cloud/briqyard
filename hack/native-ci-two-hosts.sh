@@ -122,6 +122,7 @@ if [ "$rc" = 0 ]; then
     --source-region restore-source --destination-region restore-target \
     --store-transfer "$PWD/hack/native-restore-transfer.sh" \
     --allow-daemon-kill --source-offline-hook "$PWD/hack/native-restore-transfer.sh" \
+    --require offhost --rounds 3 \
     --output native-logs/restore-offhost | tee native-logs/restore-offhost.log
 fi
 exit "$rc"

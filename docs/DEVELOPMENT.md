@@ -18,6 +18,8 @@ The parallel restore suite emits JSONL results for files, bytecode, both disks,
 Postgres, backup chains and interruption. After the existing two-host suites, the
 off-host qualification uses a fleet-held source key, destroys its source machine,
 stops that daemon and restores the workload on the second host (ADR 0103).
+Both restore runs use three independent Postgres rounds. Their final gates require
+interruption and off-host results respectively; a skipped required check fails.
 `native-two-host-logs` retains both suites, host journals and boot measurements. Manual
 dispatch can select `two_hosts_only` for targeted validation
 ([ADR 0089](adr/0089-native-suites-in-ci.md)).

@@ -562,7 +562,7 @@ finish it; never delete another run's namespace. Do not kill the harness with SI
 
 ```bash
 BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN="$BRIQYARD_TOKEN" \
-  python3 hack/restore-qualify.py --output restore-evidence
+  python3 hack/restore-qualify.py --rounds 3 --output restore-evidence
 ```
 
 Use `--cafile /path/to/ca.pem` for a private CA. Tokens can stay in the environment;
@@ -570,6 +570,11 @@ never put one into a report. The output directory must not already exist. Keep i
 `ledger.jsonl`, `results.jsonl`, file manifest and guest logs together. Exit 0 requires
 all selected checks and cleanup. A fallback to `unsynced`, missing pre-request data,
 a hole, a failed integrity check or an inconclusive loss control fails the run.
+Files, synced copies, three ordered two-disk samples, the unsynced fork control,
+Python startup, Postgres and the chain are always required. `--require` adds named
+checks; a skip never satisfies one. `--rounds` defaults to one; three gives
+independent Postgres ledgers and chains, with per-round settings, payload and
+amcheck evidence. Each backup is one sampled snapshot instant.
 Read `lost_ack_ids`, `loss_window_seconds` and `backup_start_to_last_ack_seconds`
 together: the window is the span of missing acknowledgements, not a promised RPO.
 
@@ -578,7 +583,7 @@ For two hosts, use a fleet with distinct existing regions and a shared backup st
 ```bash
 BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN="$BRIQYARD_TOKEN" \
   python3 hack/restore-qualify.py --source-region source --destination-region target \
-  --output restore-offhost-evidence
+  --require offhost --rounds 3 --output restore-offhost-evidence
 ```
 
 The source must use a fleet-held pool key (`storage.key: fleet`). The harness
@@ -591,6 +596,11 @@ default and additionally requires the disposable native CI environment; it kills
 only the daemon and this run's exact ZFS sender, never a name pattern. The CI-only
 `--source-offline-hook` additionally stops the source daemon for off-host restore
 and restarts it for cleanup. Omit that option on shared hosts.
+Native CI requires `failure` in its single-host run and `offhost` in two-hosts.
+Interruption output distinguishes removed published streams from temporary uploads
+and local snapshots allowed to remain by ADR 0100, and verifies a new backup after
+recovery. The CI source outage stops only the daemon, leaving its pool up. The
+destination shares a registry mirror, so this does not prove an absent image cache.
 
 Collect real allocated disk sizes, object-store latency, restore-to-first-query times
 and seconds per stream GiB on the real hardware. CI uses small workloads and a
