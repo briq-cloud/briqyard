@@ -706,6 +706,34 @@ See [the fleet runbook](FLEET-OPERATIONS.md#the-fleet-in-docker-adr-0060).
 
 See [the fleet runbook](FLEET-OPERATIONS.md#the-registrys-backup-adr-0032).
 
+The fleet's `/metrics` always includes these five families (prefix
+`briqyard_fleet_registry_backup_`), ten samples total (ADR 0082):
+
+| Suffix | Type and meaning |
+|---|---|
+| `configured` | Gauge, 0 or 1: an instance is configured, not necessarily reachable |
+| `publication_observed` | Gauge, 0 or 1: this process observed a full two-object ACK; NaN if its cache is unavailable |
+| `last_ack_timestamp_seconds` | Gauge, Unix receipt seconds; NaN when absent or unavailable; neither data age nor remote commit time |
+| `caller_outcomes_total{outcome}` | Counter, fixed `acknowledged`, `unchanged`, `failed`, `canceled`: settled caller results, not upload counts |
+| `last_ack_current_durable_match{state}` | Gauge, one-hot `match`, `mismatch`, `unknown`: comparison with the valid cached durable-file digest |
+
+Disabled and newly started instances report no observed ACK, NaN time, zero counters and
+unknown comparison. Existing files or objects imply no startup ACK. Failed or canceled
+callers can still have a worker commit a later ACK; their counters remain unchanged. Wall
+clock receipt time can regress. Independent counter reads do not form an atomic snapshot.
+
+Match requires both cached digests and a valid durable observation. Save failure or panic
+invalidates comparison, including directory-sync failure after rename. An unchanged save
+cannot restore validity; a later changed successful save can. Busy or unavailable caches give
+unknown, while a readable historical ACK remains visible during publication or a busy save.
+The observation path uses bounded try-locks without I/O or retries; the handler retains its
+other existing locks. Scraping does not change observations.
+
+The comparison assumes exclusive registry-file ownership. External edits are invisible;
+offline restore requires the process stopped. Mismatch gives no direction or loss claim.
+These process-local observations establish neither current store coverage nor recovery
+assurance, custody, RPO or additional durability guarantees.
+
 ### Capacity signals (ADR 0042)
 
 See [the fleet runbook](FLEET-OPERATIONS.md#capacity-signals-adr-0042).
