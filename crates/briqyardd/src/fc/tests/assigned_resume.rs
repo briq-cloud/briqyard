@@ -33,6 +33,7 @@ fn owned(dir: &Path, api: &Path) -> (Firecracker, Vm, watch::Sender<bool>) {
             incarnation: None,
             exited,
             exit,
+            vmm_oom: Default::default(),
         },
         gone,
     )

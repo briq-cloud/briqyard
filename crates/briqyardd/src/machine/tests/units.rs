@@ -191,6 +191,7 @@ fn wait_decisions() {
         exit: Some(api::Exit {
             code: 1,
             oom_killed: false,
+            vmm_oom_killed: false,
             at: Utc::now(),
             restarting,
         }),

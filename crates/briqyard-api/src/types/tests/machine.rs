@@ -82,6 +82,13 @@ fn exit() {
     assert_eq!(e.code, 137);
     assert!(e.oom_killed);
     assert_eq!(e.at, ts());
+    assert!(!e.vmm_oom_killed);
+    // The host's word is its own field, omitted while false.
+    let e: Exit = same(json!({
+        "code": 255, "oom_killed": false, "vmm_oom_killed": true,
+        "at": "2026-01-02T03:04:05Z", "restarting": false
+    }));
+    assert!(e.vmm_oom_killed && !e.oom_killed);
 }
 
 #[test]

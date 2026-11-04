@@ -72,6 +72,7 @@ impl Mock {
             incarnation: Some(mock_incarnation(pid)),
             exited: process.exited.subscribe(),
             exit: Self::exit_of(process),
+            vmm_oom: process.vmm_oom.clone(),
         })
     }
 }

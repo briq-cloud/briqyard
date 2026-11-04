@@ -151,6 +151,7 @@ fn describe_shows_the_machine_then_its_events() {
         exit: Some(api::Exit {
             code: 137,
             oom_killed: true,
+            vmm_oom_killed: false,
             at: ts(),
             restarting: true,
         }),

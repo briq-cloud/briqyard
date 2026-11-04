@@ -267,6 +267,7 @@ async fn saved_fields_alone_cannot_authorize_unbound_activation() {
         incarnation: record.boot_incarnation.clone(),
         exited: exit_receiver,
         exit: report,
+        vmm_oom: Default::default(),
     };
     assert!(h.m.verify_live_launch(&entry, &live).is_err());
     assert!(h.m.activate_memory_clone(&entry, &live).await.is_err());

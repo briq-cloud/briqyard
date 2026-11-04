@@ -128,6 +128,7 @@ pub struct Process {
     identity: Option<Arc<super::memory::ProcessIdentity>>,
     #[cfg(target_os = "linux")]
     oom_evidence: Option<super::memory::OomEvidence>,
+    vmm_oom: super::VmmOom,
     done: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -415,6 +416,7 @@ impl Process {
             identity: None,
             #[cfg(target_os = "linux")]
             oom_evidence: None,
+            vmm_oom: super::VmmOom::default(),
             done: rx,
         };
         if let Err(e) = p.client.wait_api(Duration::from_secs(10)).await {
@@ -548,6 +550,10 @@ impl Process {
         self.identity.clone()
     }
 
+    pub(super) fn vmm_oom(&self) -> super::VmmOom {
+        self.vmm_oom.clone()
+    }
+
     pub(super) fn settled(&self) -> watch::Receiver<bool> {
         self.settlement.receiver()
     }
@@ -626,7 +632,9 @@ impl Process {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown");
-            evidence.record(id);
+            if evidence.record(id) == Some(super::memory::VMM_OOM_EVIDENCE) {
+                self.vmm_oom.set();
+            }
         } else if self.chroot.is_some() {
             tracing::warn!(
                 machine = self
