@@ -39,10 +39,10 @@ impl DestinationBind {
     pub fn validate(&self) -> Result<(), &'static str> {
         self.identity.validate()?;
         let c = &self.config;
-        c.sandbox_device
-            .as_ref()
-            .ok_or("sandbox destination requires fixed data topology")?
-            .check()?;
+        // No device is the volume-free topology: the guest has no third drive to find.
+        if let Some(device) = &c.sandbox_device {
+            device.check()?;
+        }
         if self.receipt.len() != 64
             || !self
                 .receipt
@@ -60,13 +60,18 @@ impl DestinationBind {
         {
             return Err("destination identity/config mismatch");
         }
-        // One fresh host-attached ext4 data disk; no arbitrary device or mount selection.
-        if c.mounts.len() != 1
-            || c.mounts[0].device != "/dev/vdc"
-            || c.mounts[0].path != "/work"
-            || c.mounts[0].fstype != "ext4"
-        {
-            return Err("sandbox destination requires fresh ext4 /dev/vdc at /work");
+        // One fresh host-attached ext4 data disk, or none; no arbitrary device or mount selection.
+        let mounts_ok = match &c.sandbox_device {
+            Some(_) => {
+                c.mounts.len() == 1
+                    && c.mounts[0].device == "/dev/vdc"
+                    && c.mounts[0].path == "/work"
+                    && c.mounts[0].fstype == "ext4"
+            }
+            None => c.mounts.is_empty(),
+        };
+        if !mounts_ok {
+            return Err("sandbox destination requires fresh ext4 /dev/vdc at /work, or no mounts without a data device");
         }
         if c.entrypoint.is_empty() && c.cmd.is_empty() {
             return Err("destination requires a main command");
@@ -139,6 +144,7 @@ mod tests {
                     device: "/dev/vdc".into(),
                     path: "/work".into(),
                     fstype: "ext4".into(),
+                    read_only: false,
                 }],
                 sandbox_device: Some(super::super::SandboxDevice {
                     bytes: 2 << 30,
@@ -198,5 +204,25 @@ mod tests {
             r.files[0].path = path.into();
             assert!(r.validate().is_err(), "{path}");
         }
+    }
+    #[test]
+    fn volume_free_destination_has_no_device_and_no_mounts() {
+        let mut r = request();
+        r.config.sandbox_device = None;
+        r.config.mounts.clear();
+        r.files[0].path = "/start.sh".into();
+        assert!(r.validate().is_ok());
+        // A mount without a device, or a device without its mount, is never half a topology.
+        let mut mounted = r.clone();
+        mounted.config.mounts = request().config.mounts;
+        assert!(mounted.validate().is_err());
+        let mut device_only = r.clone();
+        device_only.config.sandbox_device = request().config.sandbox_device;
+        assert!(device_only.validate().is_err());
+        // The two shapes never share a fingerprint.
+        assert_ne!(
+            r.fingerprint_bytes().unwrap(),
+            request().fingerprint_bytes().unwrap()
+        );
     }
 }

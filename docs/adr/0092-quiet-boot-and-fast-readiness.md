@@ -48,9 +48,10 @@ path, the daemon would listen on one more socket per machine before the VMM star
 machines whose init predates the change would need the polling anyway. A 5 ms poll gets the
 same latency (within one interval) with no protocol change and no second path.
 
-**`loglevel=3` instead of `quiet`.** `quiet` is level 4, which also prints warnings (a
-hung task, a throttled device); a person debugging a boot sees them. The difference in boot
-output is nil at this level on the shipped kernel.
+**`loglevel=3` instead of `quiet`.** `quiet` is level 4 and keeps the kernel's warnings
+off the console too; level 3 would drop one more class (error-level lines stay in both). Not
+measured separately; `quiet` is the kernel's own name for the setting and `loglevel=` stays
+available to an operator.
 
 **`console=` off the serial port.** Loses the panic and the early-boot failures that a
 person needs, and the program's output, which uses the same device.

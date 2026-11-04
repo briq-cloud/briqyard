@@ -1,0 +1,28 @@
+name: native-probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: KVM and runner shape
+        run: |
+          { uname -a; ls -l /dev/kvm || true; lscpu; free -m; df -h /; } | tee probe.txt
+          cat probe.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Install ZFS and exercise a file-backed pool
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y zfsutils-linux
+          sudo modprobe zfs
+          truncate -s 1G "$RUNNER_TEMP/probe.img"
+          sudo zpool create nativeprobe "$RUNNER_TEMP/probe.img"
+          sudo zpool status nativeprobe | tee -a "$GITHUB_STEP_SUMMARY"
+          sudo zpool destroy nativeprobe

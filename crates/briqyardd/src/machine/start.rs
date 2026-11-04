@@ -458,7 +458,10 @@ impl Manager {
                 rec.vmm_version == self.inner.vmm.version() && saved.compatible(&host)
             }
             (Some(_), None) => false,
-            (None, _) => rec.vmm_version == self.inner.vmm.version(),
+            // Memory written before boot identities existed carries the CPUID it was taken
+            // with: on a host that has an identity it never loads (ADR 0087).
+            (None, Some(_)) => false,
+            (None, None) => rec.vmm_version == self.inner.vmm.version(),
         }
     }
 
@@ -681,6 +684,7 @@ pub(super) fn resolved_guest_config(
             device: "/dev/vdc".into(),
             path: v.mount.clone(),
             fstype: "ext4".into(),
+            read_only: false,
         });
     }
     let mut files: Vec<(String, u32, Vec<u8>)> = Vec::new();
@@ -705,16 +709,11 @@ pub(super) fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
     let (mut cfg, files) = resolved_guest_config(r, gateway)?;
     if let Some(birth) = &r.template_birth {
         cfg = if birth.profile == guest::SANDBOX_READY_V1 {
-            templates::sandbox::builder_config(guest::SandboxDevice {
-                bytes: (r
-                    .volume
+            templates::sandbox::builder_config(
+                r.volume
                     .as_ref()
-                    .context("sandbox placeholder missing")?
-                    .size_gb as u64)
-                    << 30,
-                logical_sector_bytes: 512,
-                drive_id: "data".into(),
-            })
+                    .map(|v| guest::SandboxDevice::of_gb(v.size_gb)),
+            )
         } else {
             templates::builder_config()
         };

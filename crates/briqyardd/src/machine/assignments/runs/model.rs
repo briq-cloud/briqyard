@@ -1,22 +1,29 @@
 use super::*;
 
 impl Manager {
-    pub(super) async fn current_run_disks(&self, record: &Record) -> Result<(Disk, Disk)> {
-        anyhow::ensure!(record.volume.is_some(), "assigned work disk missing");
+    /// The root disk and, when the record has a volume, the data disk; a volume-free
+    /// machine has no data disk to identify.
+    pub(super) async fn current_run_disks(&self, record: &Record) -> Result<(Disk, Option<Disk>)> {
         let root = record.root_dataset();
-        let data = record.data_dataset();
         let root = Disk {
             guid: self.inner.zfs.guid(&root).await?,
             dataset: root,
         };
-        let data = Disk {
-            guid: self.inner.zfs.guid(&data).await?,
-            dataset: data,
+        let data = match &record.volume {
+            Some(_) => {
+                let data = record.data_dataset();
+                let data = Disk {
+                    guid: self.inner.zfs.guid(&data).await?,
+                    dataset: data,
+                };
+                anyhow::ensure!(
+                    root.guid != data.guid,
+                    "root and data identify the same dataset"
+                );
+                Some(data)
+            }
+            None => None,
         };
-        anyhow::ensure!(
-            root.guid != data.guid,
-            "root and data identify the same dataset"
-        );
         Ok((root, data))
     }
 
@@ -27,16 +34,54 @@ impl Manager {
     ) -> Result<Intent> {
         let prior = entry.snapshot();
         anyhow::ensure!(
-            prior.pending.is_none() && prior.restoring.is_none(),
-            "pending/current run or update intent requires explicit continuation integration"
+            prior.restoring.is_none(),
+            "unfinished restore blocks continuation"
         );
+        let requested_size = prior
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.size.as_ref())
+            .unwrap_or(&prior.size);
+        self.check_host_size(requested_size)?;
         let previous = self.inner.store.get::<Current>(RUNS, &prior.id)?;
+        let stored_update = self.inner.store.get::<UpdateIntent>(UPDATES, &prior.id)?;
+        let consumed_update = match (&prior.pending, stored_update) {
+            (Some(pending), Some(update)) => {
+                let current = previous
+                    .as_ref()
+                    .context("assigned pending update lacks settled run")?;
+                update.check(current)?;
+                anyhow::ensure!(
+                    update.target.pending.as_ref() == Some(pending)
+                        && (updates::matches_update_target(&prior, &update.target)
+                            || updates::matches_current_target(&prior, current, &update)?),
+                    "assigned pending update differs from its intent"
+                );
+                Some(update)
+            }
+            (Some(_), None) => anyhow::bail!("assigned pending update lacks durable intent"),
+            (None, Some(update)) => {
+                let current = previous
+                    .as_ref()
+                    .context("assigned update lacks settled run")?;
+                update.check(current)?;
+                anyhow::ensure!(
+                    update.target.pending.is_none()
+                        && (updates::matches_update_target(&prior, &update.target)
+                            || updates::matches_current_target(&prior, current, &update)?),
+                    "assigned immediate update differs from its intent"
+                );
+                Some(update)
+            }
+            (None, None) => None,
+        };
         let origin = if let Some(previous) = &previous {
             previous.check()?;
             anyhow::ensure!(
                 previous.reference.phase == Phase::Settled
-                    && previous.record_fingerprint(&prior)?
-                        == previous.record_fingerprint(&previous.target)?,
+                    && (consumed_update.is_some()
+                        || previous.record_fingerprint(&prior)?
+                            == previous.record_fingerprint(&previous.target)?),
                 "previous run is not exactly Settled"
             );
             self.check_run_creation_authority(previous)?;
@@ -108,9 +153,10 @@ impl Manager {
                 .context("fresh boot identity unavailable")?
         };
         anyhow::ensure!(
-            expected_boot_identity.schema == 1,
+            expected_boot_identity.known(),
             "run boot identity schema unsupported"
         );
+        let checkpoint = checkpoint && consumed_update.is_none();
         let mode = if let (true, Some(previous)) = (checkpoint, previous.as_ref()) {
             let saved = previous
                 .settlement
@@ -140,8 +186,14 @@ impl Manager {
             let namespace = self
                 .namespace_of(&prior.namespace)
                 .context("run namespace missing")?;
-            let (mut config, files) =
-                crate::machine::start::resolved_guest_config(&prior, namespace.subnet.gateway())?;
+            let mut configured = prior.clone();
+            if let Some(update) = &consumed_update {
+                updates::apply_consumed_update(update, &mut configured)?;
+            }
+            let (mut config, files) = crate::machine::start::resolved_guest_config(
+                &configured,
+                namespace.subnet.gateway(),
+            )?;
             config.assigned_run_generation = Some(guest_generation.clone());
             let (drive, expected_bundle_sha256) =
                 crate::machine::start::assigned_config_drive(&config, &files)?;
@@ -177,11 +229,18 @@ impl Manager {
             phase: Phase::Reserved,
         };
         let mut target = prior.clone();
+        if let Some(update) = &consumed_update {
+            updates::apply_consumed_update(update, &mut target)?;
+        }
         target.assigned_run = Some(reference.clone());
         target.state = state::STARTING.into();
         target.pid = 0;
         target.suspended = checkpoint;
         target.clone_origin.as_mut().unwrap().mapping_exited = true;
+        let consumed_update_sha256 = consumed_update
+            .as_ref()
+            .map(|update| update.digest())
+            .transpose()?;
         let current = Current {
             schema: 3,
             machine: prior.id.clone(),
@@ -206,6 +265,8 @@ impl Manager {
                 .map(Current::authority_sha256)
                 .transpose()?,
             settlement: None,
+            consumed_update: consumed_update.clone().map(Box::new),
+            consumed_update_sha256,
         };
         let reader = current.reader()?;
         let intent = Intent {
@@ -229,17 +290,51 @@ impl Manager {
 impl Current {
     pub(super) fn check(&self) -> Result<()> {
         self.receipt.check()?;
+        let consumed_update_is_valid = match &self.consumed_update {
+            Some(update) => {
+                let direct_source = self.previous_run_sha256.as_deref()
+                    == Some(update.source_current_sha256.as_str());
+                // A volume update can be acknowledged while Observed, then carried through
+                // a Settled predecessor. Intent::check authenticates that exact settlement
+                // before this consumed update becomes the next run's immutable prior.
+                let settled_target =
+                    updates::matches_settled_update_target(&self.prior, &update.target)?;
+                let settled_source =
+                    self.previous_run_sha256.is_some() && !direct_source && settled_target;
+                let target_matches =
+                    updates::matches_update_target(&self.prior, &update.target) || settled_target;
+                update.check_shape().is_ok()
+                    && update.machine == self.machine
+                    && hex_id(&update.source_current_sha256, 64)
+                    && (direct_source || settled_source)
+                    && target_matches
+            }
+            None => true,
+        };
         anyhow::ensure!(
             matches!(self.schema, 1 | 3)
                 && self.reference.schema == self.schema
                 && self.reference.sequence > 0
                 && hex_id(&self.host_generation, 64)
                 && fc::valid_host_boot_id(&self.host_boot_id)
-                && self.expected_boot_identity.schema == 1
+                && self.expected_boot_identity.known()
                 && self.machine == self.prior.id
                 && self.receipt.machine == self.machine
                 && self.target.id == self.machine
-                && self.prior.pending.is_none()
+                && self.prior.pending
+                    == self
+                        .consumed_update
+                        .as_ref()
+                        .and_then(|update| update.target.pending.clone())
+                && self.consumed_update.is_some() == self.consumed_update_sha256.is_some()
+                && self.consumed_update_sha256.as_ref().is_none_or(|hash| {
+                    hex_id(hash, 64)
+                        && self
+                            .consumed_update
+                            .as_ref()
+                            .is_some_and(|update| update.digest().ok().as_ref() == Some(hash))
+                })
+                && consumed_update_is_valid
                 && self.prior.restoring.is_none()
                 && self.prior_control_sha256 == self.record_fingerprint(&self.prior)?,
             "invalid exact run authority"
@@ -273,12 +368,26 @@ impl Current {
                 && binding.create_sha256 == self.receipt.create_sha256
                 && self.prior.namespace == self.receipt.namespace
                 && self.root.dataset == self.prior.root_dataset()
-                && self.data.dataset == self.prior.data_dataset()
                 && self.root.guid > 0
-                && self.data.guid > 0
-                && self.root.guid != self.data.guid,
+                && match (&self.prior.volume, &self.data) {
+                    (Some(_), Some(data)) =>
+                        data.dataset == self.prior.data_dataset()
+                            && data.guid > 0
+                            && data.guid != self.root.guid,
+                    (None, None) => true,
+                    _ => false,
+                },
             "run changes creation authority or current backing identity"
         );
+        if let Some(update) = &self.consumed_update {
+            if let Some(swap) = &update.root_swap {
+                anyhow::ensure!(
+                    swap.target_guid == Some(self.root.guid)
+                        && self.root.dataset == self.target.root_dataset(),
+                    "current run root differs from consumed image update"
+                );
+            }
+        }
         let old = self
             .prior
             .boot_incarnation
@@ -314,6 +423,13 @@ impl Current {
         projected.pid = 0;
         projected.suspended = matches!(self.mode, Mode::Checkpoint { .. });
         projected.clone_origin.as_mut().unwrap().mapping_exited = true;
+        if let Some(update) = &self.consumed_update {
+            anyhow::ensure!(
+                update.target.pending == self.prior.pending,
+                "consumed update target differs from prior"
+            );
+            updates::apply_consumed_update(update, &mut projected)?;
+        }
         if matches!(self.reference.phase, Phase::Observed | Phase::Settled) {
             anyhow::ensure!(
                 (self.target.pid > 0 || self.reference.phase == Phase::Settled)
@@ -339,6 +455,12 @@ impl Current {
                 .as_ref()
                 .context("settlement proof missing")?;
             settled.check(self)?;
+            if let Some(update) = &settled.update {
+                projected.pending = update.target.pending.clone();
+                projected.pending_since = update.target.pending_since;
+                projected.volume = update.target.volume.clone();
+                projected.disk_limits = update.target.disk_limits.clone();
+            }
             projected.pid = 0;
             projected.suspended = settled.checkpoint.is_some();
         } else {
@@ -372,7 +494,7 @@ impl Current {
                 );
                 let gateway = origin.configure.gateway.parse()?;
                 let (mut expected, expected_files) =
-                    crate::machine::start::resolved_guest_config(&self.prior, gateway)?;
+                    crate::machine::start::resolved_guest_config(&projected, gateway)?;
                 expected.assigned_run_generation = Some(guest_generation.clone());
                 anyhow::ensure!(
                     serde_json::to_value(&config)? == serde_json::to_value(expected)?
@@ -530,15 +652,60 @@ impl Intent {
                                 .checked_add(1)
                                 .context("sequence overflow")?
                         && self.current.host_generation != prior.host_generation
-                        && self.current.record_fingerprint(&self.current.prior)?
-                            == self.current.record_fingerprint(&prior.target)?
-                        && self.current.root == prior.root
+                        && match &self.current.consumed_update {
+                            Some(update) => {
+                                let target_matches = updates::matches_update_target(
+                                    &self.current.prior,
+                                    &update.target,
+                                ) || updates::matches_current_target(
+                                    &self.current.prior,
+                                    prior,
+                                    update,
+                                )?;
+                                update.check(prior).is_ok()
+                                    && self.current.consumed_update_sha256.as_ref()
+                                        == update.digest().ok().as_ref()
+                                    && target_matches
+                            }
+                            None => {
+                                self.current.record_fingerprint(&self.current.prior)?
+                                    == self.current.record_fingerprint(&prior.target)?
+                            }
+                        }
+                        && match self
+                            .current
+                            .consumed_update
+                            .as_deref()
+                            .and_then(|update| update.root_swap.as_ref())
+                        {
+                            Some(swap) => {
+                                self.current.root.dataset == prior.root.dataset
+                                    && prior.root.guid == swap.source_guid
+                                    && swap.target_guid == Some(self.current.root.guid)
+                            }
+                            None => self.current.root == prior.root,
+                        }
                         && self.current.data == prior.data
                         && self.current.receipt == prior.receipt
                         && self.current.prior.launch_identity == prior.target.launch_identity,
                     "next run changes settled authority"
                 );
             } else {
+                if prior.reference.phase == Phase::Observed
+                    && self.current.reference.phase == Phase::Settled
+                {
+                    if let Some(settlement) = &self.current.settlement {
+                        if let Some(update) = &settlement.update {
+                            anyhow::ensure!(
+                                update.source_current_sha256 == prior.authority_sha256()?
+                                    && settlement.update_sha256.as_ref()
+                                        == update.digest().ok().as_ref(),
+                                "settlement update is not bound to the observed run"
+                            );
+                            update.check(prior)?;
+                        }
+                    }
+                }
                 let mut projected = self.current.clone();
                 projected.schema = prior.schema;
                 projected.prior_control_sha256 = prior.prior_control_sha256.clone();

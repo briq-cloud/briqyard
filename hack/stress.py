@@ -521,62 +521,90 @@ class Run:
         self.invariants("start vs destroy")
 
     def starts_past_capacity(self):
-        self.phase("start 4 machines at once that cannot all fit: 503 capacity for the rest, live memory never over the host's")
-        t = self.namespaces[0]
-        s = self.api.call("GET", "/v1/status", op="status")
-        cap = s["capacity"]["memory_mb"]
-        free = cap - s["used"]["memory_mb"]
-        n, mem = 4, free // 3 + 1  # two fit, two do not
-        body = {"namespace": t, "image": self.a.image, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": mem}, "sleep": "never", "start": False}
-        self.log(f"   {free} MB free of {cap}: {n} machines of {mem} MB")
-        made, errs = parallel([f"cap{i}" for i in range(n)], lambda name: self.api.call("POST", "/v1/machines", dict(body, name=name), op="create (stopped)", timeout=600), n)
-        self.report_errors("create stopped", errs)
-        ids = [m["id"] for m in made.values()]
-        # A create answers at `creating` (ADR 0048): the race is between starts of machines made.
-        for mid in ids:
-            self.wait_state(mid, {"created"}, timeout=self.a.boot_timeout)
-        # A start refused leaves a machine as it was: `created`, never started.
-        was = {mid: "created" for mid in ids}
-
-        # Live memory, sampled through the race: it must never exceed the host's.
-        worst = {"mb": 0}
+        self.phase("start 4 machines at once that cannot all fit: 503 capacity for the rest, sampled guest quota within the host budget")
+        problems = {}
+        completed = False
+        ids, answers, start_errors = [], {}, {}
+        race_started = False
+        started, refused = [], []
+        worst = {"mb": 0, "samples": 0}
+        sample_errors = []
         done = threading.Event()
-
-        def sample():
-            while not done.is_set():
-                live = sum(m["size"]["memory_mb"] for m in self.mlist() if m["state"] in LIVE)
-                worst["mb"] = max(worst["mb"], live)
-                self.safety.sleep(0.2)
-
-        sampler = threading.Thread(target=sample)
-        sampler.start()
+        sampler = None
         try:
-            answers, _ = parallel(ids, lambda mid: self.api.request("POST", f"/v1/machines/{mid}/start", op="start (past capacity)", timeout=300), n)
+            t = self.namespaces[0]
+            s = self.api.call("GET", "/v1/status", op="status")
+            cap = s["capacity"]["memory_mb"]
+            free = cap - s["used"]["memory_mb"]
+            n, mem = 4, free // 3 + 1  # two fit, two do not
+            body = {"namespace": t, "image": self.a.image, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": mem}, "sleep": "never", "start": False}
+            self.log(f"   {free} MB free of {cap}: {n} machines of {mem} MB")
+            made, errs = parallel([f"cap{i}" for i in range(n)], lambda name: self.api.call("POST", "/v1/machines", dict(body, name=name), op="create (stopped)", timeout=600), n)
+            self.report_errors("create stopped", errs)
+            ids = [m["id"] for m in made.values()]
+            # A create answers at `creating` (ADR 0048): race starts only after creation.
+            for mid in ids:
+                self.wait_state(mid, {"created"}, timeout=self.a.boot_timeout)
+            was = {mid: "created" for mid in ids}
+
+            # Host-wide configured guest quota, sampled through the race, not physical RAM.
+            def sample():
+                try:
+                    while not done.is_set():
+                        live = sum(m["size"]["memory_mb"] for m in self.mlist() if m["state"] in LIVE)
+                        worst["mb"] = max(worst["mb"], live)
+                        worst["samples"] += 1
+                        self.safety.sleep(0.2)
+                except Exception as error:
+                    sample_errors.append("sampler_budget_expired" if isinstance(error, BudgetExpired) else "sampler_failed")
+
+            sampler = threading.Thread(target=sample)
+            sampler.start()
+            race_started = True
+            answers, start_errors = parallel(ids, lambda mid: self.api.request("POST", f"/v1/machines/{mid}/start", op="start (past capacity)", timeout=300), n)
             started = [ids[i] for i, (st, _) in answers.items() if st == 200]
             refused = [ids[i] for i, (st, text) in answers.items() if st == 503 and self.error_code(text) == "capacity"]
             for mid in started:
                 self.wait_state(mid, {"running"}, timeout=self.a.boot_timeout)
-        finally:
             done.set()
             sampler.join()
-        problems = {}
-        for i, (st, text) in answers.items():
-            if ids[i] not in started and ids[i] not in refused:
-                problems[ids[i]] = f"answered {st} {text[:80]}"
-        for mid in refused:
-            state = self.mget(mid)["state"]
-            if state != was[mid]:
-                problems[mid] = f"refused, yet {state} (was {was[mid]})"
-        if not started:
-            problems["none"] = "no start was accepted"
-        if not refused:
-            problems["all"] = f"every start was accepted: {n * mem} MB in {free} MB free"
-        if worst["mb"] > cap:
-            problems["sum"] = f"{worst['mb']} MB live for a host of {cap}"
-        self.log(f"   started {len(started)}, refused {len(refused)}, live at most {worst['mb']} MB of {cap}")
-        self.report_errors("starts past capacity", {i: RuntimeError(msg) for i, msg in enumerate(problems.values())}, list(problems))
-        parallel(ids, lambda mid: self.api.call("DELETE", f"/v1/machines/{mid}", op="destroy", timeout=180), n)
-        self.invariants("starts past capacity")
+            sampler = None
+            for i, (st, text) in answers.items():
+                if ids[i] not in started and ids[i] not in refused:
+                    problems[f"start_{i}"] = "start_response_unexpected"
+            for mid in refused:
+                if self.mget(mid)["state"] != was[mid]:
+                    problems["refused_state"] = "refused_state_changed"
+            if not started:
+                problems["accepted"] = "no_start_accepted"
+            if not refused:
+                problems["refused"] = "no_capacity_refusal"
+            parallel(ids, lambda mid: self.api.call("DELETE", f"/v1/machines/{mid}", op="destroy", timeout=180), n)
+            self.invariants("starts past capacity")
+            completed = True
+        finally:
+            done.set()
+            try:
+                if sampler is not None:
+                    sampler.join()
+            finally:
+                if race_started:
+                    for i, error in start_errors.items():
+                        problems[f"start_{i}"] = "start_budget_expired" if isinstance(error, BudgetExpired) else "start_exception"
+                    for i in range(len(ids)):
+                        if i not in answers and i not in start_errors:
+                            problems[f"start_{i}"] = "start_response_missing"
+                if sample_errors:
+                    problems["sampler"] = sample_errors[0]
+                if not worst["samples"]:
+                    problems["samples"] = "sample_missing"
+                elif worst["mb"] > cap:
+                    problems["sum"] = "sampled_guest_budget_exceeded"
+                if not completed:
+                    problems["phase"] = "capacity_phase_incomplete"
+                if worst["samples"]:
+                    self.log(f"   accepted {len(started)}, capacity refused {len(refused)}, sampled guest quota max {worst['mb']} MB of {cap} ({worst['samples']} samples)")
+                self.report_errors("starts past capacity", {i: RuntimeError(msg) for i, msg in enumerate(problems.values())}, list(problems))
 
     def destroy_all(self):
         self.phase("destroy everything")
@@ -601,6 +629,20 @@ class Run:
             if line.startswith("process_resident_memory_bytes "):
                 return float(line.split()[1]) / (1 << 20)
         return None
+
+    def dump_consoles(self, label, ids, lines=60):
+        """The evidence of a failed cycle, read before its machines are destroyed: for each one its
+        state, exit info and the last console lines. Never raises: it must not hide the failure."""
+        for mid in ids:
+            out = [f"   CONSOLE {label} {mid}"]
+            try:
+                m = self.mget(mid)
+                out.append(f"      state={m['state']} stopped_reason={m.get('stopped_reason')} exit={m.get('exit')} error={m.get('error')}")
+                page = self.api.call("GET", f"/v1/machines/{mid}/logs?limit=5000", op="logs")
+                out += [f"      | {l.get('ts', '')} {l.get('line', '')}" for l in page.get("lines", [])[-lines:]]
+            except Exception as e:
+                out.append(f"      (unreadable: {str(e)[:200]})")
+            self.log("\n".join(out))
 
     def churn(self):
         """Cycles of everything a machine goes through, each ending with the namespaces empty
@@ -675,6 +717,9 @@ class Run:
                 self.wait_state(mid, {"stopped"}, timeout=120)
                 self.api.call("POST", f"/v1/machines/{mid}/start", op="resume", timeout=180)
                 self.wait_state(mid, {"running"}, timeout=self.a.boot_timeout)
+            except Exception:
+                self.dump_consoles(f"{t}/c{c}", made)
+                raise
             finally:
                 for x in reversed(made):
                     self.api.call("DELETE", f"/v1/machines/{x}", op="destroy", timeout=180)

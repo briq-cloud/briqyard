@@ -1,8 +1,11 @@
 use super::*;
 impl Manager {
     pub(in crate::machine) fn check_sandbox_disk(&self, r: &Record, path: &Path) -> Result<()> {
-        let expected = self.sandbox_recipe(&r.image, r.size)?.device();
-        check_geometry(path, &expected)
+        let volume = r.volume.as_ref().map(|v| v.size_gb);
+        // A volume-free recipe has no data device, and no data disk reaches this check.
+        self.sandbox_recipe(&r.image, r.size, volume)?
+            .device()
+            .map_or(Ok(()), |expected| check_geometry(path, &expected))
     }
 }
 #[cfg(target_os = "linux")]

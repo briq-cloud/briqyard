@@ -2,10 +2,15 @@
 
 Warm pools hold identity-configured, paused destinations of one immutable qualified
 named-memory template on its source host. They use normal machine records, addresses,
-root clones, durable memory readers and full CPU/RAM/machine/disk admission. Warm records additionally charge the sealed logical root size to namespace disk quota,
-alongside any volume charge. This server-owned marker persists after claim and through
-destruction until cleanup; existing ordinary-machine disk policy is unchanged. A ready
-slot has not started the fixed workload. It is neither a cold spare nor free capacity.
+root clones, durable memory readers and full CPU/RAM/machine/disk admission. Warm policy
+charges logical root and data disks separately; the data budget defaults to zero. Pool
+free-space admission subtracts their sum before preserving the existing absolute and
+percentage floors. The catalog CLI reports `data_disk_gb` alongside root, memory and CPU
+charges. Warm records additionally charge the sealed logical root size to namespace disk
+quota, alongside any volume charge. This server-owned marker persists after claim and
+through destruction until cleanup; existing ordinary-machine disk policy is unchanged. A
+ready slot has not started the fixed workload. It is neither a cold spare nor free
+capacity.
 
 Enable `templates.warm_pools = true` alongside the exact template init digest binding
 on a candidate host. Status/heartbeats advertise `warm_pool_profiles` from the configured

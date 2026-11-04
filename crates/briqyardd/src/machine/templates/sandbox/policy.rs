@@ -12,7 +12,7 @@ impl Manager {
                 .inner
                 .vmm
                 .boot_identity(false)
-                .is_some_and(|i| i.schema == 1 && i.compatible(&i))
+                .is_some_and(|i| i.compatible(&i))
             && cfg
                 .templates
                 .sandbox_recipes
@@ -23,6 +23,7 @@ impl Manager {
         &self,
         image: &str,
         size: api::Size,
+        volume_gb: Option<u32>,
     ) -> Result<&crate::config::SandboxRecipe, MError> {
         if !self.sandbox_available() {
             return Err(invalid("operator sandbox seed profile unavailable"));
@@ -35,21 +36,25 @@ impl Manager {
             .find(|r| {
                 r.image == image
                     && r.size.matches_sandbox_resources(&size)
+                    && r.volume() == volume_gb
                     && r.init_sha256 == self.inner.images.init_sha256()
             })
-            .ok_or_else(|| invalid("sandbox image/size/init is not operator approved"))
+            .ok_or_else(|| invalid("sandbox image/size/volume/init is not operator approved"))
     }
     pub(in crate::machine) fn sandbox_birth(
         &self,
         req: &api::CreateMachineRequest,
         role: Option<Role>,
     ) -> Result<TemplateBirth, MError> {
-        let recipe = self.sandbox_recipe(&req.image, req.size)?;
+        if req.volume.as_ref().is_some_and(|v| v.mount != "/work") {
+            return Err(invalid("sandbox builder data volume must mount at /work"));
+        }
+        let recipe =
+            self.sandbox_recipe(&req.image, req.size, req.volume.as_ref().map(|v| v.size_gb))?;
         if role.is_some()
             || req.fork.is_some()
             || req.restore.is_some()
             || req.sandbox_seed.is_some()
-            || req.volume.is_some()
             || req.entrypoint.is_some()
             || req.cmd.is_some()
             || !req.env.is_empty()
@@ -79,7 +84,7 @@ impl Manager {
         })
     }
     pub(in crate::machine) fn check_sandbox_builder(&self, r: &Record) -> Result<()> {
-        let recipe = self.sandbox_recipe(&r.image, r.size)?;
+        let recipe = self.sandbox_recipe(&r.image, r.size, r.volume.as_ref().map(|v| v.size_gb))?;
         let birth = r.template_birth.as_ref().context("sandbox birth missing")?;
         anyhow::ensure!(
             r.clone_origin.is_none()
@@ -106,9 +111,7 @@ impl Manager {
                 && r.files.is_empty()
                 && r.ports.is_empty()
                 && r.metadata.is_empty()
-                && r.volume
-                    .as_ref()
-                    .is_some_and(|v| v.mount == "/work" && v.size_gb == recipe.volume_gb),
+                && r.volume.as_ref().is_none_or(|v| v.mount == "/work"),
             "sandbox builder provenance/configuration mismatch"
         );
         Ok(())
@@ -119,7 +122,11 @@ impl Manager {
         a: &CloneArtifact,
     ) -> Result<()> {
         self.check_sandbox_builder(r)?;
-        let recipe = self.sandbox_recipe(&a.recipe.image, a.recipe.size)?;
+        let recipe = self.sandbox_recipe(
+            &a.recipe.image,
+            a.recipe.size,
+            a.recipe.config.sandbox_device.as_ref().map(|d| d.gb()),
+        )?;
         anyhow::ensure!(
             a.profile == guest::SANDBOX_READY_V1
                 && a.recipe.image == r.image
@@ -129,7 +136,7 @@ impl Manager {
                 && a.recipe.image_key == r.image_key
                 && a.namespace == r.namespace
                 && a.init_sha256 == recipe.init_sha256
-                && a.recipe.config.sandbox_device.as_ref() == Some(&recipe.device())
+                && a.recipe.config.sandbox_device == recipe.device()
                 && crate::machine::templates::sandbox::pristine_config(&a.recipe.config),
             "sandbox artifact recipe/device differs from operator provenance"
         );
