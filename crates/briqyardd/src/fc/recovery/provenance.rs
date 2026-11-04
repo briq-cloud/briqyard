@@ -47,10 +47,14 @@ impl Jailer {
             io::Read,
             os::{fd::AsRawFd, unix::ffi::OsStrExt},
         };
-        let dir = Dir::absolute(path.parent().ok_or_else(invalid)?)?;
-        dir.owned(super::fs::Owner::ROOT, false)?;
+        let dir = Dir::absolute(path.parent().ok_or_else(invalid)?)
+            .with_context(|| format!("opening the jailer directory of {}", path.display()))?;
+        dir.owned(super::fs::Owner::ROOT, false)
+            .context("the jailer's directory must be root-owned and not group/other-writable")?;
         let name = std::ffi::CString::new(path.file_name().ok_or_else(invalid)?.as_bytes())?;
-        let mut file = dir.open(&name, libc::O_RDONLY, 0)?;
+        let mut file = dir
+            .open(&name, libc::O_RDONLY, 0)
+            .with_context(|| format!("opening the jailer {}", path.display()))?;
         let m = file.metadata()?;
         if !m.is_file()
             || m.uid() != 0
@@ -59,12 +63,13 @@ impl Jailer {
             || m.mode() & 0o111 == 0
             || m.len() > 64 << 20
         {
-            return Err(invalid().into());
+            return Err(anyhow::Error::new(invalid())
+                .context("the jailer must be a root-owned executable regular file, not group/other-writable, up to 64 MiB"));
         }
         let mut magic = [0; 4];
         Read::read_exact(&mut file, &mut magic)?;
         if magic != *b"\x7fELF" {
-            return Err(invalid().into());
+            return Err(anyhow::Error::new(invalid()).context("the jailer is not an ELF file"));
         }
         let digest = hash(&file)?;
         approved(&digest, std::env::consts::ARCH)
@@ -81,8 +86,11 @@ impl Jailer {
         let executable = format!("/proc/self/fd/{}", provenance.file.as_raw_fd());
         let text =
             super::unit::output(std::ffi::OsStr::new(&executable), &["--version"], 1024).await?;
-        super::unit::jailer_version(&text, vmm)?;
-        provenance.check()?;
+        super::unit::jailer_version(&text, vmm)
+            .with_context(|| format!("the jailer says {:?}, the VMM is {vmm}", text.trim()))?;
+        provenance
+            .check()
+            .context("the jailer changed while it was verified")?;
         Ok(provenance)
     }
     pub(in crate::fc) fn lease(&self) -> io::Result<LaunchExecutable> {

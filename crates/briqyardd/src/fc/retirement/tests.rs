@@ -176,3 +176,22 @@ fn empty_leaf_refuses_ancestor_membership_drift_after_capture() {
     assert!(held.remove("m_owned").is_err());
     assert!(f.path.is_dir());
 }
+
+#[test]
+fn identity_follows_the_directory_not_its_name() {
+    let f = Fixture::new();
+    let first = f.held().identity().unwrap();
+    assert_eq!(first, f.held().identity().unwrap());
+    // The same name over another directory is another group.
+    let other = f.temp.path().join("firecracker/m-other");
+    fs::create_dir(&other).unwrap();
+    for name in ["cgroup.procs", "cgroup.threads"] {
+        fs::write(other.join(name), "").unwrap();
+    }
+    fs::write(other.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+    let held = f.held();
+    fs::rename(&f.path, f.temp.path().join("old")).unwrap();
+    fs::rename(&other, &f.path).unwrap();
+    assert_ne!(first, f.held().identity().unwrap());
+    assert_eq!(first, held.identity().unwrap());
+}

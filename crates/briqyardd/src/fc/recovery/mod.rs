@@ -21,6 +21,11 @@ mod tests;
 #[cfg(any(target_os = "linux", test))]
 mod unit;
 
+/// The most machine cgroups, and the most recorded machines, one recovery looks at. A host
+/// upgraded in place can hold thousands of empty leaves left by machines that are gone, and
+/// every record counts, stopped machines too (ADR 0068).
+pub(super) const MAX_LEAVES: usize = 65_536;
+
 /// Acquired before host helpers and held by the VMM factory for its entire lifetime.
 /// Only the supported official service can construct a native startup authority.
 pub struct Startup {
@@ -48,7 +53,7 @@ impl Startup {
         jailer: &Path,
         vmm: &str,
     ) -> Result<Recovered> {
-        if machines.len() > 4096 {
+        if machines.len() > MAX_LEAVES {
             return Err(anyhow!("machine recovery inventory exceeds bound"));
         }
         let mut ids = std::collections::BTreeSet::new();

@@ -90,8 +90,9 @@ output/deadlines, discard stderr and are positively reaped; they inherit no appl
 environment. No helper runs after the final unit identity recheck.
 
 Keep managed spawning closed before record recovery, orphan teardown, create resumption,
-gateway starts, background workers or HTTP mutations. Inventory at most 4096 original machine
-identities and bounded service/domain members without skipping read failures. Retain pidfds
+gateway starts, background workers or HTTP mutations. Inventory at most 65,536 original machine
+identities (records, stopped machines included, and machine cgroups; the domain's own listing
+adds its control files) and bounded service/domain members without skipping read failures. Retain pidfds
 and original command/start/leaf joins for live VMM candidates. Unknown launchers, multiple
 members, unreadable state, child cgroups, ownership changes or collisions refuse startup.
 A nonroot four-UID equality and zero effective/permitted/ambient capabilities are additional
@@ -100,7 +101,14 @@ cgroup permissions.
 
 After inventory and reaping every barrier helper, recheck the effective unit and held cgroup
 identities, then require service `cgroup.procs` to be exactly the current daemon and no child
-cgroups. Recheck the complete machine-domain membership and each held target leaf afterward.
+cgroups. Recheck the complete machine-domain membership and each target leaf afterward. A leaf with
+a VMM process is held open; a leaf with none is remembered by device and inode and looked at
+again at the end (same group, still settled and empty), because a held leaf costs about a dozen
+descriptors and a host upgraded in place can hold thousands of empty ones left by earlier
+versions (6,408 and 5,248 on the first two hosts upgraded; the former 4,096 bound refused them
+with a bare EINVAL and no machine could start). The orphan sweep that follows retires them,
+logging each at debug level: journald's default rate limit would otherwise drop the lines
+that matter.
 A pre-exec or pre-join survivor remains in the service; a post-join descendant remains in its
 leaf. The trusted jailer attaches before clone/fork and drops privilege before VMM execution.
 This closes the legacy launch window without an empty snapshot or quiet-time heuristic.
@@ -168,3 +176,10 @@ than deleting synthetic controller files. They do not prove a real cgroup kernel
 Actual supported-unit restart/adoption/preboot recovery, exact Linux pidfd/cgroup behavior,
 lifecycle, fleet, stress and chaos checks remain separate validation gates. No deployment or
 real-host proof follows solely from source fixtures or property-format compatibility.
+
+The e2e suite covers the in-place upgrade shape (`hack/e2e-siblings.sh`): after machines have
+run, it makes 5,000 empty leaves, hands the daemon over, and requires the barrier to open and
+the sweep to retire them. The leaves are made after the first machine ran on purpose: reading
+a leaf's final counters needs `memory.current` and `memory.events.local`, which a leaf has only
+once the jailer enabled `+memory` on the parent. Made on a host where no machine has run, they
+would fail the sweep for a reason that is the fixture's.
