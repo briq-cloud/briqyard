@@ -22,16 +22,31 @@ impl Barrier {
     pub(super) async fn acquire() -> Result<Self> {
         let lock = Arc::new(DomainLock::acquire().context("exclusive VMM cgroup domain")?);
         let pid = std::process::id();
-        let proc = Dir::absolute(Path::new(&format!("/proc/{pid}")))?;
-        let start = unit::self_start(&proc.text(c"stat", 4096)?)?;
-        unit::self_membership(&proc, start)?;
-        let root = unit::root_cgroup()?;
-        let service = unit::actual_group(&root)?;
-        let namespace = Arc::new(super::namespace::Namespace::capture(
-            &proc, start, &root, &service,
-        )?);
-        let (text, hooks) = unit::query().await?;
-        let unit = unit::validate(&text, pid, &hooks).context("official effective daemon unit")?;
+        let proc = Dir::absolute(Path::new(&format!("/proc/{pid}")))
+            .with_context(|| format!("opening /proc/{pid}"))?;
+        let start = unit::self_start(
+            &proc
+                .text(c"stat", 4096)
+                .context("reading /proc/self/stat")?,
+        )
+        .context("parsing the start time in /proc/self/stat")?;
+        unit::self_membership(&proc, start).context(
+            "daemon is not the process of its unit: /proc/self/cgroup must read \
+             0::/system.slice/briqyardd.service and its command line must be \
+             /usr/local/bin/briqyardd --config /etc/briqyard/config.yaml",
+        )?;
+        let root = unit::root_cgroup().context("cgroup v2 root at /sys/fs/cgroup")?;
+        let service = unit::actual_group(&root)
+            .context("cgroup directory /sys/fs/cgroup/system.slice/briqyardd.service")?;
+        let namespace = Arc::new(
+            super::namespace::Namespace::capture(&proc, start, &root, &service)
+                .context("capturing the service's namespaces")?,
+        );
+        let (text, hooks) = unit::query()
+            .await
+            .context("querying the unit with busctl and systemctl")?;
+        let unit = unit::validate(&text, pid, &hooks)
+            .context("the unit systemd reports is not the official briqyardd.service (Id, ControlGroup, FragmentPath, MainPID, ExecStart)")?;
         Ok(Self {
             lock,
             proc,

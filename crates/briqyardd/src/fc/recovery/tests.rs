@@ -149,3 +149,16 @@ fn self_start_identity_distinguishes_reused_pids_without_name_inference() {
     );
     assert!(unit::self_start("42 (daemon name) S").is_err());
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_start_outside_the_official_unit_names_the_check_that_failed() {
+    // Whatever runs this test is not briqyardd.service: the barrier refuses, and the
+    // error says which check, not only the errno of the last system call.
+    let Err(error) = super::native::Barrier::acquire().await else {
+        panic!("a test process passed the supervision barrier");
+    };
+    let chain: Vec<String> = error.chain().map(|e| e.to_string()).collect();
+    assert!(chain.len() >= 2, "no context on {chain:?}");
+    assert!(!chain[0].contains("os error"), "bare errno: {chain:?}");
+}
