@@ -68,8 +68,11 @@ check "scale: memory protection is healthy (the startup barrier opened)" 'briqya
 mid=$(briqyard machine run --namespace "$NS" --name after --image alpine:3.20 --memory 128 -- sleep 3600 2>&1 | jq -r .id 2>/dev/null)
 check "scale: a create is accepted and runs (${BOUND}s from the restart)" '[ -n "$mid" ] && briqyard machine wait --for running "$mid" >/dev/null && [ $((SECONDS - start)) -le "$BOUND" ]'
 echo "   restart to a running create: $((SECONDS - start)) s"
-for _ in $(seq 1 60); do [ "$(made)" -eq 0 ] && break; sleep 1; done
-check "scale: the startup sweep retired the leaves" '[ "$(made)" -eq 0 ]'
+drain_start=$SECONDS
+for _ in $(seq 1 "$BOUND"); do [ "$(made)" -eq 0 ] && break; sleep 1; done
+echo "   idle backlog drained after $((SECONDS - drain_start)) s of serving; $((SECONDS - start)) s from restart"
+sudo journalctl -u briqyardd --no-pager -o cat | grep 'recovery inventory checked' | tail -1
+check "scale: the background collector retired the leaves" '[ "$(made)" -eq 0 ]'
 for _ in $(seq 1 120); do [ "$(known_left)" = 0 ] && break; sleep 1; done
 check "scale: the periodic pass retired the leaves of the known machines" '[ "$(known_left)" = 0 ] && sudo journalctl -u briqyardd --no-pager | grep -q "idle cgroup leaves"'
 check "scale: nothing else was left behind" '[ "$(leaves)" -le "$((before + 1))" ]'

@@ -73,6 +73,7 @@ pub(super) struct Mock {
     /// No guest port accepts: `wait_port` answers only at its deadline.
     pub(super) silent_ports: AtomicBool,
     /// Each machine's cgroup; none without an entry.
+    orphans: Mutex<std::collections::HashSet<String>>,
     pub(super) cgroups: Mutex<HashMap<String, fc::CgroupUse>>,
     /// The counted addresses and their counters.
     pub(super) counted: Mutex<BTreeMap<String, nft::Counters>>,
@@ -171,6 +172,7 @@ impl Mock {
             cleared_ips: Mutex::new(Vec::new()),
             attachments: Mutex::new(HashMap::new()),
             silent_ports: AtomicBool::new(false),
+            orphans: Default::default(),
             cgroups: Mutex::new(HashMap::new()),
             counted: Mutex::new(BTreeMap::new()),
             refuse_uncount: AtomicBool::new(false),
@@ -483,9 +485,21 @@ impl fc::Vmm for Mock {
         );
         for id in &orphaned {
             self.recover_stopped(id).await?;
-            self.retire_cgroup(id, false)?;
+            self.final_cgroup_use(id, false)?;
+            self.orphans.lock().unwrap().insert(id.clone());
         }
         Ok(orphaned.len())
+    }
+    fn orphan_leaves(&self) -> Vec<String> {
+        self.orphans.lock().unwrap().iter().cloned().collect()
+    }
+    fn retire_orphan_leaf(&self, id: &str) -> Result<bool> {
+        if !self.orphans.lock().unwrap().contains(id) {
+            return Ok(false);
+        }
+        self.retire_cgroup(id, false)?;
+        self.orphans.lock().unwrap().remove(id);
+        Ok(true)
     }
     fn final_cgroup_use(&self, id: &str, _jailed: bool) -> Result<fc::FinalCgroupUse> {
         if self.refuse_final_meter.load(Relaxed) {

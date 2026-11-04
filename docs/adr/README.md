@@ -101,3 +101,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0103](0103-real-workload-restore-qualification.md) | Real workload restore qualification: Postgres acknowledgements, closed files, startup bytecode, two disks, incremental chain, off-host restore and an opt-in interrupted backup |
 | [0104](0104-errors-name-the-resource-not-the-address.md) | An API error names the resource, never an address; a backup's key the fleet cannot give is 409 `key_unavailable` or 503 `key_unreachable`, the detail in the log |
 | [0105](0105-main-branch-ruleset.md) | A ruleset protects `main`: PR required, squash only, `check` and `CodeQL` required, nobody bypasses; a reviewer's approval stays a written rule because one account cannot approve its own PR |
+
+| [0106](0106-serve-before-retiring-idle-leaves.md) | Keep recovery settlement synchronous; retire idle leaves after listening in bounded concurrent passes |

@@ -24,7 +24,7 @@ interruption and off-host results respectively; a skipped required check fails.
 dispatch can select `two_hosts_only` for targeted validation
 ([ADR 0089](adr/0089-native-suites-in-ci.md)).
 
-After the fleet smoke, the `suites` job runs `hack/native-ci-scale.sh` (9 checks, [ADR 0099](adr/0099-leaf-goes-with-its-vmm.md)): 6500 idle machine cgroups with no record and 60 of stopped machines, a daemon restart; the daemon must open its barrier, report memory protection healthy, accept a create and retire the leaves within 480 s. It runs from the workflow revision, so a manual dispatch with an older `ref` runs it against that source.
+After the fleet smoke, the `suites` job runs `hack/native-ci-scale.sh` (9 checks, [ADR 0099](adr/0099-leaf-goes-with-its-vmm.md)): 6500 idle machine cgroups with no record and 60 of stopped machines, a daemon restart; the daemon must open its barrier, report memory protection healthy, accept a create and retire the leaves in background after serving (up to 480 s for retirement). It runs from the workflow revision, so a manual dispatch with an older `ref` runs it against that source.
 
 ## On a Linux host with KVM
 

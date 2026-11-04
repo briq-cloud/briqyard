@@ -300,6 +300,8 @@ async fn run(args: Args) -> Result<()> {
             }
         })
     };
+    let collector = mgr.clone();
+    tokio::spawn(async move { collector.collect_leaves().await });
     if let Some(retry) = recovery_retry {
         tokio::spawn(async move {
             match retry.wait().await {

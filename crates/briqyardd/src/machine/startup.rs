@@ -85,6 +85,7 @@ impl Manager {
                 let cpu_template = fc::host_template();
                 fc::Firecracker {
                     launches: Default::default(),
+                    orphans: Default::default(),
                     startup: tokio::sync::Mutex::new(Some(startup)),
                     jailer: cfg.jailer.clone(),
                     binary: cfg.firecracker.clone(),

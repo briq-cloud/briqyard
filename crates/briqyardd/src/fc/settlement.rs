@@ -359,6 +359,19 @@ mod tests {
         assert!(launches.check("m_owned").is_err());
     }
     #[test]
+    fn a_settled_orphan_reserves_its_name_until_retirement_finishes() {
+        let launches = Launches::testing();
+        launches.new_machine("m_orphan").unwrap();
+        launches.check("m_orphan").unwrap();
+        // Empty/dead is not permission for a new record to claim a queued orphan.
+        assert!(launches.new_machine("m_orphan").is_err());
+        launches.forget("m_orphan");
+        launches.new_machine("m_orphan").unwrap();
+        let attempt = launches.begin("m_orphan").unwrap();
+        assert!(launches.check("m_orphan").is_err());
+        drop(attempt);
+    }
+    #[test]
     fn unresolved_launches_survive_drop_and_cannot_be_replaced() {
         let launches = Launches::testing();
         launches.new_machine("m_owned").unwrap();
