@@ -465,5 +465,3 @@ PY
   check "a machine of before runs again" '[ "$(briqyard machine exec "$K" -- hostname)" = survivor ]'
   briqyard machine stop "$K" >/dev/null
 fi
-
-suite_summary

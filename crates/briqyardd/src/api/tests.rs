@@ -235,3 +235,25 @@ fn error_codes() {
         (StatusCode::INTERNAL_SERVER_ERROR, "internal")
     );
 }
+
+#[tokio::test]
+async fn sealed_create_requires_explicit_start_and_accepts_a_null_volume() {
+    let mut request: api::CreateMachineRequest = serde_json::from_value(serde_json::json!({
+        "namespace": "seal-test", "name": "sealed-create-0", "image": "alpine",
+        "size": {"vcpus": 1, "memory_mb": 256}, "volume": null,
+        "sandbox_seed": {"machine_id": "m_seed", "snapshot": "s_seed", "generation": "g_seed", "request_id": "sealed-create-0"}
+    })).unwrap();
+    assert!(request.volume.is_none());
+    let error = request.check_sandbox_seed().unwrap_err();
+    let response = errors::AppError::from(MError::Invalid(error.into())).into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["code"], "invalid");
+    assert!(body["error"].as_str().unwrap().contains("start:true"));
+    println!("{}", body);
+    request.start = Some(true);
+    assert_eq!(request.check_sandbox_seed(), Ok(()));
+}

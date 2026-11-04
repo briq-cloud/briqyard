@@ -558,3 +558,5 @@ ADR 0064 follow-up adds barrier regressions for move allocation/rollback and sou
 cleanup, capability checks for inherited restores, and bounded conntrack diagnostics with
 kill/reap coverage. Each reviewed failure was reproduced before its fix; Linux network and
 microVM gates remain required before push.
+
+Native e2e additionally runs `hack/e2e-seals.sh` (4 checks): both sandbox seed disk shapes seal, create and execute their first command. The init root-only `--ignored run_as` filter includes loopback ext4 sync, freeze rollback, thaw, deadline and connection-close tests (ADR 0092).
