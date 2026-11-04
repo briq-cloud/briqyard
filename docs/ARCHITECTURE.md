@@ -142,8 +142,8 @@ a database on it is as safe as the host's drive. Both disks the guest writes tak
 and both are mounted with `discard` (the root by the kernel, the volume by the init): what a guest
 deletes goes back to the pool, unless a snapshot still holds it (ADR 0037). A fork is a clone of a snapshot of both disks,
 taken with the running guest’s filesystems frozen; both disks share one ZFS snapshot command.
-A disk fork runs what its source ran: the request's `entrypoint`, `cmd`, `files` and `ports` win,
-and left out they are the source's; `env` is the source's under the request's own variables, as in
+A disk fork runs what its source ran: the request's `entrypoint`, `cmd` and `ports` win,
+and left out they are the source's (its `files` are not: the copied disk has them); `env` is the source's under the request's own variables, as in
 a restore (ADR 0097). A memory fork (a named snapshot, a seed, a warm slot) takes no overrides.
 The fork reports achieved consistency and any fallback reason (ADR 0092). That snapshot (`@fork-<id>`
 on the source) pins every block the source has since rewritten, so it goes with the last machine

@@ -667,7 +667,9 @@ async fn a_fork_keeps_its_sources_command_unless_the_request_sets_one() {
     assert_eq!(r.entrypoint, Some(vec!["/bin/sh".to_string(), "-c".into()]));
     assert_eq!(r.cmd, Some(vec!["sleep 1000".to_string()]));
     assert_eq!(r.env.get("B").map(String::as_str), Some("src"));
-    assert_eq!((r.files.len(), r.ports.clone()), (1, vec![8080]));
+    // Not the files: the copied disk has what the guest made of them, and every boot would
+    // write the record's over it.
+    assert_eq!((r.files.len(), r.ports.clone()), (0, vec![8080]));
     // What the request sets wins: a command, an empty one (the image's own), a variable, the
     // files and the ports; the variables it leaves out stay the source's.
     let own =
