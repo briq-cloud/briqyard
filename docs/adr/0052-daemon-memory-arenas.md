@@ -62,7 +62,7 @@ build, 0.3 MB of binary. The fleet, the CLI and the init keep the system allocat
 from `VmRSS`: the trend to alert on, and what the stress driver reads.
 
 **`hack/stress.py --churn N`**: N cycles per tenant of what a machine goes through, the
-daemon's RSS read after each (the least of three readings once idle); the fitted growth of those
+daemon's RSS read after each (the least of the readings until it stops dropping, once idle); the fitted growth of those
 floors over the cycles after the first, past `--rss-growth-mb` (32), is a break, as is growth of
 open files or threads. Single readings swing 32 to 76 MB with no trend on hosted runners, so a
 pair of adjacent readings failed clean runs; the floor does not swing and a leak raises it. The first cycles fill caches and the allocator's pools; a leak keeps its slope

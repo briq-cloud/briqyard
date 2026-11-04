@@ -6,6 +6,29 @@ daemon is idle) and on their trend over the cycles after the first, which fills 
 """
 
 
+def settle(read, wait, gap, quiet=3, most=8, step=0.5):
+    """Readings of one cycle until the daemon has settled: its allocator gives pages back as
+    time and requests pass (jemalloc decays on use), so a reading taken just after a burst
+    can be 30 MB above the level the daemon returns to a few seconds later. Read, wait `gap`
+    seconds, read again, and stop once `quiet` readings in a row were not `step` MB below the
+    least so far (or after `most` readings). Returns every reading; the cycle's value is their floor."""
+    readings, low, stale = [], None, 0
+    while len(readings) < most:
+        if readings:
+            wait(gap)
+        r = read()
+        readings.append(r)
+        if r is None:
+            break
+        if low is None or r < low - step:
+            low, stale = r, 0
+        else:
+            stale += 1
+            if stale >= quiet:
+                break
+    return readings
+
+
 def floor(readings):
     """The settled value of one cycle: the least of its readings that exist; None when none does."""
     got = [r for r in readings if r is not None]

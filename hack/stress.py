@@ -32,11 +32,10 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from stress_safety import Safety, BudgetExpired
-from stress_trend import floor, handles_verdict, parse_daemon_line, rss_verdict
+from stress_trend import floor, settle, handles_verdict, parse_daemon_line, rss_verdict
 
-# Churn reads the daemon this many times, this many seconds apart, once it is idle; the least counts.
-RSS_READINGS = 3
-RSS_READING_GAP = 3
+# Churn reads the daemon every this many seconds until it stops dropping (see settle); the least counts.
+RSS_READING_GAP = 5
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -736,14 +735,11 @@ class Run:
         for c in range(1, self.a.churn + 1):
             _, errs = parallel(list(enumerate(self.namespaces)), lambda it: cycle(c, it[1], it[0]), self.a.workers)
             self.report_errors(f"churn {c}", errs, self.namespaces)
-            # Idle first: jemalloc gives freed pages back after 10 s (ADR 0052). Then the floor of
-            # a few readings, a few seconds apart: a leak raises it, the allocator's timing does not.
+            # Idle first: jemalloc gives freed pages back after 10 s (ADR 0052), as requests pass. Then
+            # read until the level stops dropping and take the floor: a leak raises it, the
+            # allocator's timing does not.
             self.safety.sleep(12)
-            readings = []
-            for k in range(RSS_READINGS):
-                if k:
-                    self.safety.sleep(RSS_READING_GAP)
-                readings.append(self.rss())
+            readings = settle(self.rss, self.safety.sleep, RSS_READING_GAP)
             mb = floor(readings)
             sizes.append(mb)
             _, fds, threads = parse_daemon_line(self.invariants(f"churn {c}"))

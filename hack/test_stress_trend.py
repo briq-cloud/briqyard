@@ -22,6 +22,30 @@ def settled(cycles, leak, rng, readings=3):
     return [min(31.0 + leak * c + rng.uniform(0, 40) for _ in range(readings)) for c in range(cycles)]
 
 
+class Settle(unittest.TestCase):
+    def run_settle(self, values):
+        it, waited = iter(values), []
+        out = t.settle(lambda: next(it), waited.append, 5)
+        return out, waited
+
+    def test_flat_stops_after_three_quiet_readings(self):
+        out, waited = self.run_settle([40, 40, 40, 40, 40])
+        self.assertEqual(out, [40, 40, 40, 40])
+        self.assertEqual(waited, [5, 5, 5])
+
+    def test_a_late_drop_is_waited_for(self):
+        # The recorded shape: identical readings, then the allocator returns pages.
+        out, _ = self.run_settle([70.6, 70.6, 70.6, 47.0, 47.0, 47.0, 47.0])
+        self.assertEqual(t.floor(out), 47.0)
+
+    def test_stops_after_the_most(self):
+        out, _ = self.run_settle([100 - 5 * i for i in range(12)])
+        self.assertEqual(len(out), 8)
+
+    def test_missing_reading_stops(self):
+        self.assertEqual(self.run_settle([40, None, 30])[0], [40, None])
+
+
 class Helpers(unittest.TestCase):
     def test_floor_skips_missing(self):
         self.assertEqual(t.floor([40, None, 33, 50]), 33)
