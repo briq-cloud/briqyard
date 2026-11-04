@@ -1,14 +1,26 @@
-<img src="docs/images/hero.png" alt="Bots laid into a brick wall, each running machines: postgres and its fork, two sandboxes, and a web app asleep. Beside them: briqyard, open-source microVMs for sandboxes and services that sleep, wake and fork." width="830">
+<div align="center">
 
-# 🧱 briqyard
+<h1>🧱<br>briqyard</h1>
 
 **Open-source microVMs for sandboxes and services that sleep, wake and fork.**
 
-briqyard runs any OCI image in a Firecracker microVM on servers you own. Each machine gets a durable disk, a private network shared with its namespace, and a sleep window: it stops when unused and wakes on the next connection or command. It is written in Rust and licensed AGPL-3.0.
+[![Release](https://img.shields.io/github/v/release/briq-cloud/briqyard?style=flat&label=release&color=b5533c)](https://github.com/briq-cloud/briqyard/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/briq-cloud/briqyard/ci.yml?branch=main&style=flat&label=CI)](https://github.com/briq-cloud/briqyard/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-b5533c?style=flat)](LICENSE)
+[![Built with Rust](https://img.shields.io/badge/built_with-Rust-b5533c?style=flat&logo=rust&logoColor=white)](Cargo.toml)
+[![API: pre-1.0](https://img.shields.io/badge/API-pre--1.0-b5533c?style=flat)](docs/ARCHITECTURE.md)
+
+[**Install**](docs/INSTALL.md) &nbsp;&bull;&nbsp; [Architecture](docs/ARCHITECTURE.md) &nbsp;&bull;&nbsp; [Operations](docs/OPERATIONS.md) &nbsp;&bull;&nbsp; [Releases](https://github.com/briq-cloud/briqyard/releases) &nbsp;&bull;&nbsp; [Contributing](CONTRIBUTING.md) &nbsp;&bull;&nbsp; [briq.cloud](https://briq.cloud)
+
+</div>
+
+## Why briqyard
+
+Agents and the services they run need real machines: their own kernel, a disk that lasts, a private network. Most of those machines sit unused most of the time, and an agent often wants a copy of one to try something. A container shares its host's kernel, a Kubernetes pod is rescheduled by design and keeps no identity, and a VM left running holds its memory for nothing.
+
+briqyard runs any OCI image in a Firecracker microVM on servers you own. A machine keeps its disk and address, stops when unused, wakes on the next connection or command, and forks into a new machine in one call. With a memory snapshot it resumes in about a quarter of a second, its processes carrying on ([ADR 0005](docs/adr/0005-sleep-and-suspend.md)). It is written in Rust and licensed AGPL-3.0.
 
 **briqyard powers [briq.cloud](https://briq.cloud).** For managed sandboxes and microVMs for your agents, without running servers, [start on briq.cloud](https://briq.cloud).
-
-> **Status:** under active development toward a stable 1.0 API.
 
 ## Key features
 
