@@ -22,6 +22,7 @@ import copy
 import json
 import os
 import re
+import string
 import subprocess
 import sys
 import threading
@@ -177,9 +178,9 @@ def parse_slack(doc):
     alerts, cur, in_labels = [], None, False
     for line in text.splitlines():
         l = line.strip()
-        m = re.fullmatch(r"\W*(firing|resolved)\W*", l, re.I)
-        if m:
-            status, cur, in_labels = m.group(1).lower(), None, False
+        word = l.strip(string.punctuation + string.whitespace).lower()
+        if word in ("firing", "resolved"):
+            status, cur, in_labels = word, None, False
         elif l.lower().startswith("labels:"):
             cur = {"status": status, "labels": {}}
             alerts.append(cur)
