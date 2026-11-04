@@ -75,10 +75,10 @@ Legacy `put` writes run on the blocking pool: two writers blocked by a freeze mu
 These are relative figures, not hardware measurements. The native workflow’s `measure_freeze` dispatch builds
 the baseline and candidate separately, records the exact SHA and host, and uploads raw samples
 and p50/p95/max in milliseconds. Twenty paired crash/default disk forks are taken idle and
-with a 32 MiB write/fsync loop. Fork timings end at `created`, before deletion. The write/fsync
+with a 32 MiB incompressible write/fsync loop under a 32 MiB/s disk limit with no burst. Fork timings end at `created`, before deletion. The write/fsync
 loop records stalls, and backups run during that loop. Twenty stop-to-stopped samples follow
 1 MiB and 128 MiB dirty writes; create is a control. Different shared runners introduce noise.
-Warm claims require a qualified catalog; that control is not yet measured by the script.
+Warm-claim control uses a qualified init-ready-v1 builder and one configured slot, twenty claims through host readiness; template sealing and refill waits are outside the timed interval. The disposable runner configuration is restored on every exit.
 
 No latency numbers or stress pass counts are claimed yet. Qualification remains pending.
 The protocol has no guest duration field; the histogram is host-observed, and includes thaw
