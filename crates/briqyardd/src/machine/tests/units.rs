@@ -137,15 +137,20 @@ fn jail_uids() {
 fn kernel_command_line() {
     let a = boot_args(false, "");
     assert!(
-        a.starts_with("console=ttyS0 reboot=k panic=1 root=/dev/vda rw"),
+        a.starts_with("console=ttyS0 quiet reboot=k panic=1 root=/dev/vda rw"),
         "{a}"
     );
     assert!(a.contains(&format!("init={}", image::INIT_PATH)), "{a}");
     assert!(a.contains(" rootfstype=ext4 rootflags=discard "), "{a}");
     assert!(a.ends_with(" pci=off"), "{a}");
-    let b = boot_args(true, "loglevel=3 quiet");
+    let b = boot_args(true, "loglevel=7");
     assert!(!b.contains("pci=off"), "{b}");
-    assert!(b.ends_with(" loglevel=3 quiet"), "{b}");
+    // The operator's arguments come after ours, so they win: `loglevel=7` undoes `quiet`.
+    assert!(b.ends_with(" loglevel=7"), "{b}");
+    assert!(
+        b.find(" quiet ").unwrap() < b.find("loglevel=7").unwrap(),
+        "{b}"
+    );
 }
 
 #[test]
