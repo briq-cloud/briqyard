@@ -10,17 +10,20 @@
 [![Built with Rust](https://img.shields.io/badge/built_with-Rust-b5533c?style=flat&logo=rust&logoColor=white)](Cargo.toml)
 [![API: pre-1.0](https://img.shields.io/badge/API-pre--1.0-b5533c?style=flat)](docs/ARCHITECTURE.md)
 
-[**Install**](docs/INSTALL.md) &nbsp;&bull;&nbsp; [Architecture](docs/ARCHITECTURE.md) &nbsp;&bull;&nbsp; [Operations](docs/OPERATIONS.md) &nbsp;&bull;&nbsp; [Releases](https://github.com/briq-cloud/briqyard/releases) &nbsp;&bull;&nbsp; [Contributing](CONTRIBUTING.md) &nbsp;&bull;&nbsp; [briq.cloud](https://briq.cloud)
+[**Install**](docs/INSTALL.md) &nbsp;&bull;&nbsp; [Architecture](docs/ARCHITECTURE.md) &nbsp;&bull;&nbsp; [Operations](docs/OPERATIONS.md) &nbsp;&bull;&nbsp; [Releases](https://github.com/briq-cloud/briqyard/releases) &nbsp;&bull;&nbsp; [Contributing](CONTRIBUTING.md)
+
+<sub>SPONSORED BY</sub><br>
+**[briq.cloud](https://briq.cloud)**: managed sandboxes and microVMs for your agents, without running servers.
 
 </div>
 
 ## Why briqyard
 
-Agents and the services they run need real machines: their own kernel, a disk that lasts, a private network. Most of those machines sit unused most of the time, and an agent often wants a copy of one to try something. A container shares its host's kernel, a Kubernetes pod is rescheduled by design and keeps no identity, and a VM left running holds its memory for nothing.
+Agents need real machines: their own kernel, a disk that lasts, a private network. Most of the time, those machines sit idle.
 
-briqyard runs any OCI image in a Firecracker microVM on servers you own. A machine keeps its disk and address, stops when unused, wakes on the next connection or command, and forks into a new machine in one call. With a memory snapshot it resumes in about a quarter of a second, its processes carrying on ([ADR 0005](docs/adr/0005-sleep-and-suspend.md)). It is written in Rust and licensed AGPL-3.0.
+A container shares its host's kernel. A Kubernetes pod keeps no identity. A VM left running wastes its memory.
 
-**briqyard powers [briq.cloud](https://briq.cloud).** For managed sandboxes and microVMs for your agents, without running servers, [start on briq.cloud](https://briq.cloud).
+briqyard runs any OCI image in a Firecracker microVM, on servers you own. A machine sleeps when unused, wakes on the next connection or command, and forks in one call. Its disk and address stay. With a memory snapshot, it resumes in about a quarter of a second ([ADR 0005](docs/adr/0005-sleep-and-suspend.md)).
 
 ## Key features
 
