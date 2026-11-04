@@ -61,6 +61,7 @@ impl Manager {
             warm_probe_override: Mutex::new(None),
             verified_templates: Mutex::new(std::collections::HashSet::new()),
             vmm: Arc::new({
+                cfg.check_runtime_classes(&crate::config::ClassHost::read())?;
                 let cpu_template = fc::host_template();
                 fc::Firecracker {
                     binary: cfg.firecracker.clone(),
@@ -73,6 +74,7 @@ impl Manager {
                         cfg.pci,
                         fc::digest(cpu_template.as_ref()),
                     )?,
+                    classes: classes::identities(&cfg, cpu_template.as_ref())?,
                     cpu_template,
                 }
             }),

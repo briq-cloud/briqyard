@@ -101,6 +101,9 @@ pub struct Host {
     pub named_memory_profiles: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warm_pool_profiles: Vec<String>,
+    /// The runtime classes it serves besides `default` (ADR 0088).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_classes: Vec<RuntimeClassInfo>,
     pub id: String,
     pub url: String,
     /// Where the fleet reaches the server over SSH, when not at the API's address (a host
@@ -204,6 +207,9 @@ pub struct RegisterHostRequest {
     pub named_memory_profiles: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warm_pool_profiles: Vec<String>,
+    /// The runtime classes it serves besides `default` (ADR 0088).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_classes: Vec<RuntimeClassInfo>,
     /// The daemon's own id, for the fleet's log; the fleet keeps the host under its own.
     pub id: String,
     pub url: String,
@@ -270,6 +276,9 @@ pub struct Status {
     pub named_memory_profiles: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warm_pool_profiles: Vec<String>,
+    /// The runtime classes it serves besides `default` (ADR 0088).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_classes: Vec<RuntimeClassInfo>,
     pub version: String,
     pub host_id: String,
     pub capacity: Capacity,

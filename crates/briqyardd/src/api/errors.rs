@@ -25,7 +25,7 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
         MError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
         MError::Conflict(_) | MError::NameTaken(_) => (StatusCode::CONFLICT, "conflict"),
         MError::NotRunning(_) => (StatusCode::CONFLICT, "not_running"),
-        MError::BadState(_) => (StatusCode::CONFLICT, "bad_state"),
+        MError::BadState(_) | MError::Refused(_) => (StatusCode::CONFLICT, "bad_state"),
         MError::BootFailed(_) => (StatusCode::CONFLICT, "boot_failed"),
         MError::PullFailed(_) => (StatusCode::CONFLICT, "pull_failed"),
         MError::CreateFailed(_) => (StatusCode::CONFLICT, "create_failed"),

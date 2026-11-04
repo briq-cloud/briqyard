@@ -20,6 +20,7 @@
 
 use crate::registry::url_host;
 use crate::AppState;
+use briqyard_api as api;
 use chrono::Utc;
 use std::path::Path;
 use std::sync::Arc;
@@ -409,6 +410,9 @@ pub fn bootstrap_settings(
             ("FLEET_ADDRESS", b.fleet_address.clone()),
         ]);
     }
+    if let Some(classes) = runtime_classes_setting(&h.runtime_classes) {
+        env.push(("BRIQYARD_RUNTIME_CLASSES", classes));
+    }
     env
 }
 
@@ -429,13 +433,33 @@ pub fn bootstrap_env(
 
 /// An upgrade's settings (ADR 0027): the release, and the token that reads it when it is a
 /// private repository's. The host's configuration says the rest (its fleet, its token, its
-/// pool's key), and is not written again.
-pub fn upgrade_env(release: &str, release_token: &str) -> String {
+/// pool's key), and is not written again; but not the class it serves, which the script
+/// installs and keeps KVM's `nested` on for only when told (ADR 0088): `classes` are the
+/// host's reported ones.
+pub fn upgrade_env(
+    release: &str,
+    release_token: &str,
+    classes: &[api::RuntimeClassInfo],
+) -> String {
     let mut env = format!("BRIQYARD_RELEASE={}", shq(release));
     if !release_token.is_empty() {
         env += &format!(" BRIQYARD_RELEASE_TOKEN={}", shq(release_token));
     }
+    if let Some(classes) = runtime_classes_setting(classes) {
+        env += &format!(" BRIQYARD_RUNTIME_CLASSES={}", shq(&classes));
+    }
     env
+}
+
+/// The classes of the host's report that the release builds, as the script's
+/// `BRIQYARD_RUNTIME_CLASSES`; none when the host serves none of them.
+fn runtime_classes_setting(classes: &[api::RuntimeClassInfo]) -> Option<String> {
+    let names: Vec<&str> = classes
+        .iter()
+        .map(|c| c.name.as_str())
+        .filter(|n| *n == "nested")
+        .collect();
+    (!names.is_empty()).then(|| names.join(","))
 }
 
 /// The bootstrap's `ssh` arguments: [`ssh_base`], then the remote command, which puts `env`

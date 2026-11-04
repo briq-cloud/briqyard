@@ -55,6 +55,8 @@ impl Manager {
             vcpus: rec.size.vcpus,
             memory_mb: rec.size.memory_mb,
             kernel: self.inner.cfg.kernel.clone(),
+            modules: None,
+            virtualization: false,
             boot_args: self.boot_args(),
             config_drive,
             root: self.inner.zfs.device(&rec.root_dataset()).await?,

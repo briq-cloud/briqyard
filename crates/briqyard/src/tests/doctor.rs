@@ -82,3 +82,19 @@ fn doctor_reads_needrestart_patterns_as_needrestart_matches_them() {
     assert!(!spared("^briqyard[dx]"));
     assert!(!spared("^dbus"));
 }
+
+#[test]
+fn a_nested_class_in_the_configuration_asks_for_kvm_nested() {
+    use crate::doctor::config_serves_nested;
+    let class = |nested: bool| {
+        format!(
+            "token: t\nruntime_classes:\n  nested:\n    kernel: /k\n    modules: /m\n    nested: {nested}\n"
+        )
+    };
+    assert!(config_serves_nested(&class(true)));
+    assert!(!config_serves_nested(&class(false)));
+    assert!(!config_serves_nested("token: t\n"));
+    assert!(!config_serves_nested("runtime_classes: {}\n"));
+    assert!(!config_serves_nested(": not yaml ["));
+    assert!(!config_serves_nested(""));
+}

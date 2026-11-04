@@ -72,6 +72,7 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     restart: None,
                     metadata: label_args(&a.labels)?,
                     region: a.region.clone(),
+                    runtime_class: a.runtime_class.clone(),
                     egress: a.egress.clone(),
                     limits: a.limits.request()?,
                     disk_limits: a.disk.request()?,

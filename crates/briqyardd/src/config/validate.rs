@@ -60,6 +60,7 @@ impl Config {
         for c in &self.ingress.allowed_clients {
             netw::cidr(c).with_context(|| format!("ingress.allowed_clients {c:?}"))?;
         }
+        self.check_runtime_class_shapes()?;
         self.check_host_ports()?;
         if let Err(e) = self.egress_limits.view().check() {
             bail!("egress_limits.{e}");
