@@ -103,6 +103,21 @@ kill_during() {
   if wait "$bg" 2>/dev/null; then return 1; fi
   return 0
 }
+# kill_when PREDICATE CMD...: CMD runs in the background and the daemon is killed the moment
+# PREDICATE (a function reading the API) says the work is under way; for what answers at once
+# and finishes after (a fork). True when the predicate was seen within 20 s.
+kill_when() {
+  local pred=$1; shift
+  "$@" >"$LOGS/bg.out" 2>&1 &
+  local bg=$! i hit=1
+  for i in $(seq 1 400); do
+    if "$pred"; then crash_daemon; hit=0; break; fi
+    sleep 0.05
+  done
+  wait "$bg" 2>/dev/null || true
+  return "$hit"
+}
+fork_in_motion() { case "$(settled_state "$T-c" fk)" in creating|starting) true;; *) false;; esac; }
 invariants() { bash "$HERE/stress-invariants.sh" >"$LOGS/inv.out" 2>&1 || { grep -E '^BAD|^info' "$LOGS/inv.out" | head -8; return 1; }; }
 # No machine in error with an empty error: a failure is reported, never silent.
 errors_reported() { [ "$(api /v1/machines | jq '[.[] | select(.state == "error" and (.error // "") == "")] | length')" = 0 ]; }
@@ -196,7 +211,8 @@ out=$(on "$NN" "nslookup example.com 2>&1; echo rc=\$?" || true)
 check "egress none: names outside the namespace do not resolve (NXDOMAIN)" 'grep -qiE "NXDOMAIN|can.t find|not found" <<<"$out"'
 check "egress none: control, its namespace and internal names answer" 'on "$NN" "ping -c1 -W2 $aip" >/dev/null && on "$NN" "nslookup iso-a.internal 2>&1" | grep -qF "$aip"'
 # Disks, files and the guest's view of its devices.
-check "a guest sees its own disks only (vda vdb)" '[ "$(blocks "$A")" = "vda vdb " ]'
+seen=$(blocks "$A")
+check "a guest sees its own three disks only: root, config drive, volume (sees: $seen)" '[ "$seen" = "vda vdb vdc " ]'
 on "$A" 'echo mark-a > /root/mark; sync'
 out=$(on "$A2" 'cat /root/mark 2>&1' || true)
 check "a file of one machine is absent from its sibling on the same image" 'on "$A" "cat /root/mark" | grep -qx mark-a && grep -qF "No such file" <<<"$out"'
@@ -226,8 +242,10 @@ check "its own cgroup, and only its process in it" '[ "$(sudo cat /proc/$pa/cgro
 f=$(sudo find "$JAIL/firecracker/$(id_dash "$A")/root" -type f -size -2000k 2>/dev/null | head -1)
 check "control: the host reads a file in a machine's jail" '[ -n "$f" ] && sudo cat "$f" >/dev/null'
 out=$(sudo -u "#$ua2" cat "$f" 2>&1 || true)
+echo "   uid $ua2 reading $f: $(echo "$out" | head -c 120)"
 check "another machine's uid cannot read it (Permission denied)" 'grep -qF "Permission denied" <<<"$out"'
 out=$(sudo -u "#$ua2" ls "$JAIL/firecracker/$(id_dash "$A")/root" 2>&1 || true)
+echo "   uid $ua2 listing the jail: $(echo "$out" | head -c 120)"
 check "nor list its jail (Permission denied)" 'grep -qF "Permission denied" <<<"$out"'
 # Limits the cgroup holds.
 mlim=$(( (256 + 256) * 1048576 ))
@@ -238,7 +256,7 @@ check "OOM preferences: VMM +500, daemon and fleet -900" '[ "$(sudo cat /proc/$p
 # Secrets stay with their machine.
 procs=$(ps -eo args)
 check "control: a machine holds its own secret" 'on "$A" "printenv SECRET_A" | grep -qx tok-a-7f3c'
-out=$(on "$A2" 'printenv; cat /proc/*/environ /proc/*/cmdline 2>/dev/null; grep -r tok-a- /etc /root /tmp 2>/dev/null' || true)
+out=$(on "$A2" 'printenv; cat /proc/*/environ /proc/*/cmdline 2>/dev/null | tr "\\0" "\\n"; grep -r tok-a- /etc /root /tmp 2>/dev/null' || true)
 check "a sibling does not hold it (env, process list, files)" '! grep -qF tok-a-7f3c <<<"$out"'
 check "the host process list never shows it" '! grep -qF tok-a-7f3c <<<"$procs"'
 out=$(on "$A2" 'cat /proc/cmdline /proc/1/environ 2>/dev/null; printenv' | tr '\0' '\n' || true)
@@ -247,26 +265,27 @@ rm_all "$A" "$A2" "$O" "$NN"
 
 # ======================================================================================
 echo "== OOM: a guest's, a VMM's, and the host's physical room"
-hog='awk "BEGIN { s = \"x\"; while (1) s = s s }"'
-G=$(run --image alpine:3.20 --name oom-g --namespace "$T-o" --memory 256 -- sleep 7200)
-S=$(run --image alpine:3.20 --name oom-s --namespace "$T-o" --memory 256 -- sleep 7200)
+hog='python3 -c "l = []; [l.append(b\"x\" * (16 << 20)) for _ in iter(int, 1)]"'
+G=$(run --image $PY --name oom-g --namespace "$T-o" --memory 256 -- sleep 7200)
+S=$(run --image $PY --name oom-s --namespace "$T-o" --memory 256 -- sleep 7200)
 on "$S" 'echo alive > /root/s; sync'
 gpid=$(fc_pid "$G"); spid=$(fc_pid "$S"); dpid=$(daemon_pid)
 ev0=$(sudo cat "$(leaf "$G")/memory.events.local")
 set +e; on "$G" "$hog" >"$LOGS/hog.out" 2>&1; rc=$?; set -e
+echo "   the hog: exit $rc, said: $(head -c 150 "$LOGS/hog.out")"
 check "guest OOM: the hog was killed in the guest (exit $rc)" '[ "$rc" = 137 ] || grep -qF Killed "$LOGS/hog.out"'
 check "guest OOM: the kernel says so on the console" 'briqyard machine logs "$G" --limit 5000 | grep -qiE "out of memory|oom-kill"'
 check "guest OOM: the machine runs on, same VMM, exec answers" '[ "$(mstate "$G")" = running ] && [ "$(fc_pid "$G")" = "$gpid" ] && [ "$(on "$G" hostname)" = oom-g ]'
 check "guest OOM: it was not the VMM's cgroup (no local oom_kill)" '[ "$(sudo cat "$(leaf "$G")/memory.events.local")" = "$ev0" ]'
 check "guest OOM: the sibling and the daemon are untouched" '[ "$(on "$S" "cat /root/s")" = alive ] && [ "$(fc_pid "$S")" = "$spid" ] && [ "$(daemon_pid)" = "$dpid" ]'
-H=$(briqyard machine run --detach --name oom-main --namespace "$T-o" --memory 256 --image alpine:3.20 -- sh -c 'awk "BEGIN { s = \"x\"; while (1) s = s s }"' | jq -r .id)
+H=$(briqyard machine run --detach --name oom-main --namespace "$T-o" --memory 256 --image $PY -- python3 -c 'l = []; [l.append(b"x" * (16 << 20)) for _ in iter(int, 1)]' | jq -r .id)
 for i in $(seq 1 90); do [ "$(mstate "$H")" = stopped ] && break; sleep 1; done
 check "guest OOM of the main process: stopped, exit reported oom_killed" '[ "$(mstate "$H")" = stopped ] && [ "$(briqyard machine get "$H" | jq -r .exit.oom_killed)" = true ]'
 check "guest OOM of the main process: the sibling still runs" '[ "$(on "$S" "cat /root/s")" = alive ]'
 rm_all "$H" "$G"
 # A VMM over its containment. A guest cannot push Firecracker past guest + 256 MiB, so the
 # ceiling of one leaf is lowered under what its VMM holds: the kernel's own cgroup OOM kill.
-V=$(run --image alpine:3.20 --name oom-v --namespace "$T-o" --memory 1024 -- sleep 7200)
+V=$(run --image $PY --name oom-v --namespace "$T-o" --memory 1024 -- sleep 7200)
 on "$V" 'dd if=/dev/urandom of=/dev/shm/fill bs=1M count=300 2>/dev/null; sync'
 vpid=$(fc_pid "$V"); dpid=$(daemon_pid); mark=$(date '+%Y-%m-%d %H:%M:%S')
 rss=$(( $(sudo awk '/^VmRSS:/ {print $2}' /proc/$vpid/status) / 1024 ))
@@ -339,11 +358,11 @@ rm_all "$CR"
 echo "-- mid-fork"
 SRC=$(mkowner src 256)
 caught=0
-for d in 0.3 0.7 1.2 0.1 2; do
+for attempt in 1 2 3; do
   destroy_named "$T-c" fk; settle || true
-  if kill_during "$d" briqyard machine fork "$SRC" --name fk --namespace "$T-c"; then caught=1; break; fi
+  if kill_when fork_in_motion briqyard machine fork "$SRC" --name fk --namespace "$T-c"; then caught=1; break; fi
 done
-check "a fork was cut short (delay $d s)" '[ "$caught" = 1 ]'
+check "a fork was killed while creating or starting (attempt $attempt)" '[ "$caught" = 1 ]'
 settle || true
 st=$(settled_state "$T-c" fk); echo "   the fork is: $st"
 check "mid-fork: the source runs on, its counter whole" 'recovered "$SRC"'
@@ -355,6 +374,7 @@ fi
 destroy_named "$T-c" fk; settle || true
 check "mid-fork: destroyed, invariants hold, nothing leaked" 'invariants'
 FK=$(briqyard machine fork "$SRC" --name fk2 --namespace "$T-c" | jq -r .id)
+briqyard machine wait --for running "$FK" >/dev/null
 check "mid-fork: a fork again works and holds the counter" '[ "$(ctr "$FK")" = "7 7 " ]'
 rm_all "$FK"
 
@@ -467,9 +487,10 @@ st=$(settled_state "$T-c" full-new)
 check "full pool: the failed create is in error with its reason (or never recorded), not running" 'case "$st" in error) errors_reported;; none) true;; *) false;; esac'
 check "full pool: the daemon lives, the running machine too" '[ "$(daemon_pid)" = "$dpid" ] && [ "$(mstate "$W")" = running ] && briqyard status >/dev/null && [ "$(on "$W" hostname)" = full ]'
 check "full pool: disk_pressure is reported" 'wait_cond disk_pressure'
-check "full pool: the fleet places nothing new on the host" 'fleet_refuses disk_pressure full-fleet "$T-full-fleet"'
+check "full pool: the fleet places nothing new on the host (503 capacity)" 'fleet_refuses "no host has room" full-fleet "$T-full-fleet"'
 sudo zfs destroy -f "$FILLED"; FILLED=
 destroy_named "$T-c" full-new; settle || true
+check "pool freed: the fleet places a machine again" 'F=$(fleet machine run --sleep never --image alpine:3.20 --name full-fleet2 --namespace "$T-full-fleet" --memory 128 -- sleep 600 | jq -r .id) && [ "$(on "$F" hostname)" = full-fleet2 ] && briqyard machine rm "$F" >/dev/null'
 check "pool freed: a create works again" 'N=$(run --image alpine:3.20 --name after-full --namespace "$T-c" --memory 256 -- sleep 600) && [ "$(on "$N" hostname)" = after-full ] && briqyard machine rm "$N" >/dev/null'
 check "pool freed: the machine kept its counter, nothing leaked" '[ "$(ctr "$W")" = "7 7 " ] && invariants'
 rm_all "$W"
