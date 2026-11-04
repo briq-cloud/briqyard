@@ -48,6 +48,9 @@ NOTIFY = {"group_wait": "5s", "group_interval": "10s"}  # the policy's 30s and 5
 FOR_OVERRIDES = {"briqyard-slots-small": "1m"}  # 10m
 CONTACT = "briqyard alert test webhook"
 
+# The CLI asks the fleet, not the daemon: placement and its refusals are the fleet's.
+os.environ["BRIQYARD_URL"] = os.environ.get("FLEET_URL", "http://127.0.0.1:7430")
+
 START = time.time()
 passed = failed = 0
 
@@ -393,9 +396,9 @@ def cleanup():
 
 
 def rules_set():
-    crash_id = machine("alert-crash", "crashy", 128, cmd=("sh", "-c", "sleep 2; exit 1"), detach=True)
+    machine("alert-crash", "crashy", 128, cmd=("sh", "-c", "sleep 2; exit 1"), detach=True)
     t_crash = time.time()
-    say(f"crash-looping machine {crash_id}")
+    say("crash-looping machine started")
     bk = machine("alert-backup", "bk", 128)
     p = run("briqyard", "machine", "backup", bk, timeout=300)
     (ok if p.returncode == 0 else bad)("a backup into a working store succeeds (no alert for it)")
@@ -433,8 +436,7 @@ def rules_set():
     (ok if p.returncode != 0 and "memory_pressure" in text else bad)(
         f"a create into that namespace is refused under pressure ({(p.stderr or p.stdout).strip()[-140:]!r})")
 
-    crash = Case("Machine in a crash loop", "briqyard-crash-loop", "Machine in a crash loop", {"namespace": "alert-crash", "host": "local"}, 480, 300,
-                 action=None)
+    crash = Case("Machine in a crash loop", "briqyard-crash-loop", "Machine in a crash loop", {"namespace": "alert-crash", "host": "local"}, 240, 840)
     backup = Case("Backup failure observed", "briqyard-backup-failed", "Backup failure observed", {"host": "local"}, 240, 540)
     room = Case("Creates refused: no room", "briqyard-out-of-room", "Creates refused: no room", {"region": "dev", "resource": "memory"}, 240, 300)
     cond = Case("Host condition", "briqyard-host-condition", "Host condition", {"host": "local", "condition": "memory_pressure"}, 360, 300)
@@ -442,14 +444,15 @@ def rules_set():
     slot = Case("Largest slot too small", "briqyard-slots-small", "Largest slot too small", {"region": "dev"}, 420, 300)
     crash.caused, backup.caused, room.caused = t_crash, t_backup, t_room
     cond.caused, slot.caused, press.caused = t_big, t_big, t_pressure
-    # The window alerts expire by themselves (ten and five minutes of events).
-    backup.recovery, room.recovery, press.recovery = t_backup, t_room, t_pressure
+    # The window alerts expire by themselves: ten minutes of restarts or backup events, five of refusals.
+    # (A destroyed machine's restarts stay in the ten-minute window too: destroying it does not resolve the alert.)
+    crash.recovery, backup.recovery, room.recovery, press.recovery = t_crash, t_backup, t_room, t_pressure
+    crash.resolve_within = 600 + 240
     backup.resolve_within = 600 + 240
     room.resolve_within = press.resolve_within = 300 + 240
-    destroy_crash = Action("destroy the crash-looping machine", [crash], lambda: destroy(crash_id))
     destroy_big = Action("destroy the machine holding the host's memory", [cond, slot], lambda: destroy(big))
-    crash.action, cond.action, slot.action = destroy_crash, destroy_big, destroy_big
-    drive([crash, backup, room, cond, press, slot], [destroy_crash, destroy_big], 1500)
+    cond.action = slot.action = destroy_big
+    drive([crash, backup, room, cond, press, slot], [destroy_big], 1500)
 
 
 def host_down_set():
