@@ -26,7 +26,7 @@ class TestConfig(unittest.TestCase):
                "\n**Resolved**\n\nValue: A=1\nLabels:\n - alertname = Not answering\n - instance = other\n"}]}
         got = alerts.parse_slack(doc)
         self.assertEqual([a["status"] for a in got], ["firing", "resolved"])
-        self.assertEqual(got[0]["labels"], {"alertname": "Not answering", "instance": "local", "region": ""})
+        self.assertEqual(got[0]["labels"], {"alertname": "Not answering", "instance": "local"})
         self.assertEqual(got[1]["labels"]["instance"], "other")
 
     def test_episodes(self):
