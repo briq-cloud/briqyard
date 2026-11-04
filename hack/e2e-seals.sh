@@ -22,6 +22,13 @@ import yaml
 p = Path('/etc/briqyard/config.yaml')
 c = yaml.safe_load(p.read_text())
 c['token'] = 'native-seal-test'
+import hashlib
+init = hashlib.sha256(Path('/usr/local/bin/briqyard-init').read_bytes()).hexdigest()
+c['templates'] = {'enabled': True, 'init_ready_init_sha256': init, 'sandbox_recipes': [
+    {'image': 'docker.io/library/alpine@sha256:85f2b723e106c34644cd5851d7e81ee87da98ac54672b29947c052a45d31dc2f',
+     'image_config_digest': 'sha256:706db57fb2063f39f69632c5b5c9c439633fda35110e65587c5d85553fd1cc38',
+     'init_sha256': init, 'size': {'vcpus': 1, 'memory_mb': 256}, 'volume_gb': gb}
+    for gb in [0, 1]]}
 p.write_text(yaml.safe_dump(c, sort_keys=False))
 PYCONFIG
 export BRIQYARD_TOKEN=native-seal-test

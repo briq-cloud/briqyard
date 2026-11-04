@@ -44,8 +44,13 @@ impl Filesystems {
         for (path, file) in self.0 {
             // Linux asm-generic: _IOWR('X', 119, int).
             if unsafe { libc::ioctl(file.as_raw_fd(), 0xc0045877u32 as _, 0) } != 0 {
-                return Err(std::io::Error::last_os_error())
-                    .with_context(|| format!("freeze {path}"));
+                let error = std::io::Error::last_os_error();
+                let context = if error.raw_os_error() == Some(libc::EBUSY) {
+                    format!("freeze {path}: already frozen or a configured mount shares an earlier filesystem; check mounted devices")
+                } else {
+                    format!("freeze {path}")
+                };
+                return Err(error).context(context);
             }
             frozen.0.push((path, file));
         }
@@ -339,6 +344,72 @@ mod tests {
         assert_eq!(frame(&mut client).await.kind, "ok");
         (client, task)
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "root and loopback ext4; CI runs --ignored run_as"]
+    async fn run_as_host_thaw_with_two_legacy_puts_blocked_on_frozen_ext4() {
+        let mount = LoopMount::new();
+        let (mut control, freeze) =
+            start(mount.path().to_string_lossy().into_owned(), 10_000).await;
+        let mut puts = Vec::new();
+        let mut clients = Vec::new();
+        for name in ["writer-one", "writer-two"] {
+            let (mut client, server) = tokio::io::duplex(4096);
+            puts.push(tokio::spawn(serve::handle(testutil::state(), server)));
+            client
+                .write_all(
+                    &guest::encode_frame(&Request {
+                        op: "put".into(),
+                        path: mount.path().join(name).to_string_lossy().into_owned(),
+                        data: b"written".to_vec(),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            clients.push(client);
+        }
+        // Observe both writers in the kernel's freeze wait before sending host thaw.
+        // The test's block_on thread remains independent of the two runtime workers.
+        testutil::wait_until("two puts blocked by the filesystem freeze", || {
+            fs::read_dir("/proc/self/task")
+                .unwrap()
+                .filter_map(|t| fs::read_to_string(t.ok()?.path().join("wchan")).ok())
+                .filter(|w| {
+                    w.contains("sb_start_write")
+                        || w.contains("percpu_rwsem_wait")
+                        || w.contains("rwsem_down_read_slowpath")
+                })
+                .count()
+                >= 2
+        });
+        control
+            .write_all(
+                &guest::encode_frame(&Request {
+                    op: "fs_thaw".into(),
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let thaw = tokio::time::timeout(Duration::from_secs(3), frame(&mut control))
+            .await
+            .unwrap();
+        assert_eq!(thaw.kind, "ok", "{}", thaw.message);
+        assert_eq!(thaw.thawed_by, "host");
+        freeze.await.unwrap();
+        for mut client in clients {
+            assert_eq!(frame(&mut client).await.kind, "ok");
+        }
+        for put in puts {
+            put.await.unwrap();
+        }
+        for name in ["writer-one", "writer-two"] {
+            assert_eq!(fs::read(mount.path().join(name)).unwrap(), b"written");
+        }
+    }
+
     #[tokio::test]
     #[ignore = "root and loopback ext4; CI runs --ignored run_as"]
     async fn run_as_filesystem_freeze_thaw_deadline_and_disconnect() {
@@ -348,10 +419,14 @@ mod tests {
         fs::write(mount.path().join("dirty"), b"durable").unwrap();
         files().sync().unwrap();
         // A later freeze failure must unwind the filesystem already frozen.
-        assert!(Filesystems::open(vec![path.clone(), path.clone()])
+        let error = match Filesystems::open(vec![path.clone(), path.clone()])
             .unwrap()
             .freeze()
-            .is_err());
+        {
+            Ok(_) => panic!("duplicate filesystem unexpectedly froze twice"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("check mounted devices"));
         files().freeze().unwrap().thaw().unwrap();
         let mut already_thawed = files().freeze().unwrap();
         assert_eq!(
