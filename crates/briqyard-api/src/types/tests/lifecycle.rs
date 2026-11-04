@@ -57,7 +57,7 @@ fn a_backup_policy_absent_is_kept_and_null_removes_it() {
 #[test]
 fn backups() {
     let b: Backup = same(json!({
-        "id": "20261021T101500.123Z", "machine_id": "m1", "namespace": "t1", "name": "db",
+        "consistency": "crash", "id": "20261021T101500.123Z", "machine_id": "m1", "namespace": "t1", "name": "db",
         "created_at": "2026-01-02T03:04:05Z", "bytes": 30, "incremental": true,
         "disks": [
             {"disk": "root", "key": "backups/m1/root/20261021T101500.123Z.zfs", "bytes": 10,
@@ -71,7 +71,7 @@ fn backups() {
     assert_eq!(b.deletes_at, Some(ts()));
     // A stored record carries the machine and no deletion time.
     let r: Backup = same(json!({
-        "id": "a", "machine_id": "m1", "namespace": "t1", "name": "db",
+        "consistency": "crash", "id": "a", "machine_id": "m1", "namespace": "t1", "name": "db",
         "created_at": "2026-01-02T03:04:05Z", "bytes": 0, "incremental": false,
         "disks": [], "machine": {"id": "m1"}
     }));

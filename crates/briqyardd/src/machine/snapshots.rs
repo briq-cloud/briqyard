@@ -13,7 +13,7 @@ pub(super) const DISKS: [&str; 2] = ["root", "data"];
 /// A snapshot as the machine's record keeps it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotRec {
-    #[serde(flatten, default)]
+    #[serde(flatten, default, skip_serializing_if = "legacy_consistency")]
     pub copy_consistency: api::CopyConsistency,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35,6 +35,15 @@ pub struct SnapshotRec {
     /// Immutable, qualified memory clone metadata; absent on every legacy snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone_artifact: Option<templates::CloneArtifact>,
+}
+
+// Existing run-control fingerprints include the serialized record. Preserve the shape
+// of snapshots written before consistency metadata existed.
+fn legacy_consistency(c: &api::CopyConsistency) -> bool {
+    c.consistency == "crash"
+        && c.consistency_reason
+            .as_deref()
+            .is_none_or(|r| r == "legacy_record")
 }
 
 impl SnapshotRec {

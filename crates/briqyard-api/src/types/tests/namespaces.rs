@@ -11,15 +11,15 @@ fn stop_request() {
 #[test]
 fn snapshot_and_namespace() {
     let s: Snapshot = round_trip(
-        json!({"id": "snap1", "machine_id": "m1", "created_at": "2026-01-02T03:04:05Z"}),
+        json!({"consistency": "crash", "id": "snap1", "machine_id": "m1", "created_at": "2026-01-02T03:04:05Z"}),
         json!({
-            "id": "snap1", "machine_id": "m1", "created_at": "2026-01-02T03:04:05Z",
+            "consistency": "crash", "id": "snap1", "machine_id": "m1", "created_at": "2026-01-02T03:04:05Z",
             "disks": [], "memory": false
         }),
     );
     assert_eq!(s.machine_id, "m1");
     let s: Snapshot = same(json!({
-        "id": "s_1", "machine_id": "m1", "name": "before-migration",
+        "consistency": "crash", "id": "s_1", "machine_id": "m1", "name": "before-migration",
         "created_at": "2026-01-02T03:04:05Z", "disks": ["root", "data"], "memory": true
     }));
     assert_eq!(s.name.as_deref(), Some("before-migration"));

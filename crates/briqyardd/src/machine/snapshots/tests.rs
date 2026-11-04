@@ -822,3 +822,11 @@ async fn failed_sync_also_falls_back_without_freezing() {
         assert!(!h.host_calls().iter().any(|c| c.starts_with("fs_freeze")));
     }
 }
+
+#[test]
+fn legacy_snapshot_metadata_preserves_record_fingerprints() {
+    let value = json!({"id":"s_old", "created_at":"2026-11-04T00:00:00Z", "disks":["root"]});
+    let record: SnapshotRec = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(record.copy_consistency.consistency, "crash");
+    assert_eq!(serde_json::to_value(record).unwrap(), value);
+}

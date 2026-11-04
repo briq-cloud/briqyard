@@ -140,7 +140,7 @@ impl CreateMachineRequest {
 /// The source of a fork.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ForkSpec {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consistency: Option<CopyConsistencyRequest>,
     pub machine_id: String,
     /// "disk" (both disks, the default) or "config" (nothing: a fresh image).

@@ -31,7 +31,7 @@ impl Default for CopyConsistency {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct BackupRequest {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consistency: Option<CopyConsistencyRequest>,
 }
 
@@ -329,7 +329,7 @@ pub struct StopRequest {
 /// A snapshot to take now (ADR 0031).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SnapshotRequest {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consistency: Option<CopyConsistencyRequest>,
     /// A name to find it by again (`before-migration`), unique among the machine's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
