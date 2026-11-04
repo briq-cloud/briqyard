@@ -9,6 +9,7 @@ use futures::{StreamExt, TryStreamExt};
 use std::collections::HashSet;
 use tokio::sync::OwnedMutexGuard;
 
+mod attempts;
 mod census;
 mod chain;
 mod holders;
@@ -18,6 +19,7 @@ mod take;
 #[cfg(test)]
 mod tests;
 
+use attempts::Attempt;
 use chain::*;
 
 /// A failed backup is tried again this long after.
