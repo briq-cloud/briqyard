@@ -189,8 +189,8 @@ the KVM API was seen. A runner that cannot nest fails the job with exit 78, an `
 GATE` line and a first line in the summary: the suites did not run, and a re-run may land on
 a runner that can. A job never passes without running them.
 
-**A stalled mirror is bounded (2026-11-05).** In 2 of 8 `two-hosts` runs the QEMU install took 128 s and
-429 s longer than its usual 10 to 16 s, and the job set the whole run's time. `-qq` hid which fetch stalled.
-The probe now prints each fetch and sets a 20 s read timeout with 3 retries, in place of apt's default
-timeout. A failed install still fails the job. The cause is unconfirmed: if a next run still stalls, its
-log says where.
+**A stalled mirror is bounded (2026-11-05).** In 2 of 8 `two-hosts` runs, 128 s and 429 s passed before the
+QEMU install unpacked its first package; in the other six the whole install took 10 to 16 s. The longer
+stall made the job set the whole run's time. `-qq` hid which fetch stalled. The probe now prints each fetch
+and sets a 20 s read timeout with 3 retries, in place of apt's default timeout. A failed install still fails
+the job. The cause is unconfirmed: if a next run still stalls, its log says where.
