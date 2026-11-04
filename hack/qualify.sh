@@ -126,7 +126,18 @@ kill_when() {
   return "$hit"
 }
 fork_in_motion() { case "$(settled_state "$T-c" fk)" in creating|starting) true;; *) false;; esac; }
-invariants() { bash "$HERE/stress-invariants.sh" >"$LOGS/inv.out" 2>&1 || { grep -E '^BAD|^info' "$LOGS/inv.out" | head -8; return 1; }; }
+invariants() {
+  bash "$HERE/stress-invariants.sh" >"$LOGS/inv.out" 2>&1 && return 0
+  grep -E '^BAD|^info' "$LOGS/inv.out" | head -8
+  if grep -qF "without a cgroup leaf" "$LOGS/inv.out"; then
+    local p
+    for p in $(pgrep -x firecracker); do echo "      pid $p: cgroup $(sudo cat /proc/$p/cgroup), score $(sudo cat /proc/$p/oom_score_adj), args $(tr '\0' ' ' </proc/$p/cmdline | cut -c1-120)"; done
+    echo "      leaves: $(ls /sys/fs/cgroup/firecracker | tr '\n' ' ')"
+    echo "      conditions: $(briqyard status | jq -c '[.conditions[] | select(.status)]')"
+    sudo journalctl -u briqyardd --no-pager -n 3000 | grep -iE 'memory_protection|cgroup|containment' | tail -5 | cut -c1-320 | sed 's/^/      /'
+  fi
+  return 1
+}
 # No machine in error with an empty error: a failure is reported, never silent.
 errors_reported() { [ "$(api /v1/machines | jq '[.[] | select(.state == "error" and (.error // "") == "")] | length')" = 0 ]; }
 destroy_named() { # NAMESPACE NAME: whatever record a cut-short create left
