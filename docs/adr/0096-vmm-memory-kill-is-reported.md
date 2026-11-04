@@ -27,7 +27,7 @@ runs on that exit, so it never sees the exit without the evidence. There is no l
 reconcile. Where the baseline or the counters are unreadable the flag stays false and the exit is
 the plain 255, as before.
 
-**A stopped copy stays `crash` with its own reason** (ADR 0092): `consistency_reason:
+**A stopped copy stays `unsynced` with its own reason** (ADR 0092): `consistency_reason:
 vmm_oom_killed` instead of `unclean_exit`, since the VMM died with the guest's page cache lost.
 
 ## Tests

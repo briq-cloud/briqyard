@@ -143,7 +143,7 @@ impl Manager {
         } else {
             "whole"
         };
-        let event = if b.copy_consistency.consistency == "crash" {
+        let event = if b.copy_consistency.consistency == "unsynced" {
             Ev::warning
         } else {
             Ev::normal
