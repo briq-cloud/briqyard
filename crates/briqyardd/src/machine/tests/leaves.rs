@@ -118,3 +118,35 @@ async fn a_pass_is_bounded_and_says_how_many_leaves_nothing_explains() {
         assert!(text.lines().any(|l| l == want), "{want}\n{text}");
     }
 }
+
+#[tokio::test]
+async fn a_leaf_that_is_always_refused_does_not_hold_back_the_ones_behind_it() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    // More refused leaves than a pass takes: whatever order the directory lists them in, the
+    // good ones are reached once the refused have been tried and put last.
+    for i in 0..150 {
+        let id = format!("m_bad{i}");
+        h.add(&id, state::STOPPED, 64);
+        leaf(&h, &id, 1);
+        h.host.refuse_retirement_of.lock().unwrap().insert(id);
+    }
+    for i in 0..50 {
+        let id = format!("m_ok{i}");
+        h.add(&id, state::STOPPED, 64);
+        leaf(&h, &id, 1);
+    }
+    for _ in 0..3 {
+        h.m.sweep_leaves().await;
+    }
+    let good_left = (0..50)
+        .filter(|i| has_leaf(&h, &format!("m_ok{i}")))
+        .count();
+    assert_eq!(good_left, 0);
+    assert!((0..150).all(|i| has_leaf(&h, &format!("m_bad{i}"))));
+    let seen = h.m.inner.stats.leaves.lock().unwrap().unwrap();
+    assert_eq!((seen.total, seen.idle), (150, 150));
+    assert!(h.m.inner.stats.leaves_retire_failed.load(Relaxed) >= 150);
+    assert!(h.m.metrics().lines().any(|l| l
+        .starts_with("briqyard_cgroup_leaves_retire_failed_total ")
+        && l != "briqyard_cgroup_leaves_retire_failed_total 0"));
+}

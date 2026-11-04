@@ -80,6 +80,8 @@ pub(super) struct Mock {
     pub(super) refuse_uncount: AtomicBool,
     pub(super) refuse_count: AtomicBool,
     pub(super) refuse_retirement: AtomicBool,
+    /// Machines whose leaf is refused whatever `refuse_retirement` says.
+    pub(super) refuse_retirement_of: Mutex<std::collections::HashSet<String>>,
     pub(super) spawning_open: AtomicBool,
     pub(super) recovery_initialized: AtomicBool,
     pub(super) refuse_recovery: AtomicBool,
@@ -174,6 +176,7 @@ impl Mock {
             refuse_uncount: AtomicBool::new(false),
             refuse_count: AtomicBool::new(false),
             refuse_retirement: AtomicBool::new(false),
+            refuse_retirement_of: Mutex::new(Default::default()),
             spawning_open: AtomicBool::new(true),
             recovery_initialized: AtomicBool::new(false),
             refuse_recovery: AtomicBool::new(false),
@@ -506,6 +509,7 @@ impl fc::Vmm for Mock {
     fn retire_cgroup(&self, id: &str, _jailed: bool) -> Result<()> {
         self.record(format!("retire-cgroup {id}"));
         if self.refuse_retirement.load(Relaxed)
+            || self.refuse_retirement_of.lock().unwrap().contains(id)
             || self.processes().iter().any(|(_, owner)| owner == id)
         {
             anyhow::bail!("synthetic VMM retirement refused");

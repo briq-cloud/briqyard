@@ -1,4 +1,4 @@
-# ADR 0099: CI token permissions
+# ADR 0098: CI token permissions
 
 2026-11-04 · Status: accepted
 

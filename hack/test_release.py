@@ -30,6 +30,22 @@ class ReleaseTests(unittest.TestCase):
             with self.subTest(text=text, version=version), self.assertRaises(ValueError):
                 release.notes(text, version)
 
+    def test_workspace_leaves_out_the_crates_with_their_own_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Cargo.toml").write_text(
+                '[workspace]\nmembers = ["crates/a", "crates/init"]\n\n[workspace.package]\nversion = "0.1.20"\n')
+            for name, version in (("a", "version.workspace = true"), ("init", 'version = "0.0.0"')):
+                (root / "crates" / name).mkdir(parents=True)
+                (root / "crates" / name / "Cargo.toml").write_text(f'[package]\nname = "{name}"\n{version}\n')
+            cwd = os.getcwd()
+            os.chdir(root)
+            try:
+                version, names = release.workspace()
+            finally:
+                os.chdir(cwd)
+            self.assertEqual((version, names), ("0.1.20", {"a"}))
+
     def test_lock_updates_only_local_workspace_packages(self):
         text = '''version = 4
 

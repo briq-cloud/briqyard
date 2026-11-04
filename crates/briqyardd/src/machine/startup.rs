@@ -166,7 +166,7 @@ impl Manager {
                 format!("daemon started: {adopted} machines adopted, {stopped} not handed over and {gone} gone marked stopped, {swept} leftovers swept"),
             )
             .data(json!({
-                "version": api::VERSION, "vmm_version": m.inner.vmm.version(),
+                "version": briqyard_version::VERSION, "vmm_version": m.inner.vmm.version(),
                 "machines": machines, "adopted": adopted, "stopped": stopped, "gone": gone,
                 "swept": swept,
             })),

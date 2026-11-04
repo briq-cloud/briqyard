@@ -25,7 +25,7 @@ use run::*;
 use tables::*;
 
 #[derive(Parser)]
-#[command(name = "briqyard", version = api::VERSION, about = "Machines in Firecracker microVMs")]
+#[command(name = "briqyard", version = briqyard_version::VERSION, about = "Machines in Firecracker microVMs")]
 struct Cli {
     /// The daemon or fleet to talk to.
     #[arg(

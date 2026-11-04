@@ -31,7 +31,9 @@ way owns the leaf, and the pass below finds it later.
 directory read, no leaf opened), and retires at most 128 leaves of machines with no VMM and no
 transition (`stopped`, `error`, `created`). What it cannot remove (the kernel still tearing the
 group down, `EBUSY`; a zombie not yet reaped) is tried again 15 s later: no call waits, retries
-or sleeps, and no stop is ever slower for it. A leaf with no record is not touched in a pass;
+or sleeps, and no stop is ever slower for it. A leaf refused every time (an owner or mode the checks reject,
+a parent without `+memory`) goes last on the next pass, so it cannot hold back the leaves behind it; it
+is logged once at `warn` when it starts to fail, and every failed pass counts in `_retire_failed_total`. A leaf with no record is not touched in a pass;
 the start's sweep owns that case.
 
 **Order: the evidence, the last CPU, the removal.** `retire_cgroup` asks for the launch's
@@ -49,13 +51,15 @@ counts; the start logs `orphans swept at start`.
 **Startup cost follows the leaves present.** With the leaves gone as machines stop, a host
 holds about one per running VMM, so a restart no longer pays for history. An upgrade from a
 version that leaked still pays once (the 118 to 168 s above, for about 6000 leaves) and never
-again. The barrier keeps its cap of 65536 and says so when it is passed.
+again: **the daemon does not answer for 2 to 4 minutes at the first start after such an upgrade**
+(CI saw 244 s once and 173 s once, for 6500 leaves). That is #134's synchronous sweep, which this
+change does not shorten. The barrier keeps its cap of 65536 and says so when it is passed.
 
 ## Tests
 
 Mock VMM: a killed and an exited VMM leave no leaf and their last CPU is counted; a running
 and a busy machine keep theirs; a refused removal is the next pass's and counts the CPU once;
-a pass is bounded and publishes the counts. `hack/native-ci-scale.sh` (the `scale` step of the
+a pass is bounded and publishes the counts; refused leaves ahead of good ones do not starve them. `hack/native-ci-scale.sh` (the `scale` step of the
 `suites` job): 6500 idle leaves, a daemon restart, the barrier open, memory protection healthy,
 a create accepted and the leaves retired within 480 s. It runs from the workflow revision, so
 `workflow_dispatch` with an older `ref` shows it failing without #134.

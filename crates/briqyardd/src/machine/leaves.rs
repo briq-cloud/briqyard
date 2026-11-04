@@ -98,17 +98,40 @@ impl Manager {
                 }
             }
         }
+        // What failed last pass goes last: a leaf that is refused every time (a mode or an owner
+        // the checks reject, a parent without `+memory`) must not hold back the ones behind it.
+        let failing = self.inner.stats.leaves_failing.lock().unwrap().clone();
+        idle_entries.sort_by_key(|e| failing.contains(&e.snapshot().id));
         let (mut retired, mut failed) = (0, 0);
+        let mut still_failing = std::collections::HashSet::new();
         for e in idle_entries.iter().take(RETIRES_PER_PASS) {
+            let id = e.snapshot().id;
             match self.retire_idle_leaf(e).await {
                 Ok(true) => retired += 1,
                 Ok(false) => {}
                 Err(err) => {
                     failed += 1;
-                    tracing::debug!(machine = e.snapshot().id, err = %format!("{err:#}"), "idle cgroup leaf not removed");
+                    // Said once, when it starts to fail; the counter counts every pass.
+                    if failing.contains(&id) {
+                        tracing::debug!(machine = id, err = %format!("{err:#}"), "idle cgroup leaf not removed");
+                    } else {
+                        tracing::warn!(machine = id, err = %format!("{err:#}"), "idle cgroup leaf cannot be removed; tried last on each pass");
+                    }
+                    still_failing.insert(id);
                 }
             }
         }
+        // Only the ones this pass looked at are forgotten or kept; the rest keep their mark.
+        let looked: std::collections::HashSet<String> = idle_entries
+            .iter()
+            .take(RETIRES_PER_PASS)
+            .map(|e| e.snapshot().id)
+            .collect();
+        *self.inner.stats.leaves_failing.lock().unwrap() = failing
+            .into_iter()
+            .filter(|id| !looked.contains(id))
+            .chain(still_failing)
+            .collect();
         let stats = &self.inner.stats;
         stats.leaves_retired.fetch_add(retired, Relaxed);
         stats.leaves_retire_failed.fetch_add(failed, Relaxed);

@@ -815,6 +815,8 @@ pub struct Stats {
     pub leaves_retire_failed: std::sync::atomic::AtomicU64,
     /// The last pass's count; none until one could read the cgroups.
     pub leaves: Mutex<Option<leaves::Leaves>>,
+    /// The machines whose leaf was refused at the last pass that looked at them.
+    pub leaves_failing: Mutex<std::collections::HashSet<String>>,
 }
 
 struct Inner {
