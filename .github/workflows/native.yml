@@ -30,6 +30,41 @@ concurrency:
   group: native-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 jobs:
+  # Which suites of `more-suites` run (ADR 0110). Not an optimisation that may fail quietly:
+  # if this job fails the run is red and `more-suites` does not start.
+  changes:
+    if: ${{ github.event.pull_request.draft != true && !inputs.two_hosts_only && !inputs.measure_freeze }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      suites: ${{ steps.select.outputs.suites }}
+    steps:
+      # On a pull request this is the merge commit: HEAD^1 is the base, so the diff is the PR's.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Select the suites
+        id: select
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -o pipefail
+          all=$(python3 hack/native-suites.py --all)
+          if [ "$EVENT" = pull_request ]; then
+            suites=$(git diff --name-only HEAD^1 HEAD | python3 hack/native-suites.py)
+          else
+            suites=$all
+          fi
+          echo "suites=$suites" >> "$GITHUB_OUTPUT"
+          left_out=$(jq -rn --argjson all "$all" --argjson run "$suites" '$all - $run | join(", ")')
+          {
+            echo "### Suites of more-suites"
+            echo "Run: $(jq -r 'join(", ")' <<<"$suites")"
+            if [ -n "$left_out" ]; then
+              echo "Left out: $left_out. Nothing they read changed; a release PR (it changes Cargo.toml) runs them."
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
   suites:
     if: ${{ github.event.pull_request.draft != true && !inputs.two_hosts_only && !inputs.measure_freeze }}
     runs-on: ubuntu-24.04
@@ -126,12 +161,13 @@ jobs:
           if-no-files-found: ignore
   more-suites:
     if: ${{ github.event.pull_request.draft != true && !inputs.two_hosts_only && !inputs.measure_freeze }}
+    needs: changes
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        suite: [stress, monitoring, alerts, qualification, restore, scale]
+        suite: ${{ fromJSON(needs.changes.outputs.suites) }}
     name: ${{ matrix.suite }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
