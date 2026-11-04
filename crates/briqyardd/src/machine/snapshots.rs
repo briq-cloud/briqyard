@@ -40,7 +40,7 @@ pub struct SnapshotRec {
 // Existing run-control fingerprints include the serialized record. Preserve the shape
 // of snapshots written before consistency metadata existed.
 fn legacy_consistency(c: &api::CopyConsistency) -> bool {
-    c.consistency == "crash"
+    c.consistency == "unsynced"
         && c.consistency_reason
             .as_deref()
             .is_none_or(|r| r == "legacy_record")
@@ -337,7 +337,7 @@ impl Manager {
             } else {
                 ""
             };
-            let event = if s.copy_consistency.consistency == "crash" {
+            let event = if s.copy_consistency.consistency == "unsynced" {
                 Ev::warning
             } else {
                 Ev::normal

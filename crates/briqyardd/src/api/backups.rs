@@ -113,12 +113,13 @@ mod request_tests {
     use super::*;
     #[test]
     fn empty_backup_body_is_optional_but_invalid_json_is_not() {
-        for body in [b"".as_slice(), b"{}", br#"{"consistency":"crash"}"#] {
+        for body in [b"".as_slice(), b"{}", br#"{"consistency":"unsynced"}"#] {
             assert!(backup_request(body).is_ok());
         }
         for body in [
             br#"{"consistency":"filesystem"}"#.as_slice(),
             br#"{"consistency":"crsh"}"#,
+            br#"{"consistency":"crash"}"#,
             b"{",
         ] {
             let error = backup_request(body).unwrap_err();

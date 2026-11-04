@@ -35,6 +35,8 @@ pub struct Host {
     pub counters: Vec<(&'static str, &'static str, u64)>,
     /// The daemon's resident memory, where the system says it.
     pub resident_bytes: Option<u64>,
+    /// VMM cgroup leaves at the last pass; none when it could not read them.
+    pub cgroup_leaves: Option<crate::machine::Leaves>,
 }
 
 /// The process's resident memory, from `VmRSS` in `/proc/self/status`; none off Linux.
@@ -452,6 +454,22 @@ pub fn render(h: &Host, machines: &[Machine]) -> String {
     for (name, help, n) in &h.counters {
         family(o, name, "counter", help, one(n));
     }
+    if let Some(l) = h.cgroup_leaves {
+        family(
+            o,
+            "briqyard_cgroup_leaves",
+            "gauge",
+            "VMM cgroup leaves on the host.",
+            one(l.total),
+        );
+        family(
+            o,
+            "briqyard_cgroup_leaves_idle",
+            "gauge",
+            "VMM cgroup leaves with no running VMM to explain them; zero when nothing leaks.",
+            one(l.idle),
+        );
+    }
     if let Some(n) = h.resident_bytes {
         family(
             o,
@@ -533,6 +551,7 @@ mod tests {
             }),
             counters: vec![("briqyard_boots_total", "Cold boots.", 3)],
             resident_bytes: Some(20 << 20),
+            cgroup_leaves: Some(crate::machine::Leaves { total: 5, idle: 2 }),
             ..Default::default()
         };
         let text = render(&h, &[run, gw]);
@@ -547,6 +566,8 @@ mod tests {
             r#"briqyard_pool_bytes{kind="size"} 1000"#,
             "briqyard_boots_total 3",
             "process_resident_memory_bytes 20971520",
+            "briqyard_cgroup_leaves 5",
+            "briqyard_cgroup_leaves_idle 2",
             r#"briqyard_machine_cpu_seconds_total{machine="m_1",namespace="t1",name="db"} 2.5"#,
             r#"briqyard_machine_boot_seconds{machine="m_1",namespace="t1",name="db"} 1.25"#,
             r#"briqyard_machine_disk_write_bytes_total{machine="m_1",namespace="t1",name="db"} 67108864"#,
@@ -563,6 +584,10 @@ mod tests {
         assert!(empty.contains("# TYPE briqyard_machine_state gauge\n"));
         assert!(empty.contains("briqyard_machines_stopped{reason=\"exit\"} 0\n"));
         assert!(!empty.contains("briqyard_pool_bytes"), "no pool read yet");
+        assert!(
+            !empty.contains("briqyard_cgroup_leaves"),
+            "no pass has read them"
+        );
     }
 
     #[cfg(target_os = "linux")]

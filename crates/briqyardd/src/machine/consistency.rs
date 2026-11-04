@@ -30,7 +30,7 @@ fn fallback(error: &anyhow::Error, phase: &str) -> api::CopyConsistency {
         }
     };
     tracing::warn!(reason, error = %error, "guest copy consistency fallback");
-    achieved("crash", Some(reason))
+    achieved("unsynced", Some(reason))
 }
 /// A stopped state alone does not prove the init completed its halt path.
 fn stopped_consistency(r: &Record) -> api::CopyConsistency {
@@ -41,28 +41,28 @@ fn stopped_consistency(r: &Record) -> api::CopyConsistency {
             r.fork
                 .as_ref()
                 .map(|origin| origin.copy_consistency.clone())
-                .unwrap_or_else(|| achieved("crash", Some("unverified_source")))
+                .unwrap_or_else(|| achieved("unsynced", Some("unverified_source")))
         };
     }
     if r.state != state::STOPPED {
-        return achieved("crash", Some("unverified_stop"));
+        return achieved("unsynced", Some("unverified_stop"));
     }
     let Some(exit) = r
         .exit
         .as_ref()
         .filter(|exit| r.started_at.is_none_or(|started| exit.at >= started))
     else {
-        return achieved("crash", Some("unverified_stop"));
+        return achieved("unsynced", Some("unverified_stop"));
     };
     if exit.oom_killed {
-        return achieved("crash", Some("oom_killed"));
+        return achieved("unsynced", Some("oom_killed"));
     }
     if exit.vmm_oom_killed {
-        return achieved("crash", Some("vmm_oom_killed"));
+        return achieved("unsynced", Some("vmm_oom_killed"));
     }
     if exit.code == 255 {
         return achieved(
-            "crash",
+            "unsynced",
             Some(if r.stopped_reason == stop::EXIT {
                 "unclean_exit"
             } else {
@@ -85,11 +85,11 @@ impl Manager {
         opt: Option<api::CopyConsistencyRequest>,
     ) -> api::CopyConsistency {
         if opt.is_some() {
-            return achieved("crash", Some("requested"));
+            return achieved("unsynced", Some("requested"));
         }
         let live = e.live.lock().unwrap().clone();
         let Some(live) = live else {
-            return achieved("crash", Some("not_running"));
+            return achieved("unsynced", Some("not_running"));
         };
         let started = Instant::now();
         let result = self.bounded_sync(&live.vsock).await;
@@ -119,12 +119,12 @@ impl Manager {
         let mut frozen = None;
         let mut held_since = None;
         let mut consistency = if opt.is_some() {
-            achieved("crash", Some("requested"))
+            achieved("unsynced", Some("requested"))
         } else if r.suspended {
             if r.suspend_synced {
                 achieved("synced", None)
             } else {
-                achieved("crash", Some("unsynced_suspend"))
+                achieved("unsynced", Some("unsynced_suspend"))
             }
         } else if matches!(
             r.state.as_str(),
@@ -158,7 +158,7 @@ impl Manager {
                         Err(err) => fallback(&err, "freeze"),
                     }
                 } else {
-                    achieved("crash", Some("not_running"))
+                    achieved("unsynced", Some("not_running"))
                 }
             } else {
                 synced
@@ -189,7 +189,7 @@ impl Manager {
                 consistency = fallback(&err, "freeze");
             }
             if held_since.is_some_and(|t| t.elapsed() >= HOLD) {
-                consistency = achieved("crash", Some("freeze_expired"));
+                consistency = achieved("unsynced", Some("freeze_expired"));
             }
         }
         self.inner
@@ -276,7 +276,7 @@ mod tests {
             assert_eq!(
                 got.consistency,
                 if expected.is_some() {
-                    "crash"
+                    "unsynced"
                 } else {
                     "filesystem"
                 },
@@ -300,16 +300,16 @@ mod lineage_tests {
             at: Utc::now(),
             restarting: false,
         });
-        assert_eq!(stopped_consistency(&r).consistency, "crash");
+        assert_eq!(stopped_consistency(&r).consistency, "unsynced");
         r.state = state::CREATED.into();
         r.started_at = None;
         r.from_source = true;
-        assert_eq!(stopped_consistency(&r).consistency, "crash");
+        assert_eq!(stopped_consistency(&r).consistency, "unsynced");
         r.fork = Some(api::ForkOrigin {
             machine_id: "m_parent".into(),
-            copy_consistency: achieved("crash", Some("requested")),
+            copy_consistency: achieved("unsynced", Some("requested")),
         });
-        assert_eq!(stopped_consistency(&r).consistency, "crash");
+        assert_eq!(stopped_consistency(&r).consistency, "unsynced");
         r.fork = None;
         r.from_source = false;
         assert_eq!(stopped_consistency(&r).consistency, "filesystem");

@@ -757,11 +757,11 @@ async fn frozen_copy_fallbacks_are_bounded_and_the_opt_out_skips_guest_calls() {
         assert_eq!(s.copy_consistency.consistency_reason.as_deref(), reason);
         assert_eq!(
             s.copy_consistency.consistency,
-            if fault == 0 { "filesystem" } else { "crash" }
+            if fault == 0 { "filesystem" } else { "unsynced" }
         );
         h.host_calls();
         let mut req = named("opt-out");
-        req.consistency = Some(api::CopyConsistencyRequest::Crash);
+        req.consistency = Some(api::CopyConsistencyRequest::Unsynced);
         let s = h.m.snapshot("m_frozen", req).await.unwrap();
         assert_eq!(
             s.copy_consistency.consistency_reason.as_deref(),
@@ -818,7 +818,7 @@ async fn failed_sync_also_falls_back_without_freezing() {
         h.m.start("m_sync", None).await.unwrap();
         h.fs_sync_fault(fault);
         let s = h.m.snapshot("m_sync", named("sync-failure")).await.unwrap();
-        assert_eq!(s.copy_consistency.consistency, "crash");
+        assert_eq!(s.copy_consistency.consistency, "unsynced");
         assert!(!h.host_calls().iter().any(|c| c.starts_with("fs_freeze")));
     }
 }
@@ -827,7 +827,7 @@ async fn failed_sync_also_falls_back_without_freezing() {
 fn legacy_snapshot_metadata_preserves_record_fingerprints() {
     let value = json!({"id":"s_old", "created_at":"2026-11-04T00:00:00Z", "disks":["root"]});
     let record: SnapshotRec = serde_json::from_value(value.clone()).unwrap();
-    assert_eq!(record.copy_consistency.consistency, "crash");
+    assert_eq!(record.copy_consistency.consistency, "unsynced");
     assert_eq!(serde_json::to_value(record).unwrap(), value);
 }
 

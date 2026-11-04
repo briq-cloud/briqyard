@@ -300,6 +300,8 @@ th0=$(sudo awk '/^Threads:/ {print $2}' /proc/$pa2/status)
 n=$(on "$A2" 'i=0; while [ $i -lt 300 ]; do sleep 60 >/dev/null 2>&1 & i=$((i+1)); done; ls /proc | grep -c "^[0-9]"')
 th1=$(sudo awk '/^Threads:/ {print $2}' /proc/$pa2/status)
 check "a guest's processes are not host processes (guest runs $n, its VMM threads $th0 -> $th1)" '[ "$n" -ge 300 ] && [ "$th1" -le $((th0 + 2)) ]'
+# Read before the kill below: it ends the machine's own `sleep` too, and a stopped machine keeps no leaf (ADR 0099).
+cpumax=$(sudo cat "$(leaf "$A2")/cpu.max" 2>&1)
 on "$A2" 'kill $(pidof sleep)' || true
 check "jailer: no capabilities, no new privileges" '[ "$(cap_eff $pa)" = 0000000000000000 ] && [ "$(sudo awk "/^NoNewPrivs:/ {print \$2}" /proc/$pa/status)" = 1 ]'
 check "jailer: a seccomp filter on every thread" '[ "$(seccomp_all $pa)" = 2 ]'
@@ -317,7 +319,7 @@ check "nor list its jail (Permission denied)" 'grep -qF "Permission denied" <<<"
 # Limits the cgroup holds.
 mlim=$(( (256 + 256) * 1048576 ))
 check "VMM ceiling is guest MiB + 256 MiB, no swap, a group kill" '[ "$(sudo cat $(leaf "$A")/memory.max)" = "$mlim" ] && [ "$(sudo cat $(leaf "$A")/memory.swap.max)" = 0 ] && [ "$(sudo cat $(leaf "$A")/memory.oom.group)" = 1 ]'
-check "CPU quota of 500 millis is 50000 per 100000" '[ "$(sudo cat $(leaf "$A2")/cpu.max)" = "50000 100000" ]'
+check "CPU quota of 500 millis is 50000 per 100000" '[ "$cpumax" = "50000 100000" ]'
 dpid=$(daemon_pid); fpid=$(fleet_pid)
 check "OOM preferences: VMM +500, daemon and fleet -900" '[ "$(sudo cat /proc/$pa/oom_score_adj)" = 500 ] && [ "$(sudo cat /proc/$dpid/oom_score_adj)" = -900 ] && [ "$(sudo cat /proc/$fpid/oom_score_adj)" = -900 ]'
 # Secrets stay with their machine.

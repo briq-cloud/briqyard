@@ -59,13 +59,13 @@ def create(cmd=None):
     ids.append(m['id']);wait(m['id'],'running');return m['id']
 def fork(crash=False):
     spec={'machine_id':source}
-    if crash:spec['consistency']='crash'
+    if crash:spec['consistency']='unsynced'
     t=time.monotonic()
     m=api('POST','/machines',{'namespace':ns,'name':'fork-'+str(next(serial)),'size':{'vcpus':1,'memory_mb':512},'fork':spec,'start':False});ids.append(m['id'])
     copied=wait(m['id'],'created');elapsed=(time.monotonic()-t)*1000
     level=(copied.get('fork') or {}).get('consistency','legacy')
     copy_levels[level]=copy_levels.get(level,0)+1
-    if level!='legacy' and level!=('crash' if crash else 'filesystem'):raise RuntimeError('fork did not achieve requested measurement consistency')
+    if level!='legacy' and level!=('unsynced' if crash else 'filesystem'):raise RuntimeError('fork did not achieve requested measurement consistency')
     api('DELETE','/machines/'+m['id']);ids.remove(m['id']);return elapsed
 phase='create_source'
 try:
