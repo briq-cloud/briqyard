@@ -26,7 +26,7 @@ pub(super) async fn status(State(st): S) -> Json<api::Status> {
         named_memory_profiles: st.mgr.named_memory_profiles(),
         warm_pool_profiles: st.mgr.warm_pool_profiles(),
         runtime_classes: st.mgr.runtime_classes(),
-        version: api::VERSION.into(),
+        version: briqyard_version::VERSION.into(),
         host_id: st.mgr.host_id().into(),
         capacity: st.mgr.capacity(),
         used,

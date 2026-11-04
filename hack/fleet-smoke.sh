@@ -125,7 +125,7 @@ if sudo -n test -d "$REL" 2>/dev/null; then
   check "the machine handed over" '[ "$(host_field "$UP" .started.stopped)" = 0 ] && [ "$(host_field "$UP" .started.adopted)" -ge 1 ]'
   check "it still answers"      '[ "$(briqyard machine exec "$U" -- hostname)" = up ]'
   check "never booted again"    '[ "$(briqyard machine logs "$U" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
-  check "its init says its version" '[ "$(briqyard machine get "$U" | jq -r .init_version)" = "$build" ]'
+  check "its init says its guest version" 'briqyard machine get "$U" | jq -e ".init_version | test(\"^[0-9]+[.][0-9]+[.][0-9]+$\")" >/dev/null'
   check "a release neither URL nor version refused" '! briqyard host upgrade "$UP" --release "not a release" >/dev/null 2>&1'
 else
   skip "host upgrade (no release directory $REL, or no sudo)"

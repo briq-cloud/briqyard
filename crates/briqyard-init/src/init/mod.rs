@@ -110,7 +110,7 @@ pub fn main() {
         .build()
         .expect("runtime");
     let report = ExitReport {
-        version: briqyard_api::VERSION.into(),
+        version: briqyard_api::version::GUEST_VERSION.into(),
         ..rt.block_on(run())
     };
     log!("{}", exit_line(&report));

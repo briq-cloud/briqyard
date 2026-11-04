@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "briqyard-api"
-version = "0.1.20"
+version = "0.0.0"
 dependencies = [
  "chrono",
  "hex",
@@ -293,6 +293,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "briqyard-version"
+version = "0.1.20"
+
+[[package]]
 name = "briqyardd"
 version = "0.1.20"
 dependencies = [
@@ -303,6 +307,7 @@ dependencies = [
  "base64 0.22.1",
  "briqyard-api",
  "briqyard-objstore",
+ "briqyard-version",
  "chrono",
  "clap",
  "flate2",

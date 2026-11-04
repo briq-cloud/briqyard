@@ -94,3 +94,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0096](0096-vmm-memory-kill-is-reported.md) | A VMM killed over its memory ceiling is reported as `exit.vmm_oom_killed`, apart from the guest's `oom_killed`; a stopped copy stays `crash` |
 | [0097](0097-a-fork-keeps-its-sources-command.md) | A disk fork runs its source's entrypoint, command, files, ports and environment unless the request sets them, as a restore does |
 | [0098](0098-ci-token-permissions.md) | CI workflows grant the GitHub token only read access to repository contents |
+| [0101](0101-the-inits-digest-changes-only-when-the-init-does.md) | The init's digest changes only when the init does: it reports a fixed guest version, its crates keep their own package version, `briqyard-version` holds the host binaries' release and commit; CI builds it twice to prove it |

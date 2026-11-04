@@ -1,0 +1,10 @@
+[package]
+name = "briqyard-version"
+description = "What a briqyard binary says it is: the workspace version and the commit it was built from"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No dependency, and the guest init does not link it: its bytes must not change with the
+# release or the commit (ADR 0098).

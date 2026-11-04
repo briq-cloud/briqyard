@@ -34,6 +34,13 @@ artifacts and versioned fleet image. The GitHub release remains a draft with
 publication/promotion remain separate steps. Merging the changelog tooling itself does
 not build or publish a new runtime version.
 
+The release's init keeps the digest of the one before it unless the init's code, its
+dependencies or the toolchain changed ([ADR 0098](adr/0098-the-inits-digest-changes-only-when-the-init-does.md)):
+CI's `hack/init-digest-check.sh` proves a version or a commit does not change it, and the
+candidate's `SHA256SUMS` line for `briqyard-init-linux-<arch>` shows the digest. The upgrade
+notes in the changelog entry say whether it changed, and so whether seeds are sealed again.
+The first release with that ADR changes it once.
+
 Qualify the exact candidate before explicitly publishing that version. Host installation
 and handover use the existing [Upgrade procedure](OPERATIONS.md#upgrade), with an
 explicit `--release <version or URL>`.

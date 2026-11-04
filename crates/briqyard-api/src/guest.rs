@@ -16,7 +16,7 @@
 //! read what the other's version writes (ADR 0027): changes are additive (a field is added
 //! with a default that means what its absence meant, never renamed, retyped or removed);
 //! unknown fields are ignored; an unknown `op` is answered `error` "unknown op <op>"; an
-//! unknown response `type` in a stream is skipped. The init says its version in `pong`.
+//! unknown response `type` in a stream is skipped. The init says its guest version in `pong` (ADR 0098).
 
 mod boot_bundle;
 pub use boot_bundle::{boot_bundle_fingerprint_bytes, boot_file_mode, effective_boot_file_mode};
@@ -209,7 +209,8 @@ pub struct Response {
     pub uptime: f64,
     #[serde(default)]
     pub main_pid: i32,
-    /// The init's version, in a `pong` (ADR 0027); empty from an init older than the field.
+    /// The init's guest version, in a `pong` (ADR 0027, 0098): the release whose guest protocol
+    /// it speaks, not the release it was built in. Empty from an init older than the field.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
     /// Raw bytes following a get_stream ready response.
@@ -254,7 +255,7 @@ pub struct ExitReport {
     /// The main process ran: false when the init failed before it (its own 125, 126, 127).
     #[serde(default)]
     pub started: bool,
-    /// The init's version, as in its `pong` (ADR 0027): a process that exits at once may end
+    /// The init's guest version, as in its `pong` (ADR 0027, 0098): a process that exits at once may end
     /// the machine before the host's first ping. Empty from an init older than this field.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,

@@ -312,8 +312,9 @@ pub struct Machine {
     pub pending: Option<Pending>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_since: Option<DateTime<Utc>>,
-    /// The init its root disk carries, as it said at the last boot (ADR 0027); empty before
-    /// its first boot, or from an init older than the report.
+    /// The guest version of the init its root disk carries, as it said at the last boot (ADR
+    /// 0027, 0098): the release whose guest protocol it speaks; empty before its first boot,
+    /// or from an init older than the report.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub init_version: String,
     /// What ran it at its last boot: Firecracker's version and the host kernel's release,

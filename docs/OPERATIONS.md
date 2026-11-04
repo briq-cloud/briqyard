@@ -344,6 +344,9 @@ briqyard host upgrade h_123456 --release 0.2.0 --runtime-class nested   # and st
 briqyard host ls                                          # VERSION, and each host's note
 ```
 
+The init's digest changes only when the init does (ADR 0098), so a release that does not touch
+the init, its dependencies or the toolchain keeps its seeds. `RELEASING.md` says how to check.
+
 A release that changes the boot identity (ADR 0087: the CPU template) makes every seed sealed
 before it refused by name. With a control plane that names seeds in its creates: it stops naming
 them first (its creates boot cold), then the hosts upgrade and the seeds are sealed and qualified

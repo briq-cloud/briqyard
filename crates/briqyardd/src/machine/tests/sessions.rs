@@ -329,7 +329,7 @@ async fn a_session_on_an_init_older_than_sessions_is_refused_naming_it() {
         other => panic!("{:?}", other.err()),
     }
     // This release's: a session.
-    *h.host.init_version.lock().unwrap() = api::VERSION.into();
+    *h.host.init_version.lock().unwrap() = api::version::GUEST_VERSION.into();
     let m = h.m.create_made(h.request("new")).await.unwrap();
     assert!(h
         .m
