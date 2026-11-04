@@ -24,15 +24,16 @@ sent that nothing remembers.
 every stream of a failed attempt. A failed delete keeps it. The marker's absence says nothing
 else: only its presence acts.
 
-**At the next start, a marker with no record gives its streams away.** The markers a previous
+**At the next start, a marker whose listing shows no record gives its streams away.** "No record" is read from a listing of `backups/<machine>/`, never from a GET: the object store reports "not found" for an absent object and also for a 404 from a missing bucket or a degraded S3-compatible node, and a false "no record" after a crash between the record and the end of the marker would delete a whole backup. Only a listing that answers, shows the streams and shows no record deletes. A listing that comes back falsely empty deletes nothing: the orphan stays, as before this ADR. The markers a previous
 process left are read when the daemon starts, before this process writes one, and settled in a
 detached task (the store is asked off the start's path). For each:
 
 | Marker | Record in the store | Done |
 |---|---|---|
-| names of ours | present | the backup is whole: the marker ends, nothing else |
-| names of ours | absent | the streams named by the marker's disks go, then the marker |
-| names of ours | lookup failed | everything stays, tried again at the next start |
+| names of ours | listed | the backup is whole: the marker ends, nothing else |
+| names of ours | not listed, streams listed | those streams go, then the marker |
+| names of ours | not listed, no stream listed | nothing to remove: the marker ends |
+| names of ours | listing failed | everything stays, tried again at the next start |
 | a stream delete fails | absent | the marker stays |
 | names that are not ours | | the marker stays, nothing is deleted |
 

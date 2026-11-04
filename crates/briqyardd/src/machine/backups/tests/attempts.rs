@@ -81,7 +81,12 @@ async fn a_kill_between_two_streams_removes_the_stream_that_was_written() {
     h.cut(&id, |h| {
         let store = h.m.inner.cfg.data_dir.join("store");
         std::fs::read_dir(store.join(format!("backups/{id}/root")))
-            .map(|d| d.count() == 2)
+            .map(|d| {
+                d.filter_map(|f| f.ok())
+                    .filter(|f| f.file_name().to_string_lossy().ends_with(".zfs"))
+                    .count()
+                    == 2
+            })
             .unwrap_or(false)
     })
     .await;
@@ -156,4 +161,45 @@ async fn nothing_is_removed_without_a_marker_or_on_a_marker_that_is_not_ours() {
     h.restart().await;
     assert_eq!(h.markers().len(), 2);
     assert!(store.get_bytes_if_present(&stray).await.unwrap().is_some());
+}
+
+#[test]
+fn only_a_listing_that_shows_streams_and_no_record_gives_streams_away() {
+    use crate::machine::backups::attempts::Verdict;
+    let a = Attempt::new("m_v", "20261104T101010.123Z", &["root", "data"]);
+    let root = "backups/m_v/root/20261104T101010.123Z.zfs".to_string();
+    let data = "backups/m_v/data/20261104T101010.123Z.zfs".to_string();
+    let record = "backups/m_v/20261104T101010.123Z.json".to_string();
+    let other = "backups/m_v/root/20261104T090909.000Z.zfs".to_string();
+    // The record is listed (whatever a GET of it says): nothing goes.
+    assert_eq!(
+        a.verdict(&[root.clone(), data.clone(), record.clone()]),
+        Verdict::Finished
+    );
+    // No record: its listed streams go, and no other object.
+    assert_eq!(
+        a.verdict(&[root.clone(), other.clone()]),
+        Verdict::Streams(vec![root])
+    );
+    // Nothing of it listed: nothing to remove.
+    assert_eq!(a.verdict(&[other]), Verdict::Streams(vec![]));
+}
+
+#[tokio::test]
+async fn a_store_that_cannot_be_listed_deletes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = harness(|_| {}).await;
+    let id = machine(&h).await;
+    let b = h.m.backup(&id).await.unwrap();
+    let store = h.m.inner.cfg.data_dir.join("store");
+    // The record is gone from view (a false "not found" would say the same) and the listing
+    // fails or comes back empty: either way the streams stay.
+    let dir = store.join(format!("backups/{id}"));
+    h.m.begin_attempt(&Attempt::new(&id, &b.id, &["root", "data"]))
+        .unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    h.restart().await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(h.streams(&id).await.len(), 2);
+    assert_eq!(h.ids(&h.listed(&id).await), vec![b.id]);
 }

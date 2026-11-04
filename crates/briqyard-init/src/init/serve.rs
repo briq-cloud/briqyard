@@ -170,7 +170,7 @@ where
                     kind: "pong".into(),
                     uptime,
                     main_pid,
-                    version: briqyard_api::VERSION.into(),
+                    version: briqyard_api::version::GUEST_VERSION.into(),
                     file_stream_v1: true,
                     exec_stream_v1: true,
                     assigned_run: st.assigned_run.clone(),
@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(f[0].kind, "pong");
         assert_eq!(f[0].main_pid, 42);
         assert!(f[0].uptime > 0.0, "read from /proc/uptime");
-        assert_eq!(f[0].version, briqyard_api::VERSION);
+        assert_eq!(f[0].version, briqyard_api::version::GUEST_VERSION);
         assert!(f[0].file_stream_v1);
         assert!(f[0].clone_status.is_none());
         assert!(f[0].sha256.is_empty());

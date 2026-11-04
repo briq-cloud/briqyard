@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.1.21 — 2026-11-04
+
+### Upgrade notes
+
+- The init's digest changes once more with this release (ADR 0101): every seed sealed before it is refused until it is sealed again, in the order `docs/OPERATIONS.md` gives (Upgrade). From this release on, the digest changes only with the init's code, its dependencies, the toolchain, the target or the release profile. A seed also binds the image, the kernel, the VMM, the CPU template and the sizes: a release that changes none of these and leaves the digest alone keeps its seeds.
+- A guest's `init_version` is now the guest protocol version, not the release.
+- The `nested` class's kernel changes (`BRIDGE_NETFILTER` as a module): a host serving the class gets it by this upgrade.
+
+### Fixes
+
+- report a VMM killed over its memory ceiling (#132) ([64c53039](https://github.com/briq-cloud/briqyard/commit/64c53039459dd8fd2ce52706a2be2d87a3eb2c6b))
+
+- br_netfilter is a module in the nested kernel ([4d22f944](https://github.com/briq-cloud/briqyard/commit/4d22f944d9f396b850923b85bdb01fd29efd8031))
+
+- a fake zfs started after its parent exited ends too ([8d89b3af](https://github.com/briq-cloud/briqyard/commit/8d89b3affef07e34115c9ab4cd7f616afea4d698))
+
+- a fork keeps the source's command unless the request sets one (#135) ([e48b6bb5](https://github.com/briq-cloud/briqyard/commit/e48b6bb5d4230af8ead572e382767f54784f2362))
+
+- restrict workflow token permissions (#137) ([75c8e9e2](https://github.com/briq-cloud/briqyard/commit/75c8e9e2f04fda9502e69a39c15adea3d324298b))
+
+- the init's digest changes only when the init does ([6dad7483](https://github.com/briq-cloud/briqyard/commit/6dad74831b4b243713bb7b01895dbe51eb0cd332))
+
+- ADR 0101, what the digest depends on, gate rules, a workspace() test ([ffd7f042](https://github.com/briq-cloud/briqyard/commit/ffd7f042470c3c003fc01c401d225dd77d42716a))
+
+
+### Maintenance
+
+- chaos, isolation and OOM qualification (#129) ([4ba56103](https://github.com/briq-cloud/briqyard/commit/4ba5610326c9f66cc014a4b7188e9d8fb4ffb114))
+
 ## 0.1.20 — 2026-11-04
 
 ### Upgrade notes

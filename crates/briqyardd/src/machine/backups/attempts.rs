@@ -66,6 +66,29 @@ impl Attempt {
     }
 }
 
+/// What a listing of the machine's prefix says about an attempt.
+#[derive(Debug, PartialEq)]
+pub(super) enum Verdict {
+    /// The record is listed: the backup exists, whatever else.
+    Finished,
+    /// No record: these of its streams are listed, and only these may go (none: nothing to do).
+    Streams(Vec<String>),
+}
+
+impl Attempt {
+    pub(super) fn verdict(&self, listed: &[String]) -> Verdict {
+        if listed.contains(&self.record()) {
+            return Verdict::Finished;
+        }
+        Verdict::Streams(
+            self.streams()
+                .into_iter()
+                .filter(|s| listed.contains(s))
+                .collect(),
+        )
+    }
+}
+
 impl Manager {
     /// Written durably before the first stream: from here a kill leaves a marker to find.
     pub(super) fn begin_attempt(&self, attempt: &Attempt) -> Result<()> {
@@ -121,25 +144,35 @@ impl Manager {
                 );
                 continue;
             }
-            let present = match store.get_bytes_if_present(&attempt.record()).await {
-                Ok(record) => record.is_some(),
+            // A listing, not a GET: the object store reports "not found" for an object that is
+            // absent and also for a 404 from a missing bucket or a degraded node, and a false
+            // "no record" would delete a whole backup. Only a listing that answers, shows the
+            // streams and shows no record gives them away.
+            let listed = match store
+                .list(&format!("backups/{}/", attempt.machine_id))
+                .await
+            {
+                Ok(listed) => listed,
                 Err(err) => {
-                    tracing::warn!(machine = attempt.machine_id, backup = attempt.id, err = %format!("{err:#}"), "backup marker kept: its record could not be looked up");
+                    tracing::warn!(machine = attempt.machine_id, backup = attempt.id, err = %format!("{err:#}"), "backup marker kept: the store could not be listed");
                     continue;
                 }
             };
-            if present {
-                tracing::debug!(
-                    machine = attempt.machine_id,
-                    backup = attempt.id,
-                    "backup finished before the daemon ended"
-                );
-                self.end_attempt(&attempt);
-                continue;
-            }
+            let streams = match attempt.verdict(&listed) {
+                Verdict::Finished => {
+                    tracing::debug!(
+                        machine = attempt.machine_id,
+                        backup = attempt.id,
+                        "backup finished before the daemon ended"
+                    );
+                    self.end_attempt(&attempt);
+                    continue;
+                }
+                Verdict::Streams(streams) => streams,
+            };
             let mut left_over = 0;
-            for key in attempt.streams() {
-                if let Err(err) = store.delete(&key).await {
+            for key in &streams {
+                if let Err(err) = store.delete(key).await {
                     left_over += 1;
                     tracing::warn!(key, err = %format!("{err:#}"), "stream of a backup that never finished kept");
                 }
@@ -148,7 +181,7 @@ impl Manager {
                 tracing::info!(
                     machine = attempt.machine_id,
                     backup = attempt.id,
-                    streams = attempt.disks.len(),
+                    streams = streams.len(),
                     "streams of a backup that never finished removed"
                 );
                 self.end_attempt(&attempt);
