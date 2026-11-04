@@ -4,7 +4,7 @@
 
 ### Upgrade notes
 
-- The init's digest changes once more with this release (ADR 0101): every seed sealed before it is refused until it is sealed again, in the order of ADR 0087 and `docs/OPERATIONS.md` (Upgrade). From this release on, a release that does not change the init's code, its dependencies or the toolchain keeps the digest and its seeds.
+- The init's digest changes once more with this release (ADR 0101): every seed sealed before it is refused until it is sealed again, in the order `docs/OPERATIONS.md` gives (Upgrade). From this release on, the digest changes only with the init's code, its dependencies, the toolchain, the target or the release profile. A seed also binds the image, the kernel, the VMM, the CPU template and the sizes: a release that changes none of these and leaves the digest alone keeps its seeds.
 - A guest's `init_version` is now the guest protocol version, not the release.
 - The `nested` class's kernel changes (`BRIDGE_NETFILTER` as a module): a host serving the class gets it by this upgrade.
 
