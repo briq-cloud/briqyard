@@ -615,10 +615,13 @@ pub(super) fn jail_uid(base: u32, subnet_index: u32, host_num: u8) -> u32 {
 }
 
 /// The guest kernel's command line. The root disk is mounted with `discard`: what the guest
-/// deletes goes back to the pool (ADR 0037).
+/// deletes goes back to the pool (ADR 0037). `quiet` keeps the kernel's boot messages (and its
+/// warnings) off the serial console, which is slow to write; errors and panics still print
+/// and the kernel's ring buffer keeps everything (ADR 0092). An operator's `kernel_args` come
+/// last, so `loglevel=7` brings the messages back.
 pub(super) fn boot_args(pci: bool, extra: &str) -> String {
     let mut args = format!(
-        "console=ttyS0 reboot=k panic=1 root=/dev/vda rw rootfstype=ext4 rootflags=discard i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd random.trust_cpu=on init={}",
+        "console=ttyS0 quiet reboot=k panic=1 root=/dev/vda rw rootfstype=ext4 rootflags=discard i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd random.trust_cpu=on init={}",
         image::INIT_PATH
     );
     if !pci {

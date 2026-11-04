@@ -73,3 +73,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0075](0075-sandbox-destination-binding.md) | One-way complete sandbox guest configuration before main, with durable consumption and replay fencing |
 | [0076](0076-operator-sandbox-seeds.md) | Operator-produced pristine sandbox topology, ordinary-create receipts and exact destination acknowledgment; native qualification gates enablement |
 | [0077](0077-immutable-warm-launch-identity.md) | Immutable warm-slot launch identity and durable source allocations; unbound consumption remains disabled |
+| [0092](0092-quiet-boot-and-fast-readiness.md) | The kernel boots `quiet` (errors and panics on the console, the ring buffer keeps the rest, `loglevel=7` in `kernel_args` undoes it) and `wait_ready` polls every 5 ms for 5 s, then every 100 ms, with the same deadline and error; a guest-side ready signal rejected |
