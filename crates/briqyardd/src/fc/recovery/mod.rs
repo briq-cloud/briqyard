@@ -15,6 +15,16 @@ pub(super) mod namespace;
 #[cfg(target_os = "linux")]
 mod native;
 #[cfg(target_os = "linux")]
+pub use native::Retry;
+#[cfg(not(target_os = "linux"))]
+pub struct Retry;
+#[cfg(not(target_os = "linux"))]
+impl Retry {
+    pub async fn wait(self) -> Result<()> {
+        anyhow::bail!("native recovery requires Linux")
+    }
+}
+#[cfg(target_os = "linux")]
 pub(super) mod provenance;
 #[cfg(test)]
 mod tests;
@@ -47,6 +57,30 @@ impl Startup {
             ))
         }
     }
+    /// A failed early settlement permits diagnostics, without storage/network reconciliation.
+    pub fn unresolved(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.unresolved()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
+        }
+    }
+
+    /// Retain the observation guards for a timed-out service. Start after listeners serve.
+    pub fn retry(&self) -> Result<Option<Retry>> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.retry()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(None)
+        }
+    }
+
     pub(crate) async fn finish(
         self,
         machines: &[RecoveryMachine],

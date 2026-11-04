@@ -326,6 +326,9 @@ impl Manager {
 
     /// Free space in the pool, in MB.
     pub async fn disk_free_mb(&self) -> u64 {
+        if self.recovery_fault().is_some() {
+            return 0;
+        }
         self.inner.zfs.free().await.unwrap_or(0) >> 20
     }
 
@@ -421,6 +424,11 @@ impl Manager {
     /// The address a proxy connects to once the machine is ready, woken when it sleeps:
     /// readiness gates traffic (ADR 0022).
     pub async fn ready_addr(&self, id: &str, timeout: Duration) -> Result<Ipv4Addr, MError> {
+        if self.recovery_fault().is_some() {
+            // Preserve forwarding to recorded running machines without waking or adopting.
+            // Assigned identities still require their normal publication proof.
+            return self.machine_addr(id, false).await;
+        }
         let ip = self.machine_addr(id, true).await?;
         self.wait(id, Until::Ready, timeout).await?;
         Ok(ip)

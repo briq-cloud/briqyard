@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.22 — 2026-11-04
+
+### Upgrade notes
+
+- The init is unchanged from 0.1.21 (ADR 0101): seeds are not sealed again. Confirm it against the `briqyard-init-linux-<arch>` line of `SHA256SUMS`.
+- The `consistency` value `crash` is now `unsynced`, in requests, responses and metric labels. Records already stored keep loading and read as `unsynced`; a request that sends `crash` gets a 400.
+- The first start after upgrading from a release before 0.1.20 sweeps its leftover cgroup leaves: linear, about 50 ms a leaf, up to 5 minutes observed. The API and in-process ingress are down meanwhile; machines keep running. A host that already ran 0.1.20 or later has paid this.
+
+### Documentation
+
+- make AGENTS.md the canonical agent guidance (#141) ([bc30466a](https://github.com/briq-cloud/briqyard/commit/bc30466a820e152240331fbcaff0e757166f018a))
+
+
+### Fixes
+
+- remove a VMM's cgroup leaf when it goes (#139) ([f75f0bb2](https://github.com/briq-cloud/briqyard/commit/f75f0bb2c00a26cc06da425934f64da5fca87e3e))
+
+- remove the stream of a backup that never finished (#138) ([f4939302](https://github.com/briq-cloud/briqyard/commit/f49393023a254e2d43594724ab609f0468f140e1))
+
+
+### Maintenance
+
+- make the pressure and backup-cut checks deterministic (#143) ([01f5c9f6](https://github.com/briq-cloud/briqyard/commit/01f5c9f65007d9a8b5aa587e451f682c02dd4bc1))
+
+- call a copy without a sync unsynced (#144) ([77c5ae2d](https://github.com/briq-cloud/briqyard/commit/77c5ae2d7d7bf906893dee3f7bcfe1f38476bdf5))
+
 ## 0.1.21 — 2026-11-04
 
 ### Upgrade notes

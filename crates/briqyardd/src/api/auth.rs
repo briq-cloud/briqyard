@@ -56,7 +56,15 @@ pub(super) async fn auth_and_log(State(st): S, req: Request, next: Next) -> Resp
             return resp;
         }
     }
-    let mut resp = next.run(req).await;
+    let mut resp = if st.mgr.recovery_fault().is_some()
+        && !matches!(
+            path.as_str(),
+            "/healthz" | "/metrics" | "/v1/status" | "/v1/openapi.yaml"
+        ) {
+        AppError::from(MError::Capacity("startup: recovery_unresolved".into())).into_response()
+    } else {
+        next.run(req).await
+    };
     resp.headers_mut()
         .insert("x-request-id", HeaderValue::from_str(&request_id).unwrap());
     if path != "/healthz" {

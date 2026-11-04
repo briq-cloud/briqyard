@@ -17,6 +17,8 @@ pub(super) struct Barrier {
     service: Dir,
     unit: unit::Identity,
     namespace: Arc<super::namespace::Namespace>,
+    unresolved: Option<anyhow::Error>,
+    retryable: bool,
 }
 impl Barrier {
     pub(super) async fn acquire() -> Result<Self> {
@@ -47,6 +49,33 @@ impl Barrier {
             .context("querying the unit with busctl and systemctl")?;
         let unit = unit::validate(&text, pid, &hooks)
             .context("the unit systemd reports is not the official briqyardd.service (Id, ControlGroup, FragmentPath, MainPID, ExecStart)")?;
+        // Before any storage/network helper or inventory: a departing member may still
+        // attach a launcher to the VMM domain. All inventory follows this wait.
+        let settlement = unit::wait_service(pid, || {
+            namespace.check()?;
+            Ok((namespace.service_pids()?, service.has_directories()?))
+        })
+        .await;
+        let retryable = settlement
+            .as_ref()
+            .is_err_and(|err| err.kind() == std::io::ErrorKind::TimedOut);
+        let unresolved = settlement.err().map(|err| {
+            let members = namespace.service_pids().unwrap_or_default();
+            let details: Vec<_> = members.into_iter().filter(|p| *p != pid).take(32)
+                .map(|p| {
+                    let exe = std::fs::read_link(format!("/proc/{p}/exe"));
+                    let stat = Dir::absolute(Path::new(&format!("/proc/{p}")))
+                        .and_then(|d| d.text(c"stat", 4096));
+                    let state = stat.as_deref().ok()
+                        .and_then(|s| s.rsplit_once(')'))
+                        .and_then(|(_, tail)| tail.split_whitespace().next());
+                    format!("pid={p} exe={exe:?} state={state:?}")
+                }).collect();
+            anyhow!("recovery_unresolved: {err}; diagnostic observations (not identity proof): {details:?}; inspect journal and docs/OPERATIONS.md#unresolved-startup")
+        });
+        if let Some(err) = &unresolved {
+            tracing::error!(err = %err, "startup service settlement failed; managed spawning stays closed");
+        }
         Ok(Self {
             lock,
             proc,
@@ -55,6 +84,24 @@ impl Barrier {
             service,
             unit,
             namespace,
+            unresolved,
+            retryable,
+        })
+    }
+
+    pub(super) fn unresolved(&self) -> bool {
+        self.unresolved.is_some()
+    }
+
+    pub(super) fn retry(&self) -> Result<Option<Retry>> {
+        Ok(if self.retryable {
+            Some(Retry {
+                namespace: self.namespace.clone(),
+                service: Dir(self.service.0.try_clone()?),
+                _lock: self.lock.clone(),
+            })
+        } else {
+            None
         })
     }
 
@@ -64,6 +111,9 @@ impl Barrier {
         jailer: &Path,
         vmm: &str,
     ) -> Result<Recovered> {
+        if let Some(err) = self.unresolved {
+            return Err(err);
+        }
         if machines.len() > MAX_LEAVES {
             return Err(anyhow!(
                 "{} recorded machines exceed the recovery bound of {MAX_LEAVES}",
@@ -321,4 +371,24 @@ enum Held {
     Idle((u64, u64)),
     /// No leaf yet.
     Absent,
+}
+
+/// Observation only. This never constructs recovered authority or opens spawning.
+pub struct Retry {
+    namespace: Arc<super::namespace::Namespace>,
+    service: Dir,
+    _lock: Arc<DomainLock>,
+}
+impl Retry {
+    pub async fn wait(self) -> Result<()> {
+        unit::await_service_settlement(std::process::id(), || {
+            self.namespace.check()?;
+            Ok((
+                self.namespace.service_pids()?,
+                self.service.has_directories()?,
+            ))
+        })
+        .await?;
+        Ok(())
+    }
 }
