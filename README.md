@@ -21,7 +21,7 @@
 
 Agents need isolated, durable machines that mostly sit idle. A container shares the host's kernel, a Kubernetes pod keeps no identity, and an idle VM pins its memory.
 
-briqyard runs any OCI image in a KVM guest under Firecracker's jailer, on servers you own. Disks are ZFS zvols, so a fork is a copy-on-write clone. An idle machine stops and frees its compute, keeping its disk and address. A TCP or HTTP connection or an exec wakes it; a memory snapshot resumes it in 0.15–0.25 s.
+briqyard runs any OCI image in a Firecracker microVM, on servers you own. An idle machine stops and keeps its disk. The next connection or exec wakes it, in 0.15–0.25 s from a memory snapshot. A fork is a copy-on-write clone.
 
 ## Key features
 
