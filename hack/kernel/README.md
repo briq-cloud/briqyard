@@ -23,6 +23,7 @@ The release attaches `nested-vmlinux-x86_64`, `nested-modules-x86_64.ext4` and
 | `NFT_LIMIT` | the named `limit` objects behind the egress limits |
 | `NF_TABLES_IPV6`, `NFT_FIB_IPV4`, `NFT_FIB_IPV6`, `NFT_FIB_INET` | `fib` in an `inet` table needs both families |
 | `NF_CT_NETLINK` | conntrack over netlink |
+| `BRIDGE_NETFILTER` module | built in (the base config), the bridge passes its frames to the IP hooks by default and the daemon's inet forward chain drops a namespace's own traffic; as a module nothing loads it, as on a server. The smoke fails if `/proc/sys/net/bridge/bridge-nf-call-iptables` exists |
 | `TRIM_UNUSED_KSYMS` off | the base config exports only the symbols its own modules use (it has none): zfs.ko would not resolve |
 | `MODULE_UNLOAD` | a failed or replaced module can be removed |
 | `LOCALVERSION=-briqyard-nested` | the release `6.18.54-briqyard-nested` names the modules directory |
