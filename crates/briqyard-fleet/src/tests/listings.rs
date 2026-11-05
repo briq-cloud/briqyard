@@ -198,7 +198,90 @@ async fn a_partial_listing_skips_a_host_that_did_not_answer_and_names_it() {
 }
 
 #[tokio::test]
-async fn a_partial_listing_still_fails_for_what_every_host_would_refuse() {
+async fn a_partial_listing_names_a_host_that_answers_badly_and_keeps_the_others() {
+    let (f, ds) = fleet_with_daemons(3).await;
+    let a = ds[0].stub.add("t1", "web", 512);
+    let c = ds[2].stub.add("t3", "cache", 256);
+    let ids = |body: &str| -> Vec<String> {
+        let ms: Vec<api::Machine> = serde_json::from_str(body).unwrap();
+        ms.iter().map(|m| m.id.clone()).collect()
+    };
+    // A 500, a 200 whose body is not an array, and a host's own auth or route errors: d2 is
+    // named, d1 and d3 are listed.
+    let answers = [
+        (StatusCode::INTERNAL_SERVER_ERROR, "boom"),
+        (StatusCode::OK, "{}"),
+        (StatusCode::UNAUTHORIZED, "{}"),
+        (StatusCode::FORBIDDEN, "{}"),
+        (StatusCode::NOT_FOUND, "{}"),
+    ];
+    for (status, text) in answers {
+        *ds[1].stub.list_answer.lock().unwrap() = Some((status, text.into()));
+        let (s, headers, body) = call(&f.st, "GET", "/v1/machines?partial=true", "api", None).await;
+        assert_eq!(s, StatusCode::OK, "{status}: {body}");
+        assert_eq!(headers["x-briqyard-unanswered-hosts"], "d2", "{status}");
+        assert_eq!(ids(&body), [a.id.clone(), c.id.clone()], "{status}");
+        // The strict listing is unchanged: the first failure is the answer.
+        let (s, headers, _) = call(&f.st, "GET", "/v1/machines", "api", None).await;
+        assert!(!s.is_success(), "{status}");
+        assert!(headers.get("x-briqyard-unanswered-hosts").is_none());
+    }
+    // 400 and 422 are the caller's request: they fail the listing.
+    for status in [StatusCode::BAD_REQUEST, StatusCode::UNPROCESSABLE_ENTITY] {
+        *ds[1].stub.list_answer.lock().unwrap() = Some((status, "{}".into()));
+        let (s, headers, body) = call(&f.st, "GET", "/v1/machines?partial=true", "api", None).await;
+        assert_eq!(s, status, "{body}");
+        assert!(headers.get("x-briqyard-unanswered-hosts").is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_partial_listing_does_not_wait_for_a_host_that_holds_the_connection() {
+    let (mut f, ds) = fleet_with_daemons(2).await;
+    let a = ds[0].stub.add("t1", "web", 512);
+    ds[1].stub.add("t2", "web", 512);
+    // d2 takes the connection and never answers.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    f.st.reg.lock().unwrap().hosts.get_mut("d2").unwrap().url =
+        format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut open = Vec::new();
+        while let Ok((conn, _)) = listener.accept().await {
+            open.push(conn);
+        }
+    });
+    Arc::get_mut(&mut f.st).unwrap().list_timeout = std::time::Duration::from_millis(300);
+    let began = std::time::Instant::now();
+    let (s, headers, body) = call(&f.st, "GET", "/v1/machines?partial=true", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(began.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(headers["x-briqyard-unanswered-hosts"], "d2");
+    let ms: Vec<api::Machine> = serde_json::from_str(&body).unwrap();
+    assert_eq!(ms.len(), 1);
+    assert_eq!(ms[0].id, a.id);
+}
+
+#[tokio::test]
+async fn a_partial_listing_fails_when_an_unanswered_host_cannot_be_named_in_the_header() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    ds[0].stub.add("t1", "web", 512);
+    ds[1].stub.add("t2", "web", 512);
+    // A static host id is any string; this one is not a header value. A 200 without the
+    // header would read as complete, so the listing fails instead.
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        let h = reg.hosts.get_mut("d2").unwrap();
+        h.id = "paris\n1".into();
+        h.state = "down".into();
+    }
+    let (s, headers, body) = call(&f.st, "GET", "/v1/machines?partial=true", "api", None).await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(json(&body)["code"], "host_unreachable");
+    assert!(headers.get("x-briqyard-unanswered-hosts").is_none());
+}
+
+#[tokio::test]
+async fn a_partial_listing_still_fails_for_the_callers_bad_request() {
     let (f, _ds) = fleet_with_daemons(2).await;
     // A bad label is the caller's: a 400 from the first host, not a skipped host.
     let (s, headers, body) = call(

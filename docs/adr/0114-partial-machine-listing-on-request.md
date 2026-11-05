@@ -10,7 +10,8 @@ ADR 0006 made every fleet listing all-or-nothing: a host that is down or silent 
 
 **`GET /v1/machines?partial=true` skips a host that did not answer.** It also holds with `namespace=`, `tenant=` and `label=`.
 
-- A host is skipped when it is `down`, unreachable, answers 5xx or answers a body that is not a listing. A 4xx (a bad label, a bad token) still fails the listing: every host would say it.
+- A host is skipped when it is `down`, unreachable, does not answer within the list timeout (10 s, `LIST_TIMEOUT`), answers 5xx, 401, 403 or 404, or answers a body that is not a listing. Host tokens and routes are per host, so one misconfigured host must not fail every namespace's listing. Any other 4xx (400 and 422: a bad label, a bad value) still fails the listing: it is the caller's request, and every host would say it.
+- The header must name every skipped host. If it cannot be built (a static host id is any string, and not always a header value), the listing fails with `502 host_unreachable`: a `200` without the header would read as complete.
 - The answer is `200`, the body as before (an array, `host` on each machine), plus `x-briqyard-unanswered-hosts: h_a,h_b`, the skipped hosts sorted by id. A `200` without the header is complete.
 - A namespace listing asks its host alone: with that host down it is `200`, `[]` and the host in the header.
 - Hosts that answered are learned as before (the registry's machine → host entries).
@@ -27,4 +28,5 @@ A fleet-side cache of the last machines each host reported, served for a host th
 
 - A caller that handles a partial answer gets the machines of the hosts that are up while one is down.
 - The strict default keeps every existing reader as safe as before.
+- A host that holds the connection delays a partial listing by the list timeout at most, not the forward timeout (15 minutes); hosts are asked in turn, so a few such hosts add up. A strict listing keeps the forward timeout.
 - The header is the whole contract: a caller that ignores it has the strict-listing hazard back.
