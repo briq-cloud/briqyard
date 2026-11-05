@@ -344,7 +344,8 @@ async fn run(args: Args) -> Result<()> {
         pinned: Mutex::new(HashMap::new()),
         state_path,
         upgrade: Default::default(),
-        backup: backup::Backup::open(&cfg.backup)?,
+        backup: backup::Backup::open(&cfg.backup)?
+            .map(|b| b.with_acks(cfg.state_dir.join("published-keys.json"))),
         key_turn: Default::default(),
         list_timeout: LIST_TIMEOUT,
         restores: Default::default(),
