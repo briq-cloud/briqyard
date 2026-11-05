@@ -45,24 +45,35 @@ pub(super) fn doctor() {
     check("choom", exists("/usr/bin/choom"), "apt install util-linux");
     check("mkfs.ext4", on_path("mkfs.ext4"), "apt install e2fsprogs");
     check("ip", on_path("ip"), "apt install iproute2");
+    // The files the daemon really uses: the configuration's paths, else the defaults.
+    let config = std::fs::read_to_string(CONFIG_PATH);
+    let paths = HostFiles::from_config(config.as_deref().unwrap_or(""));
+    println!(
+        "paths from {}",
+        if config.is_ok() {
+            CONFIG_PATH
+        } else {
+            "the defaults (no readable configuration)"
+        }
+    );
     check(
         "firecracker",
-        exists("/usr/local/bin/firecracker"),
+        exists(&paths.firecracker),
         "hack/bootstrap-host.sh downloads it",
     );
     check(
         "jailer",
-        exists("/usr/local/bin/jailer"),
+        exists(&paths.jailer),
         "hack/bootstrap-host.sh downloads it; without it machines run as root",
     );
     check(
         "guest kernel",
-        exists("/var/lib/briqyard/vmlinux"),
+        exists(&paths.kernel),
         "hack/bootstrap-host.sh downloads one",
     );
     check(
         "briqyard-init",
-        exists("/usr/local/bin/briqyard-init"),
+        exists(&paths.init),
         "make init; install the static binary",
     );
     check(
@@ -124,8 +135,8 @@ pub(super) fn doctor() {
         briqyard_api::kvm::nested(std::path::Path::new(briqyard_api::kvm::SYS_MODULE))
     {
         // A host that serves the nested runtime class asks for it (ADR 0088).
-        let serves_nested = std::fs::read_to_string("/etc/briqyard/config.yaml")
-            .is_ok_and(|conf| config_serves_nested(&conf));
+        let serves_nested =
+            std::fs::read_to_string(CONFIG_PATH).is_ok_and(|conf| config_serves_nested(&conf));
         warn(
             "KVM nested virtualization off",
             !nested || serves_nested,
@@ -136,6 +147,50 @@ pub(super) fn doctor() {
     if bad > 0 {
         eprintln!("{bad} missing");
         std::process::exit(1);
+    }
+}
+
+const CONFIG_PATH: &str = "/etc/briqyard/config.yaml";
+
+/// The files a host needs, as the daemon's configuration names them. A field the
+/// configuration leaves out (or empties, or a configuration that does not parse) keeps the
+/// daemon's default; an empty `jailer` means development without one, which `doctor` still
+/// expects at its default.
+#[derive(serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct HostFiles {
+    pub(crate) firecracker: String,
+    pub(crate) jailer: String,
+    pub(crate) kernel: String,
+    pub(crate) init: String,
+}
+
+impl Default for HostFiles {
+    fn default() -> Self {
+        Self {
+            firecracker: "/usr/local/bin/firecracker".into(),
+            jailer: "/usr/local/bin/jailer".into(),
+            kernel: "/var/lib/briqyard/vmlinux".into(),
+            init: "/usr/local/bin/briqyard-init".into(),
+        }
+    }
+}
+
+impl HostFiles {
+    pub(super) fn from_config(config: &str) -> Self {
+        let mut files: Self = serde_yaml::from_str(config).unwrap_or_default();
+        let defaults = Self::default();
+        for (path, default) in [
+            (&mut files.firecracker, defaults.firecracker),
+            (&mut files.jailer, defaults.jailer),
+            (&mut files.kernel, defaults.kernel),
+            (&mut files.init, defaults.init),
+        ] {
+            if path.is_empty() {
+                *path = default;
+            }
+        }
+        files
     }
 }
 

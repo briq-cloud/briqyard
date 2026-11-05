@@ -98,3 +98,31 @@ fn a_nested_class_in_the_configuration_asks_for_kvm_nested() {
     assert!(!config_serves_nested(": not yaml ["));
     assert!(!config_serves_nested(""));
 }
+
+#[test]
+fn the_files_checked_are_the_configured_ones() {
+    use crate::doctor::HostFiles;
+    let conf = "token: t\nfirecracker: /usr/local/lib/briqyard/runtime/h/firecracker\n\
+                jailer: /usr/local/lib/briqyard/runtime/h/jailer\n\
+                kernel: /usr/local/lib/briqyard/runtime/h/vmlinux\n\
+                init: /usr/local/lib/briqyard/runtime/h/briqyard-init\n";
+    let files = HostFiles::from_config(conf);
+    assert_eq!(
+        files.firecracker,
+        "/usr/local/lib/briqyard/runtime/h/firecracker"
+    );
+    assert_eq!(files.jailer, "/usr/local/lib/briqyard/runtime/h/jailer");
+    assert_eq!(files.kernel, "/usr/local/lib/briqyard/runtime/h/vmlinux");
+    assert_eq!(
+        files.init,
+        "/usr/local/lib/briqyard/runtime/h/briqyard-init"
+    );
+    // Without a readable configuration, or a field, the daemon's defaults.
+    for conf in ["", ": not yaml [", "token: t\njailer: ''\n"] {
+        let files = HostFiles::from_config(conf);
+        assert_eq!(files.firecracker, "/usr/local/bin/firecracker");
+        assert_eq!(files.jailer, "/usr/local/bin/jailer");
+        assert_eq!(files.kernel, "/var/lib/briqyard/vmlinux");
+        assert_eq!(files.init, "/usr/local/bin/briqyard-init");
+    }
+}
