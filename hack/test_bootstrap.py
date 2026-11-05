@@ -770,6 +770,7 @@ class WireguardPeers(unittest.TestCase):
 
 
 TUNNEL_UP = SCRIPT[SCRIPT.index("TUNNEL=briqyard0") : SCRIPT.index("# Downloads a file and checks")]
+FIREWALL_RENDER = SCRIPT[SCRIPT.index("  tunnel_line=$(host_tunnel_rule)") : SCRIPT.index("  cat > /etc/systemd/system/briqyard-firewall.service")]
 POOL_KEY = "pool_key() {" + SCRIPT.split("\npool_key() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
 PEER_A = f"{KEY}|10.42.0.12|164.132.1.2"
 PEER_B = f"{KEY2}|10.42.0.14|51.68.1.2"
@@ -790,13 +791,13 @@ esac
 case "$1" in
   genkey) echo MFNlY3JldHNlY3JldHNlY3JldHNlY3JldHNlY3JldHM= ;;
   pubkey) echo UHVibGljUHVibGljUHVibGljUHVibGljUHVibGljUHU= ;;
-  syncconf) echo syncconf >> $STATE/changes ;;
+  syncconf) [ -f $STATE/active ] || { echo "wg: no such interface" >&2; exit 1; }; echo syncconf >> $STATE/changes ;;
 esac
 """,
     "wg-quick": "#!/bin/bash\n[ \"$1\" = strip ] && cat /dev/null\nexit 0\n",
     "systemctl": """#!/bin/bash
 case "$1" in
-  is-active) [ -f $STATE/active ] ;;
+  is-active) [ -f $STATE/active ]; exit ;;
   start) touch $STATE/active; echo "start $2" >> $STATE/changes ;;
   restart) echo "restart $2" >> $STATE/changes ;;
 esac
@@ -825,9 +826,9 @@ class WireguardRun(unittest.TestCase):
         self.routes = self.state / "routes"
 
     def run_script(self, call, peers=None):
-        code = 'fail() { echo "$*" >&2; exit 1; }\n' + PRIVATE + TUNNEL_UP
+        code = 'fail() { echo "$*" >&2; exit 1; }\n' + PRIVATE + TUNNEL_UP + "\n" + call
         code = code.replace("/etc/wireguard", str(self.root / "etc/wireguard")).replace("/etc/briqyard", str(self.root / "etc/briqyard"))
-        code = code.replace("/etc/systemd/system", str(self.root / "etc/systemd")) + "\n" + call
+        code = code.replace("/etc/systemd/system", str(self.root / "etc/systemd"))
         env = {"PATH": f"{self.bin}:{os.environ['PATH']}", "STATE": str(self.state), "PRIVATE_ADDRESS": "10.42.0.13/16",
                "WIREGUARD_PORT": "51820", "FLEET_ADDRESS": "", "WIREGUARD_ONLY": ""}
         if peers is not None:
@@ -849,13 +850,16 @@ class WireguardRun(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_routes_follow_the_peers_and_an_unchanged_run_changes_none(self):
-        self.only(PEER_A)  # not active: wg-quick starts it
+        self.only(PEER_A)  # not active: wg-quick starts it, and nothing is synced before
+        self.assertIn("start wg-quick@briqyard0", self.changes())
+        self.assertNotIn("syncconf", self.changes())
         self.routes.write_text("10.42.0.12 scope link\n")
         (self.state / "changes").unlink(missing_ok=True)
         self.only(PEER_A)
         self.assertEqual([c for c in self.changes() if "route" in c], [])
         self.only(f"{PEER_A},{PEER_B}")
         self.assertEqual([c for c in self.changes() if "route" in c], ["add route add 10.42.0.14/32 dev briqyard0"])
+        self.assertIn("syncconf", self.changes())  # running now: the peers are synced
 
     def test_the_last_peer_is_removed_and_with_it_route_and_rule(self):
         self.only(PEER_A)
@@ -872,40 +876,88 @@ class WireguardRun(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("needs WIREGUARD_PEERS", result.stderr)
 
+    def render(self, peers):
+        """The firewall a full bootstrap writes, through its own rendering code."""
+        result = self.run_script("public_dev=eth0; ports=22,9000; " + FIREWALL_RENDER, peers)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return self.firewall.read_text()
+
     def test_a_full_bootstrap_without_peers_keeps_the_installed_rule(self):
         self.only(PEER_A)
-        result = self.run_script("host_tunnel_rule", None)
-        self.assertEqual(result.stdout, RULE_LINE + "\n")
+        text = self.render(None)
+        self.assertEqual(text.count(RULE_LINE), 1)
+        self.assertLess(text.index(RULE_LINE), text.index("counter drop"))
         # Given peers, theirs replace it.
-        result = self.run_script("host_tunnel_rule", PEER_B)
-        self.assertIn("51.68.1.2", result.stdout)
-        self.assertNotIn("164.132.1.2", result.stdout)
+        text = self.render(PEER_B)
+        self.assertIn("51.68.1.2", text)
+        self.assertNotIn("164.132.1.2", text)
+
+    def test_the_rendered_firewall_keeps_the_other_ports_and_the_default_drop(self):
+        self.only(PEER_A)
+        for peers in (None, PEER_B):
+            text = self.render(peers)
+            self.assertIn("tcp dport { 22, 9000 } accept", text)
+            self.assertIn('iifname != "eth0" accept', text)
+            self.assertEqual(text.count("udp dport 51820 accept # briqyard-tunnel"), 1)
+            self.assertTrue(text.rstrip().endswith("counter drop\n\t}\n}"))
+
+    def test_a_host_without_a_tunnel_renders_no_tunnel_rule(self):
+        self.assertNotIn("briqyard-tunnel", self.render(None))
 
 
 class PoolKeyRetry(unittest.TestCase):
-    def run_key(self, failures):
+    def run_key(self, outcomes):
+        """pool_key against a curl which answers one outcome per call: a curl exit status, or an HTTP status."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
+            (tmp / "script").write_text("\n".join(outcomes) + "\n")
             (tmp / "curl").write_text(
-                '#!/bin/bash\ncat >/dev/null\nn=$(cat "$STATE" 2>/dev/null || echo 0); echo $((n + 1)) > "$STATE"\n'
-                f'[ "$n" -ge {failures} ] && {{ echo \'{{"key":"k"}}\'; exit 0; }}; exit 28\n'
+                '#!/bin/bash\ncat >/dev/null\necho x >> "$DIR/calls"\n'
+                'n=$(wc -l < "$DIR/calls"); o=$(sed -n "${n}p" "$DIR/script")\n'
+                'case "$o" in\n'
+                '  e*) exit "${o#e}" ;;\n'
+                '  2*) printf \'{"key":"k"}\\n%s\' "$o" ;;\n'
+                '  *) printf \'{"error":"no"}\\n%s\' "$o" ;;\n'
+                'esac\n'
             )
             (tmp / "sleep").write_text("#!/bin/bash\n")
             for name in ("curl", "sleep"):
                 (tmp / name).chmod(0o755)
             code = POOL_KEY + "\npool_key\n"
-            env = {"PATH": f"{tmp}:{os.environ['PATH']}", "STATE": str(tmp / "n"), "FLEET_URL": "http://f", "BRIQYARD_TOKEN": "t",
+            env = {"PATH": f"{tmp}:{os.environ['PATH']}", "DIR": str(tmp), "FLEET_URL": "http://f", "BRIQYARD_TOKEN": "t",
                    "API_TOKEN": "t", "advertise": "https://x"}
-            return subprocess.run(["bash", "-c", code], env=env, capture_output=True, text=True)
+            result = subprocess.run(["bash", "-c", code], env=env, capture_output=True, text=True)
+            calls = (tmp / "calls").read_text().count("x") if (tmp / "calls").exists() else 0
+            return result, calls
 
     def test_two_timeouts_then_the_key(self):
-        result = self.run_key(2)
+        result, calls = self.run_key(["e28", "e28", "200"])
         self.assertEqual(result.stdout, "k\n", result.stderr)
+        self.assertEqual(calls, 3)
 
     def test_three_timeouts_fail(self):
-        result = self.run_key(3)
+        result, calls = self.run_key(["e28", "e28", "e28"])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("attempt 3 of 3", result.stderr)
+        self.assertEqual(calls, 3)
+
+    def test_a_refused_connection_and_a_5xx_are_retried(self):
+        result, calls = self.run_key(["e7", "503", "200"])
+        self.assertEqual(result.stdout, "k\n", result.stderr)
+        self.assertEqual(calls, 3)
+
+    def test_a_4xx_fails_at_once(self):
+        for status in ("400", "401", "403", "404", "409"):
+            result, calls = self.run_key([status, "200"])
+            self.assertNotEqual(result.returncode, 0, status)
+            self.assertEqual(result.stdout, "", status)
+            self.assertIn(f"HTTP {status}, not retried", result.stderr)
+            self.assertEqual(calls, 1, status)
+
+    def test_a_curl_failure_which_is_not_the_network_fails_at_once(self):
+        result, calls = self.run_key(["e60", "200"])  # certificate
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, 1)
 
 
 if __name__ == "__main__":

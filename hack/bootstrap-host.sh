@@ -573,16 +573,27 @@ pool_device() {
 pool_key() {
   if [ -n "$FLEET_URL" ]; then
     [ -n "$API_TOKEN" ] || { echo "   the fleet's key needs BRIQYARD_TOKEN: the host's own" >&2; return 1; }
-    # The token goes in on stdin, off the command line. A bounded retry: the ask is safe to repeat
-    # (the key is made once and served again as it is).
-    local try out
+    # The token goes in on stdin, off the command line. A bounded retry of what can pass: a
+    # timeout, a connection failure, a 5xx. The ask is safe to repeat (the key is made once and
+    # served again as it is). A 4xx or any other failure is final.
+    local try out rc code
     for try in 1 2 3; do
-      if out=$(printf 'Authorization: Bearer %s\n' "$API_TOKEN" |
-        curl -fsS --max-time 20 -H @- -H 'Content-Type: application/json' \
-          -d "{\"url\": \"$advertise\"}" "${FLEET_URL%/}/v1/hosts/key"); then
-        printf '%s' "$out" | jq -er .key
+      rc=0
+      # The status follows the body on its own line; the key never touches the disk.
+      out=$(printf 'Authorization: Bearer %s\n' "$API_TOKEN" |
+        curl -sS --max-time 20 -H @- -H 'Content-Type: application/json' -w '\n%{http_code}' \
+          -d "{\"url\": \"$advertise\"}" "${FLEET_URL%/}/v1/hosts/key") || rc=$?
+      code=${out##*$'\n'}
+      if [ "$rc" = 0 ] && [ "${code:0:1}" = 2 ]; then
+        printf '%s' "${out%$'\n'*}" | jq -er .key
         return
       fi
+      # curl: 6 and 7 cannot resolve or connect, 28 timed out, 35 TLS handshake, 52 empty reply, 55 and 56 send and receive.
+      case "$rc" in
+        0) case "$code" in 5??) ;; *) echo "   the fleet's key: HTTP $code, not retried" >&2; return 1 ;; esac ;;
+        6|7|28|35|52|55|56) ;;
+        *) echo "   the fleet's key: curl failed ($rc), not retried" >&2; return 1 ;;
+      esac
       echo "   the fleet's key: attempt $try of 3 failed" >&2
       [ "$try" = 3 ] || sleep 3
     done
