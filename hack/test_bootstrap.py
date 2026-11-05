@@ -4,6 +4,7 @@ import select
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -783,6 +784,7 @@ r=$STATE/routes
 touch $r
 case "$*" in
   "-4 route show dev "*) cat $r ;;
+  "-4 -o addr show dev "*) cat $STATE/addr 2>/dev/null || true ;;
   "route add "*) echo "add $*" >> $STATE/changes; echo "${3%/32} scope link" >> $r ;;
   "route del "*) echo "del $*" >> $STATE/changes; grep -v "^${3%/32} " $r > $r.new || true; mv $r.new $r ;;
 esac
@@ -791,14 +793,21 @@ esac
 case "$1" in
   genkey) echo MFNlY3JldHNlY3JldHNlY3JldHNlY3JldHNlY3JldHM= ;;
   pubkey) echo UHVibGljUHVibGljUHVibGljUHVibGljUHVibGljUHU= ;;
-  syncconf) [ -f $STATE/active ] || { echo "wg: no such interface" >&2; exit 1; }; echo syncconf >> $STATE/changes ;;
+  syncconf) [ -f $STATE/active ] || { echo "wg: no such interface" >&2; exit 1; }; echo syncconf >> $STATE/changes
+    # A stuck interface keeps its peers: the change is not applied.
+    [ -f $STATE/stuck ] || { grep '^PublicKey' "$3" | sed 's/.* = //' > $STATE/peers || true; } ;;
+  show) cat $STATE/peers 2>/dev/null || true ;;
 esac
 """,
-    "wg-quick": "#!/bin/bash\n[ \"$1\" = strip ] && cat /dev/null\nexit 0\n",
+    "wg-quick": "#!/bin/bash\n[ \"$1\" = strip ] && cat $CONF\nexit 0\n",
+    # The loaded table is the file the firewall unit loads.
+    "nft": "#!/bin/bash\ncat $FWFILE\n[ -f $STATE/stale_rule ] && echo 'udp dport 51820 accept' || true\n",
     "systemctl": """#!/bin/bash
 case "$1" in
   is-active) [ -f $STATE/active ]; exit ;;
-  start) touch $STATE/active; echo "start $2" >> $STATE/changes ;;
+  start) touch $STATE/active; echo "start $2" >> $STATE/changes
+    grep '^PublicKey' $CONF | sed 's/.* = //' > $STATE/peers || true
+    grep '^AllowedIPs' $CONF | sed 's/.* = \\(.*\\)\\/32/\\1 scope link/' > $STATE/routes || true ;;
   restart) echo "restart $2" >> $STATE/changes ;;
 esac
 exit 0
@@ -830,7 +839,8 @@ class WireguardRun(unittest.TestCase):
         code = code.replace("/etc/wireguard", str(self.root / "etc/wireguard")).replace("/etc/briqyard", str(self.root / "etc/briqyard"))
         code = code.replace("/etc/systemd/system", str(self.root / "etc/systemd"))
         env = {"PATH": f"{self.bin}:{os.environ['PATH']}", "STATE": str(self.state), "PRIVATE_ADDRESS": "10.42.0.13/16",
-               "WIREGUARD_PORT": "51820", "FLEET_ADDRESS": "", "WIREGUARD_ONLY": ""}
+               "WIREGUARD_PORT": "51820", "FLEET_ADDRESS": "", "WIREGUARD_ONLY": "",
+               "CONF": str(self.root / "etc/wireguard/briqyard0.conf"), "FWFILE": str(self.firewall)}
         if peers is not None:
             env["WIREGUARD_PEERS"] = peers
             env["WIREGUARD_PEERS_SET"] = "set"
@@ -870,6 +880,51 @@ class WireguardRun(unittest.TestCase):
         self.assertNotIn("briqyard-tunnel", self.firewall.read_text())
         self.assertIn("counter drop", self.firewall.read_text())
         self.assertNotIn("PublicKey", (self.root / "etc/wireguard/briqyard0.conf").read_text())
+
+    def test_a_removal_which_did_not_apply_fails(self):
+        self.only(PEER_A)
+        (self.state / "stuck").touch()  # the interface keeps its peer
+        result = self.run_script("tunnel_only", "")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("holds 1 peer(s) where WIREGUARD_PEERS names 0", result.stderr)
+
+    def test_a_route_which_stays_fails(self):
+        self.only(PEER_A)
+        self.only("")
+        self.routes.write_text("10.42.0.12 scope link\n")
+        result = self.run_script("tunnel_verify", "")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("routes (10.42.0.12)", result.stderr)
+
+    def test_a_loaded_rule_which_stays_fails(self):
+        self.only(PEER_A)
+        (self.state / "stale_rule").touch()  # the loaded table still has the rule
+        self.routes.write_text("10.42.0.12 scope link\n")
+        result = self.run_script("tunnel_only", "")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("loaded firewall holds a different number", result.stderr)
+
+    def test_a_firewall_file_which_keeps_the_rule_fails(self):
+        self.only(PEER_A)
+        self.only("")
+        self.firewall.write_text(self.firewall.read_text().replace("\t\tcounter drop", RULE_LINE + "\n\t\tcounter drop"))
+        result = self.run_script("tunnel_verify", "")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different number of tunnel rules", result.stderr)
+
+    def test_an_installed_tunnel_stands_in_for_the_private_network(self):
+        self.only(PEER_A)
+        (self.state / "addr").write_text("5: briqyard0    inet 10.42.0.13/32 scope global briqyard0\n")
+        self.assertEqual(self.run_script("installed_tunnel", None).returncode, 0)
+        self.assertNotEqual(self.run_script("installed_tunnel", PEER_A).returncode, 0)  # given peers, they apply
+        (self.state / "addr").write_text("5: briqyard0    inet 10.42.0.99/32 scope global briqyard0\n")
+        self.assertNotEqual(self.run_script("installed_tunnel", None).returncode, 0)
+        (self.state / "addr").write_text("5: briqyard0    inet 10.42.0.13/32 scope global briqyard0\n")
+        (self.root / "etc/wireguard/briqyard0.conf").unlink()
+        self.assertNotEqual(self.run_script("installed_tunnel", None).returncode, 0)
+
+    def test_the_full_bootstrap_asks_for_the_installed_tunnel_first(self):
+        self.assertIn("if ! has_address && ! installed_tunnel &&", SCRIPT)
 
     def test_unset_peers_are_not_empty_peers(self):
         result = self.run_script("tunnel_only", None)
@@ -912,10 +967,11 @@ class PoolKeyRetry(unittest.TestCase):
             tmp = Path(tmp)
             (tmp / "script").write_text("\n".join(outcomes) + "\n")
             (tmp / "curl").write_text(
-                '#!/bin/bash\ncat >/dev/null\necho x >> "$DIR/calls"\n'
+                '#!/bin/bash\ncat >/dev/null\necho x >> "$DIR/calls"\necho "$*" > "$DIR/args"\n'
                 'n=$(wc -l < "$DIR/calls"); o=$(sed -n "${n}p" "$DIR/script")\n'
                 'case "$o" in\n'
                 '  e*) exit "${o#e}" ;;\n'
+                '  t*) printf \'{"error":"no"}\\n%s\' "${o#t}"; exit 28 ;;\n'
                 '  2*) printf \'{"key":"k"}\\n%s\' "$o" ;;\n'
                 '  *) printf \'{"error":"no"}\\n%s\' "$o" ;;\n'
                 'esac\n'
@@ -928,6 +984,7 @@ class PoolKeyRetry(unittest.TestCase):
                    "API_TOKEN": "t", "advertise": "https://x"}
             result = subprocess.run(["bash", "-c", code], env=env, capture_output=True, text=True)
             calls = (tmp / "calls").read_text().count("x") if (tmp / "calls").exists() else 0
+            self.args = (tmp / "args").read_text() if (tmp / "args").exists() else ""
             return result, calls
 
     def test_two_timeouts_then_the_key(self):
@@ -953,6 +1010,26 @@ class PoolKeyRetry(unittest.TestCase):
             self.assertEqual(result.stdout, "", status)
             self.assertIn(f"HTTP {status}, not retried", result.stderr)
             self.assertEqual(calls, 1, status)
+
+    def test_a_4xx_then_a_body_timeout_is_still_final(self):
+        # HTTP 403 seen, then curl gave up on the body: status 403 and exit 28.
+        for status in ("t400", "t403", "t404"):
+            result, calls = self.run_key([status, "200"])
+            self.assertNotEqual(result.returncode, 0, status)
+            self.assertIn(f"HTTP {status[1:]}, not retried", result.stderr)
+            self.assertEqual(calls, 1, status)
+
+    def test_a_5xx_then_a_body_timeout_is_retried(self):
+        result, calls = self.run_key(["t503", "200"])
+        self.assertEqual(result.stdout, "k\n", result.stderr)
+        self.assertEqual(calls, 2)
+
+    def test_the_limit_outlasts_the_fleets_longest_wait(self):
+        # key turn 30 s + publication turn 30 s + the write 30 s (hosts.rs, backup.rs).
+        result, _ = self.run_key(["200"])
+        limit = int(re.search(r"--max-time (\d+)", self.args).group(1))
+        self.assertGreaterEqual(limit, 30 + 30 + 30 + 10)
+        self.assertLessEqual(3 * limit, 600)  # three tries stay far under the 1800 s of the SSH session
 
     def test_a_curl_failure_which_is_not_the_network_fails_at_once(self):
         result, calls = self.run_key(["e60", "200"])  # certificate

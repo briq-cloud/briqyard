@@ -118,7 +118,9 @@ pub struct Bootstrap {
     pub ssh_key: PathBuf,
     /// The script to run; empty runs the hack/bootstrap-host.sh this build ships.
     pub script: PathBuf,
-    /// `BRIQYARD_RELEASE` for the script: where the binaries are.
+    /// `BRIQYARD_RELEASE` for the script: where the binaries are, a URL
+    /// (`https://github.com/briq-cloud/briqyard/releases/download/v0.1.8`) or a version
+    /// (`0.1.8`, expanded to that project's releases); empty uses the script's `./bin`.
     pub release: String,
     /// `BRIQYARD_RELEASE_TOKEN`: a token that reads the release of a private GitHub
     /// repository; `BRIQYARD_RELEASE_TOKEN` in the fleet's environment overrides it.
@@ -353,6 +355,12 @@ impl Config {
         if !b.private_network.is_empty() {
             crate::bootstrap::Network::parse(&b.private_network)
                 .map_err(|e| anyhow::anyhow!("bootstrap.private_network {e}"))?;
+        }
+        if !b.release.is_empty() && crate::bootstrap::release_url(&b.release).is_none() {
+            bail!(
+                "bootstrap.release {:?}: want a URL (https://github.com/briq-cloud/briqyard/releases/download/v0.1.8) or a version (0.1.8)",
+                b.release
+            );
         }
         if !b.fleet_address.is_empty()
             && crate::bootstrap::private_address(b, &b.fleet_address).is_none()
@@ -800,6 +808,14 @@ bootstrap:
         assert_eq!(cfg.bootstrap.release_token, "env-gh");
         let cfg = with_env(&[], || Config::load(Some(&path)).unwrap());
         assert_eq!(cfg.bootstrap.release_token, "file-gh");
+    }
+
+    #[test]
+    fn a_release_which_is_neither_a_url_nor_a_version_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "bootstrap:\n  release: latest\n");
+        let err = with_env(&[], || Config::load(Some(&path)).unwrap_err());
+        assert!(format!("{err:#}").contains("bootstrap.release"), "{err:#}");
     }
 
     #[test]

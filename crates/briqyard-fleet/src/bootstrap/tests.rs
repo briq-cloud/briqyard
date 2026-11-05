@@ -480,6 +480,14 @@ fn a_bootstrap_pins_the_certificate_with_the_state() {
 }
 
 #[test]
+fn the_script_is_given_a_release_url() {
+    let v = "https://github.com/briq-cloud/briqyard/releases/download/v0.1.8";
+    assert_eq!(bootstrap_release("0.1.8"), v);
+    assert_eq!(bootstrap_release(&format!("{v}/")), v);
+    assert_eq!(bootstrap_release(""), "");
+}
+
+#[test]
 fn a_release_is_a_url_or_a_version() {
     assert_eq!(
         release_url("https://example.test/r/v0.2.0/").as_deref(),

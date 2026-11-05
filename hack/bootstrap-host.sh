@@ -37,7 +37,9 @@
 # its endpoint is its public address, and the only one the WireGuard port (WIREGUARD_PORT,
 # 51820) is open to. The host makes its own key (/etc/wireguard/briqyard0.key, never leaves)
 # and prints the public one. WIREGUARD_ONLY=1 sets the peers of a host already installed
-# (the fleet's host, when another joins) and changes nothing else.
+# (the fleet's host, when another joins) and changes nothing else; it then checks its own
+# result and fails if a peer, a route or a rule differs from what it was given. A full re-run
+# of a tunnel host may omit WIREGUARD_PEERS: the installed tunnel, peers and rule stay.
 #
 # The pool is encrypted at its creation (ADR 0026), with the host's key: with FLEET_URL the
 # fleet's, asked with BRIQYARD_TOKEN and never written here; without, a key made into
@@ -251,6 +253,27 @@ tunnel_up() {
   echo "   wireguard public key $(cat /etc/wireguard/$TUNNEL.pub)"
 }
 
+# A tunnel host re-run in full without WIREGUARD_PEERS: the installed tunnel already carries
+# PRIVATE_ADDRESS, and its peers and firewall rule stay as they are.
+installed_tunnel() {
+  [ -z "$WIREGUARD_PEERS" ] && [ -s $TUNNEL_CONF ] || return 1
+  ip -4 -o addr show dev $TUNNEL 2>/dev/null | awk -v a="${PRIVATE_ADDRESS%/*}" '{split($4, x, "/"); if (x[1] == a) found = 1} END {exit !found}'
+}
+# What the tunnel and the firewall hold now is what WIREGUARD_PEERS says: the peers (they are
+# what a revocation removes), their routes and the rule, the live firewall's included.
+tunnel_verify() {
+  local want have rules=0
+  want=$(tunnel_peers | awk '{print $1}' | sort)
+  have=$(wg show $TUNNEL peers | sort)
+  [ "$want" = "$have" ] || fail "$TUNNEL holds $(echo "$have" | grep -c .) peer(s) where WIREGUARD_PEERS names $(echo "$want" | grep -c .): the change did not apply"
+  want=$(tunnel_peers | awk '{print $2}' | sort)
+  have=$(ip -4 route show dev $TUNNEL | awk '{sub(/\/32$/, "", $1); print $1}' | sort)
+  [ "$want" = "$have" ] || fail "$TUNNEL has routes ($(echo $have)) that differ from the peers' ($(echo $want))"
+  [ -f $FIREWALL ] || return 0
+  [ -z "$(tunnel_rule)" ] || rules=1
+  [ "$(grep -c 'briqyard-tunnel$' $FIREWALL)" = "$rules" ] || fail "$FIREWALL holds a different number of tunnel rules than the $rules expected"
+  [ "$(nft list table inet briqyard_host | grep -c "dport $WIREGUARD_PORT ")" = "$rules" ] || fail "the loaded firewall holds a different number of rules for udp $WIREGUARD_PORT than the $rules expected"
+}
 # The firewall's line for the tunnel's port, for a full bootstrap: the peers' when it is given
 # them, else the one already installed, so a re-run without WireGuard values keeps the tunnel
 # reachable. Only the explicit WIREGUARD_ONLY operation removes it.
@@ -282,6 +305,7 @@ tunnel_only() {
   else
     echo "   no $FIREWALL: this host's firewall is not ours, set udp $WIREGUARD_PORT for the peers in it"
   fi
+  tunnel_verify
 }
 if [ "$WIREGUARD_ONLY" = 1 ]; then tunnel_only; exit 0; fi
 
@@ -450,7 +474,7 @@ if [ -n "$PRIVATE_ADDRESS" ]; then
   case "$PRIVATE_ADDRESS" in */*) ;; *) fail "PRIVATE_ADDRESS=$PRIVATE_ADDRESS: with its prefix, as 10.42.0.11/16" ;; esac
   has_address() { ip -4 -o addr show | awk -v a="$PRIVATE_ADDRESS" '$4 == a {found = 1} END {exit !found}'; }
   # Without a private interface of its own, WireGuard carries the address (ADR 0113).
-  if ! has_address && { [ -z "$WIREGUARD_PEERS" ] || [ -n "$PRIVATE_INTERFACE" ]; }; then
+  if ! has_address && ! installed_tunnel && { [ -z "$WIREGUARD_PEERS" ] || [ -n "$PRIVATE_INTERFACE" ]; }; then
     [ -n "$PRIVATE_INTERFACE" ] || fail "no interface has $PRIVATE_ADDRESS: set PRIVATE_INTERFACE (the private network's, by its MAC in the provider's console), or WIREGUARD_PEERS"
     ip link show "$PRIVATE_INTERFACE" >/dev/null || fail "no interface $PRIVATE_INTERFACE"
     command -v netplan >/dev/null || fail "no netplan: put $PRIVATE_ADDRESS on $PRIVATE_INTERFACE yourself"
@@ -575,15 +599,22 @@ pool_key() {
     [ -n "$API_TOKEN" ] || { echo "   the fleet's key needs BRIQYARD_TOKEN: the host's own" >&2; return 1; }
     # The token goes in on stdin, off the command line. A bounded retry of what can pass: a
     # timeout, a connection failure, a 5xx. The ask is safe to repeat (the key is made once and
-    # served again as it is). A 4xx or any other failure is final.
+    # served again as it is). A 4xx or any other failure is final, even when curl then failed
+    # reading the body.
+    # The limit outlasts the fleet's longest wait before its own answer, so its message (a
+    # backup that could not be written: 503) reaches this host instead of a curl timeout: the
+    # key turn (30 s), the turn to publish (30 s), the write (30 s), crates/briqyard-fleet
+    # hosts.rs and backup.rs. 120 s is that 90 s with a margin; 3 tries come to 6 minutes.
     local try out rc code
     for try in 1 2 3; do
       rc=0
       # The status follows the body on its own line; the key never touches the disk.
       out=$(printf 'Authorization: Bearer %s\n' "$API_TOKEN" |
-        curl -sS --max-time 20 -H @- -H 'Content-Type: application/json' -w '\n%{http_code}' \
+        curl -sS --connect-timeout 20 --max-time 120 -H @- -H 'Content-Type: application/json' -w '\n%{http_code}' \
           -d "{\"url\": \"$advertise\"}" "${FLEET_URL%/}/v1/hosts/key") || rc=$?
       code=${out##*$'\n'}
+      # An observed 4xx decides, whatever curl made of the rest of the answer.
+      case "$code" in 4??) echo "   the fleet's key: HTTP $code, not retried" >&2; return 1 ;; esac
       if [ "$rc" = 0 ] && [ "${code:0:1}" = 2 ]; then
         printf '%s' "${out%$'\n'*}" | jq -er .key
         return

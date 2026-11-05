@@ -61,6 +61,12 @@ pub fn release_url(release: &str) -> Option<String> {
     ok.then(|| format!("{RELEASES}/v{v}"))
 }
 
+/// `BRIQYARD_RELEASE` as the script takes it, a URL: the configured release as it is, or a
+/// version expanded to the project's releases; empty stays empty (binaries from `./bin`).
+pub fn bootstrap_release(configured: &str) -> String {
+    release_url(configured).unwrap_or_else(|| configured.to_string())
+}
+
 /// An added host's API URL: TLS, with the certificate the bootstrap pins.
 pub fn host_url(ip: &str) -> String {
     format!("https://{ip}:7420")
@@ -85,7 +91,7 @@ pub async fn run(st: Arc<AppState>) {
                 continue;
             }
             let ip = ssh_address(&h).to_string();
-            let env = bootstrap_env(b, &st.cfg.own_url(), &h, &b.release);
+            let env = bootstrap_env(b, &st.cfg.own_url(), &h, &bootstrap_release(&b.release));
             let outcome = match install(&st, &h.id, &ip, &env).await {
                 Ok(note) => api_fingerprint(&st, &ip).await.map(|fp| (note, fp)),
                 Err(e) => Err(e),
