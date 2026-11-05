@@ -426,8 +426,14 @@ pub(super) fn log_read_times(phase: &'static str) {
     use std::sync::atomic::Ordering::Relaxed;
     let us = READ_US.each_ref().map(|v| v.load(Relaxed));
     let reads = READ_COUNT.each_ref().map(|v| v.load(Relaxed));
+    #[cfg(not(target_os = "linux"))]
+    let (jailer_check_us, jailer_checks) = (0u64, 0u64);
+    #[cfg(target_os = "linux")]
+    let (jailer_check_us, jailer_checks) = super::recovery::provenance::check_times();
     tracing::info!(
         phase,
+        jailer_check_us,
+        jailer_checks,
         procs_us = us[0],
         events_us = us[1],
         cpu_stat_us = us[2],

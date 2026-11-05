@@ -419,6 +419,7 @@ impl Vmm for Firecracker {
         let began = std::time::Instant::now();
         let mut prepared = 0;
         let known: std::collections::HashSet<_> = known.iter().collect();
+        self.launches.owner_check()?;
         for id in self
             .launches
             .ids()
@@ -431,6 +432,7 @@ impl Vmm for Firecracker {
             self.orphans.lock().unwrap().insert(id);
             prepared += 1;
         }
+        self.launches.owner_check()?;
         tracing::info!(
             prepared,
             elapsed_ms = began.elapsed().as_millis() as u64,

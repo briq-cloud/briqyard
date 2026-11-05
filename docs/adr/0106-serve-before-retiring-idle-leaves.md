@@ -49,3 +49,22 @@ recheck, network, adoption and artifact cleanup have separate elapsed-time event
 Unit coverage requires startup to retain 260 orphan leaves, a bounded pass to leave 132,
 then four, then zero, with the idle gauge reflecting each backlog. Existing tests cover
 known-machine lock exclusion, running VMMs, final usage once, refusal and fair retry.
+
+## Empty epochs and retirement concurrency
+
+The second candidate measured 136.98 s API silence and 137.80 s endpoint gap.
+Orphan settlement alone took 130.597 s; cgroup read counts did not increase during
+that phase. Each empty epoch redundantly called the lifetime owner check twice,
+including a full jailer digest. The complete barrier already proved those epochs
+empty and spawning remains closed. Settlement now checks that registered death
+receipt directly for an epoch with neither a process handle nor a pid. The complete
+orphan batch rechecks lifetime ownership before and after settlement. Nonempty
+epochs keep process settlement, OOM capture and owner checks synchronously.
+Retirement still performs all owner, digest, final-counter and leaf checks.
+
+The jailer lease is shared by Arc. A digest check holds that lease while using
+positional reads, without holding the registry mutex. The former mutex serialized
+all 16 collector workers through two full digest checks per orphan. No digest is
+cached or skipped at retirement. Cumulative jailer check time and count accompany
+the control-file timings. Final-read failure still retains the leaf and registration.
+Native measurements for this revision remain pending.
