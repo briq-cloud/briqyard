@@ -173,6 +173,15 @@ pub fn private_address(b: &crate::config::Bootstrap, url: &str) -> Option<String
     net.contains(ip).then(|| format!("{ip}/{}", net.prefix))
 }
 
+/// The script's `WIREGUARD_PEERS`: `public_key|address|endpoint` entries, comma-separated.
+pub fn wireguard_peers(peers: &[crate::config::WireguardPeer]) -> String {
+    peers
+        .iter()
+        .map(|p| format!("{}|{}|{}", p.public_key, p.address, p.endpoint))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Records a bootstrap that succeeded: the API certificate pinned in the same write as the
 /// state, so the host's first heartbeat is checked against it.
 pub fn bootstrapped(r: &mut crate::registry::HostRec, note: String, fingerprint: String) {
@@ -403,12 +412,27 @@ pub fn bootstrap_settings(
     ];
     if let Some(private) = private_address(b, url) {
         let ports: Vec<String> = public_tcp_ports.iter().map(|p| p.to_string()).collect();
+        let tunnel = b.wireguard.hosts.iter().any(|h| *h == url_host(url));
         env.extend([
             ("PRIVATE_ADDRESS", private),
-            ("PRIVATE_INTERFACE", b.private_interface.clone()),
+            // A tunnel host has no private interface: the fleet-wide one is another model's.
+            (
+                "PRIVATE_INTERFACE",
+                if tunnel {
+                    String::new()
+                } else {
+                    b.private_interface.clone()
+                },
+            ),
             ("PUBLIC_TCP_PORTS", ports.join(",")),
             ("FLEET_ADDRESS", b.fleet_address.clone()),
         ]);
+        if tunnel {
+            env.extend([
+                ("WIREGUARD_PORT", b.wireguard.port.to_string()),
+                ("WIREGUARD_PEERS", wireguard_peers(&b.wireguard.peers)),
+            ]);
+        }
     }
     if let Some(classes) = runtime_classes_setting(&h.runtime_classes, &[]) {
         env.push(("BRIQYARD_RUNTIME_CLASSES", classes));

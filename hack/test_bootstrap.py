@@ -719,5 +719,55 @@ class AssignmentCompatibility(unittest.TestCase):
         self.assertIn("previous executables and configuration restored", result.stderr)
 
 
+KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+KEY2 = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8="
+PRIVATE = "private() {" + SCRIPT.split("\nprivate() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+TUNNEL = SCRIPT[SCRIPT.index("TUNNEL=briqyard0") : SCRIPT.index("# Installs the tunnel:")]
+
+
+class WireguardPeers(unittest.TestCase):
+    """The peers a tunnel host is told (ADR 0113): checked before anything is changed."""
+
+    def run_fn(self, call, peers, own="10.42.0.13/16", port="51820"):
+        script = 'fail() { echo "$*" >&2; exit 1; }\n' + PRIVATE + TUNNEL + call
+        env = {"PATH": os.environ["PATH"], "WIREGUARD_PEERS": peers, "PRIVATE_ADDRESS": own, "WIREGUARD_PORT": port}
+        return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+
+    def test_peers_and_the_firewall_rule(self):
+        peers = f"{KEY}|10.42.0.12|164.132.1.2,{KEY2}|10.42.0.14|51.68.1.2:51999"
+        out = self.run_fn("tunnel_peers", peers)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(
+            out.stdout.splitlines(),
+            [f"{KEY} 10.42.0.12 164.132.1.2 51820", f"{KEY2} 10.42.0.14 51.68.1.2 51999"],
+        )
+        rule = self.run_fn("tunnel_rule", peers)
+        self.assertEqual(
+            rule.stdout.strip(),
+            "ip saddr { 164.132.1.2, 51.68.1.2 } udp dport 51820 accept # briqyard-tunnel",
+        )
+
+    def test_no_peers_no_rule(self):
+        self.assertEqual(self.run_fn("tunnel_rule", "").stdout.strip(), "")
+
+    def test_refused(self):
+        for peers, want in [
+            (f"short|10.42.0.12|164.132.1.2", "not a WireGuard public key"),
+            (f"{KEY}|10.42.0.0/16|164.132.1.2", "is a range"),
+            (f"{KEY}|10.42.0.300|164.132.1.2", "not an IPv4 address"),
+            (f"{KEY}|10.42.0.13|164.132.1.2", "own address"),
+            (f"{KEY}|10.42.0.12|10.42.0.99", "private address"),
+            (f"{KEY}|10.42.0.12|host.example", "IPv4 address"),
+            (f"{KEY}|10.42.0.12|164.132.1.2:x", "endpoint port"),
+            (f"{KEY}|10.42.0.12|164.132.1.2,{KEY2}|10.42.0.12|51.68.1.2", "twice"),
+            (f"{KEY}|10.42.0.12|164.132.1.2,{KEY}|10.42.0.14|51.68.1.2", "twice"),
+        ]:
+            out = self.run_fn("tunnel_peers", peers)
+            self.assertNotEqual(out.returncode, 0, peers)
+            self.assertIn(want, out.stderr, peers)
+        out = self.run_fn("tunnel_peers", f"{KEY}|10.42.0.12|164.132.1.2", port="x")
+        self.assertIn("WIREGUARD_PORT", out.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

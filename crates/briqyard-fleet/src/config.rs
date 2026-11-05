@@ -146,8 +146,117 @@ pub struct Bootstrap {
     /// connections from: this fleet's and the routers'. Required when the host listens on a
     /// public address.
     pub allowed_clients: Vec<String>,
+    /// Hosts with no private network of their own: they join `private_network` over
+    /// WireGuard (ADR 0113).
+    pub wireguard: Wireguard,
     /// Tries, two minutes apart, before the host is marked `failed`.
     pub max_attempts: u32,
+}
+
+/// The hosts that join the private network over WireGuard, and whom they tunnel to.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Wireguard {
+    /// The UDP port every tunnel listens on and dials.
+    pub port: u16,
+    /// The hosts that use a tunnel instead of `private_interface`, by their private
+    /// addresses (their API addresses). Other hosts are told nothing of it.
+    pub hosts: Vec<String>,
+    /// Who each of those hosts tunnels to: the fleet's host, and any other host that must
+    /// reach them. A peer is one address, never a range.
+    pub peers: Vec<WireguardPeer>,
+}
+
+impl Wireguard {
+    /// Checked at load; nothing while no host uses a tunnel.
+    fn validate(&self, b: &Bootstrap) -> anyhow::Result<()> {
+        use anyhow::bail;
+        use std::net::Ipv4Addr;
+        if self.hosts.is_empty() {
+            return Ok(());
+        }
+        let in_net = |a: &str| crate::bootstrap::private_address(b, a).is_some();
+        if self.port == 0 || self.peers.is_empty() {
+            bail!("bootstrap.wireguard: hosts need a port and at least one peer");
+        }
+        for h in &self.hosts {
+            if h.parse::<Ipv4Addr>().is_err() || !in_net(h) {
+                bail!(
+                    "bootstrap.wireguard.hosts {h:?}: want an IPv4 address in private_network ({:?})",
+                    b.private_network
+                );
+            }
+        }
+        for p in &self.peers {
+            let key = p.public_key.as_bytes();
+            let key_ok = key.len() == 44
+                && key[43] == b'='
+                && key[..43]
+                    .iter()
+                    .all(|c| c.is_ascii_alphanumeric() || *c == b'+' || *c == b'/');
+            if !key_ok {
+                bail!(
+                    "bootstrap.wireguard.peers: {:?} is not a WireGuard public key",
+                    p.public_key
+                );
+            }
+            if p.address.parse::<Ipv4Addr>().is_err() || !in_net(&p.address) {
+                bail!(
+                    "bootstrap.wireguard.peers: address {:?} must be one IPv4 address in private_network ({:?})",
+                    p.address,
+                    b.private_network
+                );
+            }
+            if self.hosts.contains(&p.address) {
+                bail!(
+                    "bootstrap.wireguard.peers: {} is a tunnel host, not a peer of itself",
+                    p.address
+                );
+            }
+            let host = match p.endpoint.rsplit_once(':') {
+                Some((h, port)) if port.parse::<u16>().is_ok() => h,
+                _ => p.endpoint.as_str(),
+            };
+            match host.parse::<Ipv4Addr>() {
+                Ok(ip) if !ip.is_private() && !ip.is_loopback() && !ip.is_link_local() => {}
+                _ => bail!(
+                    "bootstrap.wireguard.peers: endpoint {:?} of {}: want a public IPv4 address and an optional port",
+                    p.endpoint,
+                    p.address
+                ),
+            }
+        }
+        if !b.fleet_address.is_empty() && !self.peers.iter().any(|p| p.address == b.fleet_address) {
+            bail!(
+                "bootstrap.wireguard.peers: none is fleet_address {}: a tunnel host could not reach the fleet",
+                b.fleet_address
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Default for Wireguard {
+    fn default() -> Self {
+        Self {
+            port: 51820,
+            hosts: Vec::new(),
+            peers: Vec::new(),
+        }
+    }
+}
+
+/// A host a tunnel host dials, and accepts: set on it with the script's `WIREGUARD_ONLY`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireguardPeer {
+    /// Its WireGuard public key, from the script's output (`wireguard public key …`).
+    pub public_key: String,
+    /// Its private address, the only one routed to it.
+    pub address: String,
+    /// Its public address, `ip` or `ip:port`: where the tunnel dials it, and the only source
+    /// its host's firewall takes tunnel packets from.
+    pub endpoint: String,
 }
 
 impl Default for Bootstrap {
@@ -166,6 +275,7 @@ impl Default for Bootstrap {
             fleet_url: String::new(),
             fleet_address: String::new(),
             allowed_clients: Vec::new(),
+            wireguard: Wireguard::default(),
             max_attempts: 90,
         }
     }
@@ -253,6 +363,7 @@ impl Config {
                 b.private_network
             );
         }
+        b.wireguard.validate(b)?;
         for h in &mut self.hosts {
             let name = if h.id.is_empty() { &h.url } else { &h.id };
             if !h.tls_fingerprint.is_empty() {
@@ -608,6 +719,54 @@ bootstrap:
         for bad in ["10.43.0.1", "fleet.example.com", "fd00::1"] {
             let err = load(bad).unwrap_err().to_string();
             assert!(err.starts_with("bootstrap.fleet_address "), "{bad}: {err}");
+        }
+    }
+
+    const WG_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
+    #[test]
+    fn wireguard_hosts_and_peers_are_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let load = |hosts: &str, peer: &str| {
+            let path = write(
+                &dir,
+                &format!(
+                    "bootstrap:\n  private_network: 10.42.0.0/16\n  fleet_address: 10.42.0.12\n  wireguard:\n    hosts: [{hosts}]\n    peers:\n      - {{ {peer} }}\n"
+                ),
+            );
+            with_env(&[], || Config::load(Some(&path)))
+        };
+        let good = format!("public_key: {WG_KEY}, address: 10.42.0.12, endpoint: 164.132.1.2");
+        let cfg = load("10.42.0.13", &good).unwrap();
+        assert_eq!(cfg.bootstrap.wireguard.port, 51820);
+        load("10.42.0.13", &good.replace("1.2", "1.2:51821")).unwrap();
+        for (hosts, peer, want) in [
+            ("10.43.0.1", good.clone(), "hosts"),
+            ("10.42.0.12", good.clone(), "not a peer of itself"),
+            ("10.42.0.13", good.replace(WG_KEY, "short"), "public key"),
+            (
+                "10.42.0.13",
+                good.replace("address: 10.42.0.12", "address: 10.42.0.0/16"),
+                "one IPv4 address",
+            ),
+            (
+                "10.42.0.13",
+                good.replace("address: 10.42.0.12", "address: 10.42.0.99"),
+                "none is fleet_address",
+            ),
+            (
+                "10.42.0.13",
+                good.replace("164.132.1.2", "10.42.0.12"),
+                "public IPv4",
+            ),
+            (
+                "10.42.0.13",
+                good.replace("164.132.1.2", "host.example"),
+                "public IPv4",
+            ),
+        ] {
+            let err = load(hosts, &peer).unwrap_err().to_string();
+            assert!(err.contains(want), "{peer}: {err}");
         }
     }
 

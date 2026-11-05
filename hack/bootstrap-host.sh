@@ -30,6 +30,15 @@
 # Off loopback the API serves TLS with a certificate of its own (ADR 0020): the script prints
 # its fingerprint, which the fleet pins (`tls_fingerprint` in the host's `hosts:` entry).
 #
+# A server with no private network of its own (no vRack) joins 10.42.0.0/16 over WireGuard
+# (ADR 0113): PRIVATE_ADDRESS without PRIVATE_INTERFACE, and WIREGUARD_PEERS, comma-separated
+# `PUBLIC_KEY|TUNNEL_ADDRESS|ENDPOINT[:PORT]` entries, one per host this one must reach or be
+# reached by (the fleet's host). Each peer is a single address (a /32 route, never a range);
+# its endpoint is its public address, and the only one the WireGuard port (WIREGUARD_PORT,
+# 51820) is open to. The host makes its own key (/etc/wireguard/briqyard0.key, never leaves)
+# and prints the public one. WIREGUARD_ONLY=1 sets the peers of a host already installed
+# (the fleet's host, when another joins) and changes nothing else.
+#
 # The pool is encrypted at its creation (ADR 0026), with the host's key: with FLEET_URL the
 # fleet's, asked with BRIQYARD_TOKEN and never written here; without, a key made into
 # BRIQYARD_KEY_FILE (/etc/briqyard/pool.key, 0600). Swap is turned off for good: guest memory
@@ -51,6 +60,9 @@ API_TOKEN=${BRIQYARD_TOKEN:-}
 PRIVATE_ADDRESS=${PRIVATE_ADDRESS:-}
 PRIVATE_INTERFACE=${PRIVATE_INTERFACE:-}
 PUBLIC_TCP_PORTS=${PUBLIC_TCP_PORTS:-}
+WIREGUARD_PEERS=${WIREGUARD_PEERS:-}
+WIREGUARD_PORT=${WIREGUARD_PORT:-51820}
+WIREGUARD_ONLY=${WIREGUARD_ONLY:-}
 FLEET_ADDRESS=${FLEET_ADDRESS:-}
 if [ -n "$PRIVATE_ADDRESS" ]; then LISTEN=${LISTEN:-${PRIVATE_ADDRESS%/*}:7420}; else LISTEN=${LISTEN:-0.0.0.0:7420}; fi
 ALLOWED_CLIENTS=${ALLOWED_CLIENTS:-}
@@ -134,6 +146,122 @@ put() {
 }
 
 fail() { echo "   $*" >&2; exit 1; }
+
+# WireGuard (ADR 0113): the tunnel `briqyard0` carries the private address as a /32 and one /32
+# route per peer, so it never shadows a private network the host also has. The firewall's
+# rule for the tunnel's port names the peers' public addresses, between two marker comments.
+TUNNEL=briqyard0
+TUNNEL_CONF=/etc/wireguard/$TUNNEL.conf
+valid_ipv4() {
+  local IFS=. o
+  set -- $1
+  [ $# = 4 ] || return 1
+  for o; do case "$o" in ''|*[!0-9]*) return 1 ;; esac; [ "${#o}" -le 3 ] && [ "$o" -le 255 ] || return 1; done
+}
+# Checks WIREGUARD_PEERS; prints the entries as `key tunnel_address endpoint_address endpoint_port`.
+tunnel_peers() {
+  local entry key addr endpoint host port seen=" "
+  case "$WIREGUARD_PORT" in ''|*[!0-9]*) fail "WIREGUARD_PORT=$WIREGUARD_PORT: a port number" ;; esac
+  for entry in ${WIREGUARD_PEERS//,/ }; do
+    IFS='|' read -r key addr endpoint <<< "$entry"
+    [[ "$key" =~ ^[A-Za-z0-9+/]{43}=$ ]] || fail "WIREGUARD_PEERS: '$key' is not a WireGuard public key"
+    case "$addr" in */*) fail "WIREGUARD_PEERS: $addr is a range: one address per peer, so no route shadows a private network" ;; esac
+    valid_ipv4 "$addr" || fail "WIREGUARD_PEERS: '$addr' is not an IPv4 address"
+    [ "$addr" != "${PRIVATE_ADDRESS%/*}" ] || fail "WIREGUARD_PEERS: $addr is this host's own address"
+    case "$seen" in *" $addr "*|*" $key "*) fail "WIREGUARD_PEERS: $addr or its key is listed twice" ;; esac
+    seen="$seen$addr $key "
+    host=${endpoint%:*}; port=${endpoint##*:}
+    [ "$host" != "$endpoint" ] || port=$WIREGUARD_PORT
+    valid_ipv4 "$host" || fail "WIREGUARD_PEERS: the endpoint of $addr is '$endpoint': an IPv4 address and an optional port"
+    case "$port" in ''|*[!0-9]*) fail "WIREGUARD_PEERS: the endpoint port of $addr is '$port'" ;; esac
+    ! private "$host" || fail "WIREGUARD_PEERS: the endpoint of $addr, $host, is a private address: the tunnel crosses the public network"
+    echo "$key $addr $host $port"
+  done
+}
+# The firewall's line for the tunnel's port: the peers' public addresses only.
+tunnel_rule() {
+  local hosts
+  hosts=$(tunnel_peers | awk '{print $3}' | sort -u | paste -sd, - | sed 's/,/, /g')
+  [ -n "$hosts" ] && printf '\t\tip saddr { %s } udp dport %s accept # briqyard-tunnel\n' "$hosts" "$WIREGUARD_PORT"
+  return 0
+}
+# Waits for the tunnel to the fleet's host (FLEET_ADDRESS's peer, else the first): a peer that
+# does not know this host's key yet is the commonest reason for none. The failure names the
+# key; the fleet tries again in two minutes, once the peer has it.
+tunnel_wait() {
+  local key i
+  key=$(tunnel_peers | awk -v a="$FLEET_ADDRESS" 'a == "" || $2 == a {print $1; exit}')
+  for i in $(seq 1 30); do
+    # A tunnel handshakes when it has something to send.
+    ping -c1 -W1 "${FLEET_ADDRESS:-$(tunnel_peers | awk 'NR == 1 {print $2}')}" >/dev/null 2>&1 || true
+    wg show $TUNNEL latest-handshakes | awk -v k="$key" '$1 == k && $2 > 0 {found = 1} END {exit !found}' && return 0
+    sleep 1
+  done
+  fail "no handshake with ${FLEET_ADDRESS:-the first peer} through $TUNNEL: that host needs this host's public key $(cat /etc/wireguard/$TUNNEL.pub) (peer ${PRIVATE_ADDRESS%/*}, WIREGUARD_ONLY=1), or its firewall the UDP port $WIREGUARD_PORT from this host's public address"
+}
+# Installs the tunnel: the key (made once), the configuration from the peers, the unit, the
+# firewall's rule. Peers changed on a running tunnel are synced without dropping the others.
+tunnel_up() {
+  local key addr host port conf own
+  own=${PRIVATE_ADDRESS%/*}
+  valid_ipv4 "$own" || fail "WireGuard needs PRIVATE_ADDRESS (the host's address, as 10.42.0.13/16)"
+  tunnel_peers >/dev/null
+  command -v wg >/dev/null || { apt-get update -qq; apt-get install -y -qq wireguard-tools >/dev/null; }
+  install -d -m 0700 /etc/wireguard
+  [ -s /etc/wireguard/$TUNNEL.key ] || (umask 077; wg genkey > /etc/wireguard/$TUNNEL.key)
+  chmod 0600 /etc/wireguard/$TUNNEL.key
+  wg pubkey < /etc/wireguard/$TUNNEL.key > /etc/wireguard/$TUNNEL.pub
+  conf=$(umask 077; mktemp /etc/wireguard/.conf.XXXXXX)
+  {
+    # The key inline: `wg syncconf` takes the configuration as it stands, a key set by a hook
+    # would be cleared by it.
+    printf '[Interface]\nAddress = %s/32\nListenPort = %s\nPrivateKey = %s\n' "$own" "$WIREGUARD_PORT" "$(cat /etc/wireguard/$TUNNEL.key)"
+    tunnel_peers | while read -r key addr host port; do
+      printf '\n[Peer]\nPublicKey = %s\nAllowedIPs = %s/32\nEndpoint = %s:%s\nPersistentKeepalive = 25\n' "$key" "$addr" "$host" "$port"
+    done
+  } > "$conf"
+  chmod 0600 "$conf"
+  # Unchanged: nothing to apply.
+  if ! cmp -s "$conf" $TUNNEL_CONF; then mv -f "$conf" $TUNNEL_CONF; else rm -f "$conf"; fi
+  # The daemon refuses to run under a unit with a drop-in, so the ordering before the pool key
+  # request is in the unit itself (written below, from the presence of this configuration).
+  rm -rf /etc/systemd/system/briqyardd.service.d/10-tunnel.conf
+  systemctl daemon-reload
+  systemctl enable "wg-quick@$TUNNEL" >/dev/null 2>&1
+  if systemctl is-active --quiet "wg-quick@$TUNNEL"; then
+    wg syncconf $TUNNEL <(wg-quick strip $TUNNEL)
+    # syncconf leaves routes alone: one /32 per peer, the removed peers' gone.
+    local want have r
+    want=$(tunnel_peers | awk '{print $2"/32"}' | sort)
+    have=$(ip -4 route show dev $TUNNEL | awk '{print $1}' | sort)
+    for r in $(comm -13 <(echo "$want") <(echo "$have")); do ip route del "$r" dev $TUNNEL; done
+    for r in $(comm -23 <(echo "$want") <(echo "$have")); do ip route add "$r" dev $TUNNEL; done
+  else
+    systemctl start "wg-quick@$TUNNEL"
+  fi
+  echo "   tunnel $TUNNEL: $own, $(tunnel_peers | wc -l) peer(s), udp $WIREGUARD_PORT"
+  echo "   wireguard public key $(cat /etc/wireguard/$TUNNEL.pub)"
+}
+
+# The peers of a host already installed (WIREGUARD_ONLY): the tunnel and its firewall rule only.
+if [ "$WIREGUARD_ONLY" = 1 ]; then
+  [ -n "$WIREGUARD_PEERS" ] || fail "WIREGUARD_ONLY needs WIREGUARD_PEERS"
+  echo "== wireguard peers"
+  tunnel_up
+  if [ -f /etc/briqyard/firewall.nft ]; then
+    sed -i '/# briqyard-tunnel$/d' /etc/briqyard/firewall.nft
+    rule=$(tunnel_rule)
+    # Before the final drop, so the rule is read.
+    awk -v rule="$rule" '/^\t\tcounter drop/ {print rule} {print}' /etc/briqyard/firewall.nft > /etc/briqyard/firewall.nft.new
+    grep -q 'briqyard-tunnel$' /etc/briqyard/firewall.nft.new || { rm -f /etc/briqyard/firewall.nft.new; fail "/etc/briqyard/firewall.nft has no final drop to put the rule before"; }
+    mv -f /etc/briqyard/firewall.nft.new /etc/briqyard/firewall.nft
+    systemctl restart briqyard-firewall
+    echo "   firewall: udp $WIREGUARD_PORT from the peers' public addresses"
+  else
+    echo "   no /etc/briqyard/firewall.nft: this host's firewall is not ours, open udp $WIREGUARD_PORT to the peers in it"
+  fi
+  exit 0
+fi
 
 # Downloads a file and checks its digest against the pin before it lands anywhere.
 fetch() {
@@ -299,8 +427,9 @@ if [ -n "$PRIVATE_ADDRESS" ]; then
   echo "== private network $PRIVATE_ADDRESS"
   case "$PRIVATE_ADDRESS" in */*) ;; *) fail "PRIVATE_ADDRESS=$PRIVATE_ADDRESS: with its prefix, as 10.42.0.11/16" ;; esac
   has_address() { ip -4 -o addr show | awk -v a="$PRIVATE_ADDRESS" '$4 == a {found = 1} END {exit !found}'; }
-  if ! has_address; then
-    [ -n "$PRIVATE_INTERFACE" ] || fail "no interface has $PRIVATE_ADDRESS: set PRIVATE_INTERFACE (the private network's, by its MAC in the provider's console)"
+  # Without a private interface of its own, WireGuard carries the address (ADR 0113).
+  if ! has_address && { [ -z "$WIREGUARD_PEERS" ] || [ -n "$PRIVATE_INTERFACE" ]; }; then
+    [ -n "$PRIVATE_INTERFACE" ] || fail "no interface has $PRIVATE_ADDRESS: set PRIVATE_INTERFACE (the private network's, by its MAC in the provider's console), or WIREGUARD_PEERS"
     ip link show "$PRIVATE_INTERFACE" >/dev/null || fail "no interface $PRIVATE_INTERFACE"
     command -v netplan >/dev/null || fail "no netplan: put $PRIVATE_ADDRESS on $PRIVATE_INTERFACE yourself"
     printf 'network:\n  version: 2\n  ethernets:\n    %s:\n      addresses: [%s]\n' "$PRIVATE_INTERFACE" "$PRIVATE_ADDRESS" > /etc/netplan/60-briqyard-private.yaml
@@ -308,6 +437,11 @@ if [ -n "$PRIVATE_ADDRESS" ]; then
     netplan apply
     for _ in $(seq 1 30); do has_address && break; sleep 1; done
     has_address || fail "$PRIVATE_ADDRESS did not come up on $PRIVATE_INTERFACE"
+  fi
+  if [ -n "$WIREGUARD_PEERS" ]; then
+    tunnel_up
+    has_ip() { ip -4 -o addr show | awk -v a="${PRIVATE_ADDRESS%/*}" '{split($4, x, "/"); if (x[1] == a) found = 1} END {exit !found}'; }
+    has_ip || fail "${PRIVATE_ADDRESS%/*} did not come up on $TUNNEL"
   fi
   fleet_name=${FLEET_URL#*://}; fleet_name=${fleet_name%%/*}; fleet_name=${fleet_name%:*}
   sed -i '/# briqyard: the fleet$/d' /etc/hosts
@@ -322,7 +456,7 @@ if [ -n "$PRIVATE_ADDRESS" ]; then
       fi
       ;;
   esac
-  private_dev=$(ip -4 -o addr show | awk -v a="$PRIVATE_ADDRESS" '$4 == a {print $2; exit}')
+  private_dev=$(ip -4 -o addr show | awk -v a="${PRIVATE_ADDRESS%/*}" '{split($4, x, "/"); if (x[1] == a) {print $2; exit}}')
   public_dev=$(ip -4 route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
   [ -n "$public_dev" ] || fail "no default route: machines would have no way to the internet"
   [ "$public_dev" != "$private_dev" ] || fail "the default route goes through $private_dev, the private interface"
@@ -346,6 +480,7 @@ table inet briqyard_host {
 		udp sport 67 udp dport 68 accept
 		udp sport 547 udp dport 546 accept
 		tcp dport { ${ports//,/, } } accept
+$(tunnel_rule)
 		counter drop
 	}
 }
@@ -369,6 +504,8 @@ EOF
   systemctl enable briqyard-firewall >/dev/null 2>&1
   systemctl restart briqyard-firewall
   echo "   public $public_dev: tcp $ports in, nothing else; private $private_dev"
+  # After the rule for the tunnel's port is in force.
+  [ -z "$WIREGUARD_PEERS" ] || tunnel_wait
 fi
 
 # The partition labelled briqyard-pool on a disk, if it has one.
@@ -1033,11 +1170,13 @@ fi
 range=$(awk '/^  tcp_ports:/ {gsub(/["\047 ]/, "", $2); print $2}' /etc/briqyard/config.yaml)
 range=${range:-30000-32767}
 store_max=$(( ${range#*-} - ${range%-*} + 3 ))
+# A host with a tunnel starts the daemon after it: the pool key is asked over it (ADR 0113).
+tunnel_unit=; [ ! -f $TUNNEL_CONF ] || tunnel_unit=" wg-quick@$TUNNEL.service"
 cat > /etc/systemd/system/briqyardd.service <<EOF
 [Unit]
 Description=briqyard host daemon
-After=network-online.target zfs.target
-Wants=network-online.target
+After=network-online.target zfs.target$tunnel_unit
+Wants=network-online.target$tunnel_unit
 
 [Service]
 OOMScoreAdjust=-900
