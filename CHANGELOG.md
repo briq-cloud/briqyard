@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.27 — 2026-11-05
+
+### Documentation
+
+- record the nested suites at 8 vCPUs, alerts and qualification included (#169) ([3bcedea3](https://github.com/briq-cloud/briqyard/commit/3bcedea3546c3209fd52377a08506b40d29e75ee))
+
+
+### Fixes
+
+- serve before sweeping idle cgroups (#153) ([aa0df9d9](https://github.com/briq-cloud/briqyard/commit/aa0df9d9a176632b98ac968b651e864f109c5ef7))
+
+- spawn host helpers through choom so std uses posix_spawn (#168) ([ffd995b8](https://github.com/briq-cloud/briqyard/commit/ffd995b8cfdf3010439bf71ebf262ba19840b760))
+
+
+### Maintenance
+
+- test the upgrade from the previous release on a host with history (#152) ([05a49b3c](https://github.com/briq-cloud/briqyard/commit/05a49b3c682d6f93e38287123ec36423aba8ff7b))
+
 ## 0.1.26 — 2026-11-05
 
 ### Fixes
