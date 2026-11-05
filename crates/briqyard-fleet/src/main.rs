@@ -279,7 +279,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         namespaces: vec![],
         last_seen: now,
         version: String::new(),
-        disk_free_mb: 0,
+        disk_free_mb: None,
         note: String::new(),
         bootstrap_attempts: 0,
         public_tcp_ports: None,

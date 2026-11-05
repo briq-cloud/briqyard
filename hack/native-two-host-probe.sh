@@ -40,8 +40,10 @@ for module in kvm_intel kvm_amd; do
   echo "nested after: $module $(cat "$param")"
   case "$(cat "$param")" in Y|1) ;; *) gate "nesting stays off in $module" ;; esac
 done
-sudo apt-get update -qq
-sudo apt-get install -y -qq qemu-system-x86 qemu-utils cloud-image-utils
+# A stalled mirror cost this job 128 s and 429 s (ADR 0089): each fetch is shown and given up on soon.
+apt_bound=(-o Acquire::http::Timeout=20 -o Acquire::Retries=3)
+sudo apt-get update -q "${apt_bound[@]}"
+sudo apt-get install -y -q "${apt_bound[@]}" qemu-system-x86 qemu-utils cloud-image-utils
 fetch() { curl -fsSL "$1" -o "$3"; echo "$2  $3" | sha256sum -c -; }
 fetch https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img \
   04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94 "$WORK/base.img"

@@ -638,6 +638,43 @@ async fn scrape(st: &Arc<AppState>, token: &str) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn a_host_with_no_disk_left_refuses_a_new_namespaces_machine() {
+    let f = fleet(config::Config::default());
+    seed(&f.st, "a", 64_000, 0, 0, &[]);
+    let refused = |namespace: &'static str| {
+        let st = f.st.clone();
+        async move {
+            let (s, _, body) = call(
+                &st,
+                "POST",
+                "/v1/machines",
+                "",
+                Some(ask(namespace, "", 512, 1)),
+            )
+            .await;
+            assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{namespace}: {body}");
+            assert_eq!(json(&body)["code"], "capacity", "{namespace}");
+        }
+    };
+    // Reporting 0 free.
+    f.st.reg
+        .lock()
+        .unwrap()
+        .hosts
+        .get_mut("a")
+        .unwrap()
+        .disk_free_mb = Some(0);
+    refused("t1").await;
+    // Reporting room that holds then take entirely.
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        reg.hosts.get_mut("a").unwrap().disk_free_mb = Some(2048);
+        assert_ne!(reg.hold("a", 512, 2048, 0), 0);
+    }
+    refused("t2").await;
+}
+
+#[tokio::test]
 async fn each_refusal_is_counted_by_what_ran_out_and_the_room_is_shown() {
     let f = fleet(config::Config::default());
     seed(&f.st, "a", 64_000, 4_000, 1, &["t0"]);
@@ -648,7 +685,7 @@ async fn each_refusal_is_counted_by_what_ran_out_and_the_room_is_shown() {
         for (id, disk) in [("a", 10_000), ("b", 900_000), ("c", 900_000)] {
             let h = reg.hosts.get_mut(id).unwrap();
             h.region = "gra".into();
-            h.disk_free_mb = disk;
+            h.disk_free_mb = Some(disk);
         }
     }
     set_state(&f.st, "b", "draining");
@@ -1062,4 +1099,37 @@ async fn requested_restore_source_key_keeps_its_own_authorization_during_key_adm
     let (status, _, _) = call(&f.st, "POST", "/v1/hosts/key", "fixture-two", request()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     drop(turn);
+}
+
+#[tokio::test]
+async fn the_listing_shows_a_hosts_disk_as_placement_sees_it_and_omits_it_when_unreported() {
+    let f = fleet(config::Config::default());
+    seed(&f.st, "full", 64_000, 0, 0, &[]);
+    seed(&f.st, "roomy", 64_000, 0, 0, &[]);
+    seed(&f.st, "silent", 64_000, 0, 0, &[]);
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        reg.hosts.get_mut("full").unwrap().disk_free_mb = Some(3_000);
+        reg.hosts.get_mut("roomy").unwrap().disk_free_mb = Some(900_000);
+        // A hold in flight takes its disk out of the figure, as it does for placement.
+        reg.hold("roomy", 512, 100_000, 0);
+    }
+    let (s, _, body) = call(&f.st, "GET", "/v1/hosts", "", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let listed = json(&body);
+    let of = |id: &str| {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["id"] == id)
+            .unwrap_or_else(|| panic!("{id} not listed: {body}"))
+    };
+    assert_eq!(of("full")["disk_free_mb"], 3_000);
+    assert_eq!(of("roomy")["disk_free_mb"], 800_000);
+    assert!(
+        of("silent").get("disk_free_mb").is_none(),
+        "a host that reports none shows none: {}",
+        of("silent")
+    );
 }

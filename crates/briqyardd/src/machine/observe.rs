@@ -324,12 +324,13 @@ impl Manager {
         out
     }
 
-    /// Free space in the pool, in MB.
-    pub async fn disk_free_mb(&self) -> u64 {
+    /// Free space in the pool, in MB: 0 under a recovery fault (nothing new belongs here),
+    /// `None` when the pool cannot be read.
+    pub async fn disk_free_mb(&self) -> Option<u64> {
         if self.recovery_fault().is_some() {
-            return 0;
+            return Some(0);
         }
-        self.inner.zfs.free().await.unwrap_or(0) >> 20
+        self.inner.zfs.free().await.ok().map(|free| free >> 20)
     }
 
     pub fn capacity(&self) -> api::Capacity {

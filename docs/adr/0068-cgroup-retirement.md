@@ -178,8 +178,8 @@ lifecycle, fleet, stress and chaos checks remain separate validation gates. No d
 real-host proof follows solely from source fixtures or property-format compatibility.
 
 The e2e suite covers the in-place upgrade shape (`hack/e2e-siblings.sh`): after machines have
-run, it makes 5,000 empty leaves, hands the daemon over, and requires the barrier to open and
-the sweep to retire them. The leaves are made after the first machine ran on purpose: reading
+run, it makes 200 empty leaves, hands the daemon over, and requires the barrier to open and
+the sweep to retire them (the count past the old cap is `scale`'s, ADR 0109). The leaves are made after the first machine ran on purpose: reading
 a leaf's final counters needs `memory.current` and `memory.events.local`, which a leaf has only
 once the jailer enabled `+memory` on the parent. Made on a host where no machine has run, they
 would fail the sweep for a reason that is the fixture's.

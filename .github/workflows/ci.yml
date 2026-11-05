@@ -5,6 +5,9 @@ on:
     branches: [main]
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -25,6 +28,7 @@ jobs:
           python3 -m unittest discover -s hack -p "test_monitoring_alerts.py"
           python3 -m unittest discover -s hack -p "test_stress_safety.py"
           python3 -m unittest discover -s hack -p "test_stress_trend.py"
+          python3 -m unittest discover -s hack -p "test_native_suites.py"
           python3 hack/release.py check > /dev/null
           python3 hack/monitoring-alert-check.py --check-source
           bash -n hack/bootstrap-host.sh
@@ -33,7 +37,10 @@ jobs:
           bash -n hack/native-ci-more.sh
           bash -n hack/render-alerting.sh
           bash -n hack/install-monitoring.sh
+          python3 -m py_compile hack/monitoring-webhook-check.py hack/monitoring-alerts-check.py
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -45,4 +52,26 @@ jobs:
       - run: cargo check --manifest-path fuzz/Cargo.toml --locked
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-      - run: cargo build --release --workspace
+  # Keeps a release build on main and saves the cache the PRs of native.yml read (ADR 0108).
+  native-cache:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: native
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build the head
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools pkg-config libssl-dev
+          cargo build --release --locked --workspace --exclude briqyard-init
+          cargo build --release --locked -p briqyard-init --target x86_64-unknown-linux-musl

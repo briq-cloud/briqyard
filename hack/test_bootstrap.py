@@ -449,7 +449,7 @@ class DroppedNestedClass(unittest.TestCase):
         result = self.check(served, "0")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("BRIQYARD_RUNTIME_CLASSES=nested", result.stdout)
-        self.assertNotIn("ok", result.stdout)
+        self.assertNotIn("ok", result.stdout.splitlines())
 
     def test_the_variable_a_plain_config_or_no_config_pass(self):
         served = {"runtime_classes": {"nested": {"kernel": "/k", "modules": "/m", "nested": True}}}
@@ -457,7 +457,7 @@ class DroppedNestedClass(unittest.TestCase):
                                ({"runtime_classes": {"other": {"kernel": "/k", "modules": "/m"}}}, "0")):
             result = self.check(config, nested)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("ok", result.stdout)
+            self.assertIn("ok", result.stdout.splitlines())
 
 
 class UnknownClass(unittest.TestCase):

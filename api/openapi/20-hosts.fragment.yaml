@@ -142,7 +142,7 @@
         used: { $ref: "#/components/schemas/Capacity" }
         machines: { type: integer, description: the namespaces' machines, gateways not counted }
         running: { type: integer, description: machines up on the host, gateways included }
-        disk_free_mb: { type: integer }
+        disk_free_mb: { type: integer, description: "free space in the pool, in MB; absent when the host cannot read it (0 is a full pool)" }
         tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate, 64 hex digits; empty on plain HTTP (ADR 0020)" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" } }
         started: { $ref: "#/components/schemas/DaemonStart" }
@@ -157,7 +157,7 @@
         largest_slot: { $ref: "#/components/schemas/Room", description: "absent as `free` is" }
         unschedulable:
           type: object
-          description: "creates refused 503 `capacity` since the fleet started, by what ran out"
+          description: "creates refused 503 `capacity` since the fleet started, by the fleet or by a pinned namespace's full host, by what ran out"
           properties:
             memory: { type: integer, description: "no host of the region had the memory free under its fill ceiling, or those with the room are under memory_pressure: a new host fixes it" }
             cpu: { type: integer, description: "hosts had memory but insufficient CPU capacity or no precise CPU accounting" }
@@ -229,6 +229,7 @@
         memory_policy: { $ref: "#/components/schemas/MemoryPolicy" }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
+        disk_free_mb: { type: integer, minimum: 1, description: "free space in the host's disk pool, in MB, as placement sees it: its last report less the disk of creates placed since; absent when the host reports none, and then placement does not hold it to a disk figure (fleet only)" }
         machines: { type: integer }
         namespaces: { type: array, items: { type: string } }
         last_seen: { type: string, format: date-time }
@@ -315,7 +316,7 @@
         machines: { type: integer }
         namespaces: { type: array, items: { type: string } }
         version: { type: string }
-        disk_free_mb: { type: integer }
+        disk_free_mb: { type: integer, description: "free space in the pool, in MB; absent when the host cannot read it (0 is a full pool)" }
         tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate; a fingerprint other than the pinned one is refused (403 tls_mismatch)" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" } }
         started: { $ref: "#/components/schemas/DaemonStart" }
