@@ -228,7 +228,7 @@ plus `apt-get purge docker.io` and the edge's files.
 
 ## In a briq kvm sandbox
 
-The suites run in a `kvm-sandbox` briq (`xlarge`: 4 vCPUs, 16 GB, 40 GB at `/work`) on an x86_64 host that serves the `nested` class (ADR 0088). No Lima, no Mac. In the sandbox, as root:
+The suites run in a `kvm-sandbox` briq (`xlarge`: 8 vCPUs, 16 GB, 40 GB at `/work`) on an x86_64 host that serves the `nested` class (ADR 0088). No Lima, no Mac. In the sandbox, as root:
 
 ```bash
 cd /work
@@ -248,16 +248,16 @@ Then one stage at a time, detached, so that a command's own limit does not end i
 setsid bash /work/inner.sh run build > /dev/null 2>&1 < /dev/null &
 ```
 
-| Stage | What it does | Result, 2026-11-04, source `f4939302`, AMD EPYC, one level of nesting, to within 30 s |
+| Stage | What it does | Result, 2026-11-05, source `1d3e76c7`, AMD EPYC, one level of nesting, to within 15 s |
 |---|---|---|
-| `build` | release workspace and the musl init | 141 s, from nothing |
-| `systemd` | systemd as PID 1 of namespaces of its own, for the units and the startup barrier (ADR 0068) | under 30 s |
-| `host` | `hack/bootstrap-host.sh`, `hack/install-dev.sh`, `briqyardd` under its unit | under 30 s |
-| `fleet` | `hack/fleet-smoke.sh` | 33 passed, 80 s |
-| `cargotest` | `cargo test --workspace` and the init's root tests | 1422 passed, 242 s |
-| `e2e` | `hack/e2e.sh` | 294 passed, 626 s |
+| `build` | release workspace and the musl init | 95 s, from nothing |
+| `systemd` | systemd as PID 1 of namespaces of its own, for the units and the startup barrier (ADR 0068) | 15 s |
+| `host` | `hack/bootstrap-host.sh`, `hack/install-dev.sh`, `briqyardd` under its unit | 15 s |
+| `fleet` | `hack/fleet-smoke.sh` | 33 passed, 61 s |
+| `cargotest` | `cargo test --workspace` and the init's root tests | 1434 passed, 197 s |
+| `e2e` | `hack/e2e.sh` | 294 passed, 561 s |
 
-`hack/native-ci-more.sh stress` passed 635 of 635 checks with no invariant break in 514 s, and `monitoring` passed its 18 and 9 checks in 455 s. Run them inside the namespaces with `nsenter -t "$(cat /work/logs/systemd.pid)" -a`, with `capacity` raised to `memory_mb: 12288, vcpus: 24` as in `hack/native-ci.sh`, `RUNNER_ENVIRONMENT=github-hosted` for the script's guard, and each on a fresh host: `monitoring` leaves a second host in `fleet.yaml`. `fleet-two-hosts` and `fleet-restore` need a second host: they stay on `fc` and `fc2` and on the hosted two-hosts job.
+`hack/native-ci-more.sh stress` passed 635 of 635 checks with no invariant break in 501 s, `alerts` 45 checks in 880 s and `qualification` 134 in 611 s; `monitoring` passed its 18 and 9 checks in 455 s at 4 vCPUs on 2026-11-04. Run them inside the namespaces with `nsenter -t "$(cat /work/logs/systemd.pid)" -a`, with `capacity` raised to `memory_mb: 12288, vcpus: 24` as in `hack/native-ci.sh`, `RUNNER_ENVIRONMENT=github-hosted` for the script's guard, and each on a fresh host: `monitoring` leaves a second host in `fleet.yaml`. `fleet-two-hosts` and `fleet-restore` need a second host: they stay on `fc` and `fc2` and on the hosted two-hosts job.
 
 - **Not on a hosted runner:** the `native nested` workflow adds a level of virtualization. There a guest took 17 s to start and `e2e` stopped after an hour at 262 ok, 4 failed. It rehearses the install path, by hand; it is not the acceptance.
 - **A guest boots cold every time:** a machine of the class has no memory snapshot, so the sandbox's own sleep ends its daemons and guests.
