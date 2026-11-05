@@ -251,7 +251,13 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert!(format!("{err:#}").contains("run zfs"), "{err:#}");
+        // On Linux `choom` starts the tool and says it could not (ADR 0111).
+        let said = if cfg!(target_os = "linux") {
+            "failed to execute /nonexistent/zfs"
+        } else {
+            "run zfs"
+        };
+        assert!(format!("{err:#}").contains(said), "{err:#}");
         // The device wait needs udevadm as much as it needs zfs.
         let s = Scripts::new();
         let udevadm = s.udevadm.clone();
