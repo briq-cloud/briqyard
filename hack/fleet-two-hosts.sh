@@ -21,6 +21,8 @@ check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 . "$(dirname "${BASH_SOURCE[0]}")/suite-end.sh"
 auth=(); [ -n "${BRIQYARD_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $BRIQYARD_TOKEN")
 hosts() { curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/hosts"; }
+# A machine listing with the status line, the headers and the body (ADR 0114).
+partial_ls() { curl -sS -i ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/machines?$1"; }
 CONF2=/etc/briqyard/config.yaml
 # A script run on the second host as root with `ask_key BODY` (a POST /v1/hosts/key to the
 # fleet in its config, with its token) and `$adv` (its advertised URL); stdin and arguments
@@ -93,10 +95,14 @@ if [ -n "${SECOND_HOST_STOP:-}" ]; then
   check "host marked down"      '[ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = down ]'
   check "b fails cleanly"       '! briqyard machine exec "$B" -- hostname >/dev/null 2>&1'
   check "a still answers"       '[ "$(briqyard machine exec "$A" -- hostname)" = a ]'
-  # A listing is never partial: the down host's namespace and the fleet-wide list refuse.
+  # A listing is never partial by default: the down host's namespace and the fleet-wide list refuse.
   check "listing b's namespace refuses" '! briqyard machine ls --namespace "$T-b" >/dev/null 2>&1'
   check "listing everything refuses" '! briqyard machine ls >/dev/null 2>&1'
   check "listing a's namespace works"   'briqyard machine ls --namespace "$T-a" | grep -q "$A"'
+  # Unless the caller asks for a partial one: the down host is skipped and named.
+  check "partial listing of b's namespace is empty and names the host" 'out=$(partial_ls "namespace=$T-b&partial=true" | tr -d "\r"); echo "$out" | head -1 | grep -q " 200" && echo "$out" | grep -qi "^x-briqyard-unanswered-hosts: $HB\$" && [ "$(echo "$out" | tail -1)" = "[]" ]'
+  check "partial listing of everything has a and names the host" 'out=$(partial_ls "partial=true" | tr -d "\r"); echo "$out" | head -1 | grep -q " 200" && echo "$out" | grep -qi "^x-briqyard-unanswered-hosts: $HB\$" && echo "$out" | tail -1 | grep -q "$A"'
+  check "partial listing of a's namespace names no host" 'out=$(partial_ls "namespace=$T-a&partial=true" | tr -d "\r"); echo "$out" | head -1 | grep -q " 200" && ! echo "$out" | grep -qi "^x-briqyard-unanswered-hosts:"'
   check "no placement on a down host" '[ "$(briqyard machine run --image alpine:3.20 --name c --namespace "$T-b" --memory 256 -- true 2>&1 | grep -c "no host\|down\|unavailable")" -ge 1 ]'
   if [ -n "${SECOND_HOST_SH:-}" ]; then
     # Its pool's filesystems unmounted and its key unloaded: what a reboot leaves.

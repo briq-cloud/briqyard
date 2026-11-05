@@ -297,19 +297,22 @@ pub(super) async fn start_daemon_on(
         StatusCode::NO_CONTENT.into_response()
     }
     /// Like the daemon: a namespace's or every machine, those every `label` selects.
-    async fn list(State(d): D, uri: Uri) -> Json<Vec<api::Machine>> {
+    async fn list(State(d): D, uri: Uri) -> Response {
         let url = reqwest::Url::parse(&format!("http://stub{uri}")).unwrap();
         let mut namespace = None;
         let mut labels = vec![];
         for (k, v) in url.query_pairs() {
             match k.as_ref() {
                 "namespace" => namespace = Some(v.into_owned()),
-                "label" => labels.push(api::Label::parse(&v).unwrap()),
+                "label" => match api::Label::parse(&v) {
+                    Ok(l) => labels.push(l),
+                    Err(e) => return err(StatusCode::BAD_REQUEST, "invalid", e).into_response(),
+                },
                 _ => {}
             }
         }
         let ms = d.machines.lock().unwrap();
-        Json(
+        Json::<Vec<api::Machine>>(
             ms.iter()
                 .filter(|m| {
                     namespace
@@ -321,6 +324,7 @@ pub(super) async fn start_daemon_on(
                 .cloned()
                 .collect(),
         )
+        .into_response()
     }
     async fn put_quota(
         State(d): D,

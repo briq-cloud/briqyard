@@ -2,9 +2,6 @@
 
 use super::*;
 
-/// Lists machines. A listing is the truth for whoever reads it (the control plane marks a
-/// machine missing from it as gone), so it is never partial: a namespace's listing asks the
-/// namespace's host alone, and a host that is down or does not answer fails the whole listing.
 /// The `namespace` of a query.
 pub(super) fn query_namespace(uri: &Uri) -> Option<String> {
     uri.query().and_then(namespace_param)
@@ -20,7 +17,22 @@ pub(super) fn namespace_param(q: &str) -> Option<String> {
         .map(|t| t.to_string())
 }
 
+/// Whether a query opts in to a partial listing, `partial=true` (ADR 0114).
+pub(super) fn partial_param(q: &str) -> bool {
+    q.split('&').any(|kv| kv == "partial=true")
+}
+
+/// The header of a partial listing: the hosts that did not answer, `h_a,h_b`.
+pub(super) const UNANSWERED_HOSTS: &str = "x-briqyard-unanswered-hosts";
+
+/// Lists machines. A listing is the truth for whoever reads it (the control plane marks a
+/// machine missing from it as gone), so by default it is never partial: a namespace's listing
+/// asks the namespace's host alone, and a host that is down or does not answer fails the whole
+/// listing. With `partial=true` a host that is down, does not answer or answers unreadably is
+/// skipped and named in `x-briqyard-unanswered-hosts`; a 4xx still fails it (ADR 0114).
 pub(super) async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
+    let partial = uri.query().is_some_and(partial_param);
+    let mut unanswered: Vec<String> = Vec::new();
     let namespace = query_namespace(&uri);
     let hosts: Vec<HostRec> = {
         let reg = st.reg.lock().unwrap();
@@ -36,6 +48,10 @@ pub(super) async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) ->
     };
     for h in hosts {
         let resp = forward(&st, &h, Method::GET, &path, &headers, Bytes::new()).await;
+        if partial && resp.status().is_server_error() {
+            unanswered.push(h.id.clone());
+            continue;
+        }
         if !resp.status().is_success() {
             return resp;
         }
@@ -51,10 +67,17 @@ pub(super) async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) ->
                     all.push(m);
                 }
             }
+            Err(_) if partial => unanswered.push(h.id.clone()),
             Err(e) => return unreadable(&h, e),
         }
     }
-    Json(all).into_response()
+    let mut out = Json(all).into_response();
+    if !unanswered.is_empty() {
+        if let Ok(v) = HeaderValue::from_str(&unanswered.join(",")) {
+            out.headers_mut().insert(UNANSWERED_HOSTS, v);
+        }
+    }
+    out
 }
 
 pub(super) fn unreadable(h: &HostRec, e: serde_json::Error) -> Response {

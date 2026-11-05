@@ -112,6 +112,108 @@ async fn a_listing_adds_the_host_and_is_never_partial() {
 }
 
 #[tokio::test]
+async fn a_partial_listing_skips_a_host_that_did_not_answer_and_names_it() {
+    let (f, ds) = fleet_with_daemons(3).await;
+    let a = ds[0].stub.add("t1", "web", 512);
+    let b = ds[1].stub.add("t2", "db", 1024);
+    let c = ds[2].stub.add("t3", "cache", 256);
+    poll_static_hosts_once(&f.st).await;
+    assert_eq!(pinned(&f.st, "t2").as_deref(), Some("d2"));
+    let ids = |body: &str| -> Vec<(String, String)> {
+        let ms: Vec<api::Machine> = serde_json::from_str(body).unwrap();
+        ms.iter().map(|m| (m.id.clone(), m.host.clone())).collect()
+    };
+    // Every host answers: complete, no header.
+    let (s, headers, body) = call(&f.st, "GET", "/v1/machines?partial=true", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(headers.get("x-briqyard-unanswered-hosts").is_none());
+    assert_eq!(ids(&body).len(), 3);
+    // A host down: skipped and not asked, the others listed and learned.
+    set_state(&f.st, "d2", "down");
+    f.st.reg.lock().unwrap().machines.clear();
+    let d2_before = ds[1].stub.calls().len();
+    let (s, headers, body) = call(&f.st, "GET", "/v1/machines?partial=true", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(headers["x-briqyard-unanswered-hosts"], "d2");
+    assert_eq!(
+        ids(&body),
+        [(a.id.clone(), "d1".into()), (c.id.clone(), "d3".into())]
+    );
+    assert_eq!(
+        ds[1].stub.calls().len(),
+        d2_before,
+        "a down host is not asked"
+    );
+    {
+        let reg = f.st.reg.lock().unwrap();
+        assert_eq!(reg.machines.get(&a.id).map(String::as_str), Some("d1"));
+        assert_eq!(reg.machines.get(&c.id).map(String::as_str), Some("d3"));
+        assert_eq!(reg.machines.get(&b.id), None, "nothing learned of d2");
+    }
+    // Without the parameter, or with another value, the first failure is the answer as before.
+    for path in ["/v1/machines", "/v1/machines?partial=false"] {
+        let (s, headers, body) = call(&f.st, "GET", path, "api", None).await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{path}: {body}");
+        assert_eq!(json(&body)["code"], "host_down");
+        assert!(headers.get("x-briqyard-unanswered-hosts").is_none());
+    }
+    // A namespace on the down host: empty, and the host named. Another namespace is complete.
+    let (s, headers, body) = call(
+        &f.st,
+        "GET",
+        "/v1/machines?namespace=t2&partial=true",
+        "api",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(headers["x-briqyard-unanswered-hosts"], "d2");
+    assert_eq!(json(&body), serde_json::json!([]));
+    assert_eq!(ds[1].stub.calls().len(), d2_before, "its host is not asked");
+    let (s, headers, body) = call(
+        &f.st,
+        "GET",
+        "/v1/machines?partial=true&tenant=t1",
+        "api",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(headers.get("x-briqyard-unanswered-hosts").is_none());
+    assert_eq!(ids(&body), [(a.id.clone(), "d1".into())]);
+    let (s, _, body) = call(&f.st, "GET", "/v1/machines?namespace=t2", "api", None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    // Two hosts that did not answer are both named, sorted.
+    set_state(&f.st, "d2", "ready");
+    for id in ["d2", "d3"] {
+        f.st.reg.lock().unwrap().hosts.get_mut(id).unwrap().url = "http://127.0.0.1:1".into();
+    }
+    let (s, headers, body) = call(&f.st, "GET", "/v1/machines?partial=true", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(headers["x-briqyard-unanswered-hosts"], "d2,d3");
+    assert_eq!(ids(&body), [(a.id.clone(), "d1".into())]);
+    let (s, _, body) = call(&f.st, "GET", "/v1/machines", "api", None).await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(json(&body)["code"], "host_unreachable");
+}
+
+#[tokio::test]
+async fn a_partial_listing_still_fails_for_what_every_host_would_refuse() {
+    let (f, _ds) = fleet_with_daemons(2).await;
+    // A bad label is the caller's: a 400 from the first host, not a skipped host.
+    let (s, headers, body) = call(
+        &f.st,
+        "GET",
+        "/v1/machines?label=app%21%3Dweb&partial=true",
+        "api",
+        None,
+    )
+    .await;
+    assert!(s.is_client_error(), "{s}: {body}");
+    assert!(headers.get("x-briqyard-unanswered-hosts").is_none());
+}
+
+#[tokio::test]
 async fn a_host_under_pressure_takes_no_new_namespace_and_refuses_its_own() {
     let (f, ds) = fleet_with_daemons(2).await;
     let src = ds[0].stub.add("t1", "web", 512);
