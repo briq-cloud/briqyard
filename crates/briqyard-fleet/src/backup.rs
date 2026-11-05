@@ -1846,7 +1846,7 @@ pub(super) mod tests {
         let saved = std::fs::read_to_string(&acks).unwrap();
         assert!(!saved.contains(k.expose()), "ids only, never the key");
 
-        // After a restart the store is unreachable: nothing can be written to it.
+        // After a restart nothing asks the store: the same target, whether or not it answers.
         let restart = || backup(&dir.path().join("store"), &rcpt);
         assert!(restart().with_acks(acks.clone()).holds("h1", &k).await);
         assert!(
