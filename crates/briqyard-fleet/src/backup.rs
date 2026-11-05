@@ -16,13 +16,14 @@ use std::sync::{Arc, Mutex};
 /// The newest backup; one more per UTC day (`registry-<day>.json.age`), the last of that day.
 pub const LATEST: &str = "fleet/registry.json.age";
 
-/// A write of the registry is given this long, retries included: a key request waits on it,
-/// and the store's client retries for minutes, which suits a machine's backup.
 /// A registry whose only change is heartbeat telemetry is written again after this long. A
 /// bucket with versioning keeps every overwrite as a version and refuses a write to an object
-/// that holds too many (1,000 on some stores): the registry changes with every heartbeat, so
-/// writing each change reached that limit in days and then failed for good.
+/// that holds too many (thousands): the registry changes with every heartbeat, so writing each
+/// change reached that limit in days and then failed for good. A registry at rest is written
+/// after this long too, so its backup is never older and a broken store shows.
 const TELEMETRY_REFRESH: std::time::Duration = std::time::Duration::from_secs(3600);
+/// A write of the registry is given this long, retries included: a key request waits on it,
+/// and the store's client retries for minutes, which suits a machine's backup.
 const PUT_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct Backup {
@@ -257,14 +258,19 @@ impl Backup {
                 .clone();
             let data = encode(&reg);
             let digest: [u8; 32] = Sha256::digest(&data).into();
-            if self
-                .last
-                .lock()
-                .map_err(|_| anyhow!("backup ACK cache unavailable"))?
-                .digest
-                == Some(digest)
+            // Unchanged too is written after an hour: a fleet at rest still proves its backup works.
             {
-                return Ok(false);
+                let last = self
+                    .last
+                    .lock()
+                    .map_err(|_| anyhow!("backup ACK cache unavailable"))?;
+                if last.digest == Some(digest)
+                    && last
+                        .published
+                        .is_some_and(|at| at.elapsed() < TELEMETRY_REFRESH)
+                {
+                    return Ok(false);
+                }
             }
             let stable = stable_digest(&reg);
             let telemetry_only = {
@@ -1320,6 +1326,14 @@ pub(super) mod tests {
         }
         assert!(push().await.unwrap());
         assert_eq!(count(LATEST), 3);
+        // Nothing changed at all: still written after an hour, so an idle fleet's backup stays fresh.
+        assert!(!push().await.unwrap());
+        {
+            let mut last = b.last.lock().unwrap();
+            last.published = Instant::now().checked_sub(TELEMETRY_REFRESH + Duration::from_secs(1));
+        }
+        assert!(push().await.unwrap());
+        assert_eq!(count(LATEST), 4);
     }
 
     fn synthetic_panic() -> Result<()> {
