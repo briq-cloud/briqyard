@@ -167,9 +167,12 @@ backup:
 
 with `BRIQYARD_S3_ACCESS_KEY` and `BRIQYARD_S3_SECRET_KEY` in the fleet's environment: the
 fleet's own key, never a host's. In the bucket's policy the hosts' key writes `backups/` only and
-the fleet's `fleet/` only, and versioning is on. The fleet
+the fleet's `fleet/` only, and versioning is on: give `fleet/` a lifecycle rule that expires
+non-current versions (a day), because a store refuses a write to an object that holds too many
+(1,000 on some, a `400 BadRequest` that stops the backup for good). The fleet
 writes `fleet/registry.json.age` once a minute when the registry changed, and
-`fleet/registry-<day>.json.age` with the last of each day; a host's pool key is served only once
+`fleet/registry-<day>.json.age` with the last of each day; a change that is only heartbeat
+telemetry (`last_seen`, `used`, free disk, conditions) waits for the hour; a host's pool key is served only once
 the store holds it (503 `backup` otherwise). A failed write is `registry backup` at `error`.
 
 To restore, on the fleet's host: stop the fleet, move `registry.json` aside if there is one,
