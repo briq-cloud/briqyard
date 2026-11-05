@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.28 — 2026-11-05
+
+### Features
+
+- join the host plane over WireGuard when a server has no private network (#173) ([a7fb3331](https://github.com/briq-cloud/briqyard/commit/a7fb333151ee949757a461bff4a8f56040156df3))
+
+
+### Fixes
+
+- check the files the configuration names (#174) ([d1fbe120](https://github.com/briq-cloud/briqyard/commit/d1fbe1202c9eaf066503450fc8be95e81fbfea16))
+
+- a pool key the store acknowledged survives a fleet restart (#175) ([2a0fd24e](https://github.com/briq-cloud/briqyard/commit/2a0fd24e1f35c7ce188190e149f11f34511055d3))
+
+
+### Performance
+
+- optimize sha2 for speed in release builds (#176) ([fa01fa59](https://github.com/briq-cloud/briqyard/commit/fa01fa5910b773e1ecaa6b20bae586ac31277dc3))
+
 ## 0.1.27 — 2026-11-05
 
 ### Documentation
