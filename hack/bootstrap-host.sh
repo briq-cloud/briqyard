@@ -30,6 +30,17 @@
 # Off loopback the API serves TLS with a certificate of its own (ADR 0020): the script prints
 # its fingerprint, which the fleet pins (`tls_fingerprint` in the host's `hosts:` entry).
 #
+# A server with no private network of its own (no vRack) joins 10.42.0.0/16 over WireGuard
+# (ADR 0113): PRIVATE_ADDRESS without PRIVATE_INTERFACE, and WIREGUARD_PEERS, comma-separated
+# `PUBLIC_KEY|TUNNEL_ADDRESS|ENDPOINT[:PORT]` entries, one per host this one must reach or be
+# reached by (the fleet's host). Each peer is a single address (a /32 route, never a range);
+# its endpoint is its public address, and the only one the WireGuard port (WIREGUARD_PORT,
+# 51820) is open to. The host makes its own key (/etc/wireguard/briqyard0.key, never leaves)
+# and prints the public one. WIREGUARD_ONLY=1 sets the peers of a host already installed
+# (the fleet's host, when another joins) and changes nothing else; it then checks its own
+# result and fails if a peer, a route or a rule differs from what it was given. A full re-run
+# of a tunnel host may omit WIREGUARD_PEERS: the installed tunnel, peers and rule stay.
+#
 # The pool is encrypted at its creation (ADR 0026), with the host's key: with FLEET_URL the
 # fleet's, asked with BRIQYARD_TOKEN and never written here; without, a key made into
 # BRIQYARD_KEY_FILE (/etc/briqyard/pool.key, 0600). Swap is turned off for good: guest memory
@@ -51,6 +62,11 @@ API_TOKEN=${BRIQYARD_TOKEN:-}
 PRIVATE_ADDRESS=${PRIVATE_ADDRESS:-}
 PRIVATE_INTERFACE=${PRIVATE_INTERFACE:-}
 PUBLIC_TCP_PORTS=${PUBLIC_TCP_PORTS:-}
+# Unset and empty differ for WIREGUARD_ONLY: empty removes every peer.
+WIREGUARD_PEERS_SET=${WIREGUARD_PEERS+set}
+WIREGUARD_PEERS=${WIREGUARD_PEERS:-}
+WIREGUARD_PORT=${WIREGUARD_PORT:-51820}
+WIREGUARD_ONLY=${WIREGUARD_ONLY:-}
 FLEET_ADDRESS=${FLEET_ADDRESS:-}
 if [ -n "$PRIVATE_ADDRESS" ]; then LISTEN=${LISTEN:-${PRIVATE_ADDRESS%/*}:7420}; else LISTEN=${LISTEN:-0.0.0.0:7420}; fi
 ALLOWED_CLIENTS=${ALLOWED_CLIENTS:-}
@@ -135,6 +151,200 @@ put() {
 
 fail() { echo "   $*" >&2; exit 1; }
 
+# WireGuard (ADR 0113): the tunnel `briqyard0` carries the private address as a /32 and one /32
+# route per peer, so it never shadows a private network the host also has. The firewall's
+# rule for the tunnel's port names the peers' public addresses, between two marker comments.
+TUNNEL=briqyard0
+TUNNEL_CONF=/etc/wireguard/$TUNNEL.conf
+FIREWALL=/etc/briqyard/firewall.nft
+valid_ipv4() {
+  local IFS=. o
+  set -- $1
+  [ $# = 4 ] || return 1
+  for o; do case "$o" in ''|*[!0-9]*) return 1 ;; esac; [ "${#o}" -le 3 ] && [ "$o" -le 255 ] || return 1; done
+}
+# Checks WIREGUARD_PEERS; prints the entries as `key tunnel_address endpoint_address endpoint_port`.
+tunnel_peers() {
+  local entry key addr endpoint host port seen=" "
+  case "$WIREGUARD_PORT" in ''|*[!0-9]*) fail "WIREGUARD_PORT=$WIREGUARD_PORT: a port number" ;; esac
+  for entry in ${WIREGUARD_PEERS//,/ }; do
+    IFS='|' read -r key addr endpoint <<< "$entry"
+    [[ "$key" =~ ^[A-Za-z0-9+/]{43}=$ ]] || fail "WIREGUARD_PEERS: '$key' is not a WireGuard public key"
+    case "$addr" in */*) fail "WIREGUARD_PEERS: $addr is a range: one address per peer, so no route shadows a private network" ;; esac
+    valid_ipv4 "$addr" || fail "WIREGUARD_PEERS: '$addr' is not an IPv4 address"
+    [ "$addr" != "${PRIVATE_ADDRESS%/*}" ] || fail "WIREGUARD_PEERS: $addr is this host's own address"
+    case "$seen" in *" $addr "*|*" $key "*) fail "WIREGUARD_PEERS: $addr or its key is listed twice" ;; esac
+    seen="$seen$addr $key "
+    host=${endpoint%:*}; port=${endpoint##*:}
+    [ "$host" != "$endpoint" ] || port=$WIREGUARD_PORT
+    valid_ipv4 "$host" || fail "WIREGUARD_PEERS: the endpoint of $addr is '$endpoint': an IPv4 address and an optional port"
+    case "$port" in ''|*[!0-9]*) fail "WIREGUARD_PEERS: the endpoint port of $addr is '$port'" ;; esac
+    ! private "$host" || fail "WIREGUARD_PEERS: the endpoint of $addr, $host, is a private address: the tunnel crosses the public network"
+    echo "$key $addr $host $port"
+  done
+}
+# The firewall's line for the tunnel's port: the peers' public addresses only.
+tunnel_rule() {
+  local hosts
+  hosts=$(tunnel_peers | awk '{print $3}' | sort -u | paste -sd, - | sed 's/,/, /g')
+  [ -n "$hosts" ] && printf '\t\tip saddr { %s } udp dport %s accept # briqyard-tunnel\n' "$hosts" "$WIREGUARD_PORT"
+  return 0
+}
+# Waits for the tunnel to the fleet's host (FLEET_ADDRESS's peer, else the first): a peer that
+# does not know this host's key yet is the commonest reason for none. The failure names the
+# key; the fleet tries again in two minutes, once the peer has it.
+tunnel_wait() {
+  local key i
+  key=$(tunnel_peers | awk -v a="$FLEET_ADDRESS" 'a == "" || $2 == a {print $1; exit}')
+  for i in $(seq 1 30); do
+    # A tunnel handshakes when it has something to send.
+    ping -c1 -W1 "${FLEET_ADDRESS:-$(tunnel_peers | awk 'NR == 1 {print $2}')}" >/dev/null 2>&1 || true
+    wg show $TUNNEL latest-handshakes | awk -v k="$key" '$1 == k && $2 > 0 {found = 1} END {exit !found}' && return 0
+    sleep 1
+  done
+  fail "no handshake with ${FLEET_ADDRESS:-the first peer} through $TUNNEL: that host needs this host's public key $(cat /etc/wireguard/$TUNNEL.pub) (peer ${PRIVATE_ADDRESS%/*}, WIREGUARD_ONLY=1), or its firewall the UDP port $WIREGUARD_PORT from this host's public address"
+}
+# Installs the tunnel: the key (made once), the configuration from the peers, the unit, the
+# firewall's rule. Peers changed on a running tunnel are synced without dropping the others.
+tunnel_up() {
+  local key addr host port conf own r
+  own=${PRIVATE_ADDRESS%/*}
+  valid_ipv4 "$own" || fail "WireGuard needs PRIVATE_ADDRESS (the host's address, as 10.42.0.13/16)"
+  tunnel_peers >/dev/null
+  command -v wg >/dev/null || { apt-get update -qq; apt-get install -y -qq wireguard-tools >/dev/null; }
+  install -d -m 0700 /etc/wireguard
+  [ -s /etc/wireguard/$TUNNEL.key ] || (umask 077; wg genkey > /etc/wireguard/$TUNNEL.key)
+  chmod 0600 /etc/wireguard/$TUNNEL.key
+  wg pubkey < /etc/wireguard/$TUNNEL.key > /etc/wireguard/$TUNNEL.pub
+  conf=$(umask 077; mktemp /etc/wireguard/.conf.XXXXXX)
+  {
+    # The key inline: `wg syncconf` takes the configuration as it stands, a key set by a hook
+    # would be cleared by it.
+    printf '[Interface]\nAddress = %s/32\nListenPort = %s\nPrivateKey = %s\n' "$own" "$WIREGUARD_PORT" "$(cat /etc/wireguard/$TUNNEL.key)"
+    tunnel_peers | while read -r key addr host port; do
+      printf '\n[Peer]\nPublicKey = %s\nAllowedIPs = %s/32\nEndpoint = %s:%s\nPersistentKeepalive = 25\n' "$key" "$addr" "$host" "$port"
+    done
+  } > "$conf"
+  chmod 0600 "$conf"
+  # Unchanged: nothing to apply.
+  if ! cmp -s "$conf" $TUNNEL_CONF; then mv -f "$conf" $TUNNEL_CONF; else rm -f "$conf"; fi
+  # The daemon refuses to run under a unit with a drop-in, so the ordering before the pool key
+  # request is in the unit itself (written below, from the presence of this configuration).
+  rm -rf /etc/systemd/system/briqyardd.service.d/10-tunnel.conf
+  systemctl daemon-reload
+  systemctl enable "wg-quick@$TUNNEL" >/dev/null 2>&1
+  if systemctl is-active --quiet "wg-quick@$TUNNEL"; then
+    wg syncconf $TUNNEL <(wg-quick strip $TUNNEL)
+    # syncconf leaves routes alone: one /32 per peer. `ip route show` prints a /32 as the bare
+    # address, so both sides are compared bare: only a route that differs is touched.
+    local want have
+    want=" $(tunnel_peers | awk '{printf "%s ", $2}')"
+    have=$(ip -4 route show dev $TUNNEL | awk '{sub(/\/32$/, "", $1); print $1}')
+    for r in $have; do
+      case "$want" in *" $r "*) ;; *) ip route del "$r/32" dev $TUNNEL ;; esac
+    done
+    for r in $want; do
+      case " $(echo $have) " in *" $r "*) ;; *) ip route add "$r/32" dev $TUNNEL ;; esac
+    done
+  else
+    systemctl start "wg-quick@$TUNNEL"
+  fi
+  echo "   tunnel $TUNNEL: $own, $(tunnel_peers | wc -l) peer(s), udp $WIREGUARD_PORT"
+  echo "   wireguard public key $(cat /etc/wireguard/$TUNNEL.pub)"
+}
+
+# A tunnel host re-run in full without WIREGUARD_PEERS: the installed tunnel already carries
+# PRIVATE_ADDRESS, and its peers and firewall rule stay as they are.
+installed_tunnel() {
+  [ -z "$WIREGUARD_PEERS" ] && [ -s $TUNNEL_CONF ] || return 1
+  ip -4 -o addr show dev $TUNNEL 2>/dev/null | awk -v a="${PRIVATE_ADDRESS%/*}" '{split($4, x, "/"); if (x[1] == a) found = 1} END {exit !found}'
+}
+# What the tunnel and the firewall hold now is what WIREGUARD_PEERS says: the peers (they are
+# what a revocation removes), their routes and the rule, the live firewall's included.
+tunnel_verify() {
+  local want have rules=0
+  want=$(tunnel_peers | awk '{print $1}' | sort)
+  have=$(wg show $TUNNEL peers | sort)
+  [ "$want" = "$have" ] || fail "$TUNNEL holds $(echo "$have" | grep -c .) peer(s) where WIREGUARD_PEERS names $(echo "$want" | grep -c .): the change did not apply"
+  want=$(tunnel_peers | awk '{print $2}' | sort)
+  have=$(ip -4 route show dev $TUNNEL | awk '{sub(/\/32$/, "", $1); print $1}' | sort)
+  [ "$want" = "$have" ] || fail "$TUNNEL has routes ($(echo $have)) that differ from the peers' ($(echo $want))"
+  [ -f $FIREWALL ] || return 0
+  [ -z "$(tunnel_rule)" ] || rules=1
+  [ "$(grep -c 'briqyard-tunnel$' $FIREWALL)" = "$rules" ] || fail "$FIREWALL holds a different number of tunnel rules than the $rules expected"
+  [ "$(nft list table inet briqyard_host | grep -c "dport $WIREGUARD_PORT ")" = "$rules" ] || fail "the loaded firewall holds a different number of rules for udp $WIREGUARD_PORT than the $rules expected"
+}
+# The firewall's line for the tunnel's port, for a full bootstrap: the peers' when it is given
+# them, else the one already installed, so a re-run without WireGuard values keeps the tunnel
+# reachable. Only the explicit WIREGUARD_ONLY operation removes it.
+host_tunnel_rule() {
+  local rule
+  rule=$(tunnel_rule)
+  if [ -z "$rule" ] && [ -f $FIREWALL ]; then rule=$(grep '# briqyard-tunnel$' $FIREWALL || true); fi
+  [ -z "$rule" ] || printf '%s\n' "$rule"
+}
+# The parent shell keeps fd 9 open until EXIT cleanup finishes. flock is attached
+# to its shared open file description, so the Python child can acquire it for us.
+# This script requires root; its private directory and lock are therefore root-owned.
+runtime_install_lock() {
+  # Taken early by the peers operation and by a full run's firewall step, held to exit: asking again is a no-op, not a wait on ourselves.
+  [ -z "${install_lock_held:-}" ] || return 0
+  python3 - "$1" <<'PYLOCK' || return
+import os, pathlib, stat, sys
+root = pathlib.Path(sys.argv[1])
+root.mkdir(mode=0o700, parents=True, exist_ok=True)
+info = root.lstat()
+if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+    raise ValueError("runtime install directory must be owned by installer")
+root.chmod(0o700)
+fd = os.open(root / "runtime-install.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+        raise ValueError("invalid runtime install lock")
+    os.fchmod(fd, 0o600)
+finally:
+    os.close(fd)
+PYLOCK
+  exec 9<>"$1/runtime-install.lock" || return
+  python3 - <<'PYFLOCK'
+import fcntl, sys
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    # Held, by a fleet upgrade for instance: say so, then wait for as long as it takes.
+    print("waiting for the installer lock", file=sys.stderr, flush=True)
+    fcntl.flock(9, fcntl.LOCK_EX)
+PYFLOCK
+  install_lock_held=1
+}
+# The peers of a host already installed (WIREGUARD_ONLY): the tunnel and its firewall rule
+# only. An empty WIREGUARD_PEERS is the whole set: no peer, no route, no rule.
+tunnel_only() {
+  [ -n "$WIREGUARD_PEERS_SET" ] || fail "WIREGUARD_ONLY needs WIREGUARD_PEERS (empty, to remove every peer)"
+  echo "== wireguard peers"
+  tunnel_up
+  if [ -f $FIREWALL ]; then
+    local rule
+    sed -i '/# briqyard-tunnel$/d' $FIREWALL
+    rule=$(tunnel_rule)
+    # Before the final drop, so the rule is read.
+    awk -v rule="$rule" '/^\t\tcounter drop/ && rule != "" {print rule} {print}' $FIREWALL > $FIREWALL.new
+    if [ -n "$rule" ] && ! grep -q 'briqyard-tunnel$' $FIREWALL.new; then
+      rm -f $FIREWALL.new
+      fail "$FIREWALL has no final drop to put the rule before"
+    fi
+    mv -f $FIREWALL.new $FIREWALL
+    systemctl restart briqyard-firewall
+    if [ -n "$rule" ]; then echo "   firewall: udp $WIREGUARD_PORT from the peers' public addresses"; else echo "   firewall: no rule for udp $WIREGUARD_PORT"; fi
+  else
+    echo "   no $FIREWALL: this host's firewall is not ours, set udp $WIREGUARD_PORT for the peers in it"
+  fi
+  tunnel_verify
+}
+# The fleet's upgrades rewrite the same firewall file: one writer at a time.
+if [ "$WIREGUARD_ONLY" = 1 ]; then runtime_install_lock /etc/briqyard; tunnel_only; exit 0; fi
+
 # Downloads a file and checks its digest against the pin before it lands anywhere.
 fetch() {
   local url=$1 sha=$2 dest=$3 tmp
@@ -188,6 +398,7 @@ echo "   needrestart leaves briqyardd and briqyard-fleet running"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq zfsutils-linux nftables conntrack e2fsprogs gdisk curl jq ca-certificates python3 python3-yaml >/dev/null
+runtime_install_lock /etc/briqyard # before the firewall file is read and rewritten; held to the end
 # Every helper the daemon starts runs through choom (ADR 0111).
 [ -x /usr/bin/choom ] || fail "/usr/bin/choom is missing: apt install util-linux"
 modprobe zfs
@@ -299,8 +510,9 @@ if [ -n "$PRIVATE_ADDRESS" ]; then
   echo "== private network $PRIVATE_ADDRESS"
   case "$PRIVATE_ADDRESS" in */*) ;; *) fail "PRIVATE_ADDRESS=$PRIVATE_ADDRESS: with its prefix, as 10.42.0.11/16" ;; esac
   has_address() { ip -4 -o addr show | awk -v a="$PRIVATE_ADDRESS" '$4 == a {found = 1} END {exit !found}'; }
-  if ! has_address; then
-    [ -n "$PRIVATE_INTERFACE" ] || fail "no interface has $PRIVATE_ADDRESS: set PRIVATE_INTERFACE (the private network's, by its MAC in the provider's console)"
+  # Without a private interface of its own, WireGuard carries the address (ADR 0113).
+  if ! has_address && ! installed_tunnel && { [ -z "$WIREGUARD_PEERS" ] || [ -n "$PRIVATE_INTERFACE" ]; }; then
+    [ -n "$PRIVATE_INTERFACE" ] || fail "no interface has $PRIVATE_ADDRESS: set PRIVATE_INTERFACE (the private network's, by its MAC in the provider's console), or WIREGUARD_PEERS"
     ip link show "$PRIVATE_INTERFACE" >/dev/null || fail "no interface $PRIVATE_INTERFACE"
     command -v netplan >/dev/null || fail "no netplan: put $PRIVATE_ADDRESS on $PRIVATE_INTERFACE yourself"
     printf 'network:\n  version: 2\n  ethernets:\n    %s:\n      addresses: [%s]\n' "$PRIVATE_INTERFACE" "$PRIVATE_ADDRESS" > /etc/netplan/60-briqyard-private.yaml
@@ -308,6 +520,11 @@ if [ -n "$PRIVATE_ADDRESS" ]; then
     netplan apply
     for _ in $(seq 1 30); do has_address && break; sleep 1; done
     has_address || fail "$PRIVATE_ADDRESS did not come up on $PRIVATE_INTERFACE"
+  fi
+  if [ -n "$WIREGUARD_PEERS" ]; then
+    tunnel_up
+    has_ip() { ip -4 -o addr show | awk -v a="${PRIVATE_ADDRESS%/*}" '{split($4, x, "/"); if (x[1] == a) found = 1} END {exit !found}'; }
+    has_ip || fail "${PRIVATE_ADDRESS%/*} did not come up on $TUNNEL"
   fi
   fleet_name=${FLEET_URL#*://}; fleet_name=${fleet_name%%/*}; fleet_name=${fleet_name%:*}
   sed -i '/# briqyard: the fleet$/d' /etc/hosts
@@ -322,7 +539,7 @@ if [ -n "$PRIVATE_ADDRESS" ]; then
       fi
       ;;
   esac
-  private_dev=$(ip -4 -o addr show | awk -v a="$PRIVATE_ADDRESS" '$4 == a {print $2; exit}')
+  private_dev=$(ip -4 -o addr show | awk -v a="${PRIVATE_ADDRESS%/*}" '{split($4, x, "/"); if (x[1] == a) {print $2; exit}}')
   public_dev=$(ip -4 route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
   [ -n "$public_dev" ] || fail "no default route: machines would have no way to the internet"
   [ "$public_dev" != "$private_dev" ] || fail "the default route goes through $private_dev, the private interface"
@@ -334,6 +551,8 @@ if [ -n "$PRIVATE_ADDRESS" ]; then
   [ -n "$ssh_ports" ] || fail "sshd -T names no port: closing the public interface would close SSH"
   ports=$ssh_ports${PUBLIC_TCP_PORTS:+,$PUBLIC_TCP_PORTS}
   mkdir -p /etc/briqyard
+  # Read before the file is rewritten.
+  tunnel_line=$(host_tunnel_rule)
   cat > /etc/briqyard/firewall.nft <<EOF
 table inet briqyard_host
 delete table inet briqyard_host
@@ -346,6 +565,7 @@ table inet briqyard_host {
 		udp sport 67 udp dport 68 accept
 		udp sport 547 udp dport 546 accept
 		tcp dport { ${ports//,/, } } accept
+$tunnel_line
 		counter drop
 	}
 }
@@ -369,6 +589,8 @@ EOF
   systemctl enable briqyard-firewall >/dev/null 2>&1
   systemctl restart briqyard-firewall
   echo "   public $public_dev: tcp $ports in, nothing else; private $private_dev"
+  # After the rule for the tunnel's port is in force.
+  [ -z "$WIREGUARD_PEERS" ] || tunnel_wait
 fi
 
 # The partition labelled briqyard-pool on a disk, if it has one.
@@ -412,10 +634,38 @@ pool_device() {
 pool_key() {
   if [ -n "$FLEET_URL" ]; then
     [ -n "$API_TOKEN" ] || { echo "   the fleet's key needs BRIQYARD_TOKEN: the host's own" >&2; return 1; }
-    # The token goes in on stdin, off the command line.
-    printf 'Authorization: Bearer %s\n' "$API_TOKEN" |
-      curl -fsS --max-time 20 -H @- -H 'Content-Type: application/json' \
-        -d "{\"url\": \"$advertise\"}" "${FLEET_URL%/}/v1/hosts/key" | jq -er .key
+    # The token goes in on stdin, off the command line. A bounded retry of what can pass: a
+    # timeout, a connection failure, a 5xx. The ask is safe to repeat (the key is made once and
+    # served again as it is). A 4xx or any other failure is final, even when curl then failed
+    # reading the body.
+    # The limit outlasts the fleet's longest wait before its own answer, so its message (a
+    # backup that could not be written: 503) reaches this host instead of a curl timeout: the
+    # key turn (30 s), the turn to publish (30 s), the write (30 s), crates/briqyard-fleet
+    # hosts.rs and backup.rs. 120 s is that 90 s with a margin; 3 tries come to 6 minutes.
+    local try out rc code
+    for try in 1 2 3; do
+      rc=0
+      # The status follows the body on its own line; the key never touches the disk.
+      out=$(printf 'Authorization: Bearer %s\n' "$API_TOKEN" |
+        curl -sS --connect-timeout 20 --max-time 120 -H @- -H 'Content-Type: application/json' -w '\n%{http_code}' \
+          -d "{\"url\": \"$advertise\"}" "${FLEET_URL%/}/v1/hosts/key") || rc=$?
+      code=${out##*$'\n'}
+      # An observed 4xx decides, whatever curl made of the rest of the answer.
+      case "$code" in 4??) echo "   the fleet's key: HTTP $code, not retried" >&2; return 1 ;; esac
+      if [ "$rc" = 0 ] && [ "${code:0:1}" = 2 ]; then
+        printf '%s' "${out%$'\n'*}" | jq -er .key
+        return
+      fi
+      # curl: 6 and 7 cannot resolve or connect, 28 timed out, 35 TLS handshake, 52 empty reply, 55 and 56 send and receive.
+      case "$rc" in
+        0) case "$code" in 5??) ;; *) echo "   the fleet's key: HTTP $code, not retried" >&2; return 1 ;; esac ;;
+        6|7|28|35|52|55|56) ;;
+        *) echo "   the fleet's key: curl failed ($rc), not retried" >&2; return 1 ;;
+      esac
+      echo "   the fleet's key: attempt $try of 3 failed" >&2
+      [ "$try" = 3 ] || sleep 3
+    done
+    return 1
   else
     if [ ! -f "$KEY_FILE" ] && [ "${1:-}" = make ]; then
       (umask 077; mkdir -p "$(dirname "$KEY_FILE")"; od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$KEY_FILE")
@@ -669,33 +919,6 @@ for key, value in config.value:
 else:
     print("/var/lib/briqyard/vmlinux")
 PYKERNEL
-}
-# The parent shell keeps fd 9 open until EXIT cleanup finishes. flock is attached
-# to its shared open file description, so the Python child can acquire it for us.
-# This script requires root; its private directory and lock are therefore root-owned.
-runtime_install_lock() {
-  python3 - "$1" <<'PYLOCK' || return
-import os, pathlib, stat, sys
-root = pathlib.Path(sys.argv[1])
-root.mkdir(mode=0o700, parents=True, exist_ok=True)
-info = root.lstat()
-if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
-    raise ValueError("runtime install directory must be owned by installer")
-root.chmod(0o700)
-fd = os.open(root / "runtime-install.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-try:
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
-        raise ValueError("invalid runtime install lock")
-    os.fchmod(fd, 0o600)
-finally:
-    os.close(fd)
-PYLOCK
-  exec 9<>"$1/runtime-install.lock" || return
-  python3 - <<'PYFLOCK'
-import fcntl
-fcntl.flock(9, fcntl.LOCK_EX)
-PYFLOCK
 }
 # Inspect both the installed and candidate roots without opening or changing host state.
 # Kept standalone: this gate must also protect stopped daemons and custom data_dir.
@@ -1033,11 +1256,13 @@ fi
 range=$(awk '/^  tcp_ports:/ {gsub(/["\047 ]/, "", $2); print $2}' /etc/briqyard/config.yaml)
 range=${range:-30000-32767}
 store_max=$(( ${range#*-} - ${range%-*} + 3 ))
+# A host with a tunnel starts the daemon after it: the pool key is asked over it (ADR 0113).
+tunnel_unit=; [ ! -f $TUNNEL_CONF ] || tunnel_unit=" wg-quick@$TUNNEL.service"
 cat > /etc/systemd/system/briqyardd.service <<EOF
 [Unit]
 Description=briqyard host daemon
-After=network-online.target zfs.target
-Wants=network-online.target
+After=network-online.target zfs.target$tunnel_unit
+Wants=network-online.target$tunnel_unit
 
 [Service]
 OOMScoreAdjust=-900

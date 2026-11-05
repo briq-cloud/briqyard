@@ -268,6 +268,12 @@ fleet's own vRack address), the host resolves `fleet_url`'s name to it in `/etc/
 fleet checks a host's calls by the address it knows the host at, its vRack one, and a call
 through the public network would come from the public address and be refused
 (`unknown_host`).
+A server with no private network joins over WireGuard (ADR 0113): list its private address in
+`bootstrap.wireguard.hosts` and the peers it tunnels to (the fleet's host, with its public key
+and public address) in `bootstrap.wireguard.peers`. The first attempt fails and the host's note
+names its public key; run `WIREGUARD_ONLY=1` with that key as a peer on the fleet's host, and
+the next attempt goes on. A peer behind a NAT needs an `endpoint` with a placeholder port (its address is what the firewall allows; WireGuard learns the real port). To remove the last peer, run `WIREGUARD_ONLY=1 WIREGUARD_PEERS=` (set, empty). Hosts on the private network are sent what they were.
+
 Once the script succeeds, a second connection, strict against the pinned SSH key, reads the
 daemon's certificate fingerprint (`briqyardd tls-fingerprint`); the fleet pins it in the same
 write that marks the host `bootstrapped` (the note says `api certificate … pinned`), and dials

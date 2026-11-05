@@ -61,6 +61,12 @@ pub fn release_url(release: &str) -> Option<String> {
     ok.then(|| format!("{RELEASES}/v{v}"))
 }
 
+/// `BRIQYARD_RELEASE` as the script takes it, a URL: the configured release as it is, or a
+/// version expanded to the project's releases; empty stays empty (binaries from `./bin`).
+pub fn bootstrap_release(configured: &str) -> String {
+    release_url(configured).unwrap_or_else(|| configured.to_string())
+}
+
 /// An added host's API URL: TLS, with the certificate the bootstrap pins.
 pub fn host_url(ip: &str) -> String {
     format!("https://{ip}:7420")
@@ -85,7 +91,7 @@ pub async fn run(st: Arc<AppState>) {
                 continue;
             }
             let ip = ssh_address(&h).to_string();
-            let env = bootstrap_env(b, &st.cfg.own_url(), &h, &b.release);
+            let env = bootstrap_env(b, &st.cfg.own_url(), &h, &bootstrap_release(&b.release));
             let outcome = match install(&st, &h.id, &ip, &env).await {
                 Ok(note) => api_fingerprint(&st, &ip).await.map(|fp| (note, fp)),
                 Err(e) => Err(e),
@@ -171,6 +177,15 @@ pub fn private_address(b: &crate::config::Bootstrap, url: &str) -> Option<String
     let net = Network::parse(&b.private_network).ok()?;
     let ip: std::net::Ipv4Addr = url_host(url).parse().ok()?;
     net.contains(ip).then(|| format!("{ip}/{}", net.prefix))
+}
+
+/// The script's `WIREGUARD_PEERS`: `public_key|address|endpoint` entries, comma-separated.
+pub fn wireguard_peers(peers: &[crate::config::WireguardPeer]) -> String {
+    peers
+        .iter()
+        .map(|p| format!("{}|{}|{}", p.public_key, p.address, p.endpoint))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Records a bootstrap that succeeded: the API certificate pinned in the same write as the
@@ -403,12 +418,27 @@ pub fn bootstrap_settings(
     ];
     if let Some(private) = private_address(b, url) {
         let ports: Vec<String> = public_tcp_ports.iter().map(|p| p.to_string()).collect();
+        let tunnel = b.wireguard.hosts.iter().any(|h| *h == url_host(url));
         env.extend([
             ("PRIVATE_ADDRESS", private),
-            ("PRIVATE_INTERFACE", b.private_interface.clone()),
+            // A tunnel host has no private interface: the fleet-wide one is another model's.
+            (
+                "PRIVATE_INTERFACE",
+                if tunnel {
+                    String::new()
+                } else {
+                    b.private_interface.clone()
+                },
+            ),
             ("PUBLIC_TCP_PORTS", ports.join(",")),
             ("FLEET_ADDRESS", b.fleet_address.clone()),
         ]);
+        if tunnel {
+            env.extend([
+                ("WIREGUARD_PORT", b.wireguard.port.to_string()),
+                ("WIREGUARD_PEERS", wireguard_peers(&b.wireguard.peers)),
+            ]);
+        }
     }
     if let Some(classes) = runtime_classes_setting(&h.runtime_classes, &[]) {
         env.push(("BRIQYARD_RUNTIME_CLASSES", classes));

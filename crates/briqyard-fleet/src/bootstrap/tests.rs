@@ -245,6 +245,59 @@ fn an_upgrade_enables_the_classes_asked_besides_the_reported_ones() {
 }
 
 #[test]
+fn a_tunnel_host_is_told_its_peers_and_no_private_interface() {
+    let key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let b = crate::config::Bootstrap {
+        private_network: "10.42.0.0/16".into(),
+        private_interface: "enp3s0f1".into(),
+        fleet_address: "10.42.0.12".into(),
+        wireguard: crate::config::Wireguard {
+            hosts: vec!["10.42.0.13".into()],
+            peers: vec![crate::config::WireguardPeer {
+                public_key: key.into(),
+                address: "10.42.0.12".into(),
+                endpoint: "164.132.1.2".into(),
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let env = bootstrap_env(
+        &b,
+        "https://fleet.example",
+        &rec("https://10.42.0.13:7420", "t", Some(vec![])),
+        "",
+    );
+    assert!(env.contains("PRIVATE_INTERFACE=''"), "{env}");
+    assert!(env.contains("PRIVATE_ADDRESS='10.42.0.13/16'"), "{env}");
+    assert!(env.contains("WIREGUARD_PORT='51820'"), "{env}");
+    assert!(
+        env.contains(&format!("WIREGUARD_PEERS='{key}|10.42.0.12|164.132.1.2'")),
+        "{env}"
+    );
+    // A host of the vRack in the same fleet: its interface, and nothing of the tunnel.
+    let env = bootstrap_env(
+        &b,
+        "https://fleet.example",
+        &rec("https://10.42.0.11:7420", "t", Some(vec![])),
+        "",
+    );
+    assert!(env.contains("PRIVATE_INTERFACE='enp3s0f1'"), "{env}");
+    assert!(!env.contains("WIREGUARD"), "{env}");
+    // A fleet with no tunnel hosts: as before.
+    let env = bootstrap_env(
+        &crate::config::Bootstrap {
+            wireguard: Default::default(),
+            ..b
+        },
+        "https://fleet.example",
+        &rec("https://10.42.0.13:7420", "t", Some(vec![])),
+        "",
+    );
+    assert!(!env.contains("WIREGUARD"), "{env}");
+}
+
+#[test]
 fn a_host_on_the_private_network_is_told_its_address() {
     let b = crate::config::Bootstrap {
         pool_device: "/dev/nvme0n1,/dev/nvme1n1".into(),
@@ -424,6 +477,14 @@ fn a_bootstrap_pins_the_certificate_with_the_state() {
         r.note,
         format!("bootstrapped at now; api certificate {fp} pinned")
     );
+}
+
+#[test]
+fn the_script_is_given_a_release_url() {
+    let v = "https://github.com/briq-cloud/briqyard/releases/download/v0.1.8";
+    assert_eq!(bootstrap_release("0.1.8"), v);
+    assert_eq!(bootstrap_release(&format!("{v}/")), v);
+    assert_eq!(bootstrap_release(""), "");
 }
 
 #[test]
