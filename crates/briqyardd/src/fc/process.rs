@@ -341,7 +341,8 @@ impl Process {
                 let program = settlement.jailer_program(&j.jailer)?;
                 #[cfg(not(target_os = "linux"))]
                 let program = j.jailer.clone();
-                let mut cmd = Command::new(program);
+                let mut cmd =
+                    Command::from(briqyard_api::host_process::command_for(oom_class, program));
                 {
                     use std::os::unix::process::CommandExt;
                     cmd.as_std_mut().arg0(&j.jailer);
@@ -360,7 +361,8 @@ impl Process {
                     .mode(0o600)
                     .open(&fclog)
                     .await?;
-                let mut cmd = Command::new(binary);
+                let mut cmd =
+                    Command::from(briqyard_api::host_process::command_for(oom_class, binary));
                 cmd.arg("--api-sock")
                     .arg(&api)
                     .arg("--id")
@@ -382,7 +384,6 @@ impl Process {
         for v in briqyard_api::listeners::ENV {
             cmd.env_remove(v);
         }
-        briqyard_api::host_process::set_class(cmd.as_std_mut(), oom_class);
         cmd.process_group(0);
         cmd.kill_on_drop(false);
         let mut child = cmd.spawn().context("start firecracker")?;

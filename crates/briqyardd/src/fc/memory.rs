@@ -754,7 +754,7 @@ mod identity_tests {
             }
         }
         let launch = || {
-            let mut command = briqyard_api::host_process::command("sh");
+            let mut command = std::process::Command::new("sh");
             command
                 .arg0("firecracker")
                 .args(["-c", "exec 1>&- 2>&-; read -r line", "--id", "m-owned"])
@@ -794,7 +794,7 @@ mod identity_tests {
     #[test]
     fn pidfd_abort_requires_the_exact_owned_command_and_keeps_siblings_alive() {
         let launch = || {
-            let mut command = briqyard_api::host_process::command("sh");
+            let mut command = std::process::Command::new("sh");
             command
                 .arg0("firecracker")
                 .args(["-c", "read -r line", "--id", "m-owned"])

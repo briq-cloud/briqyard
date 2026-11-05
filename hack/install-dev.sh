@@ -6,6 +6,7 @@ BUNDLE=${2:?checked release bundle path}
 BUNDLE_SHA256=${3:?trusted release bundle SHA256}
 SRC=${4:-$(cd "$(dirname "$0")/.." && pwd)}
 command -v conntrack >/dev/null || { apt-get update -qq; apt-get install -y -qq conntrack; }
+[ -x /usr/bin/choom ] || { echo "/usr/bin/choom is missing: apt install util-linux" >&2; exit 1; }
 T=$TARGET/release
 install -m 0755 "$T/briqyardd" /usr/local/bin/briqyardd
 install -m 0755 "$TARGET/$(uname -m)-unknown-linux-musl/release/briqyard-init" /usr/local/bin/briqyard-init
