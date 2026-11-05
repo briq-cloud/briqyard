@@ -309,7 +309,12 @@ PYLOCK
   exec 9<>"$1/runtime-install.lock" || return
   python3 - <<'PYFLOCK'
 import fcntl
-fcntl.flock(9, fcntl.LOCK_EX)
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    # Held, by a fleet upgrade for instance: say so, then wait for as long as it takes.
+    print("waiting for the installer lock", flush=True)
+    fcntl.flock(9, fcntl.LOCK_EX)
 PYFLOCK
   install_lock_held=1
 }
