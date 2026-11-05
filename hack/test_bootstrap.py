@@ -949,7 +949,7 @@ class WireguardRun(unittest.TestCase):
             holder.stdin.write("done\n"); holder.stdin.flush()
             output, error = run.communicate(timeout=20)
             self.assertEqual(run.returncode, 0, error)
-            self.assertIn("waiting for the installer lock", output)
+            self.assertIn("waiting for the installer lock", error)
             self.assertIn("briqyard-tunnel", self.firewall.read_text())
         finally:
             for child in (holder, run):
