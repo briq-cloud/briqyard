@@ -2,6 +2,11 @@
 
 ## 0.1.28 — 2026-11-05
 
+### Upgrade notes
+
+- The init's digest changes with this release: #176 changes the release profile of `sha2`, which the init uses (ADR 0101). Behaviour does not change. Every seed sealed before it is refused until it is sealed again, in the order `docs/OPERATIONS.md` gives (Upgrade). Before the host upgrades, set each recipe's `init_sha256`, and `templates.init_ready_init_sha256` if the configuration has it, to the digest in the `briqyard-init-linux-<arch>` line of `SHA256SUMS`: with only old values the host reports no named-memory profile after its upgrade.
+- A host on a private network gets what it got before; WireGuard applies only to the hosts in `bootstrap.wireguard.hosts` (ADR 0113). A bootstrap now retries a pool-key request that fails transiently, up to three times. The fleet writes `published-keys.json` in its state directory. None of these needs an action.
+
 ### Features
 
 - join the host plane over WireGuard when a server has no private network (#173) ([a7fb3331](https://github.com/briq-cloud/briqyard/commit/a7fb333151ee949757a461bff4a8f56040156df3))
