@@ -16,6 +16,8 @@ pub(super) struct Daemon {
     pub(super) next: AtomicUsize,
     /// A namespace the daemon refuses to delete (answers 409), to test a failed forward.
     pub(super) keep_namespace: String,
+    /// When set, the machine list answers this status and body instead of the machines.
+    pub(super) list_answer: Mutex<Option<(StatusCode, String)>>,
     /// Its event log, and the `If-Match` of each request that had one.
     pub(super) events: Mutex<Vec<api::Event>>,
     pub(super) if_match: Mutex<Vec<String>>,
@@ -156,6 +158,7 @@ pub(super) async fn start_daemon_on(
         gateways: Mutex::new(vec![]),
         next: AtomicUsize::new(0),
         keep_namespace: "kept".into(),
+        list_answer: Mutex::new(None),
         events: Mutex::new(vec![]),
         if_match: Mutex::new(vec![]),
         watcher: Mutex::new(None),
@@ -297,19 +300,25 @@ pub(super) async fn start_daemon_on(
         StatusCode::NO_CONTENT.into_response()
     }
     /// Like the daemon: a namespace's or every machine, those every `label` selects.
-    async fn list(State(d): D, uri: Uri) -> Json<Vec<api::Machine>> {
+    async fn list(State(d): D, uri: Uri) -> Response {
+        if let Some((status, body)) = d.list_answer.lock().unwrap().clone() {
+            return (status, body).into_response();
+        }
         let url = reqwest::Url::parse(&format!("http://stub{uri}")).unwrap();
         let mut namespace = None;
         let mut labels = vec![];
         for (k, v) in url.query_pairs() {
             match k.as_ref() {
                 "namespace" => namespace = Some(v.into_owned()),
-                "label" => labels.push(api::Label::parse(&v).unwrap()),
+                "label" => match api::Label::parse(&v) {
+                    Ok(l) => labels.push(l),
+                    Err(e) => return err(StatusCode::BAD_REQUEST, "invalid", e).into_response(),
+                },
                 _ => {}
             }
         }
         let ms = d.machines.lock().unwrap();
-        Json(
+        Json::<Vec<api::Machine>>(
             ms.iter()
                 .filter(|m| {
                     namespace
@@ -321,6 +330,7 @@ pub(super) async fn start_daemon_on(
                 .cloned()
                 .collect(),
         )
+        .into_response()
     }
     async fn put_quota(
         State(d): D,

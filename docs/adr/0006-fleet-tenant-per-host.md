@@ -1,6 +1,6 @@
 # ADR 0006: Fleet: a tenant on one host, calls forwarded, listings never partial
 
-Date: 2026-10-19 · Status: accepted
+Date: 2026-10-19 · Status: accepted; "a listing is never partial" superseded for machines by ADR 0114 (a caller may ask for `partial=true`)
 
 ## Context
 
@@ -24,7 +24,7 @@ The hint supplies routing, not namespace authorization or a new machine index en
 The owner's DELETE answer is relayed unchanged; only success removes the index and
 refreshes capacity (ADR 0044). Other methods and backup-holder routing are unchanged.
 
-**A listing is never partial.** A tenant's listing asks its host alone; a host down or not answering fails the listing. Every forwarded call has a 5 s connect timeout.
+**A listing is never partial.** *(Superseded for `GET /v1/machines` by ADR 0114: strict unless the caller sends `partial=true`; the other listings stay as written.)* A tenant's listing asks its host alone; a host down or not answering fails the listing. Every forwarded call has a 5 s connect timeout.
 
 **The registry is one JSON file** (hosts, tenant → host, machine → host), rewritten on change. Enough for tens of hosts; not for hundreds.
 

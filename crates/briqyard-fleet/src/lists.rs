@@ -2,9 +2,6 @@
 
 use super::*;
 
-/// Lists machines. A listing is the truth for whoever reads it (the control plane marks a
-/// machine missing from it as gone), so it is never partial: a namespace's listing asks the
-/// namespace's host alone, and a host that is down or does not answer fails the whole listing.
 /// The `namespace` of a query.
 pub(super) fn query_namespace(uri: &Uri) -> Option<String> {
     uri.query().and_then(namespace_param)
@@ -20,7 +17,24 @@ pub(super) fn namespace_param(q: &str) -> Option<String> {
         .map(|t| t.to_string())
 }
 
+/// Whether a query opts in to a partial listing, `partial=true` (ADR 0114).
+pub(super) fn partial_param(q: &str) -> bool {
+    q.split('&').any(|kv| kv == "partial=true")
+}
+
+/// The header of a partial listing: the hosts that did not answer, `h_a,h_b`.
+pub(super) const UNANSWERED_HOSTS: &str = "x-briqyard-unanswered-hosts";
+
+/// Lists machines. A listing is the truth for whoever reads it (the control plane marks a
+/// machine missing from it as gone), so by default it is never partial: a namespace's listing
+/// asks the namespace's host alone, and a host that is down or does not answer fails the whole
+/// listing. With `partial=true` a host that is down, does not answer within `LIST_TIMEOUT`,
+/// answers 5xx, 401, 403 or 404 (its own token or setup) or answers unreadably is skipped and
+/// named in `x-briqyard-unanswered-hosts`; any other 4xx is the caller's and fails it
+/// (ADR 0114).
 pub(super) async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
+    let partial = uri.query().is_some_and(partial_param);
+    let mut unanswered: Vec<String> = Vec::new();
     let namespace = query_namespace(&uri);
     let hosts: Vec<HostRec> = {
         let reg = st.reg.lock().unwrap();
@@ -35,7 +49,24 @@ pub(super) async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) ->
         None => "/v1/machines".into(),
     };
     for h in hosts {
-        let resp = forward(&st, &h, Method::GET, &path, &headers, Bytes::new()).await;
+        let asked = forward(&st, &h, Method::GET, &path, &headers, Bytes::new());
+        let resp = if partial {
+            // A host that holds the connection must not hold the listing for the forward
+            // timeout: it is unanswered, like one that is down.
+            match tokio::time::timeout(st.list_timeout, asked).await {
+                Ok(resp) => resp,
+                Err(_) => {
+                    unanswered.push(h.id.clone());
+                    continue;
+                }
+            }
+        } else {
+            asked.await
+        };
+        if partial && host_side_failure(resp.status()) {
+            unanswered.push(h.id.clone());
+            continue;
+        }
         if !resp.status().is_success() {
             return resp;
         }
@@ -51,10 +82,40 @@ pub(super) async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) ->
                     all.push(m);
                 }
             }
+            Err(_) if partial => unanswered.push(h.id.clone()),
             Err(e) => return unreadable(&h, e),
         }
     }
-    Json(all).into_response()
+    let mut out = Json(all).into_response();
+    if !unanswered.is_empty() {
+        // A 200 without the header reads as complete: when the header cannot be built (a
+        // static host id is any string), fail the listing rather than send it without.
+        match HeaderValue::from_str(&unanswered.join(",")) {
+            Ok(v) => {
+                out.headers_mut().insert(UNANSWERED_HOSTS, v);
+            }
+            Err(_) => {
+                return err(
+                    StatusCode::BAD_GATEWAY,
+                    "host_unreachable",
+                    "hosts did not answer and their ids cannot be named in a header",
+                )
+                .into_response();
+            }
+        }
+    }
+    out
+}
+
+/// A status that says the host is unwell or misconfigured, not that the request is wrong:
+/// 5xx, or 401, 403 and 404 (host tokens and routes are per host, so one host may refuse what
+/// the others accept).
+fn host_side_failure(s: StatusCode) -> bool {
+    s.is_server_error()
+        || matches!(
+            s,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+        )
 }
 
 pub(super) fn unreadable(h: &HostRec, e: serde_json::Error) -> Response {

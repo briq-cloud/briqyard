@@ -16,7 +16,7 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0003](0003-tenant-network.md) | Network: a bridge and a /24 per tenant, nftables, the host's DNS, the ingress as the only way in |
 | [0004](0004-guest-init-and-vsock.md) | The guest: a static init, a config drive, vsock for exec and files |
 | [0005](0005-sleep-and-suspend.md) | Sleep: stop on idle, wake on connect, a memory snapshot for a quarter-second resume |
-| [0006](0006-fleet-tenant-per-host.md) | Fleet: a tenant on one host, calls forwarded, listings never partial |
+| [0006](0006-fleet-tenant-per-host.md) | Fleet: a tenant on one host, calls forwarded, listings never partial (machines: optional, 0114) |
 | [0007](0007-hosts-from-providers.md) | Hosts from providers: dry-run provisioners, bootstrap over SSH, OVH Eco first (superseded in part by 0042: the bootstrap stays) |
 | [0008](0008-backups-zfs-send.md) | Backups: ZFS streams to an object store, incremental, restore is a create |
 | [0009](0009-load-controls.md) | Load: boots take turns, a tag's digest is remembered |
@@ -109,3 +109,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0110](0110-select-monitoring-suites-by-diff.md) | `alerts` and `monitoring` run on a PR only when a path they read changed (the monitoring files, the metric definitions, `native.yml`, root `Cargo.toml`/`Cargo.lock`); a dispatch and a release PR run everything; a call-site change that breaks an alert is caught by the next release PR |
 | [0111](0111-helpers-spawn-through-choom.md) | Host helpers (OOM score 0) spawn through `/usr/bin/choom -n 0 --`, so std uses `posix_spawn` instead of a `pre_exec` `fork` (1,224 forks, 1.9 s of 3.3 s in a 30-create burst); machine and gateway keep `pre_exec`; the class is fixed when the command is built; a missing `choom` fails the spawn |
 | [0113](0113-host-plane-over-wireguard.md) | A host with no private network joins the host plane (`10.42.0.0/16`) over WireGuard: `briqyard0`, /32 per peer, own keys, peers by the operator; the port open to the peers' endpoints only, tunnel trusted like the vRack; per-host override `bootstrap.wireguard.hosts`; mixed fleets unchanged |
+| [0114](0114-partial-machine-listing-on-request.md) | A machine listing may be partial when the caller sends `partial=true`: a host down, unreachable or unreadable is skipped and named in `x-briqyard-unanswered-hosts`; absence is unknown, not gone; strict by default (supersedes 0006's "never partial" for machines) |

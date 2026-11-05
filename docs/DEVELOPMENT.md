@@ -493,7 +493,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   runs. `--namespaces 4 --racers 4 --minutes 10`; `--backups` with a store; a fleet with `--url`.
 - `hack/fleet-two-hosts.sh`: a fleet with two hosts: namespaces placed on different hosts, calls
   forwarded to each, a host that stops answering marked down with its namespace's calls refused
-  (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back;
+  (`host_down`) and its listings refused rather than partial unless `partial=true` asks (ADR 0114), while the other host goes on, and the host back;
   with `SECOND_HOST_SH`, its pool locked while it is down and back encrypted and unlocked with
   the fleet's key, the key on none of its files, in its log or in the fleet's host list; and a
   backup there (a directory store for the run when it has none): its key's id, no plaintext in

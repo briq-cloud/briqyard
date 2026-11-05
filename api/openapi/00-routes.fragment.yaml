@@ -30,13 +30,16 @@ paths:
               schema: { $ref: "#/components/schemas/Status" }
   /v1/machines:
     get:
-      summary: "List machines, a namespace's or every one; through the fleet, the namespace's host or every host, never partial (ADR 0006)"
+      summary: "List machines, a namespace's or every one; through the fleet, the namespace's host or every host, never partial (ADR 0006) unless `partial=true` (ADR 0114)"
       parameters:
         - { name: namespace, in: query, schema: { type: string } }
         - { name: label, in: query, style: form, explode: true, schema: { type: array, items: { type: string } }, description: "repeatable, every one ANDed (ADR 0025): `key=value` (the machine's `metadata` has it) or `key` (has the key); a key is an optional DNS prefix and `/`, then at most 63 of a-z, A-Z, 0-9, `-_.`, alphanumeric at both ends; a value empty or the same. `!=`, `!key`, `in` and `notin` are refused" }
+        - { name: partial, in: query, schema: { type: boolean }, description: "through the fleet only (ADR 0114): `true` skips a host that is down, does not answer or answers 5xx or an unreadable body, and names the skipped hosts in the `x-briqyard-unanswered-hosts` response header (`h_a,h_b`, sorted); a namespace on a down host answers `[]` and names it. A listing without the header is complete; a machine missing from one with it is unknown, not gone. Without it the first failure is the answer (503 `host_down`, 502 `host_unreachable`)" }
       responses:
         "200":
           description: machines
+          headers:
+            x-briqyard-unanswered-hosts: { schema: { type: string }, description: "fleet, with `partial=true`: the hosts that did not answer, comma-separated; absent when the listing is complete" }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Machine" } }
