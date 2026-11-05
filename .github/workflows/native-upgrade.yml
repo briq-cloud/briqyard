@@ -1,5 +1,5 @@
 name: native-upgrade
-# The upgrade a production host goes through (ADR 0105): the previous release's own artifacts,
+# The upgrade a production host goes through (ADR 0107): the previous release's own artifacts,
 # a host with state and history, an in-place upgrade to this head through the fleet. Not on
 # every PR: on version PRs (`chore/v*`, or a changed workspace version), on a PR that changes
 # the test itself, on dispatch, and from the release workflow before a draft is created.
@@ -38,7 +38,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   upgrade:
-    # Staging and production hosts run Ubuntu 26.04 (ADR 0105).
+    # Staging and production hosts run Ubuntu 26.04 (ADR 0107).
     runs-on: ${{ inputs.runner || 'ubuntu-26.04' }}
     timeout-minutes: 75
     steps:
@@ -65,7 +65,7 @@ jobs:
             case "$HEAD_REF" in chore/v*) run=true ;; esac
             git fetch --no-tags --depth=1 origin "$BASE_SHA"
             changed=$(git diff --name-only "$BASE_SHA" HEAD)
-            echo "$changed" | grep -qxE '\.github/workflows/native-upgrade\.yml|hack/native-ci-upgrade\.sh|docs/adr/0105-.*' && run=true
+            echo "$changed" | grep -qxE '\.github/workflows/native-upgrade\.yml|hack/native-ci-upgrade\.sh|docs/adr/0107-.*' && run=true
             # The workspace version, as a version PR changes it.
             ver() { python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["workspace"]["package"]["version"])'; }
             [ "$(git show "$BASE_SHA:Cargo.toml" | ver)" != "$(ver < Cargo.toml)" ] && run=true

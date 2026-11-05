@@ -41,7 +41,7 @@ candidate's `SHA256SUMS` line for `briqyard-init-linux-<arch>` shows the digest.
 notes in the changelog entry say whether it changed, and so whether seeds are sealed again.
 The first release with that ADR changes it once.
 
-The tag workflow also runs the upgrade test ([ADR 0105](adr/0105-test-the-upgrade-from-the-previous-release.md)) on the candidate's
+The tag workflow also runs the upgrade test ([ADR 0107](adr/0107-test-the-upgrade-from-the-previous-release.md)) on the candidate's
 own artifacts: the previous published release is installed through its bootstrap, given
 machines, a backup and history, and upgraded in place through the fleet's `host upgrade`.
 The draft release is created only when it passes (`publish` needs `upgrade`), so a failed

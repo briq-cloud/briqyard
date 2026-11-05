@@ -1,4 +1,4 @@
-# ADR 0105: Test the upgrade from the previous release on a host with state and history
+# ADR 0107: Test the upgrade from the previous release on a host with state and history
 
 2026-11-04 · Status: accepted; extends ADR 0027 (upgrades with machines running), ADR 0099 (a leaf goes with its VMM) and ADR 0101 (the init's digest)
 

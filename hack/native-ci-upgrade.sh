@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The upgrade a production host goes through (ADR 0105): install the previous published release's
+# The upgrade a production host goes through (ADR 0107): install the previous published release's
 # own artifacts through its own bootstrap, give the host state and history, upgrade it in place
 # to this head through the fleet's `host upgrade` (ADR 0027), and check what came through.
 #

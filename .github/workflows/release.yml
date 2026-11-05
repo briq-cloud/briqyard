@@ -69,7 +69,7 @@ jobs:
     needs: notes
     uses: ./.github/workflows/nested-kernel.yml
   # The upgrade from the previous release to these candidate artifacts, on a host with state and
-  # history (ADR 0105). A draft release is not created without it.
+  # history (ADR 0107). A draft release is not created without it.
   upgrade:
     needs: build
     uses: ./.github/workflows/native-upgrade.yml
