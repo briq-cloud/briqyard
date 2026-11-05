@@ -146,6 +146,16 @@ pub trait Vmm: Send + Sync {
         Err(anyhow!("checked orphan settlement unsupported"))
     }
 
+    /// Settled startup orphans retain their registered identity until removal succeeds.
+    fn orphan_leaves(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn retire_orphan_leaf(&self, _id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn log_leaf_read_times(&self, _phase: &'static str) {}
+
     /// Distinguishes authoritative no-leaf from unavailable data on an existing leaf.
     fn final_cgroup_use(&self, _id: &str, _jailed: bool) -> Result<FinalCgroupUse> {
         Err(anyhow!("checked final VMM counters unsupported"))
@@ -317,6 +327,7 @@ pub trait Vmm: Send + Sync {
 /// The Firecracker on this host.
 pub struct Firecracker {
     pub(crate) launches: super::settlement::Launches,
+    pub(crate) orphans: std::sync::Mutex<std::collections::HashSet<String>>,
     pub(crate) startup: tokio::sync::Mutex<Option<Startup>>,
     pub binary: PathBuf,
     pub(crate) jailer: PathBuf,
@@ -378,11 +389,17 @@ impl Vmm for Firecracker {
             .await
             .take()
             .context("startup authority unavailable")?;
-        self.launches.initialize(
-            startup
-                .finish(machines, &self.jailer, &self.version)
-                .await?,
-        )
+        let began = std::time::Instant::now();
+        let recovered = startup
+            .finish(machines, &self.jailer, &self.version)
+            .await?;
+        tracing::info!(
+            identities = recovered.entries.len(),
+            elapsed_ms = began.elapsed().as_millis() as u64,
+            "recovery inventory checked"
+        );
+        self.log_leaf_read_times("barrier");
+        self.launches.initialize(recovered)
     }
     fn open_recovery(&self) -> Result<()> {
         self.launches.open()
@@ -399,7 +416,10 @@ impl Vmm for Firecracker {
         }
     }
     async fn prepare_orphans(&self, known: &[String]) -> Result<usize> {
-        let mut removed = 0;
+        let began = std::time::Instant::now();
+        let mut prepared = 0;
+        let known: std::collections::HashSet<_> = known.iter().collect();
+        self.launches.owner_check()?;
         for id in self
             .launches
             .ids()
@@ -407,22 +427,42 @@ impl Vmm for Firecracker {
             .filter(|id| !known.contains(id))
         {
             self.recover_stopped(&id).await?;
-            let usage = self
-                .final_cgroup_use(&id, true)?
-                .reading()
-                .context("orphan leaf disappeared before final counters")?;
-            // Debug: a host can hold thousands of orphans, and one line each would pass
-            // journald's rate limit and drop the lines that matter. The startup line counts them.
-            tracing::debug!(
-                machine = id,
-                cpu_usec = usage.cpu_usec,
-                "orphan final VMM counters"
-            );
-            self.retire_cgroup(&id, true)?;
-            self.forget_machine(&id);
-            removed += 1;
+            // Death proof is safety; orphan counters have no surviving usage identity.
+            // Read them in the collector, before removal, rather than before listening.
+            self.orphans.lock().unwrap().insert(id);
+            prepared += 1;
         }
-        Ok(removed)
+        self.launches.owner_check()?;
+        tracing::info!(
+            prepared,
+            elapsed_ms = began.elapsed().as_millis() as u64,
+            "orphan leaves queued for retirement"
+        );
+        self.log_leaf_read_times("orphan settlement");
+        Ok(0)
+    }
+
+    fn log_leaf_read_times(&self, phase: &'static str) {
+        #[cfg(any(target_os = "linux", test))]
+        super::retirement::log_read_times(phase);
+        #[cfg(not(any(target_os = "linux", test)))]
+        let _ = phase;
+    }
+
+    fn orphan_leaves(&self) -> Vec<String> {
+        self.orphans.lock().unwrap().iter().cloned().collect()
+    }
+
+    fn retire_orphan_leaf(&self, id: &str) -> Result<bool> {
+        // The registration remains reserved through removal. New machines cannot reuse it.
+        if !self.orphans.lock().unwrap().contains(id) {
+            return Ok(false);
+        }
+        self.final_cgroup_use(id, true)?;
+        self.retire_cgroup(id, true)?;
+        self.orphans.lock().unwrap().remove(id);
+        self.forget_machine(id);
+        Ok(true)
     }
 
     fn final_cgroup_use(&self, id: &str, jailed: bool) -> Result<FinalCgroupUse> {

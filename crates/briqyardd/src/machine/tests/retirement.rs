@@ -162,13 +162,20 @@ async fn ordinary_recovered_stopped_destroy_and_empty_orphan_retirement_succeed(
     assert_eq!(e.snapshot().state, state::STOPPED);
     assert!(!h.host.spawning_open.load(Relaxed));
     h.m.sweep_orphans().await.unwrap();
-    assert!(!h
+    assert!(h
         .host
         .cgroups
         .lock()
         .unwrap()
         .contains_key("m_empty_orphan"));
     h.host.open_recovery().unwrap();
+    h.m.sweep_leaves().await;
+    assert!(!h
+        .host
+        .cgroups
+        .lock()
+        .unwrap()
+        .contains_key("m_empty_orphan"));
     h.m.resume_recovery_workers().await;
     h.m.destroy("m_recovered", None).await.unwrap();
     assert!(h.stored("m_recovered").is_none());
@@ -176,7 +183,7 @@ async fn ordinary_recovered_stopped_destroy_and_empty_orphan_retirement_succeed(
     let calls = h.host.calls();
     let position = |name: &str| calls.iter().position(|call| call == name).unwrap();
     assert!(position("recovery-initialized") < position("recover-stopped m_recovered"));
-    assert!(position("retire-cgroup m_empty_orphan") < position("recovery-open"));
+    assert!(position("recovery-open") < position("retire-cgroup m_empty_orphan"));
     assert_eq!(e.meter.lock().unwrap().counted().cpu_seconds, 42.0 / 1e6);
 }
 

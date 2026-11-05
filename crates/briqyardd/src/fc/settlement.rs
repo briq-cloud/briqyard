@@ -17,7 +17,7 @@ pub(crate) struct Launches {
     #[cfg(target_os = "linux")]
     domain: Mutex<Option<Arc<super::recovery::lock::DomainLock>>>,
     #[cfg(target_os = "linux")]
-    jailer: Mutex<Option<super::recovery::provenance::Jailer>>,
+    jailer: Mutex<Option<Arc<super::recovery::provenance::Jailer>>>,
     #[cfg(target_os = "linux")]
     namespace: Mutex<Option<Arc<super::recovery::namespace::Namespace>>>,
 }
@@ -70,7 +70,7 @@ impl Launches {
         #[cfg(target_os = "linux")]
         {
             *self.domain.lock().unwrap() = Some(recovered.lock);
-            *self.jailer.lock().unwrap() = Some(recovered.jailer);
+            *self.jailer.lock().unwrap() = Some(Arc::new(recovered.jailer));
             *self.namespace.lock().unwrap() = Some(recovered.namespace);
         }
         self.initialized.store(true, Ordering::SeqCst);
@@ -151,12 +151,18 @@ impl Launches {
         if self.open.load(Ordering::SeqCst) {
             return Err(anyhow!("recovery settlement is startup-only"));
         }
-        self.owner_check()?;
         let (live, pid) = {
             let entries = self.entries.lock().unwrap();
             let entry = entries.get(id).context("recovery epoch unavailable")?;
             (entry.live.clone(), entry.pid)
         };
+        // Empty epochs were positively checked by the complete recovery barrier. They
+        // cannot launch while recovery is closed, and remain registered until retirement.
+        // Do not rehash the jailer twice per empty epoch before listening.
+        if live.is_none() && pid.is_none() {
+            return self.check_epoch(id);
+        }
+        self.owner_check()?;
         if let (Some(live), Some(pid)) = (live, pid) {
             let evidence = super::memory::OomEvidence::capture(id, pid);
             match live.signal_kill() {
@@ -195,7 +201,7 @@ impl Launches {
         }
         self.check(id)
     }
-    fn owner_check(&self) -> Result<()> {
+    pub(super) fn owner_check(&self) -> Result<()> {
         #[cfg(target_os = "linux")]
         {
             if let Some(domain) = self.domain.lock().unwrap().as_ref() {
@@ -204,7 +210,10 @@ impl Launches {
             if let Some(namespace) = self.namespace.lock().unwrap().as_ref() {
                 namespace.check()?;
             }
-            if let Some(jailer) = self.jailer.lock().unwrap().as_ref() {
+            // Hashing uses positional reads. Hold the lease, not the registry mutex,
+            // through the full digest check so independent retirements can overlap.
+            let jailer = self.jailer.lock().unwrap().clone();
+            if let Some(jailer) = jailer {
                 jailer.check()?;
             }
         }
@@ -265,6 +274,10 @@ impl Launches {
 
     pub(super) fn check(&self, id: &str) -> Result<()> {
         self.owner_check()?;
+        self.check_epoch(id)
+    }
+
+    fn check_epoch(&self, id: &str) -> Result<()> {
         if self
             .entries
             .lock()
@@ -350,6 +363,35 @@ impl Drop for Attempt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_recovered_epochs_do_not_recheck_the_launch_executable() {
+        let launches = Arc::new(Launches::default());
+        launches
+            .entries
+            .lock()
+            .unwrap()
+            .insert("m_idle".into(), Epoch::empty());
+        // A digest check takes this mutex. Empty epochs already have the barrier's
+        // death proof, so settlement must not wait for launch executable validation.
+        let guard = launches.jailer.lock().unwrap();
+        let (send, recv) = std::sync::mpsc::channel();
+        let worker = launches.clone();
+        let thread = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(worker.settle_recovered("m_idle"));
+            send.send(result.is_ok()).unwrap();
+        });
+        let result = recv.recv_timeout(Duration::from_secs(2));
+        drop(guard);
+        thread.join().unwrap();
+        assert!(result.unwrap());
+        // Neither a missing epoch nor a new launch receives authority from this path.
+        assert!(launches.check_epoch("m_missing").is_err());
+        assert!(launches.new_machine("m_idle").is_err());
+        launches.open.store(true, Ordering::SeqCst);
+        assert!(launches.new_machine("m_idle").is_err());
+    }
     #[test]
     fn production_factory_is_closed_until_a_recovery_authority_is_installed() {
         let launches = Launches::default();
@@ -357,6 +399,19 @@ mod tests {
         assert!(launches.begin("m_owned").is_err());
         assert!(launches.open().is_err());
         assert!(launches.check("m_owned").is_err());
+    }
+    #[test]
+    fn a_settled_orphan_reserves_its_name_until_retirement_finishes() {
+        let launches = Launches::testing();
+        launches.new_machine("m_orphan").unwrap();
+        launches.check("m_orphan").unwrap();
+        // Empty/dead is not permission for a new record to claim a queued orphan.
+        assert!(launches.new_machine("m_orphan").is_err());
+        launches.forget("m_orphan");
+        launches.new_machine("m_orphan").unwrap();
+        let attempt = launches.begin("m_orphan").unwrap();
+        assert!(launches.check("m_orphan").is_err());
+        drop(attempt);
     }
     #[test]
     fn unresolved_launches_survive_drop_and_cannot_be_replaced() {

@@ -10,6 +10,7 @@ fn owned(dir: &Path, api: &Path) -> (Firecracker, Vm, watch::Sender<bool>) {
     (
         Firecracker {
             launches: Default::default(),
+            orphans: Default::default(),
             startup: Default::default(),
             binary: PathBuf::new(),
             jailer: PathBuf::new(),

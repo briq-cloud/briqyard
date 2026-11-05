@@ -203,6 +203,7 @@ impl Barrier {
         }
         // An idle leaf is remembered by inode alone: a long-lived host can hold thousands of
         // leaves left by machines that are gone, and a held leaf costs a dozen descriptors.
+        let inventory = std::time::Instant::now();
         let mut observed = Vec::new();
         for id in ids {
             let leaf = super::super::retirement::Leaf::capture(&id)
@@ -236,6 +237,13 @@ impl Barrier {
             };
             observed.push((id, held, members, live));
         }
+        tracing::info!(
+            phase = "leaf inventory",
+            leaves = observed.len(),
+            elapsed_ms = inventory.elapsed().as_millis() as u64,
+            "startup phase"
+        );
+        let recheck = std::time::Instant::now();
         // The last helper is fully reaped by query(). No subsequent helper or process
         // creator runs between this unit recheck and the service/leaf kernel checks.
         let (text, hooks) = unit::query()
@@ -350,6 +358,12 @@ impl Barrier {
                 live,
             });
         }
+        tracing::info!(
+            phase = "inventory recheck",
+            leaves = entries.len(),
+            elapsed_ms = recheck.elapsed().as_millis() as u64,
+            "startup phase"
+        );
         Ok(Recovered {
             lock: self.lock,
             jailer,

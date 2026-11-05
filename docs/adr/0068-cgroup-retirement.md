@@ -118,9 +118,9 @@ recheck them at retirement and known-launch settlement, not only at startup.
 
 Only this barrier constructs the non-deserializable recovered authority. Empty known records
 receive a settled epoch and can be destroyed normally. Live known candidates can be adopted
-through their retained identity or positively terminated before being marked stopped. Empty
-orphan leaves are retired, with final counters, under the still-closed startup gate before
-artifact teardown. An adopted VM's native pidfd monitor can run, but defer its manager exit
+through their retained identity or positively terminated before being marked stopped. Orphan processes are settled under the still-closed startup gate before artifact teardown.
+ADR 0106 defers orphan final counters and empty leaf deletion until after listening; their
+registered identities remain reserved until removal succeeds. An adopted VM's native pidfd monitor can run, but defer its manager exit
 watcher, probes and restart dispatch until the managed-spawn gate opens. An exit reported
 during recovery is then consumed without losing its restart intent. Then dispatch
 create/gateway/background work.

@@ -176,6 +176,28 @@ impl Leaf {
     }
 
     fn read(&self, name: &CStr) -> io::Result<String> {
+        let began = std::time::Instant::now();
+        let result = self.read_control(name);
+        if let Some(index) = [
+            c"cgroup.procs",
+            c"cgroup.events",
+            c"cpu.stat",
+            c"memory.current",
+            c"memory.events.local",
+        ]
+        .iter()
+        .position(|candidate| *candidate == name)
+        {
+            READ_US[index].fetch_add(
+                began.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            READ_COUNT[index].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn read_control(&self, name: &CStr) -> io::Result<String> {
         // SAFETY: static control filename, held directory, no symlink following.
         let fd = unsafe {
             libc::openat(
@@ -393,6 +415,33 @@ impl Leaf {
         }
         Ok(())
     }
+}
+
+// Cumulative timings: bounded output once per startup phase or collector pass, never per leaf.
+static READ_US: [std::sync::atomic::AtomicU64; 5] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+static READ_COUNT: [std::sync::atomic::AtomicU64; 5] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+pub(super) fn log_read_times(phase: &'static str) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let us = READ_US.each_ref().map(|v| v.load(Relaxed));
+    let reads = READ_COUNT.each_ref().map(|v| v.load(Relaxed));
+    #[cfg(not(target_os = "linux"))]
+    let (jailer_check_us, jailer_checks) = (0u64, 0u64);
+    #[cfg(target_os = "linux")]
+    let (jailer_check_us, jailer_checks) = super::recovery::provenance::check_times();
+    tracing::info!(
+        phase,
+        jailer_check_us,
+        jailer_checks,
+        procs_us = us[0],
+        events_us = us[1],
+        cpu_stat_us = us[2],
+        memory_current_us = us[3],
+        memory_events_us = us[4],
+        ?reads,
+        "cgroup control read timings"
+    );
 }
 
 #[cfg(test)]
