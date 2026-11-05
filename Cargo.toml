@@ -88,3 +88,8 @@ lto = "thin"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Size optimization stops the SHA-256 intrinsics from inlining: about 3x slower per hash, and
+# the daemon hashes its helper binaries on hot paths.
+[profile.release.package.sha2]
+opt-level = 3
