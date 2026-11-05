@@ -7,18 +7,24 @@ runs its test binary as root (`--ignored run_as`, `.github/workflows/ci.yml`); i
 same step.
 
 Native PR evidence comes from the `native` GitHub Actions workflow on `ubuntu-24.04`
-with KVM and a disposable encrypted ZFS pool. Relevant PRs test their exact head;
-manual dispatch accepts a ref. The job summaries contain e2e, fleet-smoke, stress, monitoring, two-hosts and restore counts
+with KVM and a disposable encrypted ZFS pool. Relevant PRs test their exact head, except a draft (marking it ready starts the run);
+manual dispatch accepts a ref. Main's `native-cache` job in `ci.yml` writes the build cache these jobs read ([ADR 0108](adr/0108-ci-builds-once-per-cache.md)). The job summaries contain e2e, fleet-smoke, scale, stress, monitoring, two-hosts and restore counts
 and durations; the `native-*-log` artifacts contain their complete output. These checks are
-not required checks yet. Stress, monitoring, alerts and qualification run on separate runners in parallel. The qualification suite (`hack/qualify.sh`, [ADR 0095](adr/0095-qualification-batch.md)) kills the daemon, the fleet and the VMMs mid-operation, checks isolation and OOM containment against real attempts, and fills the pool. The alerts suite drives the production Grafana rules to firing and resolved against a local webhook, and the monitoring suite does so for Not answering ([ADR 0094](adr/0094-alerts-fire-and-resolve-in-ci.md)). Monitoring covers a
+not required checks yet. Stress, monitoring, alerts, qualification, restore and scale run on separate runners in parallel. On a PR, `monitoring` and `alerts` run only when a path they read changed (`hack/native-suites.py` holds the list; a release PR and a dispatch run them, [ADR 0110](adr/0110-select-monitoring-suites-by-diff.md)). The qualification suite (`hack/qualify.sh`, [ADR 0095](adr/0095-qualification-batch.md)) kills the daemon, the fleet and the VMMs mid-operation, checks isolation and OOM containment against real attempts, and fills the pool. The alerts suite drives the production Grafana rules to firing and resolved against a local webhook, and the monitoring suite does so for Not answering ([ADR 0094](adr/0094-alerts-fire-and-resolve-in-ci.md)). Monitoring covers a
 ready daemon and an explicitly unreachable registered host (18 checks). The two-host job boots
 an independent Ubuntu 24.04 QEMU/KVM host (2 vCPUs, 6 GiB), provisions it through the shared
 bootstrap and development installer, and runs all 29 two-host and 10 restore checks.
+The parallel restore suite emits JSONL results for files, bytecode, both disks,
+Postgres, backup chains and interruption. After the existing two-host suites, the
+off-host qualification uses a fleet-held source key, destroys its source machine,
+stops that daemon and restores the workload on the second host (ADR 0103).
+Both restore runs use three independent Postgres rounds. Their final gates require
+interruption and off-host results respectively; a skipped required check fails.
 `native-two-host-logs` retains both suites, host journals and boot measurements. Manual
 dispatch can select `two_hosts_only` for targeted validation
 ([ADR 0089](adr/0089-native-suites-in-ci.md)).
 
-After the fleet smoke, the `suites` job runs `hack/native-ci-scale.sh` (9 checks, [ADR 0099](adr/0099-leaf-goes-with-its-vmm.md)): 6500 idle machine cgroups with no record and 60 of stopped machines, a daemon restart; the daemon must open its barrier, report memory protection healthy, accept a create and retire the leaves within 480 s. It runs from the workflow revision, so a manual dispatch with an older `ref` runs it against that source.
+The `scale` job of the `more-suites` matrix runs `hack/native-ci-scale.sh` on its own runner (9 checks, [ADR 0099](adr/0099-leaf-goes-with-its-vmm.md), [ADR 0109](adr/0109-scale-on-its-own-runner.md)): 6500 idle machine cgroups with no record and 60 of stopped machines, a daemon restart; the daemon must open its barrier, report memory protection healthy, accept a create and retire the leaves in background after serving within 480 s. It runs from the workflow revision, so a manual dispatch with an older `ref` runs it against that source.
 
 ## On a Linux host with KVM
 
@@ -54,7 +60,7 @@ port forwards, so it sees Lima's forwarder, not fc2): a host's calls are checked
 alone there, not by their address (ADR 0026); the address check is in the unit tests. The dev VMs are aarch64, where OpenZFS's AES-GCM has no
 accelerated code: their disks are about 3.5 times slower encrypted (ADR 0026).
 
-Then `sudo briqyardd --config hack/config.dev.yaml`, and `briqyard status`.
+Then install the build with `hack/install-dev.sh` (as `hack/vm.sh install` does) and start `briqyardd.service`, and `briqyard status`. The daemon does not start by hand (`sudo briqyardd --config …` stops with the name of the check that failed): its startup barrier (ADR 0068) accepts only the process of the official unit, the `Id`, `ControlGroup`, `FragmentPath`, `MainPID` and command line that systemd reports for `briqyardd.service`, because a host's recovery after a crash must know that nothing else of the daemon's cgroup can still be running.
 
 ## On a Mac
 
@@ -222,8 +228,40 @@ plus `apt-get purge docker.io` and the edge's files.
 
 ## In a briq kvm sandbox
 
-TODO: filled after the acceptance run (ADR 0088): `cargo test --workspace`, `hack/e2e.sh` and
-`hack/fleet-smoke.sh` inside a `nested` machine on an x86_64 host that serves the class.
+The suites run in a `kvm-sandbox` briq (`xlarge`: 8 vCPUs, 16 GB, 40 GB at `/work`) on an x86_64 host that serves the `nested` class (ADR 0088). No Lima, no Mac. In the sandbox, as root:
+
+```bash
+cd /work
+git clone --depth 1 https://github.com/briq-cloud/briqyard src
+cp src/hack/native-ci-nested-inner.sh inner.sh
+B=https://github.com/briq-cloud/briqyard/releases/download/v0.1.21
+curl -fsSL "$B/SHA256SUMS-x86_64" -o sums
+curl -fsSL "$B/firecracker-checked-linux-x86_64.tar.gz" -o fc-bundle.tgz
+D=$(awk '$2 == "firecracker-checked-linux-x86_64.tar.gz" {print $1}' sums)
+echo "$D  fc-bundle.tgz" | sha256sum -c -
+echo "BUNDLE_SHA256=$D" > inner.env
+```
+
+Then one stage at a time, detached, so that a command's own limit does not end it. Each leaves `/work/logs/STAGE.log` and `/work/logs/STAGE.rc`:
+
+```bash
+setsid bash /work/inner.sh run build > /dev/null 2>&1 < /dev/null &
+```
+
+| Stage | What it does | Result, 2026-11-05, source `1d3e76c7`, AMD EPYC, one level of nesting, to within 15 s |
+|---|---|---|
+| `build` | release workspace and the musl init | 95 s, from nothing |
+| `systemd` | systemd as PID 1 of namespaces of its own, for the units and the startup barrier (ADR 0068) | 15 s |
+| `host` | `hack/bootstrap-host.sh`, `hack/install-dev.sh`, `briqyardd` under its unit | 15 s |
+| `fleet` | `hack/fleet-smoke.sh` | 33 passed, 61 s |
+| `cargotest` | `cargo test --workspace` and the init's root tests | 1434 passed, 197 s |
+| `e2e` | `hack/e2e.sh` | 294 passed, 561 s |
+
+`hack/native-ci-more.sh stress` passed 635 of 635 checks with no invariant break in 501 s, `alerts` 45 checks in 880 s and `qualification` 134 in 611 s; `monitoring` passed its 18 and 9 checks in 455 s at 4 vCPUs on 2026-11-04. Run them inside the namespaces with `nsenter -t "$(cat /work/logs/systemd.pid)" -a`, with `capacity` raised to `memory_mb: 12288, vcpus: 24` as in `hack/native-ci.sh`, `RUNNER_ENVIRONMENT=github-hosted` for the script's guard, and each on a fresh host: `monitoring` leaves a second host in `fleet.yaml`. `fleet-two-hosts` and `fleet-restore` need a second host: they stay on `fc` and `fc2` and on the hosted two-hosts job.
+
+- **Not on a hosted runner:** the `native nested` workflow adds a level of virtualization. There a guest took 17 s to start and `e2e` stopped after an hour at 262 ok, 4 failed. It rehearses the install path, by hand; it is not the acceptance.
+- **A guest boots cold every time:** a machine of the class has no memory snapshot, so the sandbox's own sleep ends its daemons and guests.
+- **`/` is shared in the namespaces:** systemd leaves it private in a container. A sandboxed unit (the mirror) would then keep a copy of a machine's mount, and its destroy answers `dataset is busy`.
 
 ## Tests
 

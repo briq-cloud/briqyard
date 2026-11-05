@@ -3,7 +3,8 @@
 set -euo pipefail
 [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || { echo 'requires a disposable GitHub-hosted runner' >&2; exit 2; }
 # The real install's alerting path: alerting.env sets SLACK_WEBHOOK_URL to the check's loopback
-# receiver (hack/monitoring-alerts-check.py, port 18199). Grafana's Slack contact point posts there.
+# receiver (hack/monitoring-alerts-check.py, port 18199; http, so the installs get
+# ALLOW_INSECURE_WEBHOOK=1). Grafana's Slack contact point posts there.
 alerting_env() {
   sudo install -d -m 0755 /etc/briqyard-monitoring
   sudo sh -c 'umask 077; echo SLACK_WEBHOOK_URL=http://127.0.0.1:18199/ > /etc/briqyard-monitoring/alerting.env'
@@ -41,7 +42,7 @@ PY
   fi
   # Ephemeral credential stays outside artifacts and command arguments.
   sudo sh -c 'umask 077; openssl rand -hex 24 > /etc/briqyard-monitoring-password'
-  sudo env GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password LARGEST_SLOT_MB=8192 bash hack/install-monitoring.sh
+  sudo env GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password LARGEST_SLOT_MB=8192 ALLOW_INSECURE_WEBHOOK=1 bash hack/install-monitoring.sh
 }
 
 case "${1:-}" in
@@ -99,7 +100,7 @@ PY
     # The install again with alerting on, as an operator does after writing alerting.env; then the
     # daemon stopped and started: Not answering fires and resolves (ADR 0094).
     alerting_env
-    sudo env GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password LARGEST_SLOT_MB=8192 bash hack/install-monitoring.sh
+    sudo env GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password LARGEST_SLOT_MB=8192 ALLOW_INSECURE_WEBHOOK=1 bash hack/install-monitoring.sh
     GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password python3 -u hack/monitoring-alerts-check.py host-down
     ;;
   alerts)
@@ -112,6 +113,15 @@ PY
     trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
     GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password python3 -u hack/monitoring-alerts-check.py rules
     ;;
+  restore)
+    python3 -m unittest discover -s hack -p test_restore_qualify.py
+    set +e
+    sudo -E python3 -u hack/restore-qualify.py --allow-daemon-kill --require failure --rounds 3 --output native-logs/restore
+    rc=$?
+    set -e
+    sudo chown -R "$(id -u):$(id -g)" native-logs/restore
+    exit "$rc"
+    ;;
   qualification)
     # Chaos, isolation and OOM on the isolated host (ADR 0095). The suite kills the daemon,
     # the fleet and every VMM and fills the pool: only on this disposable runner.
@@ -122,5 +132,10 @@ PY
     set -e
     exit "$rc"
     ;;
-  *) echo 'expected stress, monitoring, alerts or qualification' >&2; exit 2 ;;
+  scale)
+    # Thousands of idle machine cgroups, a daemon restart: the case of an in-place upgrade
+    # (ADR 0099). Its own runner (ADR 0109); the script is beside this one, from the harness.
+    exec bash "$(dirname "${BASH_SOURCE[0]}")/native-ci-scale.sh"
+    ;;
+  *) echo 'expected stress, monitoring, alerts, qualification, restore or scale' >&2; exit 2 ;;
 esac

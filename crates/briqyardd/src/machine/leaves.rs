@@ -1,6 +1,7 @@
 //! A VMM's cgroup leaf goes once its VMM is gone (ADR 0099), not when the machine does.
 
 use super::*;
+use futures::{stream, StreamExt};
 
 /// Leaves one periodic pass retires at most; the rest wait for the next pass.
 const RETIRES_PER_PASS: usize = 128;
@@ -23,6 +24,15 @@ fn idle(r: &Record, has_vm: bool) -> bool {
 }
 
 impl Manager {
+    /// Start only after API and ingress listeners have been installed. One bounded pass per
+    /// second, with no overlapping passes or catch-up bursts after a slow kernel operation.
+    pub async fn collect_leaves(self) {
+        loop {
+            self.sweep_leaves().await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
     /// Removes the machine's leaf when it has no VMM: under its lock, taken without waiting
     /// (a start, a stop or a destroy under way owns the leaf, and the pass finds it later).
     /// The VMM's death and its OOM evidence were settled before this can succeed
@@ -68,7 +78,7 @@ impl Manager {
         }
     }
 
-    /// Every pass (the tick): reads the VMM parent once, retires up to `RETIRES_PER_PASS`
+    /// Every pass: reads the VMM parent once, retires up to `RETIRES_PER_PASS`
     /// leaves of machines without a VMM, and publishes how many leaves there are and how many
     /// of them nothing explains. The cost follows the leaves present, never the history, and
     /// a leak shows in `briqyard_cgroup_leaves_idle` before it can stall a start.
@@ -101,17 +111,53 @@ impl Manager {
         // What failed last pass goes last: a leaf that is refused every time (a mode or an owner
         // the checks reject, a parent without `+memory`) must not hold back the ones behind it.
         let failing = self.inner.stats.leaves_failing.lock().unwrap().clone();
-        idle_entries.sort_by_key(|e| failing.contains(&e.snapshot().id));
+        let orphans: std::collections::HashSet<_> =
+            self.inner.vmm.orphan_leaves().into_iter().collect();
+        let mut candidates: Vec<_> = idle_entries
+            .iter()
+            .map(|e| (e.snapshot().id, Some(e.clone())))
+            .collect();
+        candidates.extend(
+            names
+                .iter()
+                .filter(|id| orphans.contains(*id))
+                .map(|id| (id.clone(), None)),
+        );
+        candidates.sort_by_key(|(id, _)| failing.contains(id));
+        let looked: std::collections::HashSet<_> = candidates
+            .iter()
+            .take(RETIRES_PER_PASS)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let results = stream::iter(candidates.into_iter().take(RETIRES_PER_PASS).map(
+            |(id, entry)| async move {
+                let result = match entry {
+                    Some(e) => self.retire_idle_leaf(&e).await,
+                    None => {
+                        let vmm = self.inner.vmm.clone();
+                        let orphan = id.clone();
+                        match tokio::task::spawn_blocking(move || vmm.retire_orphan_leaf(&orphan))
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(err) => Err(err.into()),
+                        }
+                    }
+                };
+                (id, result)
+            },
+        ))
+        .buffer_unordered(16)
+        .collect::<Vec<_>>()
+        .await;
         let (mut retired, mut failed) = (0, 0);
         let mut still_failing = std::collections::HashSet::new();
-        for e in idle_entries.iter().take(RETIRES_PER_PASS) {
-            let id = e.snapshot().id;
-            match self.retire_idle_leaf(e).await {
+        for (id, result) in results {
+            match result {
                 Ok(true) => retired += 1,
                 Ok(false) => {}
                 Err(err) => {
                     failed += 1;
-                    // Said once, when it starts to fail; the counter counts every pass.
                     if failing.contains(&id) {
                         tracing::debug!(machine = id, err = %format!("{err:#}"), "idle cgroup leaf not removed");
                     } else {
@@ -121,12 +167,6 @@ impl Manager {
                 }
             }
         }
-        // Only the ones this pass looked at are forgotten or kept; the rest keep their mark.
-        let looked: std::collections::HashSet<String> = idle_entries
-            .iter()
-            .take(RETIRES_PER_PASS)
-            .map(|e| e.snapshot().id)
-            .collect();
         *self.inner.stats.leaves_failing.lock().unwrap() = failing
             .into_iter()
             .filter(|id| !looked.contains(id))
@@ -135,12 +175,13 @@ impl Manager {
         let stats = &self.inner.stats;
         stats.leaves_retired.fetch_add(retired, Relaxed);
         stats.leaves_retire_failed.fetch_add(failed, Relaxed);
-        let idle_left = idle_entries.len() as u64 - retired + unowned;
+        let idle_left = idle_entries.len() as u64 + unowned - retired;
         *stats.leaves.lock().unwrap() = Some(Leaves {
             total: names.len() - retired as usize,
             idle: idle_left as usize,
         });
         if retired > 0 || failed > 0 {
+            self.inner.vmm.log_leaf_read_times("collector");
             tracing::info!(
                 retired,
                 failed,

@@ -774,6 +774,7 @@ async fn snapshot_keeps_its_durability_choice_and_resumes_after_failure() {
             }
             let vmm = Firecracker {
                 launches: Default::default(),
+                orphans: Default::default(),
                 startup: Default::default(),
                 binary: PathBuf::new(),
                 jailer: PathBuf::new(),

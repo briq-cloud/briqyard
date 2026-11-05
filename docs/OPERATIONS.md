@@ -549,6 +549,64 @@ In the store, per machine: `backups/<machine>/<id>.json` (the record) and
 `backups/<machine>/<disk>/<id>.zfs` (a stream, `root` or `data`). Ids are times to the
 millisecond, `20261021T101500.123Z`. A deletion removes the streams first, then the record.
 
+### Qualify workload restores
+
+Run from a checkout matching the installed runtime. Requires Python 3, a reachable
+API, permission to create and destroy machines, a configured backup store and the
+host's registry mirror. It uses stock digest-pinned Postgres and Python images,
+512 MiB guests, 1 GiB data volumes and the host's normal root disk size. Up to three
+guests coexist. It writes only into fresh `restore-q-…` namespaces. It deletes its
+machines and backup chains on success, failure and handled signals. An unreachable
+API can prevent cleanup: use the namespace and machine ids in `results.jsonl` to
+finish it; never delete another run's namespace. Do not kill the harness with SIGKILL.
+
+```bash
+BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN="$BRIQYARD_TOKEN" \
+  python3 hack/restore-qualify.py --rounds 3 --output restore-evidence
+```
+
+Use `--cafile /path/to/ca.pem` for a private CA. Tokens can stay in the environment;
+never put one into a report. The output directory must not already exist. Keep its
+`ledger.jsonl`, `results.jsonl`, file manifest and guest logs together. Exit 0 requires
+all selected checks and cleanup. A fallback to `unsynced`, missing pre-request data,
+a hole, a failed integrity check or an inconclusive loss control fails the run.
+Files, synced copies, three ordered two-disk samples, the unsynced fork control,
+Python startup, Postgres and the chain are always required. `--require` adds named
+checks; a skip never satisfies one. `--rounds` defaults to one; three gives
+independent Postgres ledgers and chains, with per-round settings, payload and
+amcheck evidence. Each backup is one sampled snapshot instant.
+Read `lost_ack_ids`, `loss_window_seconds` and `backup_start_to_last_ack_seconds`
+together: the window is the span of missing acknowledgements, not a promised RPO.
+
+For two hosts, use a fleet with distinct existing regions and a shared backup store:
+
+```bash
+BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN="$BRIQYARD_TOKEN" \
+  python3 hack/restore-qualify.py --source-region source --destination-region target \
+  --require offhost --rounds 3 --output restore-offhost-evidence
+```
+
+The source must use a fleet-held pool key (`storage.key: fleet`). The harness
+destroys its source machine after backup, then requires the restored ledger on a
+different host in a new namespace. Choose regions that identify the intended
+hosts; the harness does not change placement or host settings. Omit
+`--store-transfer`: that option belongs to the disposable CI directory-store fixture.
+Run without `--allow-daemon-kill` on shared hosts. The kill check is disabled by
+default and additionally requires the disposable native CI environment; it kills
+only the daemon and this run's exact ZFS sender, never a name pattern. The CI-only
+`--source-offline-hook` additionally stops the source daemon for off-host restore
+and restarts it for cleanup. Omit that option on shared hosts.
+Native CI requires `failure` in its single-host run and `offhost` in two-hosts.
+Interruption output distinguishes removed published streams from temporary uploads
+and local snapshots allowed to remain by ADR 0100, and verifies a new backup after
+recovery. The CI source outage stops only the daemon, leaving its pool up. The
+destination shares a registry mirror, so this does not prove an absent image cache.
+
+Collect real allocated disk sizes, object-store latency, restore-to-first-query times
+and seconds per stream GiB on the real hardware. CI uses small workloads and a
+QEMU second host; it provides no real-host performance or capacity qualification.
+There are no performance pass thresholds. See ADR 0103 for the consistency promise.
+
 The state itself (`state/`) is small and lives only on the host; a lost host loses the records
 of machines that were never backed up, and their disks. A machine's own `POST
 /v1/machines/{id}/snapshots` is a local snapshot of its disks: instant, copy-on-write, not a
@@ -709,7 +767,7 @@ registry backups, operator archives and local backing/reference scopes are exclu
 | `host …: … is not the pinned …` (fleet, 502 `host_unreachable`) | The host presents another certificate than its record's `tls_fingerprint`: reinstalled (pin the new one), or not the host |
 | `write registry …` (fleet, 500 `registry`) | The fleet's `state_dir` is full or not writable; nothing is recorded until it is |
 | `provisioner.bootstrap is read as bootstrap:` (fleet, `warn` at start), a `provisioner.…` error (the fleet does not start) | A v0.1.1 configuration: move `provisioner.bootstrap` to a top-level `bootstrap:` and delete `provisioner:` with all else under it (ADR 0042). A `dry-run` host left by an older fleet: `briqyard host rm <id>` |
-| `registry backup` (fleet, `error`), 503 `backup` on `/v1/hosts/key` | The registry could not be written to `backup.store`: credentials, endpoint, the bucket. Hosts whose key the store holds are served; new keys wait for the store |
+| `registry backup` (fleet, `error`), 503 `backup` on `/v1/hosts/key` | The registry could not be written to `backup.store`: credentials, endpoint, the bucket. A `400 BadRequest` on `fleet/registry.json.age` of a versioned bucket is its object at the store's limit of versions (1,000 on some): remove the old versions, and give `fleet/` a lifecycle rule that expires non-current ones (the runbook). Hosts whose key the store holds are served; new keys wait for the store |
 | `read the registry …` (the fleet does not start) | `registry.json` does not parse: restore the file (fields a fleet does not know are kept, not refused). Never remove it: every host's pool key is in it (ADR 0026) |
 | `bootstrap attempt N: … host key …` in a host's note | The server's SSH key is not the one pinned in `<state_dir>/known_hosts`: reinstalled, remove its line; not reinstalled, do not connect |
 | `bootstrap attempt N: … is in use (mounted at …)`, `… holds ext4` | `pool_device` names something in use: the OS's disks are named whole (their free space is taken), never the OS's partitions; a disk meant for the pool is wiped by you (`wipefs -a`) |
@@ -756,6 +814,7 @@ unknown comparison. Existing files or objects imply no startup ACK. Failed or ca
 callers can still have a worker commit a later ACK; their counters remain unchanged. Wall
 clock receipt time can regress. Independent counter reads do not form an atomic snapshot.
 
+Heartbeat telemetry alone is published at most hourly, so a mismatch can last that long.
 Match requires both cached digests and a valid durable observation. Save failure or panic
 invalidates comparison, including directory-sync failure after rename. An unchanged save
 cannot restore validity; a later changed successful save can. Busy or unavailable caches give
@@ -835,6 +894,9 @@ install -m 0600 /dev/null /etc/briqyard-monitoring/alerting.env && nano /etc/bri
 GRAFANA_URL=https://grafana.example.com bash /root/briqyard/hack/install-monitoring.sh
 ```
 
+To change the webhook, edit `SLACK_WEBHOOK_URL` (an `https://` URL; the install refuses anything else) and run the script again: it restarts Grafana when the value changed.
+To verify delivery without an alert, `python3 hack/monitoring-webhook-check.py` (asks the admin password) compares what Grafana will post to with `alerting.env`, sending nothing; `--send` has Grafana send one test message.
+
 | Alert | When |
 |---|---|
 | Not answering | a target's `up == 0` for 2 minutes: a host down, or the fleet itself |
@@ -842,7 +904,8 @@ GRAFANA_URL=https://grafana.example.com bash /root/briqyard/hack/install-monitor
 | Pool over 80 % | for 5 minutes |
 | Machine in a crash loop | restarted at least twice in 10 minutes by its policy (a first restart can predate the first sample), held 3 minutes after |
 | Backup failure observed | a host's `backup_failed` counter grew in 10 minutes, or is positive without a ten-minute baseline; one observed failure is enough |
-| Creates refused: no room | `briqyard_fleet_unschedulable_total{resource=~"memory\|cpu\|disk"}` grew: check regional capacity and host compatibility |
+| Registry backup not published | `briqyard_fleet_registry_backup_last_ack_timestamp_seconds` is over three hours old or absent for 10 minutes on a fleet with a backup: the fleet's `registry backup` errors say why (store, credentials, the bucket's object limits) |
+| Creates refused: no room | `briqyard_fleet_unschedulable_total{resource=~"memory\|cpu\|disk"}` grew (the fleet's refusal, or a pinned namespace's full host): check regional capacity and host compatibility |
 | Creates refused: host under pressure | `{resource="pressure"}` grew: free the namespace's host |
 | Largest slot too small | a region's largest memory slot under `LARGEST_SLOT_MB` for 10 minutes |
 

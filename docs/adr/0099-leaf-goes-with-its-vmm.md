@@ -27,14 +27,13 @@ machine's exit (`watch`) calls `retire_idle_leaf` when the settlement is done, w
 the VMM went. It takes the machine's lock without waiting: a start, a stop or a destroy under
 way owns the leaf, and the pass below finds it later.
 
-**A periodic pass is the backstop.** The 15 s tick lists the parent once (`cgroup_leaves`, one
+**A periodic pass is the backstop.** The collector lists the parent once (`cgroup_leaves`, one
 directory read, no leaf opened), and retires at most 128 leaves of machines with no VMM and no
 transition (`stopped`, `error`, `created`). What it cannot remove (the kernel still tearing the
-group down, `EBUSY`; a zombie not yet reaped) is tried again 15 s later: no call waits, retries
+group down, `EBUSY`; a zombie not yet reaped) is tried again on the next pass: no call waits, retries
 or sleeps, and no stop is ever slower for it. A leaf refused every time (an owner or mode the checks reject,
 a parent without `+memory`) goes last on the next pass, so it cannot hold back the leaves behind it; it
-is logged once at `warn` when it starts to fail, and every failed pass counts in `_retire_failed_total`. A leaf with no record is not touched in a pass;
-the start's sweep owns that case.
+is logged once at `warn` when it starts to fail, and every failed pass counts in `_retire_failed_total`. A settled startup orphan is also collected; unknown leaves are only counted (ADR 0106).
 
 **Order: the evidence, the last CPU, the removal.** `retire_cgroup` asks for the launch's
 death proof, and the proof is published after the OOM evidence is read (ADR 0096), so removal
@@ -46,23 +45,19 @@ reading is counted into the meter before the leaf is removed; a refused removal 
 the counters `briqyard_cgroup_leaves_retired_total` and `_retire_failed_total`. The idle gauge
 is 0 on a healthy host; a number that stays above 0 for minutes is a leak or a stuck removal.
 A pass that retired or failed anything logs one `info` line (`idle cgroup leaves`) with the
-counts; the start logs `orphans swept at start`.
+counts; the start logs prepared orphans separately from physical retirement.
 
-**Startup cost follows the leaves present.** With the leaves gone as machines stop, a host
-holds about one per running VMM, so a restart no longer pays for history. An upgrade from a
-version that leaked still pays once (the 118 to 168 s above, for about 6000 leaves) and never
-again. The first start after such an upgrade is **linear in the leaves, about 50 ms a leaf, up
-to 5 minutes observed** (173, 244 and 317 s for 6560 leaves on the CI VM): each `rmdir` of a
-memcg leaf costs a kernel offline and an RCU grace period, and `prepare_orphans`
-(`fc/vmm.rs`) removes them one at a time before the barrier opens. The API and the in-process
-ingress are down throughout; the VMMs keep running. It is paid once, after an upgrade from a
-leaking version: a fresh host never pays it. This change does not shorten it (#134's sweep). The barrier keeps its cap of 65536 and says so when it is passed.
+**Startup no longer removes historical idle leaves.** ADR 0106 moves deletion after listening.
+The barrier still inventories up to 65,536 identities and refuses unresolved ownership.
+The former serial removal took 173–317 s for 6560 leaves, with API and ingress down.
+That startup cost is superseded, rather than paid once. The collector now runs one bounded
+pass per second, with 16 removals in flight and at most 128 attempts per pass.
 
 ## Tests
 
 Mock VMM: a killed and an exited VMM leave no leaf and their last CPU is counted; a running
 and a busy machine keep theirs; a refused removal is the next pass's and counts the CPU once;
-a pass is bounded and publishes the counts; refused leaves ahead of good ones do not starve them. `hack/native-ci-scale.sh` (the `scale` step of the
-`suites` job): 6500 idle leaves, a daemon restart, the barrier open, memory protection healthy,
+a pass is bounded and publishes the counts; refused leaves ahead of good ones do not starve them. `hack/native-ci-scale.sh` (the `scale` job of the
+`more-suites` matrix, ADR 0109): 6500 idle leaves, a daemon restart, the barrier open, memory protection healthy,
 a create accepted and the leaves retired within 480 s. It runs from the workflow revision, so
 `workflow_dispatch` with an older `ref` shows it failing without #134.

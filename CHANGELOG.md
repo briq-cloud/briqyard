@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.1.26 — 2026-11-05
+
+### Fixes
+
+- a temp directory named with "ok" does not fail the bootstrap test (#163) ([f602f3cd](https://github.com/briq-cloud/briqyard/commit/f602f3cd1e374fe564826cb055ddbfb85053e7c9))
+
+- do not write a registry version for every heartbeat (#166) ([f80bc4a7](https://github.com/briq-cloud/briqyard/commit/f80bc4a7017965a40ae15aadf72c8e8db5cc4384))
+
+
+### Maintenance
+
+- build once per cache, skip native on drafts (#160) ([82d9007d](https://github.com/briq-cloud/briqyard/commit/82d9007da77bd5266164b0d71924e329192eb923))
+
+- run scale on its own runner, 200 idle leaves in the e2e hand-over (#161) ([d46c2e2a](https://github.com/briq-cloud/briqyard/commit/d46c2e2a65dfd5e282fae9217442b75365bf8327))
+
+- run alerts and monitoring only when something they read changed (#162) ([e118ef60](https://github.com/briq-cloud/briqyard/commit/e118ef600e3b951f8ab7f10a8df067960efbf654))
+
+- a stalled mirror does not hold up two-hosts; record the measured times (#165) ([1d3e76c7](https://github.com/briq-cloud/briqyard/commit/1d3e76c7a0f0bce49be928535cda1adca5de9697))
+
+## 0.1.25 — 2026-11-04
+
+### Features
+
+- report each host's disk in the host listing (#156) ([fce11c0a](https://github.com/briq-cloud/briqyard/commit/fce11c0a8a994311e8eaf4c5d93092a01f5239de))
+
+
+### Fixes
+
+- a full disk is not an unreported one (#157) ([fcd83d20](https://github.com/briq-cloud/briqyard/commit/fcd83d20d0a311ea40fadc952a7d96015d01a2b2))
+
+- a changed webhook reaches Grafana (#158) ([3f768288](https://github.com/briq-cloud/briqyard/commit/3f768288d5382a2c3e19d3941cc142408b800918))
+
+## 0.1.24 — 2026-11-04
+
+### Documentation
+
+- record the ruleset that protects main (#151) ([4e456aa8](https://github.com/briq-cloud/briqyard/commit/4e456aa8d44de2ad099da06d35a87cc06577c5d4))
+
+
+### Fixes
+
+- a backup's missing key is a typed error, not a 500 with the fleet's address (#150) ([9ac0a2e2](https://github.com/briq-cloud/briqyard/commit/9ac0a2e29796ad18cec8203d265fea22a9d12772))
+
+- count a host's capacity refusals (#154) ([5d33f6d3](https://github.com/briq-cloud/briqyard/commit/5d33f6d3ca77e863abdd1426e530e02d37112ced))
+
+
+### Maintenance
+
+- stop the daemon before making known machines' leaves (#149) ([22ca2593](https://github.com/briq-cloud/briqyard/commit/22ca2593fc31ac5fdd61b3923849ec1a337e0d06))
+
+- qualify restore with a real workload (#147) ([b4923ea1](https://github.com/briq-cloud/briqyard/commit/b4923ea187117b12bb18f10fc1a19c23ec136d5e))
+
 ## 0.1.23 — 2026-11-04
 
 ### Upgrade notes

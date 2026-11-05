@@ -101,6 +101,16 @@ impl Jailer {
         })
     }
     pub(in crate::fc) fn check(&self) -> io::Result<()> {
+        let began = std::time::Instant::now();
+        let result = self.check_inner();
+        JAILER_CHECK_US.fetch_add(
+            began.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        JAILER_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        result
+    }
+    fn check_inner(&self) -> io::Result<()> {
         if !super::fs::same(&self.dir.open(&self.name, libc::O_RDONLY, 0)?, &self.file)?
             || !self
                 .dir
@@ -119,4 +129,11 @@ impl Jailer {
         }
         Ok(())
     }
+}
+
+static JAILER_CHECK_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static JAILER_CHECKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(in crate::fc) fn check_times() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (JAILER_CHECK_US.load(Relaxed), JAILER_CHECKS.load(Relaxed))
 }

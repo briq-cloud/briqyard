@@ -99,8 +99,14 @@ pub struct HostRec {
     #[serde(default)]
     pub version: String,
     /// Free space for disks, in MB, from the last report, less what its holds took since.
-    #[serde(default)]
-    pub disk_free_mb: u64,
+    /// `None`: the host reports no figure and is not held to one; `Some(0)` is a full pool. A
+    /// record saved by a fleet that kept 0 for "no figure" loads as `None` until the next report.
+    #[serde(
+        default,
+        deserialize_with = "saved_disk_free",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disk_free_mb: Option<u64>,
     /// The last thing the bootstrap or an upgrade said.
     #[serde(default)]
     pub note: String,
@@ -151,6 +157,13 @@ pub struct Hold {
     took_disk_mb: u64,
     /// When the host answered the create: a report received after that counts the machine.
     made: Option<DateTime<Utc>>,
+}
+
+/// Reads a saved `disk_free_mb`: the number a fleet before this one wrote, where 0 stood for "no
+/// figure", is `None`.
+fn saved_disk_free<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<u64>::deserialize(d)?.filter(|free| *free != 0))
 }
 
 /// Whether a host in this state serves its machines. Placement takes only `ready`; a host
@@ -206,14 +219,16 @@ impl HostRec {
     fn take(&mut self, mut hold: Hold) {
         self.used.cpu_millis = Some(self.used.cpu_millis().saturating_add(hold.cpu_millis));
         self.used.memory_mb = self.used.memory_mb.saturating_add(hold.memory_mb);
-        hold.took_disk_mb = hold.disk_mb.min(self.disk_free_mb);
-        self.disk_free_mb -= hold.took_disk_mb;
+        if let Some(free) = self.disk_free_mb.as_mut() {
+            hold.took_disk_mb = hold.disk_mb.min(*free);
+            *free -= hold.took_disk_mb;
+        }
         self.holds.push(hold);
     }
 
     /// The host's own figures, received at `at`: they replace what the fleet had, and the holds
     /// they do not count yet (a create not answered by then) are taken from them again.
-    pub fn report(&mut self, used: Capacity, disk_free_mb: u64, at: DateTime<Utc>) {
+    pub fn report(&mut self, used: Capacity, disk_free_mb: Option<u64>, at: DateTime<Utc>) {
         self.used = used;
         self.disk_free_mb = disk_free_mb;
         for hold in std::mem::take(&mut self.holds) {
@@ -256,6 +271,8 @@ impl HostRec {
             state: self.state.clone(),
             capacity: self.capacity,
             used: self.used,
+            // 0 is "reports none", as in `has_disk`.
+            disk_free_mb: self.disk_free_mb,
             machines: self.machines,
             namespaces: self.namespaces.clone(),
             last_seen: self.last_seen,
@@ -318,7 +335,7 @@ impl HostRec {
     /// Whether `need_disk_mb` fits in its pool: a host that reports no disk figure is not held
     /// to it.
     fn has_disk(&self, need_disk_mb: u64) -> bool {
-        self.disk_free_mb == 0 || self.disk_free_mb >= need_disk_mb
+        self.disk_free_mb.is_none_or(|free| free >= need_disk_mb)
     }
 }
 
@@ -726,7 +743,9 @@ impl Registry {
         let hold = h.holds.remove(i);
         h.used.cpu_millis = Some(h.used.cpu_millis().saturating_sub(hold.cpu_millis));
         h.used.memory_mb = h.used.memory_mb.saturating_sub(hold.memory_mb);
-        h.disk_free_mb += hold.took_disk_mb;
+        if let Some(free) = h.disk_free_mb.as_mut() {
+            *free += hold.took_disk_mb;
+        }
     }
 
     /// Pins a namespace to a host that holds it now, when it has no pin: a namespace made on a
@@ -792,6 +811,30 @@ impl Registry {
         v
     }
 
+    /// What one host lacks for an ask by the fleet's own figures: `None` when it shows room
+    /// for all three (a refusal then came from something else, such as a namespace's quota or
+    /// a used-up address or port).
+    pub fn host_shortage(
+        &self,
+        host: &str,
+        need_mb: u32,
+        need_disk_mb: u64,
+        need_cpu_millis: u32,
+    ) -> Option<Resource> {
+        let h = self.hosts.get(host)?;
+        if h.reservation_mb(need_mb)
+            .is_none_or(|need| h.free_memory_mb() < need)
+        {
+            Some(Resource::Memory)
+        } else if !h.has_cpu(need_cpu_millis) {
+            Some(Resource::Cpu)
+        } else if !h.has_disk(need_disk_mb) {
+            Some(Resource::Disk)
+        } else {
+            None
+        }
+    }
+
     /// What ran out when `place` found no host for a new namespace's machine: memory when no host
     /// of the region is ready and under its ceiling with `need_mb` free; else disk when none of
     /// those has `need_disk_mb`; else (those that have both are under a condition) what the
@@ -848,7 +891,7 @@ impl Registry {
             if !h.takes_new_namespaces(policy) {
                 continue;
             }
-            let (memory, disk) = (h.free_memory_mb() as u64, h.disk_free_mb);
+            let (memory, disk) = (h.free_memory_mb() as u64, h.disk_free_mb.unwrap_or(0));
             free.memory_mb += memory;
             free.disk_mb += disk;
             largest.memory_mb = largest.memory_mb.max(memory);

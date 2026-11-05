@@ -37,6 +37,8 @@ jobs:
           components: rustfmt, clippy
           targets: ${{ matrix.arch }}-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
       - name: Install native checked Firecracker prerequisites
         run: sudo apt-get update && sudo apt-get install -y libclang-dev pkg-config cmake libssl-dev libseccomp-dev musl-tools python3-yaml
       - name: Verify release and evidence acceptance checks

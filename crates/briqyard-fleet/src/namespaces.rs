@@ -264,6 +264,7 @@ pub(super) async fn put_on_namespace(
         ));
     }
     drop(hold);
+    crate::create::host_refused(st, &host.id, &ask, &data);
     first_refused(st, id, first, &host.id, version, &data).await;
     Ok(Response::from_parts(parts, Body::from(data)))
 }

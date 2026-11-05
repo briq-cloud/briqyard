@@ -150,3 +150,34 @@ async fn a_leaf_that_is_always_refused_does_not_hold_back_the_ones_behind_it() {
         .starts_with("briqyard_cgroup_leaves_retire_failed_total ")
         && l != "briqyard_cgroup_leaves_retire_failed_total 0"));
 }
+
+#[tokio::test]
+async fn startup_orphans_wait_for_collection_and_backlog_stays_visible() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    for i in 0..260 {
+        leaf(&h, &format!("m_orphan{i}"), 1);
+    }
+    h.m.sweep_orphans().await.unwrap();
+    assert_eq!(h.host.cgroups.lock().unwrap().len(), 260);
+    h.m.sweep_leaves().await;
+    let seen = h.m.inner.stats.leaves.lock().unwrap().unwrap();
+    assert_eq!((seen.total, seen.idle), (132, 132));
+    h.m.sweep_leaves().await;
+    assert_eq!(h.m.inner.stats.leaves.lock().unwrap().unwrap().idle, 4);
+    h.m.sweep_leaves().await;
+    assert_eq!(h.m.inner.stats.leaves.lock().unwrap().unwrap().idle, 0);
+}
+
+#[tokio::test]
+async fn orphan_counter_reads_are_deferred_but_still_required_before_removal() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    leaf(&h, "m_orphan", 1);
+    h.host.refuse_final_meter.store(true, Relaxed);
+    h.m.sweep_orphans().await.unwrap();
+    h.m.sweep_leaves().await;
+    assert!(has_leaf(&h, "m_orphan"));
+    assert_eq!(h.m.inner.stats.leaves.lock().unwrap().unwrap().idle, 1);
+    h.host.refuse_final_meter.store(false, Relaxed);
+    h.m.sweep_leaves().await;
+    assert!(!has_leaf(&h, "m_orphan"));
+}

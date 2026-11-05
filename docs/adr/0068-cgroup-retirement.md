@@ -118,9 +118,9 @@ recheck them at retirement and known-launch settlement, not only at startup.
 
 Only this barrier constructs the non-deserializable recovered authority. Empty known records
 receive a settled epoch and can be destroyed normally. Live known candidates can be adopted
-through their retained identity or positively terminated before being marked stopped. Empty
-orphan leaves are retired, with final counters, under the still-closed startup gate before
-artifact teardown. An adopted VM's native pidfd monitor can run, but defer its manager exit
+through their retained identity or positively terminated before being marked stopped. Orphan processes are settled under the still-closed startup gate before artifact teardown.
+ADR 0106 defers orphan final counters and empty leaf deletion until after listening; their
+registered identities remain reserved until removal succeeds. An adopted VM's native pidfd monitor can run, but defer its manager exit
 watcher, probes and restart dispatch until the managed-spawn gate opens. An exit reported
 during recovery is then consumed without losing its restart intent. Then dispatch
 create/gateway/background work.
@@ -178,8 +178,8 @@ lifecycle, fleet, stress and chaos checks remain separate validation gates. No d
 real-host proof follows solely from source fixtures or property-format compatibility.
 
 The e2e suite covers the in-place upgrade shape (`hack/e2e-siblings.sh`): after machines have
-run, it makes 5,000 empty leaves, hands the daemon over, and requires the barrier to open and
-the sweep to retire them. The leaves are made after the first machine ran on purpose: reading
+run, it makes 200 empty leaves, hands the daemon over, and requires the barrier to open and
+the sweep to retire them (the count past the old cap is `scale`'s, ADR 0109). The leaves are made after the first machine ran on purpose: reading
 a leaf's final counters needs `memory.current` and `memory.events.local`, which a leaf has only
 once the jailer enabled `+memory` on the parent. Made on a host where no machine has run, they
 would fail the sweep for a reason that is the fixture's.

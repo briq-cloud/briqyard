@@ -46,11 +46,12 @@ fn host_requests() {
         json!({
             "id": "h1", "url": "http://10.0.0.5:7420", "region": "",
             "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
-            "machines": 0, "namespaces": [], "version": "", "disk_free_mb": 0,
+            "machines": 0, "namespaces": [], "version": "",
             "tls_fingerprint": "", "conditions": []
         }),
     );
     assert_eq!(r.region, "");
+    assert_eq!(r.disk_free_mb, None, "no figure is not a full pool");
     let r: RegisterHostRequest = same(json!({
         "memory_policy": {"version": 1, "vmm_overhead_mb": 256},
         "id": "h1", "url": "http://10.0.0.5:7420", "region": "fsn1",
@@ -61,7 +62,7 @@ fn host_requests() {
             "since": "2026-01-02T03:04:05Z", "message": "512 MB of 65536 committed (0%)"}],
         "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0, "gone": 1}
     }));
-    assert_eq!(r.disk_free_mb, 100000);
+    assert_eq!(r.disk_free_mb, Some(100000));
     assert_eq!(r.tls_fingerprint, "ab01");
     assert!(serde_json::from_value::<RegisterHostRequest>(json!({"id": "h1"})).is_err());
 }
@@ -77,11 +78,19 @@ fn status() {
         json!({
             "version": "0.1.0", "host_id": "h1",
             "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
-            "machines": 3, "running": 1, "disk_free_mb": 0, "tls_fingerprint": "",
+            "machines": 3, "running": 1, "tls_fingerprint": "",
             "conditions": [], "vmm_version": ""
         }),
     );
     assert_eq!(s.running, 1);
+    assert_eq!(s.disk_free_mb, None);
+    let full: Status = same(json!({
+        "version": "0.1.0", "host_id": "h1",
+        "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
+        "machines": 3, "running": 1, "disk_free_mb": 0, "tls_fingerprint": "",
+        "conditions": [], "vmm_version": ""
+    }));
+    assert_eq!(full.disk_free_mb, Some(0), "0 is a full pool");
     let s: Status = same(json!({
         "memory_policy": {"version": 1, "vmm_overhead_mb": 256},
         "version": "0.1.0", "host_id": "h1",

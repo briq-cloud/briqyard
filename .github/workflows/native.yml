@@ -16,6 +16,7 @@ on:
         default: false
         type: boolean
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'crates/**'
       - 'Cargo.*'
@@ -29,8 +30,43 @@ concurrency:
   group: native-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 jobs:
+  # Which suites of `more-suites` run (ADR 0110). Not an optimisation that may fail quietly:
+  # if this job fails the run is red and `more-suites` does not start.
+  changes:
+    if: ${{ github.event.pull_request.draft != true && !inputs.two_hosts_only && !inputs.measure_freeze }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      suites: ${{ steps.select.outputs.suites }}
+    steps:
+      # On a pull request this is the merge commit: HEAD^1 is the base, so the diff is the PR's.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Select the suites
+        id: select
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -o pipefail
+          all=$(python3 hack/native-suites.py --all)
+          if [ "$EVENT" = pull_request ]; then
+            suites=$(git -c core.quotePath=off diff --name-only HEAD^1 HEAD | python3 hack/native-suites.py)
+          else
+            suites=$all
+          fi
+          echo "suites=$suites" >> "$GITHUB_OUTPUT"
+          left_out=$(jq -rn --argjson all "$all" --argjson run "$suites" '$all - $run | join(", ")')
+          {
+            echo "### Suites of more-suites"
+            echo "Run: $(jq -r 'join(", ")' <<<"$suites")"
+            if [ -n "$left_out" ]; then
+              echo "Left out: $left_out. Nothing they read changed; a release PR (it changes Cargo.toml) runs them."
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
   suites:
-    if: ${{ !inputs.two_hosts_only && !inputs.measure_freeze }}
+    if: ${{ github.event.pull_request.draft != true && !inputs.two_hosts_only && !inputs.measure_freeze }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -56,6 +92,9 @@ jobs:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: native
+          save-if: false
       - name: Build the head
         run: |
           sudo apt-get update -qq
@@ -93,21 +132,13 @@ jobs:
           if [ "${statuses[1]}" != 0 ]; then rc=${statuses[1]}; fi
           echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
           exit "$rc"
-      # Thousands of idle machine cgroups, a daemon restart: the case of an in-place upgrade
-      # (ADR 0099). Harness from the workflow revision, so a dispatch on an older ref fails it.
-      - name: scale
-        if: ${{ !cancelled() && steps.e2e.outcome != 'skipped' }}
-        run: |
-          mkdir -p native-logs
-          set -o pipefail
-          bash .native-harness/hack/native-ci-scale.sh 2>&1 | tee native-logs/scale.log
       - name: Suite counts
         if: always()
         env:
           E2E_SECONDS: ${{ steps.e2e.outputs.duration }}
           FLEET_SECONDS: ${{ steps.fleet.outputs.duration }}
         run: |
-          for suite in e2e fleet-smoke scale; do
+          for suite in e2e fleet-smoke; do
             echo "### $suite" >> "$GITHUB_STEP_SUMMARY"
             if [ -f "native-logs/$suite.log" ]; then
               grep -E '^passed |^ENDED EARLY|^NOT A FULL RUN' "native-logs/$suite.log" >> "$GITHUB_STEP_SUMMARY" || echo 'No final summary' >> "$GITHUB_STEP_SUMMARY"
@@ -128,20 +159,15 @@ jobs:
           name: native-fleet-smoke-log
           path: native-logs/fleet-smoke.log
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        with:
-          name: native-scale-log
-          path: native-logs/scale.log
-          if-no-files-found: ignore
   more-suites:
-    if: ${{ !inputs.two_hosts_only && !inputs.measure_freeze }}
+    if: ${{ github.event.pull_request.draft != true && !inputs.two_hosts_only && !inputs.measure_freeze }}
+    needs: changes
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        suite: [stress, monitoring, alerts, qualification]
+        suite: ${{ fromJSON(needs.changes.outputs.suites) }}
     name: ${{ matrix.suite }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -166,6 +192,9 @@ jobs:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: native
+          save-if: false
       - name: Build the head
         run: |
           sudo apt-get update -qq
@@ -203,7 +232,7 @@ jobs:
         run: |
           echo "### $NATIVE_SUITE" >> "$GITHUB_STEP_SUMMARY"
           if [ -f "native-logs/$NATIVE_SUITE.log" ]; then
-            grep -E '^passed |^api failures:|^invariant breaks:|^native stress checks:|^ENVIRONMENT GATE:' "native-logs/$NATIVE_SUITE.log" >> "$GITHUB_STEP_SUMMARY" || echo 'No final summary' >> "$GITHUB_STEP_SUMMARY"
+            grep -E '^passed |^ENDED EARLY|^NOT A FULL RUN|^api failures:|^invariant breaks:|^native stress checks:|^ENVIRONMENT GATE:' "native-logs/$NATIVE_SUITE.log" >> "$GITHUB_STEP_SUMMARY" || echo 'No final summary' >> "$GITHUB_STEP_SUMMARY"
           else
             echo 'Did not start' >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -215,10 +244,11 @@ jobs:
           path: |
             native-logs/${{ matrix.suite }}.log
             native-logs/recovery-helper.log
+            native-logs/${{ matrix.suite }}/
           if-no-files-found: ignore
 
   two-hosts:
-    if: ${{ !inputs.measure_freeze }}
+    if: ${{ github.event.pull_request.draft != true && !inputs.measure_freeze }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -244,6 +274,9 @@ jobs:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: native
+          save-if: false
       - name: Build the head
         run: |
           sudo apt-get update -qq
@@ -276,7 +309,7 @@ jobs:
           if-no-files-found: ignore
 
   measure:
-    if: ${{ inputs.measure_freeze }}
+    if: ${{ github.event.pull_request.draft != true && inputs.measure_freeze }}
     strategy:
       fail-fast: false
       matrix:
@@ -306,6 +339,9 @@ jobs:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: native
+          save-if: false
       - name: Build the head
         run: |
           sudo apt-get update -qq
