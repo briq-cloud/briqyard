@@ -29,6 +29,7 @@ Forks serialize on the parent's mmap lock, run synchronously on async workers, a
 - `choom` comes with util-linux. `hack/bootstrap-host.sh` and `hack/install-dev.sh` fail without it, `briqyard doctor` reports it. If it is missing the spawn fails: no fallback to an unprotected or forking path.
 - Cost: 0.23 ms per spawn, all in the child, not in the daemon.
 - `arg0` on a helper names `choom`; the two tests that need an exact `firecracker` command line use a plain `std::process::Command`.
+- One helper keeps `pre_exec`: the startup check of the jailer runs the file the daemon holds open, at `/proc/self/fd/N`. That descriptor closes on exec, so `choom` could not open the path (`held_executable_command`).
 - Other spawns that use `fork`: none on the helper paths (`pre_exec`, `uid`, `gid`, `groups` and `setsid` appear only in the guest init and the machine classes above).
 
 ## Rejected

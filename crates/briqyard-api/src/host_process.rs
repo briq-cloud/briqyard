@@ -70,6 +70,17 @@ pub fn command_for(class: OomClass, program: impl AsRef<OsStr>) -> StdCommand {
     }
 }
 
+/// A helper run from an executable the caller holds open (`/proc/self/fd/N`), with score 0. The
+/// descriptor closes on exec, so `choom` could not open that path: this one writes the score in a
+/// `pre_exec` closure and forks. Only for a rare spawn, such as a check at startup.
+pub fn held_executable_command(program: impl AsRef<OsStr>) -> StdCommand {
+    #[allow(unused_mut)]
+    let mut command = StdCommand::new(program);
+    #[cfg(target_os = "linux")]
+    pre_exec_score(&mut command, OomClass::Helper);
+    command
+}
+
 /// Only static bytes and async-signal-safe syscalls run after fork.
 #[cfg(target_os = "linux")]
 fn pre_exec_score(command: &mut StdCommand, class: OomClass) {
@@ -216,6 +227,27 @@ fail() { printf '%s\n' "$*" >&2; exit 1; }
         for class in [OomClass::Machine, OomClass::Gateway] {
             assert_eq!(command_for(class, "nft").get_program(), "nft");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_held_executable_runs_directly_because_its_descriptor_closes_on_exec() {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::File::open("/bin/sh").unwrap();
+        let path = format!("/proc/self/fd/{}", file.as_raw_fd());
+        let script = ["-c", "cat /proc/self/oom_score_adj"];
+        let out = held_executable_command(&path)
+            .args(script)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "0");
+        assert!(!command(&path)
+            .args(script)
+            .output()
+            .unwrap()
+            .status
+            .success());
     }
 
     #[cfg(target_os = "linux")]

@@ -208,9 +208,28 @@ pub(super) async fn output(
     args: &[&str],
     cap: u64,
 ) -> anyhow::Result<String> {
+    bounded(crate::host_process::command(program), args, cap).await
+}
+
+/// `output` for the executable the daemon holds open at `/proc/self/fd/N`.
+#[cfg(target_os = "linux")]
+pub(super) async fn output_held(
+    program: &std::ffi::OsStr,
+    args: &[&str],
+    cap: u64,
+) -> anyhow::Result<String> {
+    let command = briqyard_api::host_process::held_executable_command(program);
+    bounded(command.into(), args, cap).await
+}
+
+#[cfg(target_os = "linux")]
+async fn bounded(
+    mut command: tokio::process::Command,
+    args: &[&str],
+    cap: u64,
+) -> anyhow::Result<String> {
     use std::{process::Stdio, time::Duration};
     use tokio::io::AsyncReadExt;
-    let mut command = crate::host_process::command(program);
     command
         .args(args)
         .env_clear()

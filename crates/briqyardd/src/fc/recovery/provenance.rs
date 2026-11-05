@@ -85,7 +85,8 @@ impl Jailer {
         // has opened the executable; no pathname re-resolution chooses another jailer.
         let executable = format!("/proc/self/fd/{}", provenance.file.as_raw_fd());
         let text =
-            super::unit::output(std::ffi::OsStr::new(&executable), &["--version"], 1024).await?;
+            super::unit::output_held(std::ffi::OsStr::new(&executable), &["--version"], 1024)
+                .await?;
         super::unit::jailer_version(&text, vmm)
             .with_context(|| format!("the jailer says {:?}, the VMM is {vmm}", text.trim()))?;
         provenance
