@@ -32,8 +32,146 @@ pub struct Backup {
     turn: Arc<tokio::sync::Mutex<()>>,
     /// Historical ACK state; never held across I/O or an await.
     last: Arc<Mutex<Written>>,
+    /// Acknowledgements of an earlier run of the fleet (ADR 0026): see `with_acks`.
+    acks: Arc<Acks>,
+    target: AckTarget,
     blocked: Arc<AtomicBool>,
     caller_outcomes: [AtomicU64; 4],
+}
+
+/// The keys the store acknowledged, by `ack_id`, kept in a file beside the registry so that a
+/// restart during a store outage still serves a key the store already holds. Ids only: a hash
+/// of the host and its key, never the key. The file names the backup it was acknowledged by
+/// (store, endpoint, recipient): another target lists nothing.
+#[derive(Default)]
+struct Acks {
+    path: Option<std::path::PathBuf>,
+    target: AckTarget,
+    ids: Mutex<std::collections::HashSet<String>>,
+}
+
+/// What identifies a backup: where it goes and to whom. No credential.
+#[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct AckTarget {
+    store: String,
+    endpoint: String,
+    recipient: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AckFile {
+    #[serde(flatten)]
+    target: AckTarget,
+    ids: std::collections::HashSet<String>,
+}
+
+/// What identifies a published key: the host and the key's content, so a key that changed
+/// matches no earlier acknowledgement.
+fn ack_id(host: &str, key: &PoolKey) -> String {
+    let mut h = Sha256::new();
+    h.update(b"briqyard pool key ack v1\0");
+    h.update(host.as_bytes());
+    h.update(b"\0");
+    h.update(key.expose().as_bytes());
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+impl Acks {
+    /// The file's ids when it was written for `target`; a missing, unreadable, corrupt or
+    /// foreign file knows none, so the key waits for a write to the store as before. Only a
+    /// missing file is quiet.
+    fn load(path: std::path::PathBuf, target: AckTarget) -> Acks {
+        let ids = match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice::<AckFile>(&bytes) {
+                Ok(file) if file.target == target => file.ids,
+                Ok(file) => {
+                    let differs: Vec<&str> = [
+                        ("store", file.target.store != target.store),
+                        ("endpoint", file.target.endpoint != target.endpoint),
+                        ("recipient", file.target.recipient != target.recipient),
+                    ]
+                    .into_iter()
+                    .filter_map(|(name, differs)| differs.then_some(name))
+                    .collect();
+                    tracing::warn!(file = %path.display(), differs = ?differs, "published-key file is for another backup: ignored");
+                    Default::default()
+                }
+                Err(e) => {
+                    tracing::warn!(file = %path.display(), err = %e, "published-key file ignored");
+                    Default::default()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            Err(e) => {
+                tracing::warn!(file = %path.display(), err = %e, "published-key file unreadable: ignored");
+                Default::default()
+            }
+        };
+        Acks {
+            path: Some(path),
+            target,
+            ids: Mutex::new(ids),
+        }
+    }
+
+    /// Replaces the ids with those of a registry the store just acknowledged. The file is
+    /// made afresh `0600` and renamed, as the registry is.
+    fn record(&self, keys: &HashMap<String, PoolKey>) {
+        let ids: std::collections::HashSet<String> =
+            keys.iter().map(|(host, key)| ack_id(host, key)).collect();
+        if let Some(path) = &self.path {
+            if let Err(e) = write_ids(path, &self.target, &ids) {
+                tracing::warn!(file = %path.display(), err = format!("{e:#}"), "published keys not saved");
+            }
+        }
+        if let Ok(mut known) = self.ids.lock() {
+            *known = ids;
+        }
+    }
+
+    fn holds(&self, host: &str, key: &PoolKey) -> bool {
+        self.ids
+            .lock()
+            .is_ok_and(|ids| ids.contains(&ack_id(host, key)))
+    }
+}
+
+/// With the backup off no store holds a copy: the file is removed, so a later run with a
+/// backup does not take the old acknowledgements for it.
+pub fn drop_acks(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(file = %path.display(), err = %e, "published-key file not removed");
+        }
+    }
+}
+
+fn write_ids(
+    path: &Path,
+    target: &AckTarget,
+    ids: &std::collections::HashSet<String>,
+) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension("tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .with_context(|| format!("create {}", tmp.display()))?;
+    let body = AckFile {
+        target: target.clone(),
+        ids: ids.clone(),
+    };
+    file.write_all(&serde_json::to_vec(&body)?)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))?;
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -187,9 +325,23 @@ impl Backup {
             recipient: recipient(&cfg.recipient)?,
             turn: Default::default(),
             last: Default::default(),
+            acks: Default::default(),
+            target: AckTarget {
+                store: cfg.store.clone(),
+                endpoint: cfg.endpoint.clone(),
+                recipient: cfg.recipient.trim().to_string(),
+            },
             blocked: Default::default(),
             caller_outcomes: Default::default(),
         }))
+    }
+
+    /// Keeps the keys the store acknowledged in `path` (ADR 0026). After a restart a key
+    /// listed there is served without a write to the store, so a store outage and a restart
+    /// together do not lock a host out; a key not listed waits for a write, as before.
+    pub fn with_acks(mut self, path: std::path::PathBuf) -> Backup {
+        self.acks = Arc::new(Acks::load(path, self.target.clone()));
+        self
     }
 
     pub fn describe(&self) -> String {
@@ -309,6 +461,7 @@ impl Backup {
                 LATEST.to_string(),
             ];
             let last = self.last.clone();
+            let acks = self.acks.clone();
             let mut guard = Publication {
                 _turn: turn,
                 blocked: self.blocked.clone(),
@@ -338,6 +491,8 @@ impl Backup {
                         .context("write the registry's backup")?;
                     }
                     written.ack_timestamp_seconds = clock();
+                    // Only now that the store acknowledged both objects.
+                    acks.record(&written.keys);
                     *last
                         .lock()
                         .map_err(|_| anyhow!("backup ACK cache unavailable"))? = written;
@@ -363,7 +518,7 @@ impl Backup {
     pub async fn holds(&self, host: &str, key: &PoolKey) -> bool {
         self.last
             .lock()
-            .map(|last| last.keys.get(host) == Some(key))
+            .map(|last| last.keys.get(host) == Some(key) || self.acks.holds(host, key))
             .unwrap_or(false)
     }
 
@@ -1659,5 +1814,114 @@ pub(super) mod tests {
         assert!(recipient("age1nope").is_err());
         std::fs::write(&other, "# nothing\n").unwrap();
         assert!(identity(&other).is_err());
+    }
+
+    fn registry_with_key(host: &str) -> (std::sync::Mutex<Registry>, PoolKey) {
+        let mut reg = Registry::default();
+        let h = crate::static_host(
+            &crate::config::StaticHost {
+                id: host.into(),
+                url: "http://10.0.0.1:7420".into(),
+                token: "t".into(),
+                ..Default::default()
+            },
+            chrono::Utc::now(),
+        );
+        reg.hosts.insert(host.into(), h);
+        let (k, _) = reg.pool_key(host).unwrap();
+        (std::sync::Mutex::new(reg), k)
+    }
+
+    /// A key the store acknowledged is still served after a restart, with the store out of
+    /// reach; one it never acknowledged, a changed one and a corrupt file are not (ADR 0026).
+    #[tokio::test]
+    async fn an_acknowledged_key_survives_a_restart_without_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let rcpt = keygen(&dir.path().join("backup.key")).unwrap();
+        let acks = dir.path().join("published-keys.json");
+        let (reg, k) = registry_with_key("h1");
+
+        let first = backup(&dir.path().join("store"), &rcpt).with_acks(acks.clone());
+        assert!(first.push(&reg).await.unwrap());
+        let saved = std::fs::read_to_string(&acks).unwrap();
+        assert!(!saved.contains(k.expose()), "ids only, never the key");
+
+        // After a restart nothing asks the store: the same target, whether or not it answers.
+        let restart = || backup(&dir.path().join("store"), &rcpt);
+        assert!(restart().with_acks(acks.clone()).holds("h1", &k).await);
+        assert!(
+            !restart().holds("h1", &k).await,
+            "no file: it waits for a write"
+        );
+        let other = registry_with_key("h1").1;
+        assert!(
+            !restart().with_acks(acks.clone()).holds("h1", &other).await,
+            "a key that changed matches no acknowledgement"
+        );
+        assert!(!restart().with_acks(acks.clone()).holds("h2", &k).await);
+
+        // The same file under another store or another recipient lists nothing.
+        let moved = backup(&dir.path().join("new-store"), &rcpt).with_acks(acks.clone());
+        assert!(!moved.holds("h1", &k).await, "a new store holds no copy");
+        let rotated = keygen(&dir.path().join("rotated.key")).unwrap();
+        let rekeyed = backup(&dir.path().join("store"), &rotated).with_acks(acks.clone());
+        assert!(
+            !rekeyed.holds("h1", &k).await,
+            "a new recipient holds no copy"
+        );
+        let saved = std::fs::read_to_string(&acks).unwrap();
+        assert!(saved.contains("\"store\"") && saved.contains("\"recipient\""));
+        assert!(!saved.contains("SECRET"), "no credential in the file");
+
+        for corrupt in ["not json", "{\"a\":1}", ""] {
+            std::fs::write(&acks, corrupt).unwrap();
+            assert!(!restart().with_acks(acks.clone()).holds("h1", &k).await);
+        }
+        std::fs::remove_file(&acks).unwrap();
+        assert!(!restart().with_acks(acks).holds("h1", &k).await);
+    }
+
+    /// With the backup off the file goes; a missing file is no error.
+    #[test]
+    fn the_acknowledgements_go_when_the_backup_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("published-keys.json");
+        std::fs::write(&file, "{}").unwrap();
+        drop_acks(&file);
+        assert!(!file.exists());
+        drop_acks(&file);
+    }
+
+    /// A file that cannot be saved is logged, and the key is still served from memory.
+    #[tokio::test]
+    async fn failing_to_save_the_acknowledgements_does_not_fail_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let rcpt = keygen(&dir.path().join("backup.key")).unwrap();
+        let (reg, k) = registry_with_key("h1");
+        let b = backup(&dir.path().join("store"), &rcpt)
+            .with_acks(dir.path().join("no-such-dir/published-keys.json"));
+        assert!(b.push(&reg).await.unwrap());
+        assert!(b.acks.holds("h1", &k), "kept in memory");
+        assert!(b.holds("h1", &k).await);
+    }
+
+    /// A cache poisoned by a panic refuses every key, whatever the file lists.
+    #[tokio::test]
+    async fn a_poisoned_cache_still_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let rcpt = keygen(&dir.path().join("backup.key")).unwrap();
+        let acks = dir.path().join("published-keys.json");
+        let (reg, k) = registry_with_key("h1");
+        let first = backup(&dir.path().join("store"), &rcpt).with_acks(acks.clone());
+        assert!(first.push(&reg).await.unwrap());
+        let b = backup(&dir.path().join("store"), &rcpt).with_acks(acks);
+        assert!(b.holds("h1", &k).await);
+        let last = b.last.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = last.lock().unwrap();
+            panic!("poison");
+        })
+        .join();
+        assert!(!b.holds("h1", &k).await);
     }
 }

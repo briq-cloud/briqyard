@@ -334,6 +334,11 @@ async fn run(args: Args) -> Result<()> {
         fill_ceiling: cfg.placement.fill_ceiling,
         down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
     };
+    let acks_file = cfg.state_dir.join("published-keys.json");
+    let published = backup::Backup::open(&cfg.backup)?;
+    if published.is_none() {
+        backup::drop_acks(&acks_file);
+    }
     let state = Arc::new(AppState {
         cfg: cfg.clone(),
         reg: Mutex::new(reg),
@@ -344,7 +349,7 @@ async fn run(args: Args) -> Result<()> {
         pinned: Mutex::new(HashMap::new()),
         state_path,
         upgrade: Default::default(),
-        backup: backup::Backup::open(&cfg.backup)?,
+        backup: published.map(|b| b.with_acks(acks_file)),
         key_turn: Default::default(),
         list_timeout: LIST_TIMEOUT,
         restores: Default::default(),
