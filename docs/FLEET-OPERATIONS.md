@@ -272,7 +272,7 @@ A server with no private network joins over WireGuard (ADR 0113): list its priva
 `bootstrap.wireguard.hosts` and the peers it tunnels to (the fleet's host, with its public key
 and public address) in `bootstrap.wireguard.peers`. The first attempt fails and the host's note
 names its public key; run `WIREGUARD_ONLY=1` with that key as a peer on the fleet's host, and
-the next attempt goes on. Hosts on the private network are sent what they were.
+the next attempt goes on. A peer behind a NAT needs an `endpoint` with a placeholder port (its address is what the firewall allows; WireGuard learns the real port). To remove the last peer, run `WIREGUARD_ONLY=1 WIREGUARD_PEERS=` (set, empty). Hosts on the private network are sent what they were.
 
 Once the script succeeds, a second connection, strict against the pinned SSH key, reads the
 daemon's certificate fingerprint (`briqyardd tls-fingerprint`); the fleet pins it in the same

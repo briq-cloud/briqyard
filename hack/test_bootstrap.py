@@ -769,5 +769,144 @@ class WireguardPeers(unittest.TestCase):
         self.assertIn("WIREGUARD_PORT", out.stderr)
 
 
+TUNNEL_UP = SCRIPT[SCRIPT.index("TUNNEL=briqyard0") : SCRIPT.index("# Downloads a file and checks")]
+POOL_KEY = "pool_key() {" + SCRIPT.split("\npool_key() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+PEER_A = f"{KEY}|10.42.0.12|164.132.1.2"
+PEER_B = f"{KEY2}|10.42.0.14|51.68.1.2"
+RULE_LINE = "\t\tip saddr { 164.132.1.2 } udp dport 51820 accept # briqyard-tunnel"
+
+MOCKS = {
+    # `ip route show` prints a /32 as the bare address, as the real one does.
+    "ip": """#!/bin/bash
+r=$STATE/routes
+touch $r
+case "$*" in
+  "-4 route show dev "*) cat $r ;;
+  "route add "*) echo "add $*" >> $STATE/changes; echo "${3%/32} scope link" >> $r ;;
+  "route del "*) echo "del $*" >> $STATE/changes; grep -v "^${3%/32} " $r > $r.new || true; mv $r.new $r ;;
+esac
+""",
+    "wg": """#!/bin/bash
+case "$1" in
+  genkey) echo MFNlY3JldHNlY3JldHNlY3JldHNlY3JldHNlY3JldHM= ;;
+  pubkey) echo UHVibGljUHVibGljUHVibGljUHVibGljUHVibGljUHU= ;;
+  syncconf) echo syncconf >> $STATE/changes ;;
+esac
+""",
+    "wg-quick": "#!/bin/bash\n[ \"$1\" = strip ] && cat /dev/null\nexit 0\n",
+    "systemctl": """#!/bin/bash
+case "$1" in
+  is-active) [ -f $STATE/active ] ;;
+  start) touch $STATE/active; echo "start $2" >> $STATE/changes ;;
+  restart) echo "restart $2" >> $STATE/changes ;;
+esac
+exit 0
+""",
+}
+
+
+class WireguardRun(unittest.TestCase):
+    """tunnel_up, WIREGUARD_ONLY and the host firewall run for real, with ip, wg and systemctl mocked."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / "state"
+        bin_dir = self.root / "bin"
+        for d in (self.state, bin_dir, self.root / "etc/briqyard"):
+            d.mkdir(parents=True)
+        for name, body in MOCKS.items():
+            (bin_dir / name).write_text(body)
+            (bin_dir / name).chmod(0o755)
+        self.bin = bin_dir
+        self.firewall = self.root / "etc/briqyard/firewall.nft"
+        self.firewall.write_text("table inet briqyard_host {\n\tchain input {\n\t\tcounter drop\n\t}\n}\n")
+        self.routes = self.state / "routes"
+
+    def run_script(self, call, peers=None):
+        code = 'fail() { echo "$*" >&2; exit 1; }\n' + PRIVATE + TUNNEL_UP
+        code = code.replace("/etc/wireguard", str(self.root / "etc/wireguard")).replace("/etc/briqyard", str(self.root / "etc/briqyard"))
+        code = code.replace("/etc/systemd/system", str(self.root / "etc/systemd")) + "\n" + call
+        env = {"PATH": f"{self.bin}:{os.environ['PATH']}", "STATE": str(self.state), "PRIVATE_ADDRESS": "10.42.0.13/16",
+               "WIREGUARD_PORT": "51820", "FLEET_ADDRESS": "", "WIREGUARD_ONLY": ""}
+        if peers is not None:
+            env["WIREGUARD_PEERS"] = peers
+            env["WIREGUARD_PEERS_SET"] = "set"
+        else:
+            env["WIREGUARD_PEERS"] = ""
+            env["WIREGUARD_PEERS_SET"] = ""
+        (self.root / "etc/systemd").mkdir(exist_ok=True)
+        result = subprocess.run(["bash", "-euo", "pipefail", "-c", code], env=env, capture_output=True, text=True)
+        return result
+
+    def changes(self):
+        path = self.state / "changes"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def only(self, peers):
+        result = self.run_script("tunnel_only", peers)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_routes_follow_the_peers_and_an_unchanged_run_changes_none(self):
+        self.only(PEER_A)  # not active: wg-quick starts it
+        self.routes.write_text("10.42.0.12 scope link\n")
+        (self.state / "changes").unlink(missing_ok=True)
+        self.only(PEER_A)
+        self.assertEqual([c for c in self.changes() if "route" in c], [])
+        self.only(f"{PEER_A},{PEER_B}")
+        self.assertEqual([c for c in self.changes() if "route" in c], ["add route add 10.42.0.14/32 dev briqyard0"])
+
+    def test_the_last_peer_is_removed_and_with_it_route_and_rule(self):
+        self.only(PEER_A)
+        self.assertIn(RULE_LINE, self.firewall.read_text())
+        self.routes.write_text("10.42.0.12 scope link\n")
+        self.only("")
+        self.assertEqual(self.routes.read_text(), "")
+        self.assertNotIn("briqyard-tunnel", self.firewall.read_text())
+        self.assertIn("counter drop", self.firewall.read_text())
+        self.assertNotIn("PublicKey", (self.root / "etc/wireguard/briqyard0.conf").read_text())
+
+    def test_unset_peers_are_not_empty_peers(self):
+        result = self.run_script("tunnel_only", None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("needs WIREGUARD_PEERS", result.stderr)
+
+    def test_a_full_bootstrap_without_peers_keeps_the_installed_rule(self):
+        self.only(PEER_A)
+        result = self.run_script("host_tunnel_rule", None)
+        self.assertEqual(result.stdout, RULE_LINE + "\n")
+        # Given peers, theirs replace it.
+        result = self.run_script("host_tunnel_rule", PEER_B)
+        self.assertIn("51.68.1.2", result.stdout)
+        self.assertNotIn("164.132.1.2", result.stdout)
+
+
+class PoolKeyRetry(unittest.TestCase):
+    def run_key(self, failures):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "curl").write_text(
+                '#!/bin/bash\ncat >/dev/null\nn=$(cat "$STATE" 2>/dev/null || echo 0); echo $((n + 1)) > "$STATE"\n'
+                f'[ "$n" -ge {failures} ] && {{ echo \'{{"key":"k"}}\'; exit 0; }}; exit 28\n'
+            )
+            (tmp / "sleep").write_text("#!/bin/bash\n")
+            for name in ("curl", "sleep"):
+                (tmp / name).chmod(0o755)
+            code = POOL_KEY + "\npool_key\n"
+            env = {"PATH": f"{tmp}:{os.environ['PATH']}", "STATE": str(tmp / "n"), "FLEET_URL": "http://f", "BRIQYARD_TOKEN": "t",
+                   "API_TOKEN": "t", "advertise": "https://x"}
+            return subprocess.run(["bash", "-c", code], env=env, capture_output=True, text=True)
+
+    def test_two_timeouts_then_the_key(self):
+        result = self.run_key(2)
+        self.assertEqual(result.stdout, "k\n", result.stderr)
+
+    def test_three_timeouts_fail(self):
+        result = self.run_key(3)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("attempt 3 of 3", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -105,7 +105,7 @@ address (the host's `hosts:` entry, below).
 | `PRIVATE_INTERFACE` | none | Where `PRIVATE_ADDRESS` is put (netplan, `/etc/netplan/60-briqyard-private.yaml`) when no interface has it yet |
 | `WIREGUARD_PEERS` | none | With `PRIVATE_ADDRESS` and no `PRIVATE_INTERFACE`: the host has no private network and joins the host plane over WireGuard (`briqyard0`, ADR 0113). Comma-separated `PUBLIC_KEY\|TUNNEL_ADDRESS\|ENDPOINT[:PORT]`; the host makes its own key and prints the public one |
 | `WIREGUARD_PORT` | `51820` | The UDP port of `briqyard0`, open to the peers' endpoints only |
-| `WIREGUARD_ONLY` | none | `1`: set the peers of a host already installed (and its firewall rule), change nothing else. Run it on the fleet's host when a tunnel host joins |
+| `WIREGUARD_ONLY` | none | `1`: set the peers of a host already installed (and its firewall rule), change nothing else. Run it on the fleet's host when a tunnel host joins. `WIREGUARD_PEERS=` set and empty removes every peer, its routes and the firewall rule; unset is refused. A full bootstrap without `WIREGUARD_PEERS` keeps the tunnel and its rule as installed |
 | `PUBLIC_TCP_PORTS` | none | Ports the public interface takes besides SSH's own (read from `sshd -T`), comma-separated: an edge's beside the daemon (80, 443, its TCP listeners). Written as `network.host_ports` too |
 | `LISTEN` | `PRIVATE_ADDRESS`'s, else `0.0.0.0:7420` | The API's address; TCP endpoints and the HTTP ingress bind the same address |
 | `ALLOWED_CLIENTS` | none | Comma-separated IPv4 CIDRs (a bare address is a `/32`) allowed to connect: the fleet's and the routers' networks. Written as `ingress.allowed_clients` |

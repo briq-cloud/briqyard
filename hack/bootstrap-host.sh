@@ -60,6 +60,8 @@ API_TOKEN=${BRIQYARD_TOKEN:-}
 PRIVATE_ADDRESS=${PRIVATE_ADDRESS:-}
 PRIVATE_INTERFACE=${PRIVATE_INTERFACE:-}
 PUBLIC_TCP_PORTS=${PUBLIC_TCP_PORTS:-}
+# Unset and empty differ for WIREGUARD_ONLY: empty removes every peer.
+WIREGUARD_PEERS_SET=${WIREGUARD_PEERS+set}
 WIREGUARD_PEERS=${WIREGUARD_PEERS:-}
 WIREGUARD_PORT=${WIREGUARD_PORT:-51820}
 WIREGUARD_ONLY=${WIREGUARD_ONLY:-}
@@ -152,6 +154,7 @@ fail() { echo "   $*" >&2; exit 1; }
 # rule for the tunnel's port names the peers' public addresses, between two marker comments.
 TUNNEL=briqyard0
 TUNNEL_CONF=/etc/wireguard/$TUNNEL.conf
+FIREWALL=/etc/briqyard/firewall.nft
 valid_ipv4() {
   local IFS=. o
   set -- $1
@@ -202,7 +205,7 @@ tunnel_wait() {
 # Installs the tunnel: the key (made once), the configuration from the peers, the unit, the
 # firewall's rule. Peers changed on a running tunnel are synced without dropping the others.
 tunnel_up() {
-  local key addr host port conf own
+  local key addr host port conf own r
   own=${PRIVATE_ADDRESS%/*}
   valid_ipv4 "$own" || fail "WireGuard needs PRIVATE_ADDRESS (the host's address, as 10.42.0.13/16)"
   tunnel_peers >/dev/null
@@ -230,12 +233,17 @@ tunnel_up() {
   systemctl enable "wg-quick@$TUNNEL" >/dev/null 2>&1
   if systemctl is-active --quiet "wg-quick@$TUNNEL"; then
     wg syncconf $TUNNEL <(wg-quick strip $TUNNEL)
-    # syncconf leaves routes alone: one /32 per peer, the removed peers' gone.
-    local want have r
-    want=$(tunnel_peers | awk '{print $2"/32"}' | sort)
-    have=$(ip -4 route show dev $TUNNEL | awk '{print $1}' | sort)
-    for r in $(comm -13 <(echo "$want") <(echo "$have")); do ip route del "$r" dev $TUNNEL; done
-    for r in $(comm -23 <(echo "$want") <(echo "$have")); do ip route add "$r" dev $TUNNEL; done
+    # syncconf leaves routes alone: one /32 per peer. `ip route show` prints a /32 as the bare
+    # address, so both sides are compared bare: only a route that differs is touched.
+    local want have
+    want=" $(tunnel_peers | awk '{printf "%s ", $2}')"
+    have=$(ip -4 route show dev $TUNNEL | awk '{sub(/\/32$/, "", $1); print $1}')
+    for r in $have; do
+      case "$want" in *" $r "*) ;; *) ip route del "$r/32" dev $TUNNEL ;; esac
+    done
+    for r in $want; do
+      case " $(echo $have) " in *" $r "*) ;; *) ip route add "$r/32" dev $TUNNEL ;; esac
+    done
   else
     systemctl start "wg-quick@$TUNNEL"
   fi
@@ -243,25 +251,39 @@ tunnel_up() {
   echo "   wireguard public key $(cat /etc/wireguard/$TUNNEL.pub)"
 }
 
-# The peers of a host already installed (WIREGUARD_ONLY): the tunnel and its firewall rule only.
-if [ "$WIREGUARD_ONLY" = 1 ]; then
-  [ -n "$WIREGUARD_PEERS" ] || fail "WIREGUARD_ONLY needs WIREGUARD_PEERS"
+# The firewall's line for the tunnel's port, for a full bootstrap: the peers' when it is given
+# them, else the one already installed, so a re-run without WireGuard values keeps the tunnel
+# reachable. Only the explicit WIREGUARD_ONLY operation removes it.
+host_tunnel_rule() {
+  local rule
+  rule=$(tunnel_rule)
+  if [ -z "$rule" ] && [ -f $FIREWALL ]; then rule=$(grep '# briqyard-tunnel$' $FIREWALL || true); fi
+  [ -z "$rule" ] || printf '%s\n' "$rule"
+}
+# The peers of a host already installed (WIREGUARD_ONLY): the tunnel and its firewall rule
+# only. An empty WIREGUARD_PEERS is the whole set: no peer, no route, no rule.
+tunnel_only() {
+  [ -n "$WIREGUARD_PEERS_SET" ] || fail "WIREGUARD_ONLY needs WIREGUARD_PEERS (empty, to remove every peer)"
   echo "== wireguard peers"
   tunnel_up
-  if [ -f /etc/briqyard/firewall.nft ]; then
-    sed -i '/# briqyard-tunnel$/d' /etc/briqyard/firewall.nft
+  if [ -f $FIREWALL ]; then
+    local rule
+    sed -i '/# briqyard-tunnel$/d' $FIREWALL
     rule=$(tunnel_rule)
     # Before the final drop, so the rule is read.
-    awk -v rule="$rule" '/^\t\tcounter drop/ {print rule} {print}' /etc/briqyard/firewall.nft > /etc/briqyard/firewall.nft.new
-    grep -q 'briqyard-tunnel$' /etc/briqyard/firewall.nft.new || { rm -f /etc/briqyard/firewall.nft.new; fail "/etc/briqyard/firewall.nft has no final drop to put the rule before"; }
-    mv -f /etc/briqyard/firewall.nft.new /etc/briqyard/firewall.nft
+    awk -v rule="$rule" '/^\t\tcounter drop/ && rule != "" {print rule} {print}' $FIREWALL > $FIREWALL.new
+    if [ -n "$rule" ] && ! grep -q 'briqyard-tunnel$' $FIREWALL.new; then
+      rm -f $FIREWALL.new
+      fail "$FIREWALL has no final drop to put the rule before"
+    fi
+    mv -f $FIREWALL.new $FIREWALL
     systemctl restart briqyard-firewall
-    echo "   firewall: udp $WIREGUARD_PORT from the peers' public addresses"
+    if [ -n "$rule" ]; then echo "   firewall: udp $WIREGUARD_PORT from the peers' public addresses"; else echo "   firewall: no rule for udp $WIREGUARD_PORT"; fi
   else
-    echo "   no /etc/briqyard/firewall.nft: this host's firewall is not ours, open udp $WIREGUARD_PORT to the peers in it"
+    echo "   no $FIREWALL: this host's firewall is not ours, set udp $WIREGUARD_PORT for the peers in it"
   fi
-  exit 0
-fi
+}
+if [ "$WIREGUARD_ONLY" = 1 ]; then tunnel_only; exit 0; fi
 
 # Downloads a file and checks its digest against the pin before it lands anywhere.
 fetch() {
@@ -468,6 +490,8 @@ if [ -n "$PRIVATE_ADDRESS" ]; then
   [ -n "$ssh_ports" ] || fail "sshd -T names no port: closing the public interface would close SSH"
   ports=$ssh_ports${PUBLIC_TCP_PORTS:+,$PUBLIC_TCP_PORTS}
   mkdir -p /etc/briqyard
+  # Read before the file is rewritten.
+  tunnel_line=$(host_tunnel_rule)
   cat > /etc/briqyard/firewall.nft <<EOF
 table inet briqyard_host
 delete table inet briqyard_host
@@ -480,7 +504,7 @@ table inet briqyard_host {
 		udp sport 67 udp dport 68 accept
 		udp sport 547 udp dport 546 accept
 		tcp dport { ${ports//,/, } } accept
-$(tunnel_rule)
+$tunnel_line
 		counter drop
 	}
 }
@@ -549,10 +573,20 @@ pool_device() {
 pool_key() {
   if [ -n "$FLEET_URL" ]; then
     [ -n "$API_TOKEN" ] || { echo "   the fleet's key needs BRIQYARD_TOKEN: the host's own" >&2; return 1; }
-    # The token goes in on stdin, off the command line.
-    printf 'Authorization: Bearer %s\n' "$API_TOKEN" |
-      curl -fsS --max-time 20 -H @- -H 'Content-Type: application/json' \
-        -d "{\"url\": \"$advertise\"}" "${FLEET_URL%/}/v1/hosts/key" | jq -er .key
+    # The token goes in on stdin, off the command line. A bounded retry: the ask is safe to repeat
+    # (the key is made once and served again as it is).
+    local try out
+    for try in 1 2 3; do
+      if out=$(printf 'Authorization: Bearer %s\n' "$API_TOKEN" |
+        curl -fsS --max-time 20 -H @- -H 'Content-Type: application/json' \
+          -d "{\"url\": \"$advertise\"}" "${FLEET_URL%/}/v1/hosts/key"); then
+        printf '%s' "$out" | jq -er .key
+        return
+      fi
+      echo "   the fleet's key: attempt $try of 3 failed" >&2
+      [ "$try" = 3 ] || sleep 3
+    done
+    return 1
   else
     if [ ! -f "$KEY_FILE" ] && [ "${1:-}" = make ]; then
       (umask 077; mkdir -p "$(dirname "$KEY_FILE")"; od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$KEY_FILE")
