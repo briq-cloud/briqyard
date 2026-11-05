@@ -505,3 +505,47 @@ fn machine_set_changes_what_it_runs() {
         ErrorKind::ValueValidation
     );
 }
+
+#[test]
+fn evacuation_cli_selects_namespace_jobs_cancel_resume_and_host_drain() {
+    let cli = parse(&[
+        "namespace",
+        "evacuate",
+        "example",
+        "--to",
+        "h_target",
+        "--drop-snapshots",
+    ]);
+    let Cmd::Namespace(NamespaceCmd::Evacuate(args)) = cli.cmd else {
+        panic!("wrong command");
+    };
+    assert_eq!(args.namespace.as_deref(), Some("example"));
+    assert_eq!(args.to.as_deref(), Some("h_target"));
+    assert!(args.drop_snapshots);
+    assert!(matches!(
+        parse(&["namespace", "evacuate", "cancel", "example"]).cmd,
+        Cmd::Namespace(NamespaceCmd::Evacuate(EvacuateArgs {
+            action: Some(EvacuateAction::Cancel { .. }),
+            ..
+        }))
+    ));
+    assert!(matches!(
+        parse(&["namespace", "evacuate", "resume", "example"]).cmd,
+        Cmd::Namespace(NamespaceCmd::Evacuate(EvacuateArgs {
+            action: Some(EvacuateAction::Resume { .. }),
+            ..
+        }))
+    ));
+    assert!(matches!(
+        parse(&["host", "evacuate", "h_source"]).cmd,
+        Cmd::Host(HostCmd::Evacuate { .. })
+    ));
+    assert!(matches!(
+        parse(&["machine", "release", "m_one", "--force"]).cmd,
+        Cmd::Machine(_)
+    ));
+    assert_eq!(
+        fails(&["namespace", "evacuate"]),
+        ErrorKind::MissingRequiredArgument
+    );
+}

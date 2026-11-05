@@ -81,6 +81,7 @@ struct AppState {
     /// Lists and forwards hold a read guard; journal planning and switching take write.
     authority: tokio::sync::RwLock<()>,
     evacuation_workers: Mutex<std::collections::HashSet<String>>,
+    evacuation_changed: tokio::sync::Notify,
     cfg: config::Config,
     reg: Mutex<Registry>,
     policy: Policy,
@@ -344,6 +345,7 @@ async fn run(args: Args) -> Result<()> {
     let state = Arc::new(AppState {
         authority: Default::default(),
         evacuation_workers: Default::default(),
+        evacuation_changed: Default::default(),
         cfg: cfg.clone(),
         reg: Mutex::new(reg),
         policy,
@@ -372,6 +374,18 @@ async fn run(args: Args) -> Result<()> {
         .collect::<Vec<_>>()
     {
         evacuations::driver::launch(state.clone(), namespace);
+    }
+    let host_jobs: Vec<_> = state
+        .reg
+        .lock()
+        .unwrap()
+        .host_evacuations
+        .values()
+        .filter(|j| j.error.is_none() && j.completed.len() < j.namespaces.len())
+        .map(|j| j.host.clone())
+        .collect();
+    for id in host_jobs {
+        evacuations::launch_host(state.clone(), id);
     }
     tokio::spawn(backup::run(state.clone()));
     tokio::spawn(poll_static_hosts(state.clone()));
@@ -579,6 +593,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/hosts/tokens/:id", axum::routing::delete(revoke_token))
         .route("/install.sh", get(install_script))
         .route("/bootstrap-host.sh", get(bootstrap_script))
+        .route(
+            "/v1/hosts/:id/evacuate",
+            get(evacuations::get_host).post(evacuations::start_host),
+        )
         .route("/v1/hosts/:id/drain", post(drain_host))
         .route("/v1/hosts/:id/undrain", post(undrain_host))
         .route("/v1/hosts/:id/upgrade", post(upgrade::upgrade_host))

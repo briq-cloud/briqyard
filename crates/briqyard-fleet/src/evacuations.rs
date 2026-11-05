@@ -2,7 +2,9 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 pub(crate) mod driver;
+mod host;
 mod io;
+pub(crate) use host::*;
 mod routes;
 pub(crate) use routes::*;
 
@@ -73,4 +75,10 @@ pub(crate) fn namespace_available(reg: &Registry, namespace: &str) -> Result<(),
         ));
     }
     Ok(())
+}
+
+pub(crate) fn host_busy(reg: &Registry, id: &str) -> bool {
+    reg.evacuations
+        .values()
+        .any(|j| j.active() && (j.from == id || j.to == id))
 }

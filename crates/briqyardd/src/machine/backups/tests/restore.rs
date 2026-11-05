@@ -369,6 +369,19 @@ async fn retention_on_a_live_machine_and_an_expired_holder_never_deletes_another
     assert!(h.listed(&m.id).await.iter().any(|b| b.id == second.id));
     h.m.destroy(&m.id, None).await.unwrap();
     let holder = h.m.holder(&m.id).unwrap();
+    let listed = h.listed(&m.id).await;
+    assert!(listed
+        .iter()
+        .find(|b| b.id == foreign.id)
+        .unwrap()
+        .deletes_at
+        .is_none());
+    assert!(listed
+        .iter()
+        .find(|b| b.id == second.id)
+        .unwrap()
+        .deletes_at
+        .is_some());
     h.m.expire(&holder).await;
     let left = h.listed(&m.id).await;
     assert_eq!(left.len(), 1);
@@ -378,4 +391,48 @@ async fn retention_on_a_live_machine_and_an_expired_holder_never_deletes_another
         b"foreign-stream"
     );
     assert!(h.m.holder(&m.id).is_none());
+}
+
+#[tokio::test]
+async fn same_id_restore_keeps_configuration_and_hold_and_refuses_an_existing_id() {
+    let h = harness(|_| {}).await;
+    let mut request = h.request("original");
+    request.start = Some(false);
+    request.env.insert("PERSISTED".into(), "value".into());
+    request.metadata.insert("label".into(), "kept".into());
+    request.cmd = Some(vec!["echo".into(), "kept".into()]);
+    request.ports = vec![80];
+    request.backup = every("1h", 2);
+    let m = h.m.create_made(request).await.unwrap();
+    h.m.entry(&m.id).unwrap().rec.lock().unwrap().state = state::STOPPED.into();
+    h.m.hold_machine(&m.id, "ev_test").await.unwrap();
+    super::super::super::holds::JOB
+        .scope(Some("ev_test".into()), async {
+            let before = h.m.evacuation_manifest(&m.id).await.unwrap();
+            let backup = h.m.backup(&m.id).await.unwrap();
+            let restore = || {
+                let mut request = restore_of(&m.id, &backup.id, "validated-name");
+                request.restore.as_mut().unwrap().same_id = true;
+                // same_id adopts the whole record, even if a caller supplies overrides.
+                request.env.insert("OVERRIDE".into(), "ignored".into());
+                request.metadata.insert("other".into(), "ignored".into());
+                request
+            };
+            assert!(matches!(
+                h.m.create_made(restore()).await,
+                Err(MError::Conflict(_))
+            ));
+            h.m.destroy(&m.id, None).await.unwrap();
+            let restored = h.m.create_made(restore()).await.unwrap();
+            assert_eq!(restored.id, m.id);
+            assert_eq!(restored.name, "original");
+            assert_eq!(restored.state, state::STOPPED);
+            let after = h.m.evacuation_manifest(&m.id).await.unwrap();
+            assert_eq!(after["held"], "ev_test");
+            for key in ["config_digest", "root_bytes", "data_bytes"] {
+                assert_eq!(before[key], after[key], "{key}");
+            }
+        })
+        .await;
+    assert!(matches!(h.m.start(&m.id, None).await, Err(MError::Held(_))));
 }

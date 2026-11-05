@@ -46,6 +46,11 @@ pub(super) struct Daemon {
     /// The runtime classes its status lists besides `default`.
     pub(super) runtime_classes: Mutex<Vec<api::RuntimeClassInfo>>,
     pub(super) backup_records: Mutex<Vec<serde_json::Value>>,
+    pub(super) evacuate_v1: std::sync::atomic::AtomicBool,
+    pub(super) holds: Mutex<HashMap<String, String>>,
+    pub(super) evacuation_fault: Mutex<Option<String>>,
+    pub(super) evacuation_lost_response: Mutex<Option<String>>,
+    pub(super) manifest_mismatch: std::sync::atomic::AtomicBool,
 }
 
 impl Daemon {
@@ -94,6 +99,7 @@ impl Daemon {
             host_port: Some(30000 + n as u16),
             host: String::new(),
             address: format!("127.0.0.1:{}", 30000 + n),
+            delivery_address: String::new(),
             created_at: Utc::now(),
         };
         self.endpoints.lock().unwrap().push(e.clone());
@@ -180,6 +186,11 @@ pub(super) async fn start_daemon_on(
         runtime_classes: Mutex::new(vec![]),
         status_body_failure: std::sync::atomic::AtomicBool::new(false),
         backup_records: Mutex::new(vec![]),
+        evacuate_v1: Default::default(),
+        holds: Default::default(),
+        evacuation_fault: Default::default(),
+        evacuation_lost_response: Default::default(),
+        manifest_mismatch: Default::default(),
     });
     type D = State<Arc<Daemon>>;
     async fn status(State(d): D) -> Response {
@@ -193,7 +204,7 @@ pub(super) async fn start_daemon_on(
         }
         let ms = d.machines.lock().unwrap();
         Json(api::Status {
-            evacuate_v1: false,
+            evacuate_v1: d.evacuate_v1.load(Ordering::SeqCst),
             memory_policy: None,
             egress_siblings_v1: d.egress_siblings.load(Ordering::SeqCst),
             named_memory_fork_v1: false,
@@ -320,6 +331,17 @@ pub(super) async fn start_daemon_on(
                 })
                 .filter(|m| labels.iter().all(|l| l.matches(&m.metadata)))
                 .cloned()
+                .map(|mut m| {
+                    m.endpoints = d
+                        .endpoints
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|e| e.machine_id == m.id)
+                        .cloned()
+                        .collect();
+                    m
+                })
                 .collect(),
         )
     }
@@ -410,11 +432,24 @@ pub(super) async fn start_daemon_on(
     }
     /// Like the daemon: a bad name is refused, and a machine that does not fit in what the
     /// host has left.
-    async fn create(State(d): D, Json(req): Json<api::CreateMachineRequest>) -> Response {
+    async fn create(
+        State(d): D,
+        headers: HeaderMap,
+        Json(req): Json<api::CreateMachineRequest>,
+    ) -> Response {
         // Model a dispatched daemon operation that can outlive the fleet HTTP handler.
-        tokio::spawn(perform_create(d, req)).await.unwrap()
+        let job = headers
+            .get("x-briqyard-job")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        tokio::spawn(perform_create(d, req, job)).await.unwrap()
     }
-    async fn perform_create(d: Arc<Daemon>, req: api::CreateMachineRequest) -> Response {
+    async fn perform_create(
+        d: Arc<Daemon>,
+        req: api::CreateMachineRequest,
+        job: String,
+    ) -> Response {
         let gate = d.create_gate.lock().unwrap().clone();
         if let Some((entered, release)) = gate {
             entered.notify_one();
@@ -435,7 +470,16 @@ pub(super) async fn start_daemon_on(
         if let Some(f) = d.on_create.lock().unwrap().as_ref() {
             f();
         }
-        let m = d.add(&req.namespace, &req.name, req.size.memory_mb);
+        let m = if let Some(rs) = req.restore.as_ref().filter(|rs| rs.same_id) {
+            let mut m = d.machine(&req.namespace, &req.name, 256);
+            m.id = rs.machine_id.clone();
+            m.state = "stopped".into();
+            d.holds.lock().unwrap().insert(m.id.clone(), job);
+            d.machines.lock().unwrap().push(m.clone());
+            m
+        } else {
+            d.add(&req.namespace, &req.name, req.size.memory_mb)
+        };
         if let Some(done) = d.create_finished.lock().unwrap().as_ref() {
             done.notify_one();
         }
@@ -476,6 +520,7 @@ pub(super) async fn start_daemon_on(
         let mut ms = d.machines.lock().unwrap();
         let before = ms.len();
         ms.retain(|m| m.id != id);
+        d.endpoints.lock().unwrap().retain(|e| e.machine_id != id);
         if ms.len() == before {
             StatusCode::NOT_FOUND
         } else {
@@ -547,6 +592,7 @@ pub(super) async fn start_daemon_on(
             "created_at": "2026-10-29T10:00:00Z", "bytes": 1, "incremental": false, "disks": [],
             "host": d.id,
         });
+        d.backup_records.lock().unwrap().push(b.clone());
         (StatusCode::CREATED, Json(b)).into_response()
     }
     /// The store is shared: every host answers for every machine id, with nothing here.
@@ -576,11 +622,27 @@ pub(super) async fn start_daemon_on(
     async fn delete_backup() -> StatusCode {
         StatusCode::NO_CONTENT
     }
-    async fn add_endpoint(State(d): D, Path(id): Path<String>) -> Response {
+    async fn add_endpoint(
+        State(d): D,
+        Path(id): Path<String>,
+        Json(request): Json<api::CreateEndpointRequest>,
+    ) -> Response {
         if !d.machines.lock().unwrap().iter().any(|m| m.id == id) {
             return StatusCode::NOT_FOUND.into_response();
         }
-        (StatusCode::CREATED, Json(d.add_endpoint(&id))).into_response()
+        let mut endpoint = d.add_endpoint(&id);
+        if let Some(keep) = request.id {
+            d.endpoints
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|e| e.id == endpoint.id)
+                .unwrap()
+                .id = keep.clone();
+            endpoint.id = keep;
+        }
+        endpoint.port = request.port;
+        (StatusCode::CREATED, Json(endpoint)).into_response()
     }
     async fn endpoints(State(d): D) -> Json<Vec<api::Endpoint>> {
         Json(d.endpoints.lock().unwrap().clone())
@@ -690,7 +752,10 @@ pub(super) async fn start_daemon_on(
             req.method(),
             req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("")
         );
-        d.calls.lock().unwrap().push(line);
+        d.calls.lock().unwrap().push(line.clone());
+        if d.evacuation_fault.lock().unwrap().as_ref() == Some(&line) {
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
         if let Some(v) = req.headers().get(header::IF_MATCH) {
             d.if_match
                 .lock()
@@ -700,7 +765,13 @@ pub(super) async fn start_daemon_on(
         if !d.token.is_empty() && bearer(req.headers()) != d.token {
             return err(StatusCode::UNAUTHORIZED, "unauthorized", "bad token").into_response();
         }
-        next.run(req).await
+        let lose_response = d.evacuation_lost_response.lock().unwrap().as_ref() == Some(&line);
+        let response = next.run(req).await;
+        if lose_response {
+            StatusCode::BAD_GATEWAY.into_response()
+        } else {
+            response
+        }
     }
     async fn warm_claim(
         State(d): D,
@@ -719,6 +790,31 @@ pub(super) async fn start_daemon_on(
         };
         machine.name = request.name;
         Json(machine.clone()).into_response()
+    }
+    async fn manifest(State(d): D, Path(id): Path<String>) -> Response {
+        let ms = d.machines.lock().unwrap();
+        let Some(m) = ms.iter().find(|m| m.id == id) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        Json(serde_json::json!({"id":id,"state":m.state,"held":d.holds.lock().unwrap().get(&id),"ip":m.ip,"config_digest":if d.manifest_mismatch.load(Ordering::SeqCst) {"different"} else {"config"},"root_bytes":1<<20,"data_bytes":0,"host_local":false})).into_response()
+    }
+    async fn hold(
+        State(d): D,
+        Path(id): Path<String>,
+        Json(body): Json<serde_json::Value>,
+    ) -> StatusCode {
+        d.holds
+            .lock()
+            .unwrap()
+            .insert(id, body["job"].as_str().unwrap().into());
+        StatusCode::NO_CONTENT
+    }
+    async fn release(State(d): D, Path(id): Path<String>) -> StatusCode {
+        d.holds.lock().unwrap().remove(&id);
+        StatusCode::NO_CONTENT
+    }
+    async fn hold_owner(State(d): D, Path(id): Path<String>) -> Json<serde_json::Value> {
+        Json(serde_json::json!({"job":d.holds.lock().unwrap().get(&id)}))
     }
     let app = Router::new()
         .route(
@@ -740,6 +836,11 @@ pub(super) async fn start_daemon_on(
         )
         .route("/v1/machines", get(list).post(create))
         .route("/v1/machines/:id", get(get_machine).delete(delete_machine))
+        .route("/v1/machines/:id/evacuation-manifest", get(manifest))
+        .route(
+            "/v1/machines/:id/hold",
+            get(hold_owner).post(hold).delete(release),
+        )
         .route("/v1/machines/:id/start", post(start_machine))
         .route("/v1/machines/:id/stop", post(stop_machine))
         .route("/v1/machines/:id/move", post(move_machine))

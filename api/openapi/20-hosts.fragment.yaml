@@ -130,6 +130,7 @@
     Status:
       type: object
       properties:
+        evacuate_v1: { type: boolean, default: false, description: "Explicit support for durable holds, same-id restore, endpoint identity and key-scoped backup retention. Missing means unsupported" }
         egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
         named_memory_fork_v1: { type: boolean, default: false, description: "explicit availability of configured named memory cloning; supported profiles are listed separately; absent or stale reports are unsupported" }
         named_memory_profiles: { type: array, items: { type: string, enum: [init-ready-v1] }, description: "implemented configured profiles; init-ready does not clone already-running services" }

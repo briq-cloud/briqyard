@@ -30,6 +30,7 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
     let st = Arc::new(AppState {
         authority: Default::default(),
         evacuation_workers: Default::default(),
+        evacuation_changed: Default::default(),
         state_path,
         policy: Policy {
             require_egress_siblings: false,
@@ -237,6 +238,7 @@ mod backups;
 mod classes;
 mod daemon;
 mod endpoints;
+mod evacuations;
 mod events;
 mod files;
 mod hosts;

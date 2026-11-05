@@ -34,8 +34,24 @@ impl Manager {
             store.list(&format!("backups/{machine_id}/")).await?
         };
         let mut out = self.read_backups(store, keys).await?;
+        // A holder owns only this host's keyed chain (and legacy unkeyed backups).
+        // Listing remains possible if the local key source cannot be resolved; in
+        // that case expiration cannot run either, so advertise no keyed deadline.
+        let local_key = if deletes_at.is_some() {
+            self.seal().await.ok().map(|seal| seal.id)
+        } else {
+            None
+        };
         for b in &mut out {
-            b.deletes_at = deletes_at;
+            b.deletes_at = if b.key_id.is_none()
+                || local_key
+                    .as_ref()
+                    .is_some_and(|key| b.key_id.as_ref() == Some(key))
+            {
+                deletes_at
+            } else {
+                None
+            };
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)

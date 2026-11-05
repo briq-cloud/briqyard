@@ -54,7 +54,7 @@ async fn cancelled(st: &AppState, namespace: &str) -> Result<bool> {
     Ok(false)
 }
 
-async fn run(st: &AppState, namespace: &str) -> Result<()> {
+pub(crate) async fn run(st: &AppState, namespace: &str) -> Result<()> {
     let mut job = journal(st, namespace)?;
     if !job.active() {
         return Ok(());
@@ -90,6 +90,28 @@ async fn run(st: &AppState, namespace: &str) -> Result<()> {
         for (index, m) in job.machines.iter_mut().enumerate() {
             if cancelled(st, namespace).await? {
                 return Ok(());
+            }
+            if let Some(backup) = &m.backup {
+                let listed = call(
+                    st,
+                    &source,
+                    &job.job,
+                    Method::GET,
+                    &format!("/v1/machines/{}/backups", m.id),
+                    serde_json::Value::Null,
+                )
+                .await?;
+                let listed: Vec<api::Backup> = serde_json::from_value(listed)?;
+                if !listed
+                    .iter()
+                    .any(|b| b.id == *backup && b.machine_id == m.id)
+                {
+                    return Err(anyhow!(
+                        "source backup {} for {} is no longer listed",
+                        backup,
+                        m.id
+                    ));
+                }
             }
             if m.backup.is_none() {
                 checkpoint(st, namespace, |j| j.step = "cold".into()).await?;
@@ -139,7 +161,21 @@ async fn run(st: &AppState, namespace: &str) -> Result<()> {
                     backup: m.backup.clone().ok_or_else(|| anyhow!("backup missing"))?,
                 };
                 let open = st.restores.open(&target.id, &rs, std::time::Instant::now());
-                let result = call(st, &target, &job.job, Method::POST, "/v1/machines", serde_json::json!({"namespace": namespace,"name":m.name,"restore":rs,"start":false})).await;
+                let result = call(
+                    st,
+                    &target,
+                    &job.job,
+                    Method::POST,
+                    "/v1/machines",
+                    serde_json::to_value(api::CreateMachineRequest {
+                        namespace: namespace.into(),
+                        name: m.name.clone(),
+                        restore: Some(rs),
+                        start: Some(false),
+                        ..Default::default()
+                    })?,
+                )
+                .await;
                 st.restores.close(open);
                 result?;
             }
@@ -173,6 +209,7 @@ async fn run(st: &AppState, namespace: &str) -> Result<()> {
                 || actual.machine_id != endpoint.machine_id
                 || actual.port != endpoint.port
                 || actual.protocol != endpoint.protocol
+                || actual.host != endpoint.host
             {
                 return Err(anyhow!("endpoint {} identity mismatch", endpoint.id));
             }
@@ -183,35 +220,14 @@ async fn run(st: &AppState, namespace: &str) -> Result<()> {
             })
             .await?;
         }
-        for (index, m) in job.machines.iter().enumerate() {
-            if cancelled(st, namespace).await? {
-                return Ok(());
-            }
-            let actual = call(
-                st,
-                &target,
-                &job.job,
-                Method::GET,
-                &format!("/v1/machines/{}/evacuation-manifest", m.id),
-                serde_json::Value::Null,
-            )
-            .await?;
-            for key in ["id", "config_digest", "root_bytes", "data_bytes"] {
-                if actual[key] != m.manifest[key] {
-                    return Err(anyhow!("verification {}: {key} differs", m.id));
-                }
-            }
-            if actual["state"] != "stopped" || actual["held"] != job.job {
-                return Err(anyhow!(
-                    "verification {}: destination must remain stopped and held",
-                    m.id
-                ));
-            }
+        if let Err(error) = verify(st, namespace, &job).await {
             checkpoint(st, namespace, |j| {
-                j.machines[index].verified = true;
-                j.machines[index].ip = actual["ip"].as_str().unwrap_or_default().into();
+                j.cancel_requested = true;
+                j.error = Some(format!("{error:#}"));
             })
             .await?;
+            rollback(st, namespace).await?;
+            return Err(error);
         }
         checkpoint(st, namespace, |j| j.step = "verified".into()).await?;
         if cancelled(st, namespace).await? {
@@ -280,6 +296,38 @@ async fn run(st: &AppState, namespace: &str) -> Result<()> {
         j.error = None;
     })
     .await
+}
+
+async fn verify(st: &AppState, namespace: &str, job: &Evacuation) -> Result<()> {
+    let target = host(st, &job.to)?;
+    for (index, m) in job.machines.iter().enumerate() {
+        let actual = call(
+            st,
+            &target,
+            &job.job,
+            Method::GET,
+            &format!("/v1/machines/{}/evacuation-manifest", m.id),
+            serde_json::Value::Null,
+        )
+        .await?;
+        for key in ["id", "config_digest", "root_bytes", "data_bytes"] {
+            if actual[key] != m.manifest[key] {
+                return Err(anyhow!("verification {}: {key} differs", m.id));
+            }
+        }
+        if actual["state"] != "stopped" || actual["held"] != job.job {
+            return Err(anyhow!(
+                "verification {}: destination must remain stopped and held",
+                m.id
+            ));
+        }
+        checkpoint(st, namespace, |j| {
+            j.machines[index].verified = true;
+            j.machines[index].ip = actual["ip"].as_str().unwrap_or_default().into();
+        })
+        .await?;
+    }
+    Ok(())
 }
 
 async fn wait_stopped(st: &AppState, host: &HostRec, id: &str) -> Result<()> {
@@ -367,7 +415,6 @@ async fn rollback(st: &AppState, namespace: &str) -> Result<()> {
         }
         let job = reg.evacuations.get_mut(namespace).unwrap();
         job.step = "cancelled".into();
-        job.error = None;
     }
     st.save().await
 }

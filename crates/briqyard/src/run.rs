@@ -15,6 +15,14 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
         Cmd::Status => print_json(&c.call::<api::Status>(GET, "/v1/status", NONE).await?),
         Cmd::Openapi => print!("{}", c.raw(GET, "/v1/openapi.yaml", NONE).await?),
         Cmd::Machine(m) => match *m {
+            MachineCmd::Release { id, job, force } => {
+                c.raw(
+                    DELETE,
+                    &format!("/v1/machines/{id}/hold"),
+                    Some(&serde_json::json!({"job":job,"force":force})),
+                )
+                .await?;
+            }
             MachineCmd::Ls { namespace, labels } => {
                 let path = machines_path(namespace.as_deref(), &labels);
                 let ms: Vec<api::Machine> = c.call(GET, &path, NONE).await?;
@@ -501,6 +509,35 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             }
         },
         Cmd::Namespace(t) => match t {
+            NamespaceCmd::Evacuations => print_json(
+                &c.call::<serde_json::Value>(GET, "/v1/namespaces/evacuations", NONE)
+                    .await?,
+            ),
+            NamespaceCmd::Evacuate(args) => {
+                let (path, body) = match args.action {
+                    Some(EvacuateAction::Cancel { namespace }) => (
+                        format!("/v1/namespaces/{namespace}/evacuate/cancel"),
+                        serde_json::json!({}),
+                    ),
+                    Some(EvacuateAction::Resume { namespace }) => (
+                        format!("/v1/namespaces/{namespace}/evacuate/resume"),
+                        serde_json::json!({}),
+                    ),
+                    None => (
+                        format!(
+                            "/v1/namespaces/{}/evacuate",
+                            args.namespace
+                                .ok_or_else(|| anyhow!("namespace required"))?
+                        ),
+                        serde_json::json!({"to":args.to,"drop_snapshots":args.drop_snapshots}),
+                    ),
+                };
+                // Resume and cancel may return an empty accepted response.
+                let response = c.raw(POST, &path, Some(&body)).await?;
+                if !response.is_empty() {
+                    println!("{response}");
+                }
+            }
             NamespaceCmd::Ls => print_json(
                 &c.call::<Vec<api::Namespace>>(GET, "/v1/namespaces", NONE)
                     .await?,
@@ -666,6 +703,18 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             }
         },
         Cmd::Host(h) => match h {
+            HostCmd::Evacuate {
+                id,
+                to,
+                drop_snapshots,
+            } => print_json(
+                &c.call::<serde_json::Value>(
+                    POST,
+                    &format!("/v1/hosts/{id}/evacuate"),
+                    Some(&serde_json::json!({"to":to,"drop_snapshots":drop_snapshots})),
+                )
+                .await?,
+            ),
             HostCmd::Ls => {
                 let hs: Vec<api::Host> = c.call(GET, "/v1/hosts", NONE).await?;
                 let st: api::Status = c.call(GET, "/v1/status", NONE).await?;

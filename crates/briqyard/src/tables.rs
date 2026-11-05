@@ -103,13 +103,13 @@ pub(super) fn snapshot_table(ss: &[api::Snapshot]) -> String {
 /// `endpoint ls`.
 pub(super) fn endpoint_table(eps: &[api::Endpoint]) -> String {
     let mut out = format!(
-        "{:<18} {:<16} {:<6} {:<9} ADDRESS\n",
+        "{:<18} {:<16} {:<6} {:<9} ADDRESS DELIVERY\n",
         "ID", "MACHINE", "PORT", "PROTOCOL"
     );
     for e in eps {
         out.push_str(&format!(
-            "{:<18} {:<16} {:<6} {:<9} {}\n",
-            e.id, e.machine_id, e.port, e.protocol, e.address
+            "{:<18} {:<16} {:<6} {:<9} {} {}\n",
+            e.id, e.machine_id, e.port, e.protocol, e.address, e.delivery_address
         ));
     }
     out

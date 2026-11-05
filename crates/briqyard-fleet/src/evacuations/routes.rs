@@ -2,7 +2,7 @@ use super::*;
 use io::*;
 
 #[derive(Default, Deserialize)]
-pub(crate) struct Request {
+pub(crate) struct EvacuateRequest {
     pub to: Option<String>,
     #[serde(default)]
     pub drop_snapshots: bool,
@@ -24,7 +24,7 @@ pub(crate) async fn list(State(st): S) -> Json<Vec<Evacuation>> {
 pub(crate) async fn start(
     State(st): S,
     Path(namespace): Path<String>,
-    Json(request): Json<Request>,
+    Json(request): Json<EvacuateRequest>,
 ) -> Result<(StatusCode, Json<Evacuation>), Refusal> {
     if !api::valid_id(&namespace) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid", "invalid namespace"));
@@ -51,7 +51,11 @@ pub(crate) async fn start(
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
-async fn plan(st: &AppState, namespace: &str, request: Request) -> Result<Evacuation, Refusal> {
+async fn plan(
+    st: &AppState,
+    namespace: &str,
+    request: EvacuateRequest,
+) -> Result<Evacuation, Refusal> {
     let source = {
         let reg = st.reg.lock().unwrap();
         namespace_available(&reg, namespace)?;
@@ -311,6 +315,34 @@ async fn plan(st: &AppState, namespace: &str, request: Request) -> Result<Evacua
         if existing.is_some() {
             shortages.push(format!(
                 "host {} already holds namespace {namespace}",
+                target.id
+            ));
+            continue;
+        }
+        let mut collision = false;
+        for m in &copies {
+            if lookup(st, &target, &format!("/v1/machines/{}", m.id))
+                .await
+                .map_err(unsupported)?
+                .is_some()
+            {
+                collision = true;
+                break;
+            }
+        }
+        for ep in &endpoints {
+            if lookup(st, &target, &format!("/v1/endpoints/{}", ep.id))
+                .await
+                .map_err(unsupported)?
+                .is_some()
+            {
+                collision = true;
+                break;
+            }
+        }
+        if collision {
+            shortages.push(format!(
+                "host {} already holds a machine or endpoint id",
                 target.id
             ));
             continue;

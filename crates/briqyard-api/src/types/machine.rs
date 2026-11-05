@@ -343,6 +343,9 @@ pub struct Endpoint {
     pub host: String,
     /// Where to connect: "<ip>:<host_port>" or "http://<host>".
     pub address: String,
+    /// The host ingress to dial. HTTP callers preserve `host` as the Host header.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub delivery_address: String,
     pub created_at: DateTime<Utc>,
 }
 

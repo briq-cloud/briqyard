@@ -635,6 +635,7 @@ fn the_endpoint_and_image_tables() {
             host_port: Some(30432),
             host: String::new(),
             address: "203.0.113.5:30432".into(),
+            delivery_address: String::new(),
             created_at: ts(),
         },
         api::Endpoint {
@@ -645,6 +646,7 @@ fn the_endpoint_and_image_tables() {
             host_port: None,
             host: "web".into(),
             address: "http://web.example".into(),
+            delivery_address: String::new(),
             created_at: ts(),
         },
     ];
@@ -652,15 +654,15 @@ fn the_endpoint_and_image_tables() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines[0],
-        "ID                 MACHINE          PORT   PROTOCOL  ADDRESS"
+        "ID                 MACHINE          PORT   PROTOCOL  ADDRESS DELIVERY"
     );
     assert_eq!(
         lines[1],
-        "ep_01              m_01             5432   tcp       203.0.113.5:30432"
+        "ep_01              m_01             5432   tcp       203.0.113.5:30432 "
     );
     assert_eq!(
         lines[2],
-        "ep_02              m_02             80     http      http://web.example"
+        "ep_02              m_02             80     http      http://web.example "
     );
     assert_eq!(lines.len(), 3);
 

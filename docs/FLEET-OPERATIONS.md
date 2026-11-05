@@ -332,13 +332,44 @@ Alone in its namespace and the target new: the namespace is renamed, the machine
 address and is not restarted. The target exists on the host: the machine is stopped, takes an
 address there and starts again (`restarted: true`, `previous_ip`); a machine that was not
 running stays as it is. Through a fleet, the target pinned to another host: refused (409 `other_host`) before
-anything happens, naming both hosts; moving across hosts is not supported yet, use the
-procedure below. The namespace it left
+anything happens, naming both hosts; move the whole stopped namespace with `namespace evacuate` below. The namespace it left
 stays until `briqyard namespace rm`. Refused (409): another machine sends its traffic through
 this one, the target has a machine of that name, a snapshot with memory exists (it would resume
 on the old address; delete it), the machine is starting, stopping or destroying. ADR 0056.
 
 ### Moving a namespace
+
+```bash
+briqyard namespace evacuate example --to h_target
+briqyard namespace evacuations
+briqyard namespace evacuate resume example
+briqyard namespace evacuate cancel example       # before the authority switch
+briqyard host evacuate h_source                  # drain, then sequential namespace jobs
+```
+
+Phase 1 accepts stopped machines only. Gateway namespaces, host-local seeds, warm
+slots and assigned clones are refused. Named snapshots need `--drop-snapshots`;
+memory state does not travel. Both hosts must advertise `evacuate_v1` and share the
+backup store. The destination must be in the source region and have logical disk
+capacity for every root and volume. Holds refuse a backup or operation already in
+flight with 409 `busy`; stop that activity, then resume. Held machines cannot wake.
+
+The registry journal owns routing while both copies exist. Source data is removed
+after destination verification and the durable authority switch. A failed cleanup
+leaves `finishing`; resume it. A host job stops at the first refusal, leaves the host
+`draining`, and reports completed and remaining namespaces at
+`GET /v1/hosts/{id}/evacuate`; repeat the command with the same options to resume.
+
+After `switched` or `done`, refetch each stable endpoint id. Persist its new
+`delivery_address` and update the external edge; for HTTP retain `host` as the Host
+header. HTTP `address` is the unchanged public hostname, not the ingress to dial.
+The runtime never updates an external edge. The source backup chain stays readable
+until source destruction, then for that host's `backup.keep_destroyed_days`;
+target retention prunes only its own key's chain. Its first backup is whole.
+
+The following manual fallback is for an older fleet or an unavailable source.
+It changes machine ids and requires the operator to verify the restore strategy
+before destroying the source.
 
 Machines do not move between hosts on their own: a draining host keeps its namespaces until they
 are removed. To take a namespace off a host (draining, full, or gone):

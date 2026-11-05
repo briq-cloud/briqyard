@@ -83,7 +83,9 @@ pub(super) async fn checkpoint(
             .ok_or_else(|| anyhow!("evacuation journal missing"))?;
         update(job);
     }
-    st.save().await
+    st.save().await?;
+    st.evacuation_changed.notify_waiters();
+    Ok(())
 }
 
 pub(super) fn journal(st: &AppState, namespace: &str) -> Result<Evacuation> {

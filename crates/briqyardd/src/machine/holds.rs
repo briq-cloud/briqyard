@@ -81,6 +81,9 @@ impl Manager {
 
     pub async fn release_machine(&self, id: &str, job: &str, force: bool) -> Result<(), MError> {
         let e = self.own_entry(id)?;
+        if e.snapshot().held.is_none() {
+            return Ok(());
+        }
         let _operation = e
             .operations
             .clone()
@@ -96,90 +99,6 @@ impl Manager {
         self.inner.store.put_durable("machines", id, &next)?;
         r.held = None;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::machine::tests::{harness_config, record};
-
-    #[tokio::test]
-    async fn stopped_hold_survives_disk_roundtrip_and_refuses_wake_and_mutation() {
-        let h = harness_config(|_| {}).await;
-        let e = h.add("m_held", state::STOPPED, 256);
-        h.m.hold_machine("m_held", "ev_1").await.unwrap();
-        let saved: Record = h.m.inner.store.get("machines", "m_held").unwrap().unwrap();
-        assert_eq!(saved.held.as_deref(), Some("ev_1"));
-        let recovered = Entry::new(saved, e.events.clone());
-        h.m.inner
-            .machines
-            .lock()
-            .unwrap()
-            .insert("m_held".into(), recovered);
-        assert!(matches!(
-            h.m.start("m_held", None).await,
-            Err(MError::Held(_))
-        ));
-        assert!(matches!(
-            h.m.wake("m_held", None).await,
-            Err(MError::Held(_))
-        ));
-        assert!(matches!(
-            h.m.machine_addr("m_held", true).await,
-            Err(MError::Held(_))
-        ));
-        assert!(matches!(
-            h.m.destroy("m_held", None).await,
-            Err(MError::Held(_))
-        ));
-        assert!(matches!(
-            h.m.update("m_held", Default::default(), None).await,
-            Err(MError::Held(_))
-        ));
-        assert!(matches!(
-            h.m.hold_machine("m_held", "ev_2").await,
-            Err(MError::Held(_))
-        ));
-        assert!(matches!(
-            h.m.release_machine("m_held", "ev_2", false).await,
-            Err(MError::Held(_))
-        ));
-        JOB.scope(Some("ev_1".into()), async {
-            let e = h.m.entry("m_held").unwrap();
-            assert!(h.m.operation(&e).is_ok());
-        })
-        .await;
-        h.m.release_machine("m_held", "ev_1", false).await.unwrap();
-        assert!(h.m.entry("m_held").unwrap().snapshot().held.is_none());
-    }
-
-    #[tokio::test]
-    async fn hold_refuses_an_active_backup_turn_or_an_operation_without_writing() {
-        let h = harness_config(|_| {}).await;
-        let e = h.add("m_held", state::STOPPED, 256);
-        let backup = e.backup_turn.clone().lock_owned().await;
-        assert!(matches!(
-            h.m.hold_machine("m_held", "ev_1").await,
-            Err(MError::Busy(_))
-        ));
-        assert!(e.snapshot().held.is_none());
-        drop(backup);
-        let operation = h.m.operation(&e).unwrap();
-        assert!(matches!(
-            h.m.hold_machine("m_held", "ev_1").await,
-            Err(MError::Busy(_))
-        ));
-        drop(operation);
-        h.m.hold_machine("m_held", "ev_1").await.unwrap();
-        assert!(matches!(h.m.operation(&e), Err(MError::Held(_))));
-        // Old records have no hold and retain their former behavior.
-        let mut old = serde_json::to_value(record()).unwrap();
-        old.as_object_mut().unwrap().remove("held");
-        assert!(serde_json::from_value::<Record>(old)
-            .unwrap()
-            .held
-            .is_none());
     }
 }
 
@@ -239,5 +158,92 @@ impl Manager {
         Ok(
             json!({"id": id, "state": rec.state, "held": rec.held, "ip": rec.ip, "config_digest": digest, "root_bytes": root, "data_bytes": data, "host_local": rec.template_birth.is_some() || rec.warm_slot.is_some() || rec.launch_identity.is_some() || rec.clone_origin.is_some()}),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::machine::tests::{harness_config, record};
+
+    #[tokio::test]
+    async fn stopped_hold_survives_disk_roundtrip_and_refuses_wake_and_mutation() {
+        let h = harness_config(|_| {}).await;
+        let e = h.add("m_held", state::STOPPED, 256);
+        h.m.hold_machine("m_held", "ev_1").await.unwrap();
+        let saved: Record = h.m.inner.store.get("machines", "m_held").unwrap().unwrap();
+        assert_eq!(saved.held.as_deref(), Some("ev_1"));
+        let recovered = Entry::new(saved, e.events.clone());
+        h.m.inner
+            .machines
+            .lock()
+            .unwrap()
+            .insert("m_held".into(), recovered);
+        assert!(matches!(
+            h.m.start("m_held", None).await,
+            Err(MError::Held(_))
+        ));
+        assert!(matches!(
+            h.m.wake("m_held", None).await,
+            Err(MError::Held(_))
+        ));
+        assert!(matches!(
+            h.m.machine_addr("m_held", true).await,
+            Err(MError::Held(_))
+        ));
+        assert!(matches!(
+            h.m.destroy("m_held", None).await,
+            Err(MError::Held(_))
+        ));
+        assert!(matches!(
+            h.m.update("m_held", Default::default(), None).await,
+            Err(MError::Held(_))
+        ));
+        assert!(matches!(
+            h.m.hold_machine("m_held", "ev_2").await,
+            Err(MError::Held(_))
+        ));
+        assert!(matches!(
+            h.m.release_machine("m_held", "ev_2", false).await,
+            Err(MError::Held(_))
+        ));
+        JOB.scope(Some("ev_1".into()), async {
+            let e = h.m.entry("m_held").unwrap();
+            assert!(h.m.operation(&e).is_ok());
+        })
+        .await;
+        h.m.release_machine("m_held", "ev_1", false).await.unwrap();
+        let entry = h.m.entry("m_held").unwrap();
+        assert!(entry.snapshot().held.is_none());
+        let _active = h.m.operation(&entry).unwrap();
+        h.m.release_machine("m_held", "ev_1", false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hold_refuses_an_active_backup_turn_or_an_operation_without_writing() {
+        let h = harness_config(|_| {}).await;
+        let e = h.add("m_held", state::STOPPED, 256);
+        let backup = e.backup_turn.clone().lock_owned().await;
+        assert!(matches!(
+            h.m.hold_machine("m_held", "ev_1").await,
+            Err(MError::Busy(_))
+        ));
+        assert!(e.snapshot().held.is_none());
+        drop(backup);
+        let operation = h.m.operation(&e).unwrap();
+        assert!(matches!(
+            h.m.hold_machine("m_held", "ev_1").await,
+            Err(MError::Busy(_))
+        ));
+        drop(operation);
+        h.m.hold_machine("m_held", "ev_1").await.unwrap();
+        assert!(matches!(h.m.operation(&e), Err(MError::Held(_))));
+        // Old records have no hold and retain their former behavior.
+        let mut old = serde_json::to_value(record()).unwrap();
+        old.as_object_mut().unwrap().remove("held");
+        assert!(serde_json::from_value::<Record>(old)
+            .unwrap()
+            .held
+            .is_none());
     }
 }

@@ -45,6 +45,19 @@ impl Manager {
             "http" => format!("http://{}", e.host),
             _ => format!("{}:{}", self.inner.advertise, e.host_port.unwrap_or(0)),
         };
+        let delivery_address = if e.protocol == "http" {
+            let port = self
+                .inner
+                .cfg
+                .ingress
+                .http
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.parse::<u16>().ok())
+                .unwrap_or(80);
+            format!("http://{}:{port}", self.inner.advertise)
+        } else {
+            address.clone()
+        };
         api::Endpoint {
             id: e.id.clone(),
             machine_id: e.machine_id.clone(),
@@ -53,6 +66,7 @@ impl Manager {
             host_port: e.host_port,
             host: e.host.clone(),
             address,
+            delivery_address,
             created_at: e.created_at,
         }
     }
@@ -177,4 +191,52 @@ pub(super) fn free_tcp_port(spec: &str, used: Vec<u16>) -> Result<u16, MError> {
     netw::first_free(used, lo as u32, hi as u32)
         .map(|p| p as u16)
         .ok_or_else(|| MError::Capacity("no tcp endpoint port left".into()))
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::machine::tests::harness_config;
+
+    #[tokio::test]
+    async fn supplied_ids_are_idempotent_and_cannot_replace_another_endpoint() {
+        let h = harness_config(|cfg| cfg.ingress.http = "127.0.0.1:0".into()).await;
+        h.add("m_one", state::STOPPED, 256);
+        h.add("m_two", state::STOPPED, 256);
+        let request = || api::CreateEndpointRequest {
+            id: Some("ep_preserved".into()),
+            port: 80,
+            protocol: "http".into(),
+            host: "original.example.test".into(),
+        };
+        let first = h.m.create_endpoint("m_one", request()).unwrap();
+        assert_eq!(first.id, "ep_preserved");
+        assert_eq!(first.host, "original.example.test");
+        assert_eq!(
+            first.delivery_address,
+            format!("http://{}:0", h.m.inner.advertise)
+        );
+        assert_ne!(first.address, first.delivery_address);
+        assert_eq!(
+            h.m.create_endpoint("m_one", request()).unwrap().id,
+            first.id
+        );
+        assert!(matches!(
+            h.m.create_endpoint("m_two", request()),
+            Err(MError::Conflict(_))
+        ));
+        let saved: EndpointRec =
+            h.m.inner
+                .store
+                .get("endpoints", &first.id)
+                .unwrap()
+                .unwrap();
+        assert_eq!(saved.machine_id, "m_one");
+        assert_eq!(saved.host, first.host);
+        h.m.hold_machine("m_one", "ev_test").await.unwrap();
+        assert!(matches!(
+            h.m.delete_endpoint(&first.id),
+            Err(MError::Held(_))
+        ));
+    }
 }

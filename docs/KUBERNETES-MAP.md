@@ -85,7 +85,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Pod affinity | ◐ a namespace's machines share a host, forced | | — |
 | Cordon | ✓ `host drain`, `host undrain`; a drained host is never forgotten (`retire` is its own state, ADR 0027) | | |
 | Taints, tolerations | ✗ | | — |
-| Drain with eviction | ◐ drain stops placement; machines stay | evacuate a host from backups | yard |
+| Drain with eviction | ◐ `host evacuate` moves stopped namespaces with ids preserved; gateway namespaces refused | running machines and memory state | yard |
 | Node object, heartbeats | ✓ heartbeat every 15 s, `down` after a minute | | |
 | Joining a node (`kubeadm join`) | ✓ `host add`: a server bought by hand, bootstrapped over SSH with the fleet's `bootstrap:`, its SSH key and certificate pinned; its API on the private network (ADR 0028). ✓ `host token create` and `install.sh` (`kubeadm token create` and `join`): a bootstrap token, reusable until it expires or is revoked (`--ttl`, `--ttl 0` never; our addition: `--address`), the server joins on its own and runs the same bootstrap (ADR 0059) | upgrading a joined host without SSH | yard |
 | Node conditions (MemoryPressure, DiskPressure) | ✓ `memory_pressure`, `disk_pressure`, and `storage_stalled` (a `zfs` command stuck, ADR 0046) in status and the heartbeat, `host_condition` events; the fleet places nothing new on a host under pressure (ADR 0021) | | |
@@ -179,4 +179,4 @@ Each with an ADR, unit tests, Linux CI and the VM suites: egress controls (ADR 0
 
 Decided 2026-10-20: the daemon runs scheduled backups from a policy the control plane sets; the pool is encrypted with one key per host held by the fleet; events stay per host and are read through the fleet, which keeps nothing; probes run in the daemon and a control plane's healthcheck moves onto them.
 
-Later, in the tables above: groups and load balancing, the mesh, scoped tokens, fleet HA, OS patching through the fleet, evacuation.
+Later, in the tables above: groups and load balancing, the mesh, scoped tokens, fleet HA, OS patching through the fleet, running-machine evacuation.

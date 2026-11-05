@@ -324,3 +324,39 @@ async fn closed_new_gateway_refuses_before_machine_or_address_persistence() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn hold_refuses_a_real_backup_even_after_its_request_is_disconnected() {
+    let h = harness(|b| b.at_once = 1).await;
+    let machine = h.machine("db", every("1h", 3), false).await;
+    let entry = h.m.entry(&machine.id).unwrap();
+    entry.rec.lock().unwrap().state = state::STOPPED.into();
+    let send = Hold::send(&h);
+    let (manager, id) = (h.m.clone(), machine.id.clone());
+    let caller = tokio::spawn(async move { manager.backup(&id).await });
+    until(|| h.sends() >= 1).await;
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(matches!(
+        h.m.hold_machine(&machine.id, "ev_test").await,
+        Err(MError::Busy(_))
+    ));
+    assert!(entry.snapshot().held.is_none());
+    send.release();
+    tokio::time::timeout(LIMIT, h.m.drain_backups())
+        .await
+        .unwrap();
+    h.m.hold_machine(&machine.id, "ev_test").await.unwrap();
+    assert!(matches!(
+        h.m.backup(&machine.id).await,
+        Err(MError::Held(_))
+    ));
+    assert!(h
+        .m
+        .backup_step(Utc::now() + chrono::Duration::days(1))
+        .is_empty());
+    assert!(matches!(
+        h.m.machine_addr(&machine.id, true).await,
+        Err(MError::Held(_))
+    ));
+}
