@@ -118,6 +118,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/machines/:id/start", post(start_machine))
         .route("/v1/machines/:id/wake", post(wake_machine))
         .route("/v1/machines/:id/stop", post(stop_machine))
+        .route(
+            "/v1/machines/:id/evacuation-manifest",
+            get(evacuation_manifest),
+        )
+        .route(
+            "/v1/machines/:id/hold",
+            post(hold_machine).get(get_hold).delete(release_machine),
+        )
         .route("/v1/machines/:id/restart", post(restart_machine))
         .route("/v1/machines/:id/move", post(move_machine))
         .route("/v1/machines/:id/touch", post(touch_machine))

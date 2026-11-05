@@ -407,6 +407,10 @@ impl Default for Policy {
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct Registry {
+    #[serde(default)]
+    pub evacuations: HashMap<String, crate::evacuations::Evacuation>,
+    #[serde(default)]
+    pub host_evacuations: HashMap<String, crate::evacuations::HostEvacuation>,
     pub hosts: HashMap<String, HostRec>,
     /// namespace → host id. A namespace's machines share a host, so its network needs no overlay.
     #[serde(alias = "tenants")]
@@ -518,8 +522,12 @@ impl Registry {
         let routes = &self.sandbox_requests;
         let admissions = &self.sandbox_admissions;
         let moves = &self.namespace_moves;
+        let evacuations = &self.evacuations;
         self.namespaces.retain(|t, host| {
-            moves.values().any(|m| m.namespace == *t)
+            evacuations
+                .get(t)
+                .is_some_and(crate::evacuations::Evacuation::active)
+                || moves.values().any(|m| m.namespace == *t)
                 || admissions
                     .values()
                     .any(|a| a.namespace == *t && a.pending_seed())
@@ -572,7 +580,9 @@ impl Registry {
     /// Drops a host and everything indexed to it but its pool key, kept as a retired key: its
     /// backups stay readable (ADR 0035).
     pub fn forget(&mut self, id: &str) {
-        if crate::create_replay::host_unresolved(self, id) {
+        if crate::evacuations::host_busy(self, id)
+            || crate::create_replay::host_unresolved(self, id)
+        {
             return;
         }
         if let Some(h) = self.hosts.remove(id).filter(|h| !h.pool_key.is_empty()) {
@@ -762,7 +772,12 @@ impl Registry {
     /// Releases a namespace from its host: its next machine is placed afresh. The host's next
     /// heartbeat pins it again if the namespace still has machines there.
     pub fn unpin(&mut self, namespace: &str) {
-        if crate::create_replay::namespace_unresolved(self, namespace) {
+        if self
+            .evacuations
+            .get(namespace)
+            .is_some_and(crate::evacuations::Evacuation::active)
+            || crate::create_replay::namespace_unresolved(self, namespace)
+        {
             return;
         }
         if self.namespaces.remove(namespace).is_some() {

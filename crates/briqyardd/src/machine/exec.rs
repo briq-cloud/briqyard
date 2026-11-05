@@ -7,6 +7,7 @@ impl Manager {
 
     pub(super) async fn running_vsock(&self, id: &str, wake: bool) -> Result<PathBuf, MError> {
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         if !(wake && self.assigned_lifecycle(&e.snapshot())) {
             self.ordinary_operation(&e.snapshot())?;
         }
@@ -158,6 +159,7 @@ impl Manager {
     ) -> Result<Session, MError> {
         req.validate().map_err(invalid)?;
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         self.ordinary_operation(&e.snapshot())?;
         let in_use = InUse::new(e);
         let sock = self.running_vsock(id, req.wake).await?;
@@ -195,6 +197,7 @@ impl Manager {
             .execs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         if !(wake && self.assigned_lifecycle(&e.snapshot())) {
             self.ordinary_operation(&e.snapshot())?;
         }
@@ -243,6 +246,7 @@ impl Manager {
         req: guest::Request,
     ) -> Result<(Box<dyn guestc::Conn>, Option<u64>, InUse), MError> {
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         self.ordinary_operation(&e.snapshot())?;
         let in_use = InUse::new(e);
         let sock = self.running_vsock(id, false).await?;

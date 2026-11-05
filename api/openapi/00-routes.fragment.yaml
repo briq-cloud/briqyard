@@ -730,6 +730,95 @@ paths:
       responses:
         "204": { description: forgotten }
         "409": { description: "the host holds a pool key (`pool_key`): retire it, or force" }
+  /v1/namespaces/evacuations:
+    get:
+      summary: Fleet evacuation journals and results
+      responses:
+        "200": { description: "Jobs: job, namespace, from, to, step, machines (backup, restored, verified, ip, manifest), endpoints, quota, started, error, cancel_requested, drop_snapshots", content: { application/json: { schema: { type: array, items: { type: object } } } } }
+  /v1/namespaces/{id}/evacuate:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Evacuate a stopped namespace through the fleet, preserving ids
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                to: { type: string, description: "Destination host; otherwise placement within the source region" }
+                drop_snapshots: { type: boolean, default: false }
+      responses:
+        "202": { description: "Durable journal accepted; poll namespace evacuations" }
+        "409": { description: "Running or held machine, gateway, host-local resource, snapshot, concurrent job, or missing evacuation capability; source untouched" }
+        "503": { description: "No eligible destination has room; shortfall is reported" }
+  /v1/namespaces/{id}/evacuate/resume:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Resume an open durable evacuation job
+      responses:
+        "202": { description: resumed }
+        "404": { description: no open job }
+  /v1/namespaces/{id}/evacuate/cancel:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Cancel before the authority switch; clean up target and release source holds
+      responses:
+        "202": { description: cancellation requested }
+        "204": { description: already cancelled }
+        "409": { description: already switched; source cleanup must finish }
+  /v1/hosts/{id}/evacuate:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: Host evacuation progress, completed namespaces and the rest
+      responses:
+        "200": { description: "host, namespaces, completed, current, to, drop_snapshots, error" }
+        "404": { description: job not found }
+    post:
+      summary: Drain a host and sequentially evacuate its namespaces; repeat to resume
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                to: { type: string }
+                drop_snapshots: { type: boolean, default: false }
+      responses:
+        "202": { description: "Durable host job; stops at first refusal, leaves host draining" }
+        "409": { description: host state, capability or conflicting resume options }
+  /v1/machines/{id}/hold:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: Holding evacuation job, or null
+      responses:
+        "200": { description: "job" }
+    post:
+      summary: Durably hold a stopped machine; refuse an active operation or backup
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { type: object, required: [job], properties: { job: { type: string } } } }
+      responses:
+        "204": { description: held, including an idempotent hold by the same job }
+        "409": { description: "busy, held by another job, or not stopped" }
+    delete:
+      summary: Release a hold by its job, or force directly on the daemon
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { type: object, required: [job], properties: { job: { type: string }, force: { type: boolean, default: false } } } }
+      responses:
+        "204": { description: released }
+        "409": { description: wrong holder or an operation is active }
+  /v1/machines/{id}/evacuation-manifest:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: Configuration digest and logical disk sizes for evacuation verification
+      responses:
+        "200": { description: "id, state, held, ip, config_digest, root_bytes, data_bytes, host_local; write-only configuration is never returned" }
+
 components:
   parameters:
     id:

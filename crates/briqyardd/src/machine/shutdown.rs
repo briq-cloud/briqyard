@@ -375,6 +375,7 @@ impl Manager {
         at: Option<u64>,
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         if e.snapshot().assigned_run.is_none() {
             if self.assigned_lifecycle(&e.snapshot()) && e.snapshot().pid == 0 {
                 self.check_assigned_bound_record(&e.snapshot())?;
@@ -611,7 +612,10 @@ impl Manager {
         match self.own_entry(id) {
             Err(MError::NotFound) => Ok(()),
             Err(err) => Err(err),
-            Ok(_) => self.destroy_machine(id, at).await,
+            Ok(e) => {
+                let _operation = self.operation(&e)?;
+                self.destroy_machine(id, at).await
+            }
         }
     }
 

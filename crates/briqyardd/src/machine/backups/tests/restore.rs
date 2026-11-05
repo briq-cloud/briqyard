@@ -7,6 +7,7 @@ fn restore_of(machine_id: &str, backup: &str, name: &str) -> api::CreateMachineR
         namespace: "t1".into(),
         name: name.into(),
         restore: Some(api::RestoreSpec {
+            same_id: false,
             machine_id: machine_id.into(),
             backup: backup.into(),
         }),
@@ -210,6 +211,7 @@ async fn retention_keeps_keep_restorable_points_and_their_bases() {
         namespace: "t1".into(),
         name: name.into(),
         restore: Some(api::RestoreSpec {
+            same_id: false,
             machine_id: m.id.clone(),
             backup: backup.into(),
         }),
@@ -282,6 +284,7 @@ async fn a_promoted_fork_backs_up_whole_from_its_own_snapshots_only() {
             namespace: "t1".into(),
             name: "back".into(),
             restore: Some(api::RestoreSpec {
+                same_id: false,
                 machine_id: fork.id.clone(),
                 backup: second.id.clone(),
             }),
@@ -337,4 +340,99 @@ async fn a_base_is_deleted_only_with_what_continues_from_it() {
     let ev = h.last_of(&m.id, reason::BACKUP_DELETED).data.unwrap();
     assert_eq!(ev["backups"], json!([made[1], made[0]]));
     assert_eq!(h.stored(&m.id).unwrap().backup_bytes, next.bytes);
+}
+
+#[tokio::test]
+async fn retention_on_a_live_machine_and_an_expired_holder_never_deletes_another_keys_chain() {
+    let h = harness(|_| {}).await;
+    let m = h.machine("db", every("1h", 1), false).await;
+    let first = h.m.backup(&m.id).await.unwrap();
+    let mut foreign = first.clone();
+    foreign.id = "20000101T000000.000Z".into();
+    foreign.key_id = Some("another-pool-key".into());
+    foreign.disks[0].key = format!("backups/{}/foreign/root", m.id);
+    let store = h.m.backup_store().unwrap();
+    store
+        .put_bytes(&foreign.disks[0].key, b"foreign-stream")
+        .await
+        .unwrap();
+    store
+        .put_bytes(
+            &format!("backups/{}/{}.json", m.id, foreign.id),
+            &serde_json::to_vec(&foreign).unwrap(),
+        )
+        .await
+        .unwrap();
+    let second = h.m.backup(&m.id).await.unwrap();
+    assert!(h.listed(&m.id).await.iter().any(|b| b.id == foreign.id));
+    assert!(!h.listed(&m.id).await.iter().any(|b| b.id == first.id));
+    assert!(h.listed(&m.id).await.iter().any(|b| b.id == second.id));
+    h.m.destroy(&m.id, None).await.unwrap();
+    let holder = h.m.holder(&m.id).unwrap();
+    let listed = h.listed(&m.id).await;
+    assert!(listed
+        .iter()
+        .find(|b| b.id == foreign.id)
+        .unwrap()
+        .deletes_at
+        .is_none());
+    assert!(listed
+        .iter()
+        .find(|b| b.id == second.id)
+        .unwrap()
+        .deletes_at
+        .is_some());
+    h.m.expire(&holder).await;
+    let left = h.listed(&m.id).await;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, foreign.id);
+    assert_eq!(
+        store.get_bytes(&foreign.disks[0].key).await.unwrap(),
+        b"foreign-stream"
+    );
+    assert!(h.m.holder(&m.id).is_none());
+}
+
+#[tokio::test]
+async fn same_id_restore_keeps_configuration_and_hold_and_refuses_an_existing_id() {
+    let h = harness(|_| {}).await;
+    let mut request = h.request("original");
+    request.start = Some(false);
+    request.env.insert("PERSISTED".into(), "value".into());
+    request.metadata.insert("label".into(), "kept".into());
+    request.cmd = Some(vec!["echo".into(), "kept".into()]);
+    request.ports = vec![80];
+    request.backup = every("1h", 2);
+    let m = h.m.create_made(request).await.unwrap();
+    h.m.entry(&m.id).unwrap().rec.lock().unwrap().state = state::STOPPED.into();
+    h.m.hold_machine(&m.id, "ev_test").await.unwrap();
+    super::super::super::holds::JOB
+        .scope(Some("ev_test".into()), async {
+            let before = h.m.evacuation_manifest(&m.id).await.unwrap();
+            let backup = h.m.backup(&m.id).await.unwrap();
+            let restore = || {
+                let mut request = restore_of(&m.id, &backup.id, "validated-name");
+                request.restore.as_mut().unwrap().same_id = true;
+                // same_id adopts the whole record, even if a caller supplies overrides.
+                request.env.insert("OVERRIDE".into(), "ignored".into());
+                request.metadata.insert("other".into(), "ignored".into());
+                request
+            };
+            assert!(matches!(
+                h.m.create_made(restore()).await,
+                Err(MError::Conflict(_))
+            ));
+            h.m.destroy(&m.id, None).await.unwrap();
+            let restored = h.m.create_made(restore()).await.unwrap();
+            assert_eq!(restored.id, m.id);
+            assert_eq!(restored.name, "original");
+            assert_eq!(restored.state, state::STOPPED);
+            let after = h.m.evacuation_manifest(&m.id).await.unwrap();
+            assert_eq!(after["held"], "ev_test");
+            for key in ["config_digest", "root_bytes", "data_bytes"] {
+                assert_eq!(before[key], after[key], "{key}");
+            }
+        })
+        .await;
+    assert!(matches!(h.m.start(&m.id, None).await, Err(MError::Held(_))));
 }

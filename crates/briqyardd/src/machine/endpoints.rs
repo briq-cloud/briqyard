@@ -45,6 +45,19 @@ impl Manager {
             "http" => format!("http://{}", e.host),
             _ => format!("{}:{}", self.inner.advertise, e.host_port.unwrap_or(0)),
         };
+        let delivery_address = if e.protocol == "http" {
+            let port = self
+                .inner
+                .cfg
+                .ingress
+                .http
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.parse::<u16>().ok())
+                .unwrap_or(80);
+            format!("http://{}:{port}", self.inner.advertise)
+        } else {
+            address.clone()
+        };
         api::Endpoint {
             id: e.id.clone(),
             machine_id: e.machine_id.clone(),
@@ -53,6 +66,7 @@ impl Manager {
             host_port: e.host_port,
             host: e.host.clone(),
             address,
+            delivery_address,
             created_at: e.created_at,
         }
     }
@@ -63,6 +77,7 @@ impl Manager {
         req: api::CreateEndpointRequest,
     ) -> Result<api::Endpoint, MError> {
         let e = self.own_entry(machine_id)?;
+        let _operation = self.operation(&e)?;
         self.ordinary_operation(&e.snapshot())?;
         if req.port == 0 {
             return Err(invalid("port must be 1..65535"));
@@ -82,10 +97,23 @@ impl Manager {
             .values()
             .find(|ex| ex.machine_id == machine_id && ex.port == req.port && ex.protocol == proto)
         {
+            if req.id.as_ref().is_some_and(|id| id != &ex.id) {
+                return Err(MError::Conflict(
+                    "endpoint port already has another id".into(),
+                ));
+            }
             return Ok(self.endpoint_view(ex));
         }
+        if let Some(id) = &req.id {
+            if !api::valid_id(id) || !id.starts_with("ep_") {
+                return Err(invalid("endpoint id is invalid"));
+            }
+            if endpoints.contains_key(id) {
+                return Err(MError::Conflict(format!("endpoint {id} already exists")));
+            }
+        }
         let mut ep = EndpointRec {
-            id: new_id("ep"),
+            id: req.id.clone().unwrap_or_else(|| new_id("ep")),
             machine_id: machine_id.to_string(),
             namespace,
             port: req.port,
@@ -103,15 +131,22 @@ impl Manager {
                     "http endpoints are not enabled on this host (ingress.http)",
                 ));
             }
-            let label = if req.host.is_empty() {
-                format!("{name}-{}", &new_id("")[1..5])
-            } else {
+            ep.host = if req.id.is_some() && !req.host.is_empty() {
+                if req.host.len() > 253 || !req.host.split('.').all(api::valid_name) {
+                    return Err(invalid("HTTP endpoint host is not a DNS name"));
+                }
                 req.host.clone()
+            } else {
+                let label = if req.host.is_empty() {
+                    format!("{name}-{}", &new_id("")[1..5])
+                } else {
+                    req.host.clone()
+                };
+                if !api::valid_name(&label) {
+                    return Err(invalid("host must be a DNS label"));
+                }
+                format!("{label}.{}", self.inner.cfg.ingress.domain)
             };
-            if !api::valid_name(&label) {
-                return Err(invalid("host must be a DNS label"));
-            }
-            ep.host = format!("{label}.{}", self.inner.cfg.ingress.domain);
             if endpoints.values().any(|x| x.host == ep.host) {
                 return Err(invalid(format!("host {} is taken", ep.host)));
             }
@@ -124,6 +159,11 @@ impl Manager {
     }
 
     pub fn delete_endpoint(&self, id: &str) -> Result<(), MError> {
+        let current = self.endpoint(id);
+        let _operation = current
+            .as_ref()
+            .map(|ep| self.entry(&ep.machine_id).and_then(|e| self.operation(&e)))
+            .transpose()?;
         let ep = self.inner.endpoints.lock().unwrap().remove(id);
         if let Some(ep) = ep {
             self.inner.store.delete("endpoints", id)?;
@@ -151,4 +191,52 @@ pub(super) fn free_tcp_port(spec: &str, used: Vec<u16>) -> Result<u16, MError> {
     netw::first_free(used, lo as u32, hi as u32)
         .map(|p| p as u16)
         .ok_or_else(|| MError::Capacity("no tcp endpoint port left".into()))
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::machine::tests::harness_config;
+
+    #[tokio::test]
+    async fn supplied_ids_are_idempotent_and_cannot_replace_another_endpoint() {
+        let h = harness_config(|cfg| cfg.ingress.http = "127.0.0.1:0".into()).await;
+        h.add("m_one", state::STOPPED, 256);
+        h.add("m_two", state::STOPPED, 256);
+        let request = || api::CreateEndpointRequest {
+            id: Some("ep_preserved".into()),
+            port: 80,
+            protocol: "http".into(),
+            host: "original.example.test".into(),
+        };
+        let first = h.m.create_endpoint("m_one", request()).unwrap();
+        assert_eq!(first.id, "ep_preserved");
+        assert_eq!(first.host, "original.example.test");
+        assert_eq!(
+            first.delivery_address,
+            format!("http://{}:0", h.m.inner.advertise)
+        );
+        assert_ne!(first.address, first.delivery_address);
+        assert_eq!(
+            h.m.create_endpoint("m_one", request()).unwrap().id,
+            first.id
+        );
+        assert!(matches!(
+            h.m.create_endpoint("m_two", request()),
+            Err(MError::Conflict(_))
+        ));
+        let saved: EndpointRec =
+            h.m.inner
+                .store
+                .get("endpoints", &first.id)
+                .unwrap()
+                .unwrap();
+        assert_eq!(saved.machine_id, "m_one");
+        assert_eq!(saved.host, first.host);
+        h.m.hold_machine("m_one", "ev_test").await.unwrap();
+        assert!(matches!(
+            h.m.delete_endpoint(&first.id),
+            Err(MError::Held(_))
+        ));
+    }
 }

@@ -186,6 +186,7 @@ fn describe_shows_the_machine_then_its_events() {
                 host_port: None,
                 host: "web-ab12.byard.localhost".into(),
                 address: "http://web-ab12.byard.localhost".into(),
+                delivery_address: String::new(),
                 created_at: ts(),
             },
             api::Endpoint {
@@ -196,6 +197,7 @@ fn describe_shows_the_machine_then_its_events() {
                 host_port: Some(20001),
                 host: String::new(),
                 address: "10.0.0.5:20001".into(),
+                delivery_address: String::new(),
                 created_at: ts(),
             },
         ],

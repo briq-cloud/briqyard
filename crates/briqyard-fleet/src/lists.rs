@@ -21,6 +21,7 @@ pub(super) fn namespace_param(q: &str) -> Option<String> {
 }
 
 pub(super) async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
+    let _authority = st.authority.read().await;
     let namespace = query_namespace(&uri);
     let hosts: Vec<HostRec> = {
         let reg = st.reg.lock().unwrap();
@@ -45,6 +46,11 @@ pub(super) async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) ->
                 let mut reg = st.reg.lock().unwrap();
                 for mut m in ms {
                     if let Some(id) = m["id"].as_str() {
+                        if evacuations::authoritative(&reg, Indexed::Machine, id)
+                            .is_some_and(|owner| owner != h.id)
+                        {
+                            continue;
+                        }
                         reg.machines.insert(id.to_string(), h.id.clone());
                     }
                     m["host"] = serde_json::Value::String(h.id.clone());
@@ -68,6 +74,7 @@ pub(super) fn unreadable(h: &HostRec, e: serde_json::Error) -> Response {
 
 /// Lists endpoints, never partially, like machines; each one is indexed to its host.
 pub(super) async fn list_endpoints(State(st): S, headers: HeaderMap) -> Response {
+    let _authority = st.authority.read().await;
     let hosts = st.reg.lock().unwrap().listed();
     let mut all: Vec<api::Endpoint> = Vec::new();
     for h in hosts {
@@ -87,10 +94,15 @@ pub(super) async fn list_endpoints(State(st): S, headers: HeaderMap) -> Response
         match serde_json::from_slice::<Vec<api::Endpoint>>(&data) {
             Ok(eps) => {
                 let mut reg = st.reg.lock().unwrap();
-                for e in &eps {
+                for e in eps {
+                    if evacuations::authoritative(&reg, Indexed::Endpoint, &e.id)
+                        .is_some_and(|owner| owner != h.id)
+                    {
+                        continue;
+                    }
                     reg.endpoints.insert(e.id.clone(), h.id.clone());
+                    all.push(e);
                 }
-                all.extend(eps);
             }
             Err(e) => return unreadable(&h, e),
         }
@@ -152,6 +164,7 @@ pub(super) async fn usage(State(st): S, headers: HeaderMap, uri: Uri) -> Respons
 /// The running machines' use (ADR 0021), asked as machines are listed: a namespace's of its
 /// host, else of every host, never partial, each machine with its host.
 pub(super) async fn top(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
+    let _authority = st.authority.read().await;
     let namespace = query_namespace(&uri);
     let hosts: Vec<HostRec> = {
         let reg = st.reg.lock().unwrap();

@@ -595,6 +595,7 @@ async fn the_gateway_is_read_only_through_the_machine_routes() {
             h.m.create_endpoint(
                 &gw,
                 api::CreateEndpointRequest {
+                    id: None,
                     port: 3128,
                     ..Default::default()
                 },

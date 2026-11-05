@@ -106,6 +106,8 @@ pub(super) async fn delete_namespace(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Refusal> {
+    let _authority = st.authority.read().await;
+    evacuations::namespace_available(&st.reg.lock().unwrap(), &id)?;
     let (host, version) = {
         let reg = st.reg.lock().unwrap();
         if reg.namespace_inflight(&id) {
@@ -189,6 +191,8 @@ pub(super) async fn put_on_namespace(
     headers: &HeaderMap,
     body: Bytes,
 ) -> Result<Response, Refusal> {
+    let _authority = st.authority.read().await;
+    evacuations::namespace_available(&st.reg.lock().unwrap(), id)?;
     if !api::valid_id(id) {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -324,6 +328,8 @@ pub(super) async fn delete_gateway(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Refusal> {
+    let _authority = st.authority.read().await;
+    evacuations::namespace_available(&st.reg.lock().unwrap(), &id)?;
     let host = st.reg.lock().unwrap().host_of_namespace(&id).cloned();
     let Some(host) = host else {
         return Ok(StatusCode::NO_CONTENT.into_response());
@@ -339,6 +345,8 @@ pub(super) async fn unpin_namespace(
     State(st): S,
     Path(id): Path<String>,
 ) -> Result<Response, Refusal> {
+    let _authority = st.authority.read().await;
+    evacuations::namespace_available(&st.reg.lock().unwrap(), &id)?;
     {
         let mut reg = st.reg.lock().unwrap();
         if crate::create_replay::namespace_unresolved(&reg, &id) {

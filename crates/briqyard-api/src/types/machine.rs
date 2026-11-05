@@ -343,12 +343,18 @@ pub struct Endpoint {
     pub host: String,
     /// Where to connect: "<ip>:<host_port>" or "http://<host>".
     pub address: String,
+    /// The host ingress to dial. HTTP callers preserve `host` as the Host header.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub delivery_address: String,
     pub created_at: DateTime<Utc>,
 }
 
 /// Opens a port of a machine to the outside.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CreateEndpointRequest {
+    /// Preserve an endpoint id during evacuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub port: u16,
     #[serde(default)]
     pub protocol: String,

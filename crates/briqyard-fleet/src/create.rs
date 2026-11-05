@@ -36,8 +36,17 @@ pub(super) async fn create_machine(
     headers: HeaderMap,
     mut body: Bytes,
 ) -> Result<Response, Refusal> {
+    let _authority = st.authority.read().await;
     let mut req: api::CreateMachineRequest = serde_json::from_slice(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
+    evacuations::namespace_available(&st.reg.lock().unwrap(), &req.namespace)?;
+    if req.restore.as_ref().is_some_and(|rs| rs.same_id) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "evacuating",
+            "same_id restore is internal to an evacuation job",
+        ));
+    }
     req.check_sandbox_seed()
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", e))?;
     let sandbox_profile =

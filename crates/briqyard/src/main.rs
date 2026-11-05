@@ -122,6 +122,14 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum MachineCmd {
+    /// Release a durable hold directly on its daemon; force is an operator override
+    Release {
+        id: String,
+        #[arg(long, default_value = "")]
+        job: String,
+        #[arg(long)]
+        force: bool,
+    },
     /// List machines: briqyard machine ls [--namespace NAME] [-l app=web] [-l tier]
     Ls {
         #[arg(long, alias = "tenant")]
@@ -615,6 +623,10 @@ enum EndpointCmd {
 #[derive(Subcommand)]
 enum NamespaceCmd {
     Ls,
+    /// Evacuate stopped machines through the fleet; gateways are refused
+    Evacuate(EvacuateArgs),
+    /// Show durable namespace evacuation jobs and results
+    Evacuations,
     /// Show a namespace, its gateway included
     Get {
         id: String,
@@ -647,6 +659,25 @@ enum NamespaceCmd {
         #[arg(long)]
         cpu_millis: Option<u32>,
     },
+}
+
+#[derive(Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+struct EvacuateArgs {
+    #[arg(required = true)]
+    namespace: Option<String>,
+    #[arg(long)]
+    to: Option<String>,
+    #[arg(long)]
+    drop_snapshots: bool,
+    #[command(subcommand)]
+    action: Option<EvacuateAction>,
+}
+
+#[derive(Subcommand)]
+enum EvacuateAction {
+    Cancel { namespace: String },
+    Resume { namespace: String },
 }
 
 #[derive(Subcommand)]
@@ -704,6 +735,14 @@ enum ImageCmd {
 #[derive(Subcommand)]
 enum HostCmd {
     Ls,
+    /// Drain a host and sequentially evacuate its stopped namespaces
+    Evacuate {
+        id: String,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        drop_snapshots: bool,
+    },
     /// Add a server bought by hand; the fleet bootstraps it over SSH and pins its keys:
     /// briqyard host add 51.68.1.2 --address 10.42.0.11 --region gra
     Add {

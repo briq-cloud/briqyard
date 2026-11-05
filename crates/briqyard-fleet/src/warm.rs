@@ -25,6 +25,8 @@ pub(super) async fn put_warm_catalog(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, Refusal> {
+    let _authority = st.authority.read().await;
+    evacuations::namespace_available(&st.reg.lock().unwrap(), &namespace)?;
     let _: api::WarmDesiredRequest = serde_json::from_slice(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", e.to_string()))?;
     if !api::valid_name(&entry) {
@@ -101,6 +103,8 @@ pub(super) async fn put_warm_pool(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, Refusal> {
+    let _authority = st.authority.read().await;
+    evacuations::namespace_available(&st.reg.lock().unwrap(), &namespace)?;
     let request: api::PutWarmPoolRequest = serde_json::from_slice(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", e.to_string()))?;
     let host = host(&st, &namespace, true)?;
@@ -143,6 +147,8 @@ pub(super) async fn delete_warm_pool(
     Path((namespace, name)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, Refusal> {
+    let _authority = st.authority.read().await;
+    evacuations::namespace_available(&st.reg.lock().unwrap(), &namespace)?;
     let host = host(&st, &namespace, false)?;
     Ok(forward(
         &st,
@@ -161,6 +167,8 @@ pub(super) async fn claim_warm_pool(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, Refusal> {
+    let _authority = st.authority.read().await;
+    evacuations::namespace_available(&st.reg.lock().unwrap(), &namespace)?;
     let _: api::ClaimWarmPoolRequest = serde_json::from_slice(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", e.to_string()))?;
     let host = host(&st, &namespace, true)?;

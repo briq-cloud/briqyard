@@ -16,6 +16,7 @@ async fn the_ingress_resyncs_when_it_missed_endpoint_events() {
     );
     ing.start().await.unwrap();
     let tcp = |port| api::CreateEndpointRequest {
+        id: None,
         port,
         protocol: "tcp".into(),
         host: String::new(),
@@ -55,6 +56,7 @@ async fn the_ingress_opens_no_listener_for_an_endpoint_gone() {
         std::sync::Arc::new(briqyard_api::listeners::Listeners::none()),
     );
     let req = api::CreateEndpointRequest {
+        id: None,
         port: 8080,
         protocol: "tcp".into(),
         host: String::new(),
@@ -210,6 +212,7 @@ async fn a_command_in_flight_keeps_the_machine_awake() {
 /// harness's addresses: a dial waits on it until the machine stops.
 fn ingress_to(h: &Harness, machine: &str) -> (crate::ingress::Ingress, EndpointRec) {
     let req = api::CreateEndpointRequest {
+        id: None,
         port: 1,
         protocol: "tcp".into(),
         ..Default::default()

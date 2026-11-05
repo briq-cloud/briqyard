@@ -4,6 +4,7 @@ use super::*;
 
 fn tcp(port: u16) -> api::CreateEndpointRequest {
     api::CreateEndpointRequest {
+        id: None,
         port,
         protocol: "tcp".into(),
         host: String::new(),

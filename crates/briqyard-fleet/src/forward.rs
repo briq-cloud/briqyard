@@ -35,7 +35,11 @@ pub(super) fn to_host(
         )
     })?;
     let mut req = client.request(method, &url);
-    for h in [header::CONTENT_TYPE, header::IF_MATCH] {
+    for h in [
+        header::CONTENT_TYPE,
+        header::IF_MATCH,
+        header::HeaderName::from_static("x-briqyard-job"),
+    ] {
         if let Some(v) = headers.get(&h) {
             req = req.header(h, v);
         }

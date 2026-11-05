@@ -33,6 +33,7 @@
       type: object
       required: [machine_id]
       properties:
+        same_id: { type: boolean, default: false, description: "Evacuation only: adopt the held backup's id and complete configuration; requires start:false and the holding job; 409 if that id exists" }
         machine_id: { type: string, description: the backed-up machine; it may no longer exist }
         backup: { type: string, description: a backup id, or "latest" (the default) }
     BackupPolicy:
@@ -236,14 +237,16 @@
         host_port: { type: integer }
         host: { type: string }
         address: { type: string, description: '"<ip>:<host_port>" or "http://<host>"' }
+        delivery_address: { type: string, description: "Physical ingress to dial: ip:port for TCP, http://ip:port for HTTP. HTTP callers retain host as the Host header. Refetch after evacuation" }
         created_at: { type: string, format: date-time }
     CreateEndpointRequest:
       type: object
       required: [port]
       properties:
+        id: { type: string, description: "Preserve an endpoint id during evacuation; a collision is 409" }
         port: { type: integer }
         protocol: { type: string, enum: [tcp, http], default: tcp }
-        host: { type: string, description: the label before the domain, for http }
+        host: { type: string, description: "The label before the domain for HTTP; with id, an existing full hostname may be preserved" }
     ExecRequest:
       type: object
       required: [cmd]

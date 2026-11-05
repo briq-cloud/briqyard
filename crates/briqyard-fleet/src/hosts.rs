@@ -665,6 +665,13 @@ pub(super) fn new_added_host(
 pub(super) async fn retire_host(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
     let host = {
         let mut reg = st.reg.lock().unwrap();
+        if crate::evacuations::host_busy(&reg, &id) {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "evacuating",
+                "host participates in an open evacuation",
+            ));
+        }
         match reg.hosts.get_mut(&id) {
             Some(h) if h.state == "upgrading" => {
                 return Err(err(
@@ -704,6 +711,10 @@ pub(super) async fn retired(st: &AppState, h: &HostRec) -> Result<api::Host> {
             !crate::create_replay::host_unresolved(&reg, &h.id),
             "host has an unresolved sandbox dispatch"
         );
+        anyhow::ensure!(
+            !crate::evacuations::host_busy(&reg, &h.id),
+            "host participates in an open evacuation"
+        );
         reg.forget(&h.id);
     }
     st.save().await?;
@@ -732,6 +743,13 @@ pub(super) async fn forget_host(
 ) -> Result<Response, Refusal> {
     {
         let mut reg = st.reg.lock().unwrap();
+        if crate::evacuations::host_busy(&reg, &id) {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "evacuating",
+                "host participates in an open evacuation",
+            ));
+        }
         if crate::create_replay::host_unresolved(&reg, &id) {
             return Err(err(
                 StatusCode::CONFLICT,

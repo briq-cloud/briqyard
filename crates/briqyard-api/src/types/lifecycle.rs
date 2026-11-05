@@ -54,6 +54,9 @@ pub struct ForkOrigin {
 /// Which backup to restore: a machine's latest, or one by id.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RestoreSpec {
+    /// Adopt the backed-up id and configuration; evacuation jobs only.
+    #[serde(default, skip_serializing_if = "super::limits::is_false")]
+    pub same_id: bool,
     /// The backed-up machine (it may no longer exist).
     pub machine_id: String,
     /// A backup id from `GET /machines/{id}/backups`; empty or "latest" for the newest.

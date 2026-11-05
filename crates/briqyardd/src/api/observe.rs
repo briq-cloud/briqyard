@@ -20,6 +20,7 @@ pub(super) async fn metrics(State(st): S) -> Response {
 pub(super) async fn status(State(st): S) -> Json<api::Status> {
     let (used, running, machines) = st.mgr.usage();
     Json(api::Status {
+        evacuate_v1: true,
         memory_policy: Some(api::MemoryPolicy::CURRENT),
         egress_siblings_v1: true,
         named_memory_fork_v1: !st.mgr.named_memory_profiles().is_empty(),

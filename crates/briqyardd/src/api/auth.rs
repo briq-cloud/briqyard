@@ -63,7 +63,15 @@ pub(super) async fn auth_and_log(State(st): S, req: Request, next: Next) -> Resp
         ) {
         AppError::from(MError::Capacity("startup: recovery_unresolved".into())).into_response()
     } else {
-        next.run(req).await
+        crate::machine::holds::JOB
+            .scope(
+                req.headers()
+                    .get("x-briqyard-job")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+                next.run(req),
+            )
+            .await
     };
     resp.headers_mut()
         .insert("x-request-id", HeaderValue::from_str(&request_id).unwrap());

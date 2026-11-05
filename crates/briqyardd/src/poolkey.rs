@@ -216,6 +216,7 @@ mod tests {
     /// The restore the stand-in fleet has open for this host.
     fn rs() -> api::RestoreSpec {
         api::RestoreSpec {
+            same_id: false,
             machine_id: "m_src".into(),
             backup: "b1".into(),
         }
@@ -396,6 +397,7 @@ mod tests {
         assert_eq!(pool_key(&keyed).await.unwrap(), key());
         assert_eq!(by_id(&keyed, &theirs, &rs()).await.unwrap(), other());
         let elsewhere = api::RestoreSpec {
+            same_id: false,
             machine_id: "m_other".into(),
             ..rs()
         };
