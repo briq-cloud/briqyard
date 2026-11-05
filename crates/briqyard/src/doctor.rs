@@ -2,6 +2,15 @@
 
 /// What a host needs, checked where this runs; prints one line per check.
 pub(super) fn doctor() {
+    let bad = checks(std::path::Path::new(CONFIG_PATH));
+    if bad > 0 {
+        eprintln!("{bad} missing");
+        std::process::exit(1);
+    }
+}
+
+/// The checks against the configuration at `config_path`; the number that missed.
+pub(super) fn checks(config_path: &std::path::Path) -> usize {
     let mut bad = 0;
     let mut check = |name: &str, ok: bool, hint: &str| {
         println!(
@@ -46,16 +55,9 @@ pub(super) fn doctor() {
     check("mkfs.ext4", on_path("mkfs.ext4"), "apt install e2fsprogs");
     check("ip", on_path("ip"), "apt install iproute2");
     // The files the daemon really uses: the configuration's paths, else the defaults.
-    let config = std::fs::read_to_string(CONFIG_PATH);
+    let config = std::fs::read_to_string(config_path);
     let paths = HostFiles::from_config(config.as_deref().unwrap_or(""));
-    println!(
-        "paths from {}",
-        if config.is_ok() {
-            CONFIG_PATH
-        } else {
-            "the defaults (no readable configuration)"
-        }
-    );
+    println!("{}", paths_source(config_path, config.as_deref()));
     check(
         "firecracker",
         exists(&paths.firecracker),
@@ -136,7 +138,7 @@ pub(super) fn doctor() {
     {
         // A host that serves the nested runtime class asks for it (ADR 0088).
         let serves_nested =
-            std::fs::read_to_string(CONFIG_PATH).is_ok_and(|conf| config_serves_nested(&conf));
+            std::fs::read_to_string(config_path).is_ok_and(|conf| config_serves_nested(&conf));
         warn(
             "KVM nested virtualization off",
             !nested || serves_nested,
@@ -144,9 +146,20 @@ pub(super) fn doctor() {
              hack/bootstrap-host.sh writes /etc/modprobe.d/briqyard-kvm.conf, applied at the next boot",
         );
     }
-    if bad > 0 {
-        eprintln!("{bad} missing");
-        std::process::exit(1);
+    bad
+}
+
+/// Where the checked paths come from: the configuration, or the daemon's defaults and why.
+pub(super) fn paths_source(
+    path: &std::path::Path,
+    config: Result<&str, &std::io::Error>,
+) -> String {
+    match config {
+        Err(_) => "paths from the defaults (no readable configuration)".into(),
+        Ok(text) if serde_yaml::from_str::<HostFiles>(text).is_err() => {
+            format!("paths from the defaults ({} is unparsable)", path.display())
+        }
+        Ok(_) => format!("paths from {}", path.display()),
     }
 }
 

@@ -126,3 +126,51 @@ fn the_files_checked_are_the_configured_ones() {
         assert_eq!(files.init, "/usr/local/bin/briqyard-init");
     }
 }
+
+#[test]
+fn doctor_checks_the_files_the_configuration_names() {
+    use crate::doctor::checks;
+    let dir = std::env::temp_dir().join(format!("briqyard-doctor-files-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let names = ["firecracker", "jailer", "vmlinux", "briqyard-init"];
+    for n in names {
+        std::fs::write(dir.as_path().join(n), "").unwrap();
+    }
+    let conf = |root: &std::path::Path| {
+        let p = |n: &str| root.join(n).display().to_string();
+        format!(
+            "firecracker: {}\njailer: {}\nkernel: {}\ninit: {}\n",
+            p("firecracker"),
+            p("jailer"),
+            p("vmlinux"),
+            p("briqyard-init")
+        )
+    };
+    let write = |name: &str, text: String| {
+        let path = dir.as_path().join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    };
+    let present = checks(&write("present.yaml", conf(dir.as_path())));
+    let absent = checks(&write("absent.yaml", conf(&dir.as_path().join("missing"))));
+    // The same host, the same other checks: only the four named files differ.
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(absent, present + 4);
+}
+
+#[test]
+fn doctor_says_when_the_configuration_does_not_parse() {
+    use crate::doctor::paths_source;
+    let path = std::path::Path::new("/etc/briqyard/config.yaml");
+    let unreadable = std::fs::read_to_string("/nonexistent/briqyard.yaml");
+    assert!(paths_source(path, unreadable.as_deref()).contains("no readable configuration"));
+    let text = paths_source(path, Ok(": not yaml ["));
+    assert!(
+        text.contains("unparsable") && text.contains("defaults"),
+        "{text}"
+    );
+    assert_eq!(
+        paths_source(path, Ok("token: t\n")),
+        "paths from /etc/briqyard/config.yaml"
+    );
+}
