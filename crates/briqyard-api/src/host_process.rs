@@ -31,56 +31,93 @@ impl OomClass {
     }
 }
 
+/// Util-linux `choom`; an absolute path, so a child environment without the usual `PATH` still
+/// resolves it. It writes the score and execs the helper, so the pid stays the same.
+#[cfg(target_os = "linux")]
+const CHOOM: &str = "/usr/bin/choom";
+
 /// Ordinary host helpers must not inherit the supervisor's protected score.
 pub fn command(program: impl AsRef<OsStr>) -> StdCommand {
+    command_for(OomClass::Helper, program)
+}
+
+/// A command that runs with the score of `class`; the class is fixed here, never set afterward.
+///
+/// A helper (score 0, thousands of spawns) goes through `choom -n 0 -- <program>`: std spawns a
+/// command without a `pre_exec` closure with `posix_spawn`, which shares the parent's memory
+/// instead of copying its page tables (ADR 0111). `choom` exits non-zero when it cannot write the
+/// score, so the helper never runs with the supervisor's. A missing `choom` fails the spawn.
+/// `arg0` on a helper names `choom`, not the program.
+///
+/// A machine or a gateway (rare spawns, and the jailer forks the VMM and drops credentials
+/// afterward) writes its score in a `pre_exec` closure. A failure aborts exec.
+pub fn command_for(class: OomClass, program: impl AsRef<OsStr>) -> StdCommand {
+    #[cfg(target_os = "linux")]
+    {
+        if class == OomClass::Helper {
+            let mut command = StdCommand::new(CHOOM);
+            command.args(["-n", "0", "--"]).arg(program);
+            return command;
+        }
+        let mut command = StdCommand::new(program);
+        pre_exec_score(&mut command, class);
+        command
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = class;
+        StdCommand::new(program)
+    }
+}
+
+/// A helper run from an executable the caller holds open (`/proc/self/fd/N`), with score 0. The
+/// descriptor closes on exec, so `choom` could not open that path: this one writes the score in a
+/// `pre_exec` closure and forks. Only for a rare spawn, such as a check at startup.
+pub fn held_executable_command(program: impl AsRef<OsStr>) -> StdCommand {
+    #[allow(unused_mut)]
     let mut command = StdCommand::new(program);
-    set_class(&mut command, OomClass::Helper);
+    #[cfg(target_os = "linux")]
+    pre_exec_score(&mut command, OomClass::Helper);
     command
 }
 
-/// Install before spawning: the jailer forks the VMM and drops credentials afterward.
-/// Failure aborts exec. Only static bytes and async-signal-safe syscalls run after fork.
-pub fn set_class(command: &mut StdCommand, class: OomClass) {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::process::CommandExt;
-        let bytes = class.bytes();
-        // SAFETY: no allocation, locks, formatting or logging in the child.
-        unsafe {
-            command.pre_exec(move || {
-                let fd = libc::open(
-                    c"/proc/self/oom_score_adj".as_ptr(),
-                    libc::O_WRONLY | libc::O_CLOEXEC,
-                );
-                if fd < 0 {
-                    return Err(std::io::Error::last_os_error());
+/// Only static bytes and async-signal-safe syscalls run after fork.
+#[cfg(target_os = "linux")]
+fn pre_exec_score(command: &mut StdCommand, class: OomClass) {
+    use std::os::unix::process::CommandExt;
+    let bytes = class.bytes();
+    // SAFETY: no allocation, locks, formatting or logging in the child.
+    unsafe {
+        command.pre_exec(move || {
+            let fd = libc::open(
+                c"/proc/self/oom_score_adj".as_ptr(),
+                libc::O_WRONLY | libc::O_CLOEXEC,
+            );
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut offset = 0;
+            let result = loop {
+                let n = libc::write(fd, bytes.as_ptr().add(offset).cast(), bytes.len() - offset);
+                if n < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    break Err(error);
                 }
-                let mut offset = 0;
-                let result = loop {
-                    let n =
-                        libc::write(fd, bytes.as_ptr().add(offset).cast(), bytes.len() - offset);
-                    if n < 0 {
-                        let error = std::io::Error::last_os_error();
-                        if error.raw_os_error() == Some(libc::EINTR) {
-                            continue;
-                        }
-                        break Err(error);
-                    }
-                    if n == 0 {
-                        break Err(std::io::Error::from_raw_os_error(libc::EIO));
-                    }
-                    offset += n as usize;
-                    if offset == bytes.len() {
-                        break Ok(());
-                    }
-                };
-                libc::close(fd);
-                result
-            });
-        }
+                if n == 0 {
+                    break Err(std::io::Error::from_raw_os_error(libc::EIO));
+                }
+                offset += n as usize;
+                if offset == bytes.len() {
+                    break Ok(());
+                }
+            };
+            libc::close(fd);
+            result
+        });
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (command, class);
 }
 
 #[cfg(test)]
@@ -182,12 +219,43 @@ fail() { printf '%s\n' "$*" >&2; exit 1; }
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn only_a_helper_spawns_through_choom_without_a_pre_exec() {
+        let helper = command("nft");
+        assert_eq!(helper.get_program(), CHOOM);
+        let args: Vec<_> = helper.get_args().collect();
+        assert_eq!(args, ["-n", "0", "--", "nft"]);
+        for class in [OomClass::Machine, OomClass::Gateway] {
+            assert_eq!(command_for(class, "nft").get_program(), "nft");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_held_executable_runs_directly_because_its_descriptor_closes_on_exec() {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::File::open("/bin/sh").unwrap();
+        let path = format!("/proc/self/fd/{}", file.as_raw_fd());
+        let script = ["-c", "cat /proc/self/oom_score_adj"];
+        let out = held_executable_command(&path)
+            .args(script)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "0");
+        assert!(!command(&path)
+            .args(script)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn child_and_fork_inherit_the_selected_score_without_changing_parent() {
         let before = std::fs::read_to_string("/proc/self/oom_score_adj").unwrap();
         for class in [OomClass::Helper, OomClass::Machine, OomClass::Gateway] {
-            let mut command = command("sh");
-            set_class(&mut command, class);
-            let out = command
+            let out = command_for(class, "sh")
                 .args(["-c", "(cat /proc/self/oom_score_adj)"])
                 .output()
                 .unwrap();

@@ -188,6 +188,8 @@ echo "   needrestart leaves briqyardd and briqyard-fleet running"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq zfsutils-linux nftables conntrack e2fsprogs gdisk curl jq ca-certificates python3 python3-yaml >/dev/null
+# Every helper the daemon starts runs through choom (ADR 0111).
+[ -x /usr/bin/choom ] || fail "/usr/bin/choom is missing: apt install util-linux"
 modprobe zfs
 
 # The ARC is a cache the kernel must shrink when a machine touches its memory: capped, it

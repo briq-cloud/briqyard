@@ -41,6 +41,8 @@ pub(super) fn doctor() {
         "apt install zfsutils-linux",
     );
     check("nft", on_path("nft"), "apt install nftables");
+    // Every helper the daemon starts runs through it to reset its OOM score (ADR 0111).
+    check("choom", exists("/usr/bin/choom"), "apt install util-linux");
     check("mkfs.ext4", on_path("mkfs.ext4"), "apt install e2fsprogs");
     check("ip", on_path("ip"), "apt install iproute2");
     check(

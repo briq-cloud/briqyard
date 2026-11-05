@@ -80,7 +80,7 @@ PRIVATE_ADDRESS=10.42.0.11/16 ALLOWED_CLIENTS=10.42.0.0/16 \
 bash bootstrap-host.sh
 ```
 
-It installs the packages (ZFS, nftables, conntrack-tools, e2fsprogs, gdisk), caps the ZFS cache, loads KVM with `nested` off from the next boot (ADR 0087, on for a host that serves the `nested` class, ADR 0088; `briqyard doctor` warns while it is on, the daemon logs `kvm_nested`), turns swap off
+It installs the packages (ZFS, nftables, conntrack-tools, e2fsprogs, gdisk) and checks for `choom` (util-linux, ADR 0111), caps the ZFS cache, loads KVM with `nested` off from the next boot (ADR 0087, on for a host that serves the `nested` class, ADR 0088; `briqyard doctor` warns while it is on, the daemon logs `kvm_nested`), turns swap off
 for good, puts the API on the private network and closes the public interface when
 `PRIVATE_ADDRESS` is set, makes the pool encrypted (on the devices given, or on a file for a
 trial; ADR 0026), downloads Firecracker, its jailer and a guest kernel, installs the binaries

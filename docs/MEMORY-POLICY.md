@@ -85,7 +85,7 @@ bash -n hack/bootstrap-host.sh hack/oom-group-smoke.sh
 ```
 
 Run the same workspace tests on Linux before publication, in a target directory belonging to
-the source tree. Linux is required for pre-exec inheritance, procfs/pidfds and kernel cgroups.
+the source tree. Linux is required for score inheritance, procfs/pidfds and kernel cgroups.
 The protected-parent regression changes only its child process's score, then proves ordinary
 helpers reset to 0, VMM preferences survive forks and the parent remains -900:
 
