@@ -127,6 +127,7 @@ async fn a_host_unreachable_never_shows_the_sessions_query() {
 async fn a_forwarded_restore_is_open_during_its_create_alone() {
     let (f, ds) = fleet_with_daemons(1).await;
     let rs = api::RestoreSpec {
+        same_id: false,
         machine_id: "m_src".into(),
         backup: "b1".into(),
     };

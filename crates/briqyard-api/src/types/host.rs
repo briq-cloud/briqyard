@@ -290,6 +290,9 @@ impl std::fmt::Debug for HostKey {
 /// GET /v1/status.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Status {
+    /// Durable holds and identity-preserving namespace evacuation.
+    #[serde(default, skip_serializing_if = "super::limits::is_false")]
+    pub evacuate_v1: bool,
     /// Supports explicit via-mode access to pinned namespace siblings (ADR 0064).
     #[serde(default, skip_serializing_if = "super::limits::is_false")]
     pub egress_siblings_v1: bool,

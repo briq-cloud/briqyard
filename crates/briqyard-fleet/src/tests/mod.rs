@@ -28,6 +28,8 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
         reg.heartbeat(static_host(h, now), now);
     }
     let st = Arc::new(AppState {
+        authority: Default::default(),
+        evacuation_workers: Default::default(),
         state_path,
         policy: Policy {
             require_egress_siblings: false,

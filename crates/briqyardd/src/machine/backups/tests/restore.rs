@@ -7,6 +7,7 @@ fn restore_of(machine_id: &str, backup: &str, name: &str) -> api::CreateMachineR
         namespace: "t1".into(),
         name: name.into(),
         restore: Some(api::RestoreSpec {
+            same_id: false,
             machine_id: machine_id.into(),
             backup: backup.into(),
         }),
@@ -210,6 +211,7 @@ async fn retention_keeps_keep_restorable_points_and_their_bases() {
         namespace: "t1".into(),
         name: name.into(),
         restore: Some(api::RestoreSpec {
+            same_id: false,
             machine_id: m.id.clone(),
             backup: backup.into(),
         }),
@@ -282,6 +284,7 @@ async fn a_promoted_fork_backs_up_whole_from_its_own_snapshots_only() {
             namespace: "t1".into(),
             name: "back".into(),
             restore: Some(api::RestoreSpec {
+                same_id: false,
                 machine_id: fork.id.clone(),
                 backup: second.id.clone(),
             }),
@@ -337,4 +340,42 @@ async fn a_base_is_deleted_only_with_what_continues_from_it() {
     let ev = h.last_of(&m.id, reason::BACKUP_DELETED).data.unwrap();
     assert_eq!(ev["backups"], json!([made[1], made[0]]));
     assert_eq!(h.stored(&m.id).unwrap().backup_bytes, next.bytes);
+}
+
+#[tokio::test]
+async fn retention_on_a_live_machine_and_an_expired_holder_never_deletes_another_keys_chain() {
+    let h = harness(|_| {}).await;
+    let m = h.machine("db", every("1h", 1), false).await;
+    let first = h.m.backup(&m.id).await.unwrap();
+    let mut foreign = first.clone();
+    foreign.id = "20000101T000000.000Z".into();
+    foreign.key_id = Some("another-pool-key".into());
+    foreign.disks[0].key = format!("backups/{}/foreign/root", m.id);
+    let store = h.m.backup_store().unwrap();
+    store
+        .put_bytes(&foreign.disks[0].key, b"foreign-stream")
+        .await
+        .unwrap();
+    store
+        .put_bytes(
+            &format!("backups/{}/{}.json", m.id, foreign.id),
+            &serde_json::to_vec(&foreign).unwrap(),
+        )
+        .await
+        .unwrap();
+    let second = h.m.backup(&m.id).await.unwrap();
+    assert!(h.listed(&m.id).await.iter().any(|b| b.id == foreign.id));
+    assert!(!h.listed(&m.id).await.iter().any(|b| b.id == first.id));
+    assert!(h.listed(&m.id).await.iter().any(|b| b.id == second.id));
+    h.m.destroy(&m.id, None).await.unwrap();
+    let holder = h.m.holder(&m.id).unwrap();
+    h.m.expire(&holder).await;
+    let left = h.listed(&m.id).await;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, foreign.id);
+    assert_eq!(
+        store.get_bytes(&foreign.disks[0].key).await.unwrap(),
+        b"foreign-stream"
+    );
+    assert!(h.m.holder(&m.id).is_none());
 }

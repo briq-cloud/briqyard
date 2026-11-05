@@ -232,6 +232,7 @@ impl Manager {
 
     pub async fn snapshots(&self, id: &str) -> Result<Vec<api::Snapshot>, MError> {
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         let r = e.snapshot();
         Ok(r.snapshots.iter().map(|s| s.view(&r.id)).collect())
     }
@@ -244,6 +245,7 @@ impl Manager {
         req: api::SnapshotRequest,
     ) -> Result<api::Snapshot, MError> {
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         if let Some(n) = &req.name {
             api::check_snapshot_name(n).map_err(invalid)?;
         }
@@ -439,6 +441,7 @@ impl Manager {
     /// what something still clones (a retired disk) goes with the last of those.
     pub async fn delete_snapshot(&self, id: &str, snap: &str) -> Result<(), MError> {
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         let parents = {
             // The turn too, as a restore takes it: no backup sends while a retired disk goes.
             let _turns = e.lock_with_turn().await;
@@ -481,6 +484,7 @@ impl Manager {
         at: Option<u64>,
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         self.ordinary_operation(&e.snapshot())?;
         let turns = e.lock_once_stopped(true).await;
         self.check_version(&e, at)?;

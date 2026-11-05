@@ -178,6 +178,7 @@ impl Manager {
     }
 
     pub(in crate::machine) fn ordinary_operation(&self, r: &Record) -> Result<(), MError> {
+        self.check_hold(r)?;
         if r.launch_identity.is_some() {
             let entry = self.entry(&r.id)?;
             if !self.assignment_publication_allowed(r, entry.identity_trusted.load(Relaxed)) {

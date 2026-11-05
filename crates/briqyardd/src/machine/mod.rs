@@ -35,6 +35,7 @@ mod create;
 mod endpoints;
 mod exec;
 mod gateway;
+pub mod holds;
 mod launch_identity;
 mod leaves;
 mod memory;
@@ -75,6 +76,10 @@ use update::*;
 /// What the API maps to statuses.
 #[derive(Debug, thiserror::Error)]
 pub enum MError {
+    #[error("machine held by evacuation job {0}")]
+    Held(String),
+    #[error("machine has an operation in flight: {0}")]
+    Busy(String),
     #[error("no compatible ready slot is available")]
     PoolEmpty,
     #[error("running guest does not support exec_stream_v1")]
@@ -184,6 +189,8 @@ pub enum Role {
 /// A machine as the daemon keeps it: the API view plus what running it needs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<String>,
     pub id: String,
     #[serde(alias = "tenant")]
     pub namespace: String,
@@ -570,6 +577,7 @@ pub fn new_id(prefix: &str) -> String {
 }
 
 struct Entry {
+    operations: Arc<tokio::sync::RwLock<()>>,
     /// Serializes lifecycle operations on one machine; owned by a hand-over (ADR 0027).
     lock: Arc<tokio::sync::Mutex<()>>,
     rec: Mutex<Record>,
@@ -614,6 +622,7 @@ struct Entry {
 impl Entry {
     fn new(rec: Record, events: Events) -> Arc<Self> {
         Arc::new(Self {
+            operations: Default::default(),
             lock: Default::default(),
             rec: Mutex::new(rec),
             live: Mutex::new(None),
@@ -931,7 +940,8 @@ where
     T: Send + 'static,
     F: std::future::Future<Output = Result<T, MError>> + Send + 'static,
 {
-    match tokio::spawn(fut).await {
+    let job = holds::JOB.try_with(Clone::clone).unwrap_or_default();
+    match tokio::spawn(holds::JOB.scope(job, fut)).await {
         Ok(r) => r,
         Err(err) => Err(MError::Other(anyhow!("transition task: {err}"))),
     }

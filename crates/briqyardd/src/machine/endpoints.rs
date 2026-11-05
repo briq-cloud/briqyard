@@ -63,6 +63,7 @@ impl Manager {
         req: api::CreateEndpointRequest,
     ) -> Result<api::Endpoint, MError> {
         let e = self.own_entry(machine_id)?;
+        let _operation = self.operation(&e)?;
         self.ordinary_operation(&e.snapshot())?;
         if req.port == 0 {
             return Err(invalid("port must be 1..65535"));
@@ -82,10 +83,23 @@ impl Manager {
             .values()
             .find(|ex| ex.machine_id == machine_id && ex.port == req.port && ex.protocol == proto)
         {
+            if req.id.as_ref().is_some_and(|id| id != &ex.id) {
+                return Err(MError::Conflict(
+                    "endpoint port already has another id".into(),
+                ));
+            }
             return Ok(self.endpoint_view(ex));
         }
+        if let Some(id) = &req.id {
+            if !api::valid_id(id) || !id.starts_with("ep_") {
+                return Err(invalid("endpoint id is invalid"));
+            }
+            if endpoints.contains_key(id) {
+                return Err(MError::Conflict(format!("endpoint {id} already exists")));
+            }
+        }
         let mut ep = EndpointRec {
-            id: new_id("ep"),
+            id: req.id.clone().unwrap_or_else(|| new_id("ep")),
             machine_id: machine_id.to_string(),
             namespace,
             port: req.port,
@@ -103,15 +117,22 @@ impl Manager {
                     "http endpoints are not enabled on this host (ingress.http)",
                 ));
             }
-            let label = if req.host.is_empty() {
-                format!("{name}-{}", &new_id("")[1..5])
-            } else {
+            ep.host = if req.id.is_some() && !req.host.is_empty() {
+                if req.host.len() > 253 || !req.host.split('.').all(api::valid_name) {
+                    return Err(invalid("HTTP endpoint host is not a DNS name"));
+                }
                 req.host.clone()
+            } else {
+                let label = if req.host.is_empty() {
+                    format!("{name}-{}", &new_id("")[1..5])
+                } else {
+                    req.host.clone()
+                };
+                if !api::valid_name(&label) {
+                    return Err(invalid("host must be a DNS label"));
+                }
+                format!("{label}.{}", self.inner.cfg.ingress.domain)
             };
-            if !api::valid_name(&label) {
-                return Err(invalid("host must be a DNS label"));
-            }
-            ep.host = format!("{label}.{}", self.inner.cfg.ingress.domain);
             if endpoints.values().any(|x| x.host == ep.host) {
                 return Err(invalid(format!("host {} is taken", ep.host)));
             }
@@ -124,6 +145,11 @@ impl Manager {
     }
 
     pub fn delete_endpoint(&self, id: &str) -> Result<(), MError> {
+        let current = self.endpoint(id);
+        let _operation = current
+            .as_ref()
+            .map(|ep| self.entry(&ep.machine_id).and_then(|e| self.operation(&e)))
+            .transpose()?;
         let ep = self.inner.endpoints.lock().unwrap().remove(id);
         if let Some(ep) = ep {
             self.inner.store.delete("endpoints", id)?;

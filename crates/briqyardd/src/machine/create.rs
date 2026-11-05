@@ -195,6 +195,7 @@ impl Manager {
         }
         let now = Utc::now();
         let mut rec = Record {
+            held: None,
             id: new_id("m"),
             namespace: req.namespace.clone(),
             role,
@@ -292,6 +293,47 @@ impl Manager {
             let key = self.backup_key(&b, rs).await?;
             let was: Record = serde_json::from_value(backups::spec_of(&b, key.as_deref())?)
                 .map_err(|e| invalid(format!("backup {}: machine record: {e}", b.id)))?;
+            if rs.same_id {
+                if req.start != Some(false) {
+                    return Err(invalid("same_id restore requires start: false"));
+                }
+                let job = holds::JOB
+                    .try_with(Clone::clone)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| invalid("same_id restore requires an evacuation job"))?;
+                if was.held.as_deref() != Some(job.as_str())
+                    || was.role.is_some()
+                    || was.namespace != req.namespace
+                {
+                    return Err(invalid("same_id backup must be held by this job, in the same namespace, without a gateway"));
+                }
+                // Adopt the backed-up configuration, retaining fresh host-local lifecycle,
+                // network, accounting and process state from this create.
+                rec.id = was.id.clone();
+                rec.name = was.name.clone();
+                rec.held = Some(job);
+                rec.metadata = was.metadata.clone();
+                rec.entrypoint = was.entrypoint.clone();
+                rec.cmd = was.cmd.clone();
+                rec.env = was.env.clone();
+                rec.files = was.files.clone();
+                rec.size = was.size;
+                rec.volume = was.volume.clone();
+                rec.ports = was.ports.clone();
+                rec.probes = was.probes.clone();
+                rec.restart = was.restart.clone();
+                rec.sleep = was.sleep.clone();
+                rec.egress = was.egress.clone();
+                rec.limits = was.limits.clone();
+                rec.disk_limits = was.disk_limits.clone();
+                rec.backup.policy = was.backup.policy.clone();
+                rec.created_at = was.created_at;
+                rec.pending = was.pending.clone();
+                rec.stopped_reason = was.stopped_reason.clone();
+                rec.exit = was.exit.clone();
+                rec.stopped_at = was.stopped_at;
+            }
             // The request says what it says; the backup fills the rest.
             inherit_run_config(&mut rec, &was);
             // A restore writes the backup's boot files again; a disk fork keeps the copied disk's.
@@ -584,7 +626,10 @@ impl Manager {
         }
         let made = match &how {
             Make::Restore(b, key) => self.receive_disks(e, b, key.as_deref()).await,
-            Make::Fork(src, fork) => self.make_disks(e, Some(src.as_ref()), Some(fork)).await,
+            Make::Fork(src, fork) => {
+                let _operation = self.operation(src)?;
+                self.make_disks(e, Some(src.as_ref()), Some(fork)).await
+            }
             Make::Image => self.make_disks(e, None, None).await,
             Make::Existing | Make::Assigned => return Ok(()),
         };
@@ -626,7 +671,14 @@ impl Manager {
                 .data(json!({ "image": r.image, "digest": r.image_digest })),
         };
         if !r.start {
-            e.set_state(state::CREATED, |_| Some(ev));
+            e.set_state(
+                if e.snapshot().held.is_some() {
+                    state::STOPPED
+                } else {
+                    state::CREATED
+                },
+                |_| Some(ev),
+            );
             self.save(e)?;
             return Ok(());
         }
@@ -713,6 +765,12 @@ impl Manager {
     fn add_machine(&self, mut rec: Record, t: &Namespace) -> Result<Arc<Entry>, MError> {
         self.check_host_size(&rec.size)?;
         let mut machines = self.inner.machines.lock().unwrap();
+        if machines.contains_key(&rec.id) {
+            return Err(MError::Conflict(format!(
+                "machine {} already exists",
+                rec.id
+            )));
+        }
         // A rename of the namespace (ADR 0056) swaps it under this lock: a create that read
         // the old name is repeated, not recorded in a namespace that is gone.
         if !self

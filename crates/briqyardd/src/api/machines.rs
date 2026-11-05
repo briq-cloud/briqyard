@@ -187,3 +187,42 @@ pub(super) async fn sandbox_request_lookup(
             .into_response()),
     }
 }
+
+#[derive(Deserialize)]
+pub(super) struct HoldRequest {
+    job: String,
+    #[serde(default)]
+    force: bool,
+}
+pub(super) async fn hold_machine(
+    State(st): S,
+    Path(id): Path<String>,
+    Json(req): Json<HoldRequest>,
+) -> Result<StatusCode, AppError> {
+    let m = st.mgr.clone();
+    detached(async move { m.hold_machine(&id, &req.job).await }).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+pub(super) async fn release_machine(
+    State(st): S,
+    Path(id): Path<String>,
+    Json(req): Json<HoldRequest>,
+) -> Result<StatusCode, AppError> {
+    let m = st.mgr.clone();
+    detached(async move { m.release_machine(&id, &req.job, req.force).await }).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(super) async fn evacuation_manifest(
+    State(st): S,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    Ok(Json(st.mgr.evacuation_manifest(&id).await?))
+}
+
+pub(super) async fn get_hold(
+    State(st): S,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    Ok(Json(serde_json::json!({"job": st.mgr.hold_owner(&id)?})))
+}

@@ -349,6 +349,9 @@ pub struct Endpoint {
 /// Opens a port of a machine to the outside.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CreateEndpointRequest {
+    /// Preserve an endpoint id during evacuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub port: u16,
     #[serde(default)]
     pub protocol: String,

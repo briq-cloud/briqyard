@@ -414,6 +414,7 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     name,
                     sleep,
                     restore: Some(api::RestoreSpec {
+                        same_id: false,
                         machine_id: from,
                         backup,
                     }),
@@ -477,6 +478,7 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 port,
             } => {
                 let req = api::CreateEndpointRequest {
+                    id: None,
                     port,
                     protocol: if http { "http".into() } else { String::new() },
                     host: host.unwrap_or_default(),

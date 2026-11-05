@@ -399,6 +399,7 @@ async fn a_backup_after_a_restore_continues_from_an_ancestor_or_is_whole() {
                 namespace: "t1".into(),
                 name: name.into(),
                 restore: Some(api::RestoreSpec {
+                    same_id: false,
                     machine_id: m.id.clone(),
                     backup: b.id.clone(),
                 }),

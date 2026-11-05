@@ -108,6 +108,7 @@ mod tests {
 
     fn rs(m: &str, b: &str) -> api::RestoreSpec {
         api::RestoreSpec {
+            same_id: false,
             machine_id: m.into(),
             backup: b.into(),
         }

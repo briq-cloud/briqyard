@@ -144,6 +144,11 @@ impl Manager {
         backup_id: &str,
         chain: bool,
     ) -> Result<(), MError> {
+        let _operation = self
+            .entry(machine_id)
+            .ok()
+            .map(|e| self.operation(&e))
+            .transpose()?;
         let owner = self.owner(machine_id)?;
         self.backup_store()?;
         let turn = owner.turn().lock_owned().await;

@@ -8,6 +8,7 @@ mod bootstrap;
 mod config;
 mod create;
 mod create_replay;
+mod evacuations;
 mod forward;
 mod hosts;
 mod join;
@@ -77,6 +78,9 @@ enum Cmd {
 }
 
 struct AppState {
+    /// Lists and forwards hold a read guard; journal planning and switching take write.
+    authority: tokio::sync::RwLock<()>,
+    evacuation_workers: Mutex<std::collections::HashSet<String>>,
     cfg: config::Config,
     reg: Mutex<Registry>,
     policy: Policy,
@@ -326,6 +330,9 @@ async fn run(args: Args) -> Result<()> {
         reg.heartbeat(static_host(h, now), now);
     }
     upgrade::interrupted(&mut reg);
+    for namespace in reg.evacuations.keys().cloned().collect::<Vec<_>>() {
+        evacuations::driver::reserve(&mut reg, &namespace);
+    }
     let policy = Policy {
         require_egress_siblings: false,
         require_named_memory: false,
@@ -335,6 +342,8 @@ async fn run(args: Args) -> Result<()> {
         down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
     };
     let state = Arc::new(AppState {
+        authority: Default::default(),
+        evacuation_workers: Default::default(),
         cfg: cfg.clone(),
         reg: Mutex::new(reg),
         policy,
@@ -352,6 +361,18 @@ async fn run(args: Args) -> Result<()> {
         written: Default::default(),
         durable_observed_valid: Default::default(),
     });
+    for namespace in state
+        .reg
+        .lock()
+        .unwrap()
+        .evacuations
+        .iter()
+        .filter(|(_, job)| job.active())
+        .map(|(ns, _)| ns.clone())
+        .collect::<Vec<_>>()
+    {
+        evacuations::driver::launch(state.clone(), namespace);
+    }
     tokio::spawn(backup::run(state.clone()));
     tokio::spawn(poll_static_hosts(state.clone()));
     tokio::spawn(forget_retired(state.clone()));
@@ -498,6 +519,19 @@ fn restored(reg: &Registry, from: &str, path: &std::path::Path) -> String {
 fn namespace_routes(prefix: &str) -> Router<Arc<AppState>> {
     Router::new()
         .route(prefix, get(list_namespaces))
+        .route(&format!("{prefix}/evacuations"), get(evacuations::list))
+        .route(
+            &format!("{prefix}/:namespace/evacuate"),
+            post(evacuations::start),
+        )
+        .route(
+            &format!("{prefix}/:namespace/evacuate/resume"),
+            post(evacuations::resume),
+        )
+        .route(
+            &format!("{prefix}/:namespace/evacuate/cancel"),
+            post(evacuations::cancel),
+        )
         .route(
             &format!("{prefix}/:namespace/sandbox-admissions/:request_id"),
             put(sandbox_admissions::admit).delete(sandbox_admissions::cancel),

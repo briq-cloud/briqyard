@@ -97,6 +97,8 @@ pub(super) async fn admit(
     Path((namespace, id)): Path<(String, String)>,
     Json(request): Json<Request>,
 ) -> Result<Json<serde_json::Value>, Refusal> {
+    let _authority = st.authority.read().await;
+    evacuations::namespace_available(&st.reg.lock().unwrap(), &namespace)?;
     authenticated(&st)?;
     check_ids(&namespace, &id)?;
     request

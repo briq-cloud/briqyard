@@ -34,6 +34,7 @@ impl Manager {
         check_namespace_id(namespace)?;
         let _admission = self.inner.namespace_lifecycle.read().await;
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         let first = e.snapshot();
         if first.template_birth.is_some() || first.clone_origin.is_some() {
             return Err(MError::Conflict(

@@ -159,6 +159,7 @@ async fn cancelled_restore_waiter_retains_make_lifecycle_and_shared_io_drain() {
         namespace: "t1".into(),
         name: "restored".into(),
         restore: Some(api::RestoreSpec {
+            same_id: false,
             machine_id: original.id,
             backup: backup.id,
         }),

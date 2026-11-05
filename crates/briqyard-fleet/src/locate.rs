@@ -32,6 +32,9 @@ impl Indexed {
 pub(super) async fn locate(st: &AppState, what: Indexed, id: &str) -> Option<HostRec> {
     let hosts = {
         let mut reg = st.reg.lock().unwrap();
+        if let Some(owner) = evacuations::authoritative(&reg, what, id) {
+            return reg.hosts.get(owner).cloned();
+        }
         let known = what.index(&mut reg).get(id).cloned();
         if let Some(h) = known.and_then(|hid| reg.hosts.get(&hid)) {
             return Some(h.clone());
@@ -50,8 +53,11 @@ pub(super) async fn locate(st: &AppState, what: Indexed, id: &str) -> Option<Hos
         )
         .await;
         if resp.status().is_success() {
-            what.index(&mut st.reg.lock().unwrap())
-                .insert(id.to_string(), h.id.clone());
+            let mut reg = st.reg.lock().unwrap();
+            if let Some(owner) = evacuations::authoritative(&reg, what, id) {
+                return reg.hosts.get(owner).cloned();
+            }
+            what.index(&mut reg).insert(id.to_string(), h.id.clone());
             return Some(h);
         }
     }
@@ -65,6 +71,7 @@ pub(super) async fn list_backups(
     Path(params): Path<Vec<(String, String)>>,
     headers: HeaderMap,
 ) -> Response {
+    let _authority = st.authority.read().await;
     let id = params
         .iter()
         .find(|(k, _)| k == "id")
@@ -163,11 +170,26 @@ pub(super) async fn by_machine(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, Refusal> {
+    let _authority = st.authority.read().await;
     let id = params
         .iter()
         .find(|(k, _)| k == "id")
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
+    if method != Method::GET {
+        let reg = st.reg.lock().unwrap();
+        if let Some(job) = reg
+            .evacuations
+            .values()
+            .find(|j| j.active() && !j.switched() && j.machines.iter().any(|m| m.id == id))
+        {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "evacuating",
+                format!("machine {id} is evacuating in job {}", job.job),
+            ));
+        }
+    }
     let own = format!("/v1/machines/{id}");
     let is_delete = method == Method::DELETE && uri.path() == own;
     // A destroyed machine is its backups alone (ADR 0023): reached on the host that holds
@@ -294,6 +316,7 @@ pub(super) async fn by_endpoint(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, Refusal> {
+    let _authority = st.authority.read().await;
     let host = locate(&st, Indexed::Endpoint, &id).await.ok_or_else(|| {
         err(
             StatusCode::NOT_FOUND,

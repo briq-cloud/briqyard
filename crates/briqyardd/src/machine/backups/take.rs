@@ -78,9 +78,11 @@ impl Manager {
         req: api::BackupRequest,
     ) -> Result<api::Backup, MError> {
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         self.ordinary_operation(&e.snapshot())?;
         self.backup_store()?;
         let turn = e.backup_turn.clone().lock_owned().await;
+        self.check_hold(&e.snapshot())?;
         let admission = self.inner.backups.jobs.reserve().await?;
         self.inner
             .backups
@@ -138,7 +140,14 @@ impl Manager {
         };
         let mut pruned = Vec::new();
         if let Some(p) = &rec.backup.policy {
-            for old in prune(&all, p.keep as usize).into_iter().rev() {
+            // Same-id restores share the object prefix with their source. Retention
+            // belongs to this key, never to another host's recovery chain.
+            let local: Vec<_> = all
+                .iter()
+                .filter(|old| old.key_id == b.key_id)
+                .cloned()
+                .collect();
+            for old in prune(&local, p.keep as usize).into_iter().rev() {
                 match self.delete_backup_objects(store, old).await {
                     Ok(()) => pruned.push(old.id.clone()),
                     Err(err) => {
@@ -218,11 +227,14 @@ impl Manager {
         let mut all = self.backups(&rec.id).await?;
         let seal = self.seal().await?;
         let key_id = seal.id.clone();
-        let whole = rec
-            .backup
-            .policy
-            .as_ref()
-            .is_some_and(|p| chain_length(&all) >= p.keep as usize);
+        let whole = rec.backup.policy.as_ref().is_some_and(|p| {
+            chain_length(
+                &all.iter()
+                    .filter(|b| b.key_id.as_deref() == Some(key_id.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ) >= p.keep as usize
+        });
         let bid = Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
         let snap = format!("bk-{bid}");
         let z = &self.inner.zfs;

@@ -91,6 +91,7 @@ impl Manager {
             .filter(|e| {
                 let r = e.rec.lock().unwrap();
                 r.is_namespaces()
+                    && r.held.is_none()
                     && r.state != state::DESTROYING
                     && r.has_disks()
                     && r.backup.policy.is_some()
@@ -143,6 +144,9 @@ impl Manager {
     /// A due machine's backup, its turn held. A machine with no process whose disks wrote
     /// nothing since its last backup is not backed up again: its next time moves on.
     pub(super) async fn scheduled_backup(&self, e: &Arc<Entry>, now: DateTime<Utc>) {
+        let Ok(_operation) = self.operation(e) else {
+            return;
+        };
         let r = e.snapshot();
         // Read again under the turn: a PATCH may have moved it while it waited for the gate.
         let Some(every) = r.backup.policy.as_ref().and_then(|p| p.check().ok()) else {
@@ -201,6 +205,19 @@ impl Manager {
                 return;
             }
         };
+        let seal = match self.seal().await {
+            Ok(seal) => seal,
+            Err(err) => {
+                tracing::warn!(machine = id, err = %err, "expired backup key not resolved");
+                return;
+            }
+        };
+        // A restored machine on another host shares the id, not retention ownership.
+        // Unkeyed legacy chains retain their historical holder expiration behavior.
+        let all: Vec<_> = all
+            .into_iter()
+            .filter(|b| b.key_id.is_none() || b.key_id.as_deref() == Some(seal.id.as_str()))
+            .collect();
         let mut deleted = Vec::new();
         for b in all.iter().rev() {
             if let Err(err) = self.delete_backup_objects(store, b).await {

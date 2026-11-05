@@ -235,6 +235,7 @@ async fn a_host_gets_the_key_of_a_backup_for_a_restore_it_was_given() {
         ..Default::default()
     });
     let rs = api::RestoreSpec {
+        same_id: false,
         machine_id: "m_src".into(),
         backup: "b1".into(),
     };
@@ -1075,6 +1076,7 @@ async fn requested_restore_source_key_keeps_its_own_authorization_during_key_adm
     let source_id = api::poolkey::id(source.expose()).unwrap();
     let turn = f.st.key_turn.lock().await;
     let rs = api::RestoreSpec {
+        same_id: false,
         machine_id: "fixture-machine".into(),
         backup: "fixture-backup".into(),
     };

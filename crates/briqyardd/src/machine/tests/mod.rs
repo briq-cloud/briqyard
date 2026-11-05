@@ -42,6 +42,7 @@ use update::*;
 pub(in crate::machine) fn record() -> Record {
     let now = Utc.with_ymd_and_hms(2026, 10, 18, 22, 0, 0).unwrap();
     Record {
+        held: None,
         id: "m_abc123".into(),
         namespace: "t1".into(),
         role: None,

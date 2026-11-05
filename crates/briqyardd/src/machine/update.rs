@@ -18,6 +18,7 @@ impl Manager {
         at: Option<u64>,
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         if e.snapshot().assigned_run.is_some() {
             if self.assigned_lifecycle(&e.snapshot()) {
                 if req.spec.volume.is_some() && e.snapshot().state == state::RUNNING {
@@ -167,6 +168,7 @@ impl Manager {
     /// stop, whose events move the version.
     pub async fn restart(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         if self.assigned_lifecycle(&e.snapshot()) {
             self.stop_entry(&e, stop::USER, Duration::ZERO, false, at)
                 .await?;
@@ -185,6 +187,7 @@ impl Manager {
 
     pub fn touch(&self, id: &str) -> Result<(), MError> {
         let e = self.own_entry(id)?;
+        let _operation = self.operation(&e)?;
         self.ordinary_operation(&e.snapshot())?;
         e.touch();
         Ok(())

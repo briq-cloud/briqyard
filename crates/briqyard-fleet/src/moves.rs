@@ -23,6 +23,7 @@ pub(crate) async fn move_machine(
     }
     let fence = {
         let mut reg = st.reg.lock().unwrap();
+        evacuations::namespace_available(&reg, &req.namespace)?;
         if !reg.hosts.contains_key(&host.id) || reg.machines.get(id) != Some(&host.id) {
             return Err(err(
                 StatusCode::CONFLICT,
