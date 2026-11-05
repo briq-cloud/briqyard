@@ -98,3 +98,79 @@ fn a_nested_class_in_the_configuration_asks_for_kvm_nested() {
     assert!(!config_serves_nested(": not yaml ["));
     assert!(!config_serves_nested(""));
 }
+
+#[test]
+fn the_files_checked_are_the_configured_ones() {
+    use crate::doctor::HostFiles;
+    let conf = "token: t\nfirecracker: /usr/local/lib/briqyard/runtime/h/firecracker\n\
+                jailer: /usr/local/lib/briqyard/runtime/h/jailer\n\
+                kernel: /usr/local/lib/briqyard/runtime/h/vmlinux\n\
+                init: /usr/local/lib/briqyard/runtime/h/briqyard-init\n";
+    let files = HostFiles::from_config(conf);
+    assert_eq!(
+        files.firecracker,
+        "/usr/local/lib/briqyard/runtime/h/firecracker"
+    );
+    assert_eq!(files.jailer, "/usr/local/lib/briqyard/runtime/h/jailer");
+    assert_eq!(files.kernel, "/usr/local/lib/briqyard/runtime/h/vmlinux");
+    assert_eq!(
+        files.init,
+        "/usr/local/lib/briqyard/runtime/h/briqyard-init"
+    );
+    // Without a readable configuration, or a field, the daemon's defaults.
+    for conf in ["", ": not yaml [", "token: t\njailer: ''\n"] {
+        let files = HostFiles::from_config(conf);
+        assert_eq!(files.firecracker, "/usr/local/bin/firecracker");
+        assert_eq!(files.jailer, "/usr/local/bin/jailer");
+        assert_eq!(files.kernel, "/var/lib/briqyard/vmlinux");
+        assert_eq!(files.init, "/usr/local/bin/briqyard-init");
+    }
+}
+
+#[test]
+fn doctor_checks_the_files_the_configuration_names() {
+    use crate::doctor::checks;
+    let dir = std::env::temp_dir().join(format!("briqyard-doctor-files-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let names = ["firecracker", "jailer", "vmlinux", "briqyard-init"];
+    for n in names {
+        std::fs::write(dir.as_path().join(n), "").unwrap();
+    }
+    let conf = |root: &std::path::Path| {
+        let p = |n: &str| root.join(n).display().to_string();
+        format!(
+            "firecracker: {}\njailer: {}\nkernel: {}\ninit: {}\n",
+            p("firecracker"),
+            p("jailer"),
+            p("vmlinux"),
+            p("briqyard-init")
+        )
+    };
+    let write = |name: &str, text: String| {
+        let path = dir.as_path().join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    };
+    let present = checks(&write("present.yaml", conf(dir.as_path())));
+    let absent = checks(&write("absent.yaml", conf(&dir.as_path().join("missing"))));
+    // The same host, the same other checks: only the four named files differ.
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(absent, present + 4);
+}
+
+#[test]
+fn doctor_says_when_the_configuration_does_not_parse() {
+    use crate::doctor::paths_source;
+    let path = std::path::Path::new("/etc/briqyard/config.yaml");
+    let unreadable = std::fs::read_to_string("/nonexistent/briqyard.yaml");
+    assert!(paths_source(path, unreadable.as_deref()).contains("no readable configuration"));
+    let text = paths_source(path, Ok(": not yaml ["));
+    assert!(
+        text.contains("unparsable") && text.contains("defaults"),
+        "{text}"
+    );
+    assert_eq!(
+        paths_source(path, Ok("token: t\n")),
+        "paths from /etc/briqyard/config.yaml"
+    );
+}
