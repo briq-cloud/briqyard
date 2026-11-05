@@ -283,6 +283,36 @@ host_tunnel_rule() {
   if [ -z "$rule" ] && [ -f $FIREWALL ]; then rule=$(grep '# briqyard-tunnel$' $FIREWALL || true); fi
   [ -z "$rule" ] || printf '%s\n' "$rule"
 }
+# The parent shell keeps fd 9 open until EXIT cleanup finishes. flock is attached
+# to its shared open file description, so the Python child can acquire it for us.
+# This script requires root; its private directory and lock are therefore root-owned.
+runtime_install_lock() {
+  # Taken early by the peers operation and by a full run's firewall step, held to exit: asking again is a no-op, not a wait on ourselves.
+  [ -z "${install_lock_held:-}" ] || return 0
+  python3 - "$1" <<'PYLOCK' || return
+import os, pathlib, stat, sys
+root = pathlib.Path(sys.argv[1])
+root.mkdir(mode=0o700, parents=True, exist_ok=True)
+info = root.lstat()
+if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+    raise ValueError("runtime install directory must be owned by installer")
+root.chmod(0o700)
+fd = os.open(root / "runtime-install.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+        raise ValueError("invalid runtime install lock")
+    os.fchmod(fd, 0o600)
+finally:
+    os.close(fd)
+PYLOCK
+  exec 9<>"$1/runtime-install.lock" || return
+  python3 - <<'PYFLOCK'
+import fcntl
+fcntl.flock(9, fcntl.LOCK_EX)
+PYFLOCK
+  install_lock_held=1
+}
 # The peers of a host already installed (WIREGUARD_ONLY): the tunnel and its firewall rule
 # only. An empty WIREGUARD_PEERS is the whole set: no peer, no route, no rule.
 tunnel_only() {
@@ -307,7 +337,8 @@ tunnel_only() {
   fi
   tunnel_verify
 }
-if [ "$WIREGUARD_ONLY" = 1 ]; then tunnel_only; exit 0; fi
+# The fleet's upgrades rewrite the same firewall file: one writer at a time.
+if [ "$WIREGUARD_ONLY" = 1 ]; then runtime_install_lock /etc/briqyard; tunnel_only; exit 0; fi
 
 # Downloads a file and checks its digest against the pin before it lands anywhere.
 fetch() {
@@ -362,6 +393,7 @@ echo "   needrestart leaves briqyardd and briqyard-fleet running"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq zfsutils-linux nftables conntrack e2fsprogs gdisk curl jq ca-certificates python3 python3-yaml >/dev/null
+runtime_install_lock /etc/briqyard # before the firewall file is read and rewritten; held to the end
 # Every helper the daemon starts runs through choom (ADR 0111).
 [ -x /usr/bin/choom ] || fail "/usr/bin/choom is missing: apt install util-linux"
 modprobe zfs
@@ -882,33 +914,6 @@ for key, value in config.value:
 else:
     print("/var/lib/briqyard/vmlinux")
 PYKERNEL
-}
-# The parent shell keeps fd 9 open until EXIT cleanup finishes. flock is attached
-# to its shared open file description, so the Python child can acquire it for us.
-# This script requires root; its private directory and lock are therefore root-owned.
-runtime_install_lock() {
-  python3 - "$1" <<'PYLOCK' || return
-import os, pathlib, stat, sys
-root = pathlib.Path(sys.argv[1])
-root.mkdir(mode=0o700, parents=True, exist_ok=True)
-info = root.lstat()
-if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
-    raise ValueError("runtime install directory must be owned by installer")
-root.chmod(0o700)
-fd = os.open(root / "runtime-install.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-try:
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
-        raise ValueError("invalid runtime install lock")
-    os.fchmod(fd, 0o600)
-finally:
-    os.close(fd)
-PYLOCK
-  exec 9<>"$1/runtime-install.lock" || return
-  python3 - <<'PYFLOCK'
-import fcntl
-fcntl.flock(9, fcntl.LOCK_EX)
-PYFLOCK
 }
 # Inspect both the installed and candidate roots without opening or changing host state.
 # Kept standalone: this gate must also protect stopped daemons and custom data_dir.

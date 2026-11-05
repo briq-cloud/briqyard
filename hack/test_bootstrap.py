@@ -21,6 +21,9 @@ from test_package import fixture
 SCRIPT = (Path(__file__).parent / "bootstrap-host.sh").read_text()
 HELPERS = SCRIPT.split("# Runtime installation helpers.", 1)[1].split("# End runtime installation helpers.", 1)[0]
 HELPERS = HELPERS[HELPERS.index("checked_bundle()") :]
+# Defined beside the peers operation, which takes it too.
+INSTALL_LOCK = "runtime_install_lock() {" + SCRIPT.split("\nruntime_install_lock() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+HELPERS = INSTALL_LOCK + HELPERS
 DROPPED = "refuse_dropped_nested() {" + SCRIPT.split("refuse_dropped_nested() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
 INSTALL = SCRIPT.split('echo "== binaries', 1)[1].split('echo "== api certificate"', 1)[0]
 INSTALL = 'echo "== binaries' + INSTALL
@@ -834,7 +837,7 @@ class WireguardRun(unittest.TestCase):
         self.firewall.write_text("table inet briqyard_host {\n\tchain input {\n\t\tcounter drop\n\t}\n}\n")
         self.routes = self.state / "routes"
 
-    def run_script(self, call, peers=None):
+    def run_script(self, call, peers=None, wait=True):
         code = 'fail() { echo "$*" >&2; exit 1; }\n' + PRIVATE + TUNNEL_UP + "\n" + call
         code = code.replace("/etc/wireguard", str(self.root / "etc/wireguard")).replace("/etc/briqyard", str(self.root / "etc/briqyard"))
         code = code.replace("/etc/systemd/system", str(self.root / "etc/systemd"))
@@ -848,6 +851,8 @@ class WireguardRun(unittest.TestCase):
             env["WIREGUARD_PEERS"] = ""
             env["WIREGUARD_PEERS_SET"] = ""
         (self.root / "etc/systemd").mkdir(exist_ok=True)
+        if not wait:
+            return subprocess.Popen(["bash", "-euo", "pipefail", "-c", code], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         result = subprocess.run(["bash", "-euo", "pipefail", "-c", code], env=env, capture_output=True, text=True)
         return result
 
@@ -925,6 +930,39 @@ class WireguardRun(unittest.TestCase):
 
     def test_the_full_bootstrap_asks_for_the_installed_tunnel_first(self):
         self.assertIn("if ! has_address && ! installed_tunnel &&", SCRIPT)
+
+    def test_the_peers_operation_waits_for_the_installer_lock(self):
+        """A fleet upgrade holding the lock rewrites the firewall file: the operation must not edit it meanwhile."""
+        dispatch = next(line for line in SCRIPT.splitlines() if line.startswith('if [ "$WIREGUARD_ONLY" = 1 ]'))
+        lock = self.root / "etc/briqyard/runtime-install.lock"
+        holder = subprocess.Popen(
+            [sys.executable, "-c", "import fcntl,os,sys\nfd=os.open(sys.argv[1],os.O_CREAT|os.O_RDWR,0o600)\nfcntl.flock(fd,fcntl.LOCK_EX)\nprint('held',flush=True)\nsys.stdin.readline()", str(lock)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        run = None
+        try:
+            self.assertEqual(holder.stdout.readline(), "held\n")
+            run = self.run_script("WIREGUARD_ONLY=1\n" + dispatch, PEER_A, wait=False)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run.wait(timeout=1)
+            self.assertEqual(self.changes(), [])
+            self.assertNotIn("briqyard-tunnel", self.firewall.read_text())
+            holder.stdin.write("done\n"); holder.stdin.flush()
+            _, error = run.communicate(timeout=20)
+            self.assertEqual(run.returncode, 0, error)
+            self.assertIn("briqyard-tunnel", self.firewall.read_text())
+        finally:
+            for child in (holder, run):
+                if child and child.poll() is None:
+                    child.kill()
+                    child.communicate(timeout=10)
+
+    def test_a_full_run_takes_the_lock_before_it_reads_the_firewall_rule(self):
+        self.assertLess(SCRIPT.index("python3 python3-yaml >/dev/null\nruntime_install_lock /etc/briqyard"), SCRIPT.index("tunnel_line=$(host_tunnel_rule)"))
+
+    def test_asking_for_the_lock_twice_does_not_wait_on_itself(self):
+        result = subprocess.run(["bash", "-c", INSTALL_LOCK + '\nruntime_install_lock "$1"; runtime_install_lock "$1"; echo twice', "x", str(self.root / "lk")],
+                                text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.stdout, "twice\n", result.stderr)
 
     def test_unset_peers_are_not_empty_peers(self):
         result = self.run_script("tunnel_only", None)
