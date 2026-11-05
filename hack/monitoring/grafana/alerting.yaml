@@ -161,6 +161,36 @@ groups:
         annotations:
           summary: "Host {{ .Labels.host }} has an observed backup failure in the ten-minute event window, or a positive counter without a ten-minute baseline."
           description: "Inspect backup events and the store. This bounded event signal does not establish backup success, freshness or an RPO; a cleared alert is not recovery evidence."
+      - uid: briqyard-registry-backup-stale
+        title: "Registry backup not published"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: briqyard-prometheus
+            model:
+              refId: A
+              # 1 when the last full acknowledgement is over three hours old, or there is none
+              # (NaN, as after a restart whose first writes failed); 0 for a fleet without a
+              # backup. The fleet writes at least hourly while the store accepts writes.
+              expr: '((time() - briqyard_fleet_registry_backup_last_ack_timestamp_seconds > bool 10800) + (briqyard_fleet_registry_backup_last_ack_timestamp_seconds != bool briqyard_fleet_registry_backup_last_ack_timestamp_seconds)) * on(instance, job) briqyard_fleet_registry_backup_configured'
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ .Labels.instance }} has not published its registry backup for three hours: no new pool key is handed out and a lost registry is not recoverable."
+          description: "The fleet's log has `registry backup` at error with the store's answer; see the runbook's table."
       - uid: briqyard-out-of-room
         title: "Creates refused: no room"
         condition: C

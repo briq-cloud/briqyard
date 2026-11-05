@@ -18,6 +18,11 @@ pub const LATEST: &str = "fleet/registry.json.age";
 
 /// A write of the registry is given this long, retries included: a key request waits on it,
 /// and the store's client retries for minutes, which suits a machine's backup.
+/// A registry whose only change is heartbeat telemetry is written again after this long. A
+/// bucket with versioning keeps every overwrite as a version and refuses a write to an object
+/// that holds too many (1,000 on some stores): the registry changes with every heartbeat, so
+/// writing each change reached that limit in days and then failed for good.
+const TELEMETRY_REFRESH: std::time::Duration = std::time::Duration::from_secs(3600);
 const PUT_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct Backup {
@@ -33,6 +38,10 @@ pub struct Backup {
 #[derive(Default)]
 struct Written {
     digest: Option<[u8; 32]>,
+    /// The digest of the registry without its heartbeat telemetry (`stable_digest`), and when
+    /// it was written: what decides that a change is only telemetry.
+    stable: Option<[u8; 32]>,
+    published: Option<std::time::Instant>,
     ack_timestamp_seconds: Option<u64>,
     /// The pool key of each host in it.
     keys: HashMap<String, PoolKey>,
@@ -146,6 +155,21 @@ where
     }
 }
 
+/// The digest of the registry without what each heartbeat rewrites (`last_seen`, `used`, free
+/// disk, conditions, the machine count): the next report after a restore is the truth for all
+/// of them. Two registries with the same digest differ in nothing a restore needs.
+fn stable_digest(reg: &Registry) -> [u8; 32] {
+    let mut stable = reg.clone();
+    for h in stable.hosts.values_mut() {
+        h.last_seen = chrono::DateTime::UNIX_EPOCH;
+        h.used = Default::default();
+        h.disk_free_mb = None;
+        h.conditions.clear();
+        h.machines = 0;
+    }
+    Sha256::digest(encode(&stable)).into()
+}
+
 /// The registry as written: the same bytes as `registry.json`.
 pub fn encode(reg: &Registry) -> Vec<u8> {
     serde_json::to_vec_pretty(reg).expect("a registry serializes")
@@ -242,12 +266,28 @@ impl Backup {
             {
                 return Ok(false);
             }
+            let stable = stable_digest(&reg);
+            let telemetry_only = {
+                let last = self
+                    .last
+                    .lock()
+                    .map_err(|_| anyhow!("backup ACK cache unavailable"))?;
+                last.stable == Some(stable)
+                    && last
+                        .published
+                        .is_some_and(|at| at.elapsed() < TELEMETRY_REFRESH)
+            };
+            if telemetry_only {
+                return Ok(false);
+            }
             let sealed: Arc<[u8]> = age::encrypt(&self.recipient, &data)
                 .context("encrypt the registry")?
                 .into();
             let mut written = Written {
                 ack_timestamp_seconds: None,
                 digest: Some(digest),
+                stable: Some(stable),
+                published: Some(std::time::Instant::now()),
                 keys: reg
                     .hosts
                     .values()
@@ -393,8 +433,8 @@ pub fn keygen(path: &Path) -> Result<String> {
     Ok(recipient)
 }
 
-/// Writes the registry once a minute when it changed. A write that fails is an `error` and is
-/// tried again at the next turn.
+/// Writes the registry once a minute when it changed, heartbeat telemetry aside (an hour at most
+/// between two writes). A write that fails is an `error` and is tried again at the next turn.
 pub async fn run(st: std::sync::Arc<crate::AppState>) {
     let Some(backup) = st.backup.as_ref() else {
         return;
@@ -1224,6 +1264,62 @@ pub(super) mod tests {
             .await
             .unwrap());
         }
+    }
+
+    /// A bucket with versioning keeps each overwrite as a version and refuses a write to an
+    /// object with too many (1,000 on some stores; the answer is a 400 `BadRequest`). Heartbeats
+    /// rewrite `last_seen` and `used` every few seconds, so writing every change filled the
+    /// limit in days and the backup then failed for good.
+    #[tokio::test]
+    async fn heartbeat_telemetry_does_not_write_a_version_each_minute() {
+        const LIMIT: usize = 1000;
+        let (_dir, b, reg) = fixture();
+        let versions: Arc<Mutex<HashMap<String, usize>>> = Default::default();
+        let store = versions.clone();
+        let put = move |object: String, _: Arc<[u8]>| {
+            let store = store.clone();
+            async move {
+                let mut store = store.lock().unwrap();
+                let n = store.entry(object).or_default();
+                if *n >= LIMIT {
+                    bail!("400 Bad Request: the current object has too many versions");
+                }
+                *n += 1;
+                Ok(())
+            }
+        };
+        let push = || bounded(b.push_with(&reg, put.clone()));
+        assert!(push().await.unwrap());
+        // Three days of a heartbeat every ten seconds, a backup every minute.
+        for beat in 1..=3 * 24 * 60 {
+            {
+                let mut reg = reg.lock().unwrap();
+                let h = reg.hosts.get_mut("h1").unwrap();
+                h.last_seen += chrono::Duration::seconds(60);
+                h.used.memory_mb = beat % 97;
+                h.disk_free_mb = Some(1000 + u64::from(beat % 31));
+                h.machines = (beat % 5) as usize;
+            }
+            assert!(!push().await.unwrap(), "beat {beat}");
+        }
+        let count = |object: &str| versions.lock().unwrap()[object];
+        assert_eq!((count(LATEST), versions.lock().unwrap().len()), (1, 2));
+        // A change a restore needs is written at once.
+        reg.lock()
+            .unwrap()
+            .namespaces
+            .insert("n1".into(), "h1".into());
+        assert!(push().await.unwrap());
+        assert_eq!(count(LATEST), 2);
+        // Telemetry alone is written after an hour, so the backup is never older than that.
+        reg.lock().unwrap().hosts.get_mut("h1").unwrap().used.vcpus += 1;
+        assert!(!push().await.unwrap());
+        {
+            let mut last = b.last.lock().unwrap();
+            last.published = Instant::now().checked_sub(TELEMETRY_REFRESH + Duration::from_secs(1));
+        }
+        assert!(push().await.unwrap());
+        assert_eq!(count(LATEST), 3);
     }
 
     fn synthetic_panic() -> Result<()> {

@@ -42,7 +42,8 @@ class TestConfig(unittest.TestCase):
     def test_every_rule_has_a_case_or_a_reason(self):
         covered = {"briqyard-not-answering", "briqyard-host-condition", "briqyard-crash-loop", "briqyard-backup-failed",
                    "briqyard-out-of-room", "briqyard-host-pressure", "briqyard-slots-small"}
-        uncovered = {"briqyard-pool-full"}  # ADR 0094: a pool over 80 % needs tens of GB of disk
+        uncovered = {"briqyard-pool-full",  # ADR 0094: a pool over 80 % needs tens of GB of disk
+                     "briqyard-registry-backup-stale"}  # three hours of silence: no sandbox runner waits that long
         uids = {r["uid"] for g in alerts.production_rules()["groups"] for r in g["rules"]}
         self.assertEqual(uids, covered | uncovered)
 
