@@ -478,6 +478,26 @@ async fn followed(rx: &mut tokio::sync::mpsc::Receiver<String>) -> serde_json::V
 }
 
 #[tokio::test]
+async fn the_last_console_lines_in_an_error_carry_no_view_mark() {
+    use api::LogView::{App, Runtime};
+    let h = harness("10.64.0.0/22", 4096).await;
+    let entry = h.add("m_a", state::RUNNING, 256);
+    let dir = h.m.inner.cfg.run_dir().join("m_a");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut w = console::Writer::open(&dir, 1 << 20).await.unwrap();
+    let ts = "2026-10-21T10:00:00.000000Z";
+    w.line(ts, Runtime, b"[briqyard] start failed")
+        .await
+        .unwrap();
+    w.line(ts, App, b"app said no").await.unwrap();
+    let rec = entry.rec.lock().unwrap().clone();
+    assert_eq!(
+        h.m.last_console_lines(&rec, 5),
+        format!("{ts} [briqyard] start failed | {ts} app said no")
+    );
+}
+
+#[tokio::test]
 async fn logs_follow_sends_only_the_lines_of_its_view() {
     use api::LogView::{App, Runtime};
     let h = harness("10.64.0.0/22", 4096).await;

@@ -34,9 +34,9 @@ Env is not in those bodies. The machine's env is written on the config drive the
 | Firecracker's stderr (the jailer's errors included) | runtime | the pipe |
 | Firecracker's log | runtime | its own pipe, below |
 
-The init is not changed (its digest changes only with the init, ADR 0101) and its line format stays: the daemon still reads `[briqyard] exit code=…`.
+The init is not changed (its digest changes only with the init, ADR 0101) and its line format stays (the `[briqyard] ` prefix is what marks its lines).
 
-**Firecracker runs at `--level Warning` with its own log FIFO.** One `--` after the jailer's arguments, then `--log-path <fifo> --level Warning`. The FIFO is `firecracker.fifo` in the run directory (inside the chroot when jailed), made like the metrics FIFO (ADR 0030): owned by the jail's uid, opened `O_RDWR | O_NONBLOCK` by the daemon before the spawn so Firecracker's open never blocks and never sees a closed reader. A task stamps each line it reads as runtime and appends it to the console. After a daemon restart, adopt reopens the FIFO and a fresh writer, as it does for the metrics.
+**Firecracker runs at `--level Warning` with its own log FIFO.** One `--` after the jailer's arguments, then `--log-path <fifo> --level Warning`. The FIFO is `firecracker.fifo` in the run directory (inside the chroot when jailed), made like the metrics FIFO (ADR 0030): owned by the jail's uid, opened `O_RDWR | O_NONBLOCK` by the daemon before the spawn so Firecracker's open never blocks. A task stamps each line it reads as runtime and appends it to the console. After a daemon restart, adopt reopens the FIFO and a fresh writer, as it does for the metrics.
 
 **No redaction.** Firecracker at Warning logs no request body, and what its bodies held (paths, boot args, network settings) is not secret.
 
