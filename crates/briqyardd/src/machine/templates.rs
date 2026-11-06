@@ -123,6 +123,34 @@ impl Manager {
         Ok(())
     }
 
+    /// What lets `make_disks` clone a named snapshot without the source's lock: the destination's
+    /// durable reader names this source, snapshot and generation. `reserve_named_clone` wrote
+    /// it under that lock, and every operation that could remove, roll back or replace the
+    /// snapshot checks it under that lock (`check_clone_readers`). Without it, refuse.
+    pub(super) fn check_clone_reader(
+        &self,
+        source: &str,
+        origin: &CloneOrigin,
+        destination: &str,
+    ) -> Result<()> {
+        let held = self
+            .inner
+            .store
+            .get::<CloneReader>(READERS, destination)?
+            .is_some_and(|r| {
+                r.source_machine == source
+                    && r.snapshot == origin.snapshot
+                    && r.generation == origin.artifact.generation
+                    && r.destination == destination
+            });
+        anyhow::ensure!(
+            held,
+            "clone {destination} holds no reader of {source}/{}",
+            origin.snapshot
+        );
+        Ok(())
+    }
+
     pub(super) fn artifact_files(
         &self,
         source: &str,

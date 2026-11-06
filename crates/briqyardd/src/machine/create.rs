@@ -848,10 +848,22 @@ impl Manager {
                 .map(|f| f.copy.is_empty() || f.copy == "disk")
                 .unwrap_or(false);
         if copy_disks {
-            // Under the source's lock: a restore swaps its disks under that lock (ADR 0031),
-            // and a tidy removes a fork snapshot nothing clones yet.
+            // The source's lock (`Entry.lock` of the seed or fork source) protects what is read
+            // here and, for a disk fork, the clone itself: a restore swaps the source's disks
+            // under it (ADR 0031) and a tidy removes a fork snapshot nothing clones yet.
+            //
+            // A named memory clone is the exception. Its snapshot is held by a durable reader
+            // (`READERS`), written by `reserve_named_clone` under this same lock before the
+            // create was answered. While it exists, `destroy`, `restore_snapshot`,
+            // `delete_snapshot`, `remake_root` and `tidy` refuse, each checking it under the
+            // source's lock (`check_clone_readers`), and nothing else removes, rolls back or
+            // renames the snapshot. So the lock is held only to validate and read the source,
+            // then released before the `zfs clone`: creates from one seed clone in parallel.
+            // Rule: take the lock to read or decide, never across a `zfs` command that the
+            // reader already makes safe. Lock order is unchanged: the new machine's lock, then
+            // the source's, and no other lock is taken under the source's.
             let src = src.unwrap();
-            let _src_lock = src.lock.lock().await;
+            let src_lock = src.lock.lock().await;
             let s = src.snapshot();
             if s.state == state::DESTROYING {
                 return Err(anyhow!("fork source {} is being destroyed", s.id));
@@ -873,6 +885,7 @@ impl Manager {
                     a.generation == origin.artifact.generation,
                     "named memory artifact generation changed"
                 );
+                self.check_clone_reader(&s.id, origin, &r.id)?;
                 e.rec.lock().unwrap().fork = Some(api::ForkOrigin {
                     machine_id: s.id.clone(),
                     copy_consistency: s
@@ -882,6 +895,7 @@ impl Manager {
                         .map(|snap| snap.copy_consistency.clone())
                         .unwrap_or_default(),
                 });
+                drop(src_lock);
                 let started = std::time::Instant::now();
                 z.clone_snapshot(&s.root_dataset(), &origin.snapshot, &r.root_dataset())
                     .await?;
