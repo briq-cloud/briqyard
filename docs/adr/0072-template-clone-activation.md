@@ -43,3 +43,9 @@ an already-running service. A service profile requires qualified application par
 and post-clone hooks that preserve prepared state while resetting application RNG,
 sockets and cached identity; unsupported profiles are refused. Paused warm slots
 must use the same identity and artifact contracts before atomic claim and activation.
+
+## Amended 2026-11-06: the disk clone runs outside the seed's lock
+
+A named clone's `zfs clone` of the seed's snapshot no longer runs under the seed's `Entry.lock`. The lock was held across it, so every create from one seed waited for the previous clone (one seed: a strict 74 ms cycle, about 14 creates/s on a 24-core host, while clones of different sources ran in parallel to about 240/s).
+
+The durable reader of the destination is what holds the snapshot. `reserve_named_clone` writes it under the seed's lock before the create is answered; `destroy`, `restore_snapshot`, `delete_snapshot`, `remake_root` and `tidy` refuse while one exists, each checking it under that lock, and nothing else removes, rolls back or renames the snapshot. `make_disks` takes the lock to validate the source, checks that the destination's reader names this source, snapshot and generation (refusing otherwise), and releases the lock before the clone. The reader's lifetime is unchanged: it goes with the clone's machine. Disk forks and restores keep the lock across their clone. Lock order is unchanged (the new machine's lock, then the source's); the sandbox create path still holds its daemon-wide locks while it waits for the seed's lock to reserve, which is a separate change.
