@@ -46,6 +46,6 @@ A 400 for a `limit` over 1000. The old endpoint capped silently; a client that a
 
 - The latest lines of any console cost at most `SCAN_MAX` bytes of reading, not the console's length.
 - A client may receive a short or empty page with `hasOlder` true and must keep paging by cursor; a page is not the end until `hasOlder` (or `hasNewer`) is false.
-- A line longer than `SCAN_MAX` is skipped by a backward page: the scan finds no line start, so the cursor moves to the bottom of the scan (inside the line) and the next page reads on before it. A forward page reads such a line whole. The writer does not bound a line.
+- A line longer than `SCAN_MAX` is skipped by a backward page: the scan finds no line start, so the cursor moves to the bottom of the scan (inside the line) and the next page reads on before it. A cursor inside such a line is a position, not a line start: a forward page from it returns the rest of that line, cut. A forward page from a line start reads such a line whole. The writer does not bound a line.
 - The CLI prints the lines on stdout and the cursors on stderr (`(older: --before X)`, `(newer: --after X)`), so a pipe stays clean.
 - `since` on a page is refused, where it used to work. The briq side moves to `before` and `after` in its own change.

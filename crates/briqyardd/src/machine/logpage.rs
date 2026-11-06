@@ -106,8 +106,11 @@ pub(super) fn backward(
             // Not one line starts in the window: read more of it.
             win *= 2;
             if w == floor {
-                // A line longer than the scan: skipped, and the cursor still moves.
-                from = floor;
+                if from == asked {
+                    // No line starts in the whole scan: a line longer than it. Skipped,
+                    // and the cursor still moves.
+                    from = floor;
+                }
                 break;
             }
             continue;

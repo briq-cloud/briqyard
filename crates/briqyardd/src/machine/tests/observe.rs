@@ -642,6 +642,34 @@ async fn a_line_longer_than_the_scan_is_skipped_going_back_and_the_cursors_still
     assert_eq!(seen, ["first", "last"]);
 }
 
+#[tokio::test]
+async fn going_back_over_more_than_the_scan_of_ordinary_lines_returns_each_once() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.add("m_a", state::RUNNING, 256);
+    let dir = h.m.inner.cfg.run_dir().join("m_a");
+    std::fs::create_dir_all(&dir).unwrap();
+    // Five lines of 1.5 MiB: the scan of 4 MiB stops inside the third from the end.
+    let ts = "2026-10-21T10:00:00.000000Z";
+    let body = "x".repeat(3 << 19);
+    let text: String = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|n| format!("{ts} {n}{body}\n"))
+        .collect();
+    std::fs::write(dir.join("console.log"), text).unwrap();
+    let (mut seen, mut at) = (Vec::new(), LogAt::Tail);
+    for _ in 0..10 {
+        let p = h.m.logs("m_a", at, 10, api::LogView::App).unwrap();
+        let mut page: Vec<String> = texts(&p).iter().map(|l| l[..1].to_string()).collect();
+        page.extend(seen);
+        seen = page;
+        if !p.has_older {
+            break;
+        }
+        at = LogAt::Before(p.before.parse().unwrap());
+    }
+    assert_eq!(seen, ["a", "b", "c", "d", "e"]);
+}
+
 // --- labels, quotas and logs follow (ADR 0025) ---
 
 #[tokio::test]
