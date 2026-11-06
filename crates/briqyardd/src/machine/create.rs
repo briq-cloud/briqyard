@@ -885,6 +885,7 @@ impl Manager {
                     a.generation == origin.artifact.generation,
                     "named memory artifact generation changed"
                 );
+                self.check_clone_reader(&s.id, origin, &r.id)?;
                 e.rec.lock().unwrap().fork = Some(api::ForkOrigin {
                     machine_id: s.id.clone(),
                     copy_consistency: s
@@ -894,7 +895,6 @@ impl Manager {
                         .map(|snap| snap.copy_consistency.clone())
                         .unwrap_or_default(),
                 });
-                self.check_clone_reader(&s.id, origin, &r.id)?;
                 drop(src_lock);
                 let started = std::time::Instant::now();
                 z.clone_snapshot(&s.root_dataset(), &origin.snapshot, &r.root_dataset())
