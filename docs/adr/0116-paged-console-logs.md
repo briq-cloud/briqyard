@@ -22,7 +22,7 @@ Date: 2026-11-06 · Status: accepted
 
 `before` with `after` is `400 invalid`. A non-numeric cursor is `400 invalid`. `since` on a page and `before`, `after` or `limit` on a follow are `400 invalid`: each belongs to one mode. Clamping `limit` keeps a client that asks for "everything" working; the other cases name a request that has no meaning.
 
-**Response: `{lines, before, after, hasOlder, hasNewer}`.** `before` is the cursor to read older lines, `after` the cursor to read newer ones. The old `next` is gone: `after` replaces it. This breaks a reader of the old response, which is why the control plane moves with it (the `since` form of a follow is kept).
+**Response: `{lines, before, after, hasOlder, hasNewer}`** (camelCase: the shape the control plane consumes, fixed with the design). `before` is the cursor to read older lines, `after` the cursor to read newer ones (the CLI prints it each time, so a reader can poll from the end). `hasNewer` is true while any byte follows, a line still being written included; the next page may then be empty. The old `next` is gone: `after` replaces it. This breaks a reader of the old response, which is why the control plane moves with it (the `since` form of a follow is kept).
 
 **A cursor is opaque and covers every byte the page scanned**, including lines the view filtered out. A page of the `app` view over a console that is all runtime lines is empty but its cursor still moves, so a client following the cursors reaches the end and never stalls on a run of filtered lines. A cursor is today a byte offset in the console, which rotation (ADRs 0021, 0025) does not change; clients must not read it.
 
@@ -46,6 +46,6 @@ A 400 for a `limit` over 1000. The old endpoint capped silently; a client that a
 
 - The latest lines of any console cost at most `SCAN_MAX` bytes of reading, not the console's length.
 - A client may receive a short or empty page with `hasOlder` true and must keep paging by cursor; a page is not the end until `hasOlder` (or `hasNewer`) is false.
-- A line longer than `SCAN_MAX` cannot be paged past. Console lines are bounded by the writer far below that.
+- A line longer than `SCAN_MAX` is skipped by a backward page: the scan finds no line start, so the cursor moves to the bottom of the scan (inside the line) and the next page reads on before it. A forward page reads such a line whole. The writer does not bound a line.
 - The CLI prints the lines on stdout and the cursors on stderr (`(older: --before X)`, `(newer: --after X)`), so a pipe stays clean.
 - `since` on a page is refused, where it used to work. The briq side moves to `before` and `after` in its own change.

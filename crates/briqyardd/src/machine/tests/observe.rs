@@ -610,6 +610,38 @@ async fn a_line_still_being_written_is_not_in_a_page_and_not_passed_by_its_curso
     }
 }
 
+#[tokio::test]
+async fn a_line_longer_than_the_scan_is_skipped_going_back_and_the_cursors_still_reach_the_start() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.add("m_a", state::RUNNING, 256);
+    let dir = h.m.inner.cfg.run_dir().join("m_a");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ts = "2026-10-21T10:00:00.000000Z";
+    let huge = "x".repeat(super::super::logpage::SCAN_MAX as usize + 10);
+    std::fs::write(
+        dir.join("console.log"),
+        format!("{ts} first\n{ts} {huge}\n{ts} last\n"),
+    )
+    .unwrap();
+    let (mut seen, mut at) = (Vec::new(), LogAt::Tail);
+    for _ in 0..10 {
+        let p = h.m.logs("m_a", at, 10, api::LogView::App).unwrap();
+        let mut page = texts(&p);
+        page.extend(seen);
+        seen = page;
+        if !p.has_older {
+            break;
+        }
+        let before = p.before.parse().unwrap();
+        assert!(
+            at == LogAt::Tail || LogAt::Before(before) != at,
+            "no progress"
+        );
+        at = LogAt::Before(before);
+    }
+    assert_eq!(seen, ["first", "last"]);
+}
+
 // --- labels, quotas and logs follow (ADR 0025) ---
 
 #[tokio::test]

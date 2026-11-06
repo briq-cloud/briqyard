@@ -234,9 +234,7 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     if res.has_older {
                         eprintln!("(older: --before {})", res.before);
                     }
-                    if res.has_newer {
-                        eprintln!("(newer: --after {})", res.after);
-                    }
+                    eprintln!("(newer: --after {})", res.after);
                 }
             }
             MachineCmd::Move { namespace, id } => {

@@ -1,8 +1,9 @@
 //! Pages of the console (ADR 0116): chronological, of one view, from a cursor or from the tail.
 //!
-//! A cursor is an offset in the whole console, always at the start of a line, and covers every
-//! byte scanned, the other view's lines included, so a page that found nothing still moves.
-//! A request scans at most `SCAN_MAX` bytes.
+//! A cursor is an offset in the whole console, at the start of a line (inside one only when a
+//! backward page skipped a line longer than `SCAN_MAX`), and covers every byte scanned, the
+//! other view's lines included, so a page that found nothing still moves. A request scans at
+//! most `SCAN_MAX` bytes.
 
 use super::exec::parse_log_line;
 use super::*;
@@ -37,7 +38,7 @@ pub(super) struct Page {
     pub from: u64,
     /// The first byte after the range, where the page after it starts.
     pub to: u64,
-    /// Whether whole lines remain after `to`.
+    /// Whether bytes remain after `to`.
     pub more: bool,
 }
 
@@ -105,6 +106,8 @@ pub(super) fn backward(
             // Not one line starts in the window: read more of it.
             win *= 2;
             if w == floor {
+                // A line longer than the scan: skipped, and the cursor still moves.
+                from = floor;
                 break;
             }
             continue;
