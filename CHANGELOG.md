@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.1.30 — 2026-11-06
+
+### Upgrade notes
+
+- The init's digest is expected not to change with this release (ADR 0101): no init source or dependency it uses changed, and `briqyard-api` gained only console-log types the init does not use. Confirm it in the candidate's `SHA256SUMS` line for `briqyard-init-linux-<arch>` against v0.1.29's (`365e5d1b…` on x86_64); if it differs, seeds are sealed again as `docs/OPERATIONS.md` (Upgrade) says.
+- The console log API changes (ADR 0115, ADR 0116). `GET /v1/machines/{id}/logs` answers the newest lines of the app view by default: kernel and `[briqyard]` runtime lines leave it, and `view=runtime` returns them (`--view runtime` in the CLI). The `next` field is replaced by the `before` and `after` cursors, and `limit` defaults to 200 (at most 1000). A caller that reads `next`, or greps runtime lines in the default view, must change. A machine booted by an older daemon keeps a mixed console until its next boot.
+- Cloning a named snapshot no longer holds the seed's lock for the clone: creates from one seed run their clones in parallel. No action is needed.
+- Sealed seeds stay usable after a reboot on the same kernel: recovery and start no longer compare the artifact's device number, which ZFS changes at each mount. Existing manifests verify at the next daemon start, with no reseal. A reboot that changes the kernel release, the Firecracker or kernel binary, or the init digest still refuses the seed, by design: reseal after such an upgrade.
+
+### Documentation
+
+- ADR 0113 assumes one host for the fleet and the edge (#183) ([fd628841](https://github.com/briq-cloud/briqyard/commit/fd6288412004c14c4cc3e25d481512775c1f94ea))
+
+
+### Features
+
+- page the console from the tail with before and after cursors (#182) ([ee4da888](https://github.com/briq-cloud/briqyard/commit/ee4da888a1d1e51730e51b3c86b92207147303a6))
+
+
+### Fixes
+
+- separate app and runtime console output at capture (#179) ([ce421728](https://github.com/briq-cloud/briqyard/commit/ce421728ecfbb0608d1e3c8a46ac7d643217494e))
+
+- keep sealed seeds usable after a reboot (#185) ([34d42fc2](https://github.com/briq-cloud/briqyard/commit/34d42fc2bbde7719ca79f852e5c5e5be7ebe9f36))
+
+
+### Performance
+
+- clone a named snapshot outside the seed's lock (#181) ([1989dbad](https://github.com/briq-cloud/briqyard/commit/1989dbad4a0ebb2a5d8ec1fef2300af7db7ab8e4))
+
 ## 0.1.29 — 2026-11-06
 
 ### Upgrade notes
