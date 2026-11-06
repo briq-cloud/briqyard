@@ -1,7 +1,7 @@
 //! The HTTP API over the machine manager.
 
 use crate::events::Filter;
-use crate::machine::{detached, MError, Manager, Until};
+use crate::machine::{detached, LogAt, MError, Manager, Until, LOG_DEFAULT_LIMIT};
 use axum::body::Body;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::WebSocketUpgrade;
@@ -58,7 +58,6 @@ pub struct AppState {
 const MAX_STOP_SEC: u64 = 600;
 const MAX_EXEC_MS: u64 = 3_600_000;
 const MAX_WAIT_SEC: u64 = 600;
-const MAX_LOG_LINES: usize = 5000;
 
 /// A stop's grace, from the request's seconds; 0 is the manager's default.
 fn stop_timeout(asked_sec: u64) -> Duration {
@@ -73,11 +72,6 @@ fn exec_timeout_ms(asked: u64) -> u64 {
 /// How long `/wait` blocks: a minute unless asked.
 fn wait_timeout(asked_sec: Option<u64>) -> Duration {
     Duration::from_secs(asked_sec.unwrap_or(60).clamp(1, MAX_WAIT_SEC))
-}
-
-/// Lines per log page; 0 is the manager's default.
-fn log_limit(asked: Option<usize>) -> usize {
-    asked.unwrap_or(0).min(MAX_LOG_LINES)
 }
 
 /// Which token a path needs: none for liveness; none for `/metrics` and the OpenAPI document

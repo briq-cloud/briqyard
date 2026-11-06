@@ -467,6 +467,12 @@ check "logs -f gets a line printed after it began" 'grep -q e2e-followed /tmp/by
 check "logs: a line the program printed is in the app view only" 'briqyard machine logs "$FL" | grep -q e2e-followed && ! briqyard machine logs "$FL" --view runtime | grep -q e2e-followed'
 check "logs: the init and kernel lines are in the runtime view only" '! briqyard machine logs "$FL" --limit 5000 | grep -qE "\[briqyard\]|\[ *[0-9]+\.[0-9]{6}\] " && briqyard machine logs "$FL" --limit 5000 --view runtime | grep -q "\[briqyard\] started"'
 check "logs: Firecracker logs no request body" '! briqyard machine logs "$FL" --limit 5000 --view runtime | grep -qE "boot_args|kernel_image_path"'
+# A page is the newest lines, oldest first; its stderr says where the older ones are (ADR 0116).
+text_of() { sed 's/^[^ ]* //'; }
+older_of() { sed -n 's/^(older: --before \(.*\))$/\1/p'; }
+check "logs: a page is the newest lines, oldest first" '[ "$(briqyard machine logs "$FL" --limit 2 2>/dev/null | text_of | tr "\n" ,)" = "e2e-ready,e2e-followed," ]'
+check "logs: the cursor of a page gives the one before it" 'b=$(briqyard machine logs "$FL" --limit 1 2>&1 >/dev/null | older_of); [ -n "$b" ] && [ "$(briqyard machine logs "$FL" --limit 1 --before "$b" 2>/dev/null | text_of)" = e2e-ready ]'
+check "logs: before and after together are refused" '! briqyard machine logs "$FL" --before 1 --after 2 >/dev/null 2>&1'
 briqyard machine rm "$FL" >/dev/null
 for i in $(seq 1 10); do kill -0 "$FOLLOW" 2>/dev/null || break; sleep 1; done
 check "logs -f ends at the destroy"  '! kill -0 "$FOLLOW" 2>/dev/null && grep -q "was destroyed" /tmp/by-e2e-follow.txt'

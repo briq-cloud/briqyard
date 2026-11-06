@@ -194,6 +194,8 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             MachineCmd::Logs {
                 since,
                 limit,
+                before,
+                after,
                 follow,
                 view,
                 id,
@@ -217,18 +219,23 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     })
                     .await?;
                 } else {
-                    let res: api::LogsResponse = c
-                        .call(
-                            GET,
-                            &format!(
-                                "/v1/machines/{id}/logs?since={since}&limit={limit}&view={view}"
-                            ),
-                            NONE,
-                        )
-                        .await?;
+                    let mut path = format!("/v1/machines/{id}/logs?view={view}");
+                    for (name, value) in [
+                        ("limit", limit.map(|l| l.to_string())),
+                        ("before", before),
+                        ("after", after),
+                    ] {
+                        if let Some(v) = value {
+                            path += &format!("&{name}={v}");
+                        }
+                    }
+                    let res: api::LogsResponse = c.call(GET, &path, NONE).await?;
                     res.lines.iter().for_each(print);
-                    if !res.next.is_empty() {
-                        eprintln!("(next: --since {})", res.next);
+                    if res.has_older {
+                        eprintln!("(older: --before {})", res.before);
+                    }
+                    if res.has_newer {
+                        eprintln!("(newer: --after {})", res.after);
                     }
                 }
             }

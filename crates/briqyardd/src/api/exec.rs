@@ -154,8 +154,12 @@ pub(super) async fn get_file(
 
 #[derive(Deserialize)]
 pub(super) struct LogsQuery {
+    /// Where a follow starts.
     since: Option<String>,
     limit: Option<usize>,
+    /// Page before this cursor, or after it; neither is the tail (ADR 0116).
+    before: Option<String>,
+    after: Option<String>,
     #[serde(default)]
     follow: bool,
     /// `app` (the default) or `runtime` (ADR 0115).
@@ -169,17 +173,47 @@ pub(super) async fn logs(
     Path(id): Path<String>,
     Query(q): Query<LogsQuery>,
 ) -> Result<Response, AppError> {
-    let since = q.since.as_deref().unwrap_or("");
     let view = match q.view.as_deref() {
         None => api::LogView::default(),
         Some(v) => v.parse().map_err(|e: String| MError::Invalid(e))?,
     };
-    if !q.follow {
-        return Ok(Json(st.mgr.logs(&id, since, log_limit(q.limit), view)?).into_response());
+    if q.follow {
+        if q.before.is_some() || q.after.is_some() || q.limit.is_some() {
+            return Err(MError::Invalid("a follow takes since only".into()).into());
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
+        st.mgr
+            .follow_logs(&id, q.since.as_deref().unwrap_or(""), view, tx)?;
+        return Ok(ndjson(rx));
     }
-    let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
-    st.mgr.follow_logs(&id, since, view, tx)?;
-    Ok(ndjson(rx))
+    let at = log_at(q.since.as_deref(), q.before.as_deref(), q.after.as_deref())?;
+    let limit = q.limit.unwrap_or(LOG_DEFAULT_LIMIT);
+    Ok(Json(st.mgr.logs(&id, at, limit, view)?).into_response())
+}
+
+/// Where a page starts: `before` or `after` a cursor, else the tail. An empty `after` is the
+/// start of the console. `since` belongs to a follow.
+pub(super) fn log_at(
+    since: Option<&str>,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Result<LogAt, MError> {
+    let cursor = |name: &str, v: &str| {
+        v.parse::<u64>()
+            .map_err(|_| MError::Invalid(format!("{name} must be a cursor from a previous page")))
+    };
+    match (since, before, after) {
+        (Some(_), ..) => Err(MError::Invalid(
+            "since is for a follow: page with before or after".into(),
+        )),
+        (None, Some(_), Some(_)) => Err(MError::Invalid(
+            "before and after cannot be given together".into(),
+        )),
+        (None, Some(b), None) => Ok(LogAt::Before(cursor("before", b)?)),
+        (None, None, Some("")) => Ok(LogAt::After(0)),
+        (None, None, Some(a)) => Ok(LogAt::After(cursor("after", a)?)),
+        (None, None, None) => Ok(LogAt::Tail),
+    }
 }
 
 /// A stream of lines as `application/x-ndjson`, until the sender is dropped.

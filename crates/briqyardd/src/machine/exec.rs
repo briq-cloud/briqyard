@@ -295,31 +295,46 @@ impl Manager {
 
     // --- logs ---
 
-    /// Pages the console. `since` is an offset in the whole console, the rotated file
-    /// included (ADR 0021); `limit` caps the lines of `view` (ADR 0115) returned.
+    /// A page of the console's `view` (ADR 0116): `limit` lines, oldest first, from `at`. The
+    /// cursors in the answer are offsets in the whole console, the rotated file included
+    /// (ADR 0021), and cover the other view's lines the page skipped.
     pub fn logs(
         &self,
         id: &str,
-        since: &str,
+        at: LogAt,
         limit: usize,
         view: api::LogView,
     ) -> Result<api::LogsResponse, MError> {
         self.entry(id)?;
-        let limit = if limit == 0 || limit > 5000 {
-            500
-        } else {
-            limit
-        };
+        let limit = limit.clamp(1, logpage::MAX_LIMIT);
         let dir = self.inner.cfg.run_dir().join(id);
-        match console_page(&dir, log_cursor(since)?, limit, view)
-            .map_err(|e| MError::Other(e.into()))?
-        {
-            None => Ok(api::LogsResponse::default()),
-            Some((lines, next)) => Ok(api::LogsResponse {
-                lines,
-                next: next.to_string(),
-            }),
-        }
+        let io = |e: std::io::Error| MError::Other(e.into());
+        let (page, has_older) = match at {
+            LogAt::After(from) => {
+                match logpage::forward(&dir, from, limit, logpage::SCAN_MAX, view).map_err(io)? {
+                    None => return Ok(api::LogsResponse::default()),
+                    Some(p) => {
+                        let older = p.from > console::oldest(&dir).map_err(io)?;
+                        (p, older)
+                    }
+                }
+            }
+            LogAt::Before(to) => match logpage::backward(&dir, to, limit, view).map_err(io)? {
+                None => return Ok(api::LogsResponse::default()),
+                Some(p) => p,
+            },
+            LogAt::Tail => match logpage::backward(&dir, u64::MAX, limit, view).map_err(io)? {
+                None => return Ok(api::LogsResponse::default()),
+                Some(p) => p,
+            },
+        };
+        Ok(api::LogsResponse {
+            lines: page.lines,
+            before: page.from.to_string(),
+            after: page.to.to_string(),
+            has_older,
+            has_newer: page.more,
+        })
     }
 
     /// Follows the console from `since` (ADR 0025): the lines after it, then each new one,
@@ -362,7 +377,7 @@ impl Manager {
             tokio::pin!(woken);
             woken.as_mut().enable();
             loop {
-                let (lines, next) = match console_page(&dir, cursor, FOLLOW_PAGE, view) {
+                let page = match logpage::forward(&dir, cursor, FOLLOW_PAGE, u64::MAX, view) {
                     Ok(Some(page)) => page,
                     Ok(None) => break,
                     Err(err) => {
@@ -371,9 +386,9 @@ impl Manager {
                         return;
                     }
                 };
-                cursor = next;
-                let full = lines.len() == FOLLOW_PAGE;
-                for l in lines {
+                cursor = page.to;
+                let full = page.lines.len() == FOLLOW_PAGE;
+                for l in page.lines {
                     let line = serde_json::to_string(&l).unwrap_or_default() + "\n";
                     if !events::send(&tx, &mut closing, line).await {
                         return;
@@ -468,35 +483,6 @@ fn log_cursor(since: &str) -> Result<u64, MError> {
             .parse()
             .map_err(|_| invalid("since must be a cursor from a previous page")),
     }
-}
-
-/// Up to `limit` whole lines of `view` from the console in `dir` from `from`, and the cursor
-/// after the last line read, one of the other view's included; `None` when the machine has no
-/// console yet.
-fn console_page(
-    dir: &Path,
-    from: u64,
-    limit: usize,
-    view: api::LogView,
-) -> std::io::Result<Option<(Vec<api::LogLine>, u64)>> {
-    use std::io::BufRead;
-    let Some((mut pos, mut r)) = console::read_from(dir, from)? else {
-        return Ok(None);
-    };
-    let mut lines = Vec::new();
-    while lines.len() < limit {
-        let mut line = String::new();
-        let n = r.read_line(&mut line)?;
-        if n == 0 || !line.ends_with('\n') {
-            break;
-        }
-        pos += n as u64;
-        let (of, line) = parse_log_line(&line);
-        if of == view {
-            lines.push(line);
-        }
-    }
-    Ok(Some((lines, pos)))
 }
 
 /// The view a stored console line belongs to, and the line.
