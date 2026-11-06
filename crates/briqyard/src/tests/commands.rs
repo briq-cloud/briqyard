@@ -129,17 +129,19 @@ fn machine_lifecycle_commands() {
         _ => panic!("not an ls"),
     }
     match machine(parse(&[
-        "machine", "logs", "-f", "--since", "c9", "--limit", "10", "m1",
+        "machine", "logs", "-f", "--since", "c9", "--limit", "10", "--view", "runtime", "m1",
     ])) {
         MachineCmd::Logs {
             since,
             limit,
             follow,
+            view,
             id,
         } => {
             assert_eq!(since.as_deref(), Some("c9"));
             assert_eq!(limit, 10);
             assert!(follow);
+            assert_eq!(view, briqyard_api::LogView::Runtime);
             assert_eq!(id, "m1");
         }
         _ => panic!("not logs"),
@@ -149,10 +151,14 @@ fn machine_lifecycle_commands() {
             since,
             limit,
             follow,
+            view,
             ..
-        } => assert!(since.is_none() && limit == 500 && !follow),
+        } => assert!(
+            since.is_none() && limit == 500 && !follow && view == briqyard_api::LogView::App
+        ),
         _ => panic!("not logs"),
     }
+    assert!(Cli::try_parse_from(["briqyard", "machine", "logs", "--view", "all", "m1"]).is_err());
     match machine(parse(&["machine", "fork", "--name", "copy", "m1"])) {
         MachineCmd::Fork {
             name,

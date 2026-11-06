@@ -242,7 +242,7 @@ echo "inner-a: first machine exec answered after $(awk -v a="$t0" -v b="$(date +
 second=$(inner_boot inner-b | tail -n 1)
 sbx briqyard machine exec "$second" -- uname -r | tee "$WORK/inner-uname"
 # The kernel's own timeline of the second boot, from its console.
-sbx briqyard machine logs "$second" --limit 100000 2>&1 | grep -E 'Linux version|Freeing unused kernel|Run /|briqyard|init' | cut -c1-160 | head -n 12 > "$WORK/boot-timeline" || true
+sbx briqyard machine logs "$second" --limit 100000 --view runtime 2>&1 | grep -E 'Linux version|Freeing unused kernel|Run /|briqyard|init' | cut -c1-160 | head -n 12 > "$WORK/boot-timeline" || true
 # Is a failed reach slowness? The same ping with 2 s and with 60 s to answer.
 b_name=$(sbx briqyard machine get "$second" | jq -r .name)
 a_name=inner-a

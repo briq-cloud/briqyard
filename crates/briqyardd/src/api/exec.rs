@@ -158,9 +158,11 @@ pub(super) struct LogsQuery {
     limit: Option<usize>,
     #[serde(default)]
     follow: bool,
+    /// `app` (the default) or `runtime` (ADR 0115).
+    view: Option<String>,
 }
 
-/// A page of the console; with `follow=true`, the lines and each new one as NDJSON, kept open
+/// A page of the console's `view`; with `follow=true`, the lines and each new one as NDJSON, kept open
 /// (ADR 0025).
 pub(super) async fn logs(
     State(st): S,
@@ -168,11 +170,15 @@ pub(super) async fn logs(
     Query(q): Query<LogsQuery>,
 ) -> Result<Response, AppError> {
     let since = q.since.as_deref().unwrap_or("");
+    let view = match q.view.as_deref() {
+        None => api::LogView::default(),
+        Some(v) => v.parse().map_err(|e: String| MError::Invalid(e))?,
+    };
     if !q.follow {
-        return Ok(Json(st.mgr.logs(&id, since, log_limit(q.limit))?).into_response());
+        return Ok(Json(st.mgr.logs(&id, since, log_limit(q.limit), view)?).into_response());
     }
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
-    st.mgr.follow_logs(&id, since, tx)?;
+    st.mgr.follow_logs(&id, since, view, tx)?;
     Ok(ndjson(rx))
 }
 

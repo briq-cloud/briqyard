@@ -4,7 +4,12 @@
 //! is an offset in the whole console, so a read goes across both files, and what was rotated
 //! away twice is gone. A follower (ADR 0025) waits on the console's `grown` notifier, which
 //! the writer wakes after each line.
+//!
+//! One file holds both views (ADR 0115). A line is `<ts> <text>` for the app's, as it always
+//! was, and `<ts>! <text>` for the runtime's: a line written before the views existed has
+//! no mark and reads as the app's, so a console that spans an upgrade stays whole.
 
+use briqyard_api::LogView;
 use std::collections::BTreeMap;
 use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
@@ -14,6 +19,48 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
 
 const CURRENT: &str = "console.log";
+
+/// Ends the timestamp of a runtime line (an RFC 3339 time never ends with it).
+const RUNTIME_MARK: char = '!';
+
+/// Starts what the guest's init prints (`briqyard-init`'s `console_line`).
+const INIT_PREFIX: &str = "[briqyard] ";
+
+/// The view of a line the guest wrote to its serial console, which the kernel, the init and
+/// the customer's program all print to. The kernel stamps its own lines with the time since
+/// boot (`printk.time=1`, in the boot arguments) and the init starts its own with
+/// `[briqyard] `: anything else is the program's.
+pub fn serial_view(line: &[u8]) -> LogView {
+    if line.starts_with(INIT_PREFIX.as_bytes()) || kernel_stamped(line) {
+        LogView::Runtime
+    } else {
+        LogView::App
+    }
+}
+
+/// `[    1.234567] `: the kernel's time since boot.
+fn kernel_stamped(line: &[u8]) -> bool {
+    let Some(rest) = line.strip_prefix(b"[") else {
+        return false;
+    };
+    let rest = rest.trim_ascii_start();
+    let secs = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+    let Some(rest) = rest[secs..].strip_prefix(b".") else {
+        return false;
+    };
+    let micros = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+    secs > 0 && micros > 0 && rest[micros..].starts_with(b"] ")
+}
+
+/// The view a stored line belongs to, its timestamp and the text, from the line as written
+/// (without its newline). `None` when it has no timestamp.
+pub fn unstamp(stored: &str) -> Option<(LogView, &str, &str)> {
+    let (stamp, text) = stored.split_once(' ')?;
+    Some(match stamp.strip_suffix(RUNTIME_MARK) {
+        Some(ts) => (LogView::Runtime, ts, text),
+        None => (LogView::App, stamp, text),
+    })
+}
 
 /// Held to rename the files (a rotation) and to find and open them (a read), so a reader never
 /// takes one file's start for another's. One for the daemon: a rotation is a rename, an
@@ -169,12 +216,15 @@ impl Writer {
         Ok(w)
     }
 
-    /// Writes one line as `<ts> <line>\n`, then rotates when the file passed the size. The
-    /// line is in the file when this returns (a tokio file hands a write to a thread, and
-    /// only a flush waits for it), and the followers are woken.
-    pub async fn line(&mut self, ts: &str, line: &[u8]) -> std::io::Result<()> {
-        let mut buf = Vec::with_capacity(ts.len() + line.len() + 2);
+    /// Writes one line as `<ts> <line>\n` (`<ts>! <line>\n` for the runtime's), then rotates
+    /// when the file passed the size. The line is in the file when this returns (a tokio file
+    /// hands a write to a thread, and only a flush waits for it), and the followers are woken.
+    pub async fn line(&mut self, ts: &str, view: LogView, line: &[u8]) -> std::io::Result<()> {
+        let mut buf = Vec::with_capacity(ts.len() + line.len() + 3);
         buf.extend_from_slice(ts.as_bytes());
+        if view == LogView::Runtime {
+            buf.push(RUNTIME_MARK as u8);
+        }
         buf.push(b' ');
         buf.extend_from_slice(line);
         if !line.ends_with(b"\n") {
@@ -253,7 +303,9 @@ mod tests {
         // Each line is 9 bytes, "ts lineN\n": line N starts at 9 N.
         let mut w = Writer::open(d, 25).await.unwrap();
         for i in 0..3 {
-            w.line("ts", format!("line{i}").as_bytes()).await.unwrap();
+            w.line("ts", LogView::App, format!("line{i}").as_bytes())
+                .await
+                .unwrap();
         }
         w.flush().await.unwrap();
         // The third line took the file to 27 bytes: rotated, the next starts at 27.
@@ -264,13 +316,15 @@ mod tests {
             (l, next),
             (vec!["line0".into(), "line1".into(), "line2".into()], 27)
         );
-        w.line("ts", b"line3").await.unwrap();
+        w.line("ts", LogView::App, b"line3").await.unwrap();
         w.flush().await.unwrap();
         // A cursor in the previous file reads on into the current one.
         assert_eq!(lines(d, 18), (vec!["line2".into(), "line3".into()], 36));
         assert_eq!(lines(d, 27), (vec!["line3".into()], 36));
         for i in 4..6 {
-            w.line("ts", format!("line{i}").as_bytes()).await.unwrap();
+            w.line("ts", LogView::App, format!("line{i}").as_bytes())
+                .await
+                .unwrap();
         }
         w.flush().await.unwrap();
         // A second rotation: one previous file kept, a cursor in the one before reads on from
@@ -286,7 +340,7 @@ mod tests {
         // A new writer (a new boot) goes on where the console ends.
         drop(w);
         let mut w = Writer::open(d, 25).await.unwrap();
-        w.line("ts", b"line6").await.unwrap();
+        w.line("ts", LogView::App, b"line6").await.unwrap();
         w.flush().await.unwrap();
         assert_eq!(lines(d, 54), (vec!["line6".into()], 63));
     }
@@ -302,7 +356,7 @@ mod tests {
             let woken = follower.notified();
             tokio::pin!(woken);
             woken.as_mut().enable();
-            w.line("ts", b"one").await.unwrap();
+            w.line("ts", LogView::App, b"one").await.unwrap();
             // No flush: the line is there for a page or a follower as soon as it is written.
             assert_eq!(lines(d, 0), (vec!["one".into()], 7));
             tokio::time::timeout(std::time::Duration::from_secs(1), woken)
@@ -342,7 +396,7 @@ mod tests {
                 for i in 0..500 {
                     w.lock()
                         .await
-                        .line("ts", format!("{t}-{i:03}").as_bytes())
+                        .line("ts", LogView::App, format!("{t}-{i:03}").as_bytes())
                         .await
                         .unwrap();
                     tokio::task::yield_now().await;
@@ -378,5 +432,69 @@ mod tests {
             let want: Vec<String> = (0..500).map(|i| format!("{t}-{i:03}")).collect();
             assert_eq!(mine, want.iter().collect::<Vec<_>>(), "task {t}");
         }
+    }
+
+    #[test]
+    fn the_guests_serial_lines_are_split_by_who_printed_them() {
+        for runtime in [
+            "[briqyard] started pid=7 /app --token x",
+            "[briqyard] exit code=1 oom=false requested=false",
+            "[    0.000000] Linux version 6.1.102",
+            "[   12.345678] Kernel panic - not syncing: Attempted to kill init!",
+            "[123456.789012] reboot: Restarting system",
+        ] {
+            assert_eq!(
+                serial_view(runtime.as_bytes()),
+                LogView::Runtime,
+                "{runtime}"
+            );
+        }
+        for app in [
+            "listening on :8080",
+            "",
+            "[briqyard]",
+            " [briqyard] indented",
+            "[INFO] 12.5 ready",
+            "[ 12 ] not a time",
+            "[12.] no micros",
+            "[.5] no seconds",
+            "[1.5]no space",
+            "[2026-11-05T20:15:53Z] request",
+        ] {
+            assert_eq!(serial_view(app.as_bytes()), LogView::App, "{app}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_runtime_line_is_marked_and_a_line_without_the_mark_is_the_apps() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        // A console from before the views: unmarked lines.
+        std::fs::write(d.join(CURRENT), "2026-10-21T10:00:00.000000Z old\n").unwrap();
+        let mut w = Writer::open(d, 1 << 20).await.unwrap();
+        w.line("2026-10-21T10:00:01.000000Z", LogView::App, b"app\n")
+            .await
+            .unwrap();
+        w.line("2026-10-21T10:00:02.000000Z", LogView::Runtime, b"run")
+            .await
+            .unwrap();
+        w.flush().await.unwrap();
+        let text = std::fs::read_to_string(d.join(CURRENT)).unwrap();
+        assert_eq!(
+            text,
+            "2026-10-21T10:00:00.000000Z old\n\
+             2026-10-21T10:00:01.000000Z app\n\
+             2026-10-21T10:00:02.000000Z! run\n"
+        );
+        let got: Vec<_> = text.lines().map(|l| unstamp(l).unwrap()).collect();
+        assert_eq!(
+            got,
+            [
+                (LogView::App, "2026-10-21T10:00:00.000000Z", "old"),
+                (LogView::App, "2026-10-21T10:00:01.000000Z", "app"),
+                (LogView::Runtime, "2026-10-21T10:00:02.000000Z", "run"),
+            ]
+        );
+        assert_eq!(unstamp("nostamp"), None);
     }
 }

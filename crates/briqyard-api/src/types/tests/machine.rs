@@ -341,6 +341,18 @@ fn files() {
 }
 
 #[test]
+fn log_views() {
+    assert_eq!(LogView::default(), LogView::App);
+    for (text, view) in [("app", LogView::App), ("runtime", LogView::Runtime)] {
+        assert_eq!(text.parse::<LogView>(), Ok(view));
+        assert_eq!(view.as_str(), text);
+        assert_eq!(serde_json::to_value(view).unwrap(), json!(text));
+    }
+    let err = "all".parse::<LogView>().unwrap_err();
+    assert!(err.contains("app or runtime"), "{err}");
+}
+
+#[test]
 fn logs() {
     let l: LogsResponse = round_trip(
         json!({"lines": [{"ts": "2026-01-02T03:04:05Z", "line": "[briqyard] started pid=1"}]}),

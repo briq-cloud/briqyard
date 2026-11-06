@@ -404,6 +404,38 @@ pub struct FileResponse {
     pub base64: String,
 }
 
+/// Which of a console's lines a read returns (ADR 0115). Every line belongs to exactly one:
+/// what the customer's program printed, or what the runtime printed about the machine (the
+/// kernel, the guest's init, Firecracker and its jailer).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogView {
+    #[default]
+    App,
+    Runtime,
+}
+
+impl std::str::FromStr for LogView {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "app" => Ok(Self::App),
+            "runtime" => Ok(Self::Runtime),
+            other => Err(format!("view must be app or runtime, not {other:?}")),
+        }
+    }
+}
+
+impl LogView {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::App => "app",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
 /// One line of the serial console.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogLine {
