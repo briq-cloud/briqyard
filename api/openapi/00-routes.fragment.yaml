@@ -286,8 +286,9 @@ paths:
     parameters:
       - { $ref: "#/components/parameters/id" }
       - { name: since, in: query, schema: { type: string }, description: "the `next` cursor of a previous page: an offset in the whole console, its rotated file included (ADR 0021); one rotated away reads on from the oldest line kept" }
-      - { name: limit, in: query, schema: { type: integer, default: 500, maximum: 5000 } }
+      - { name: limit, in: query, schema: { type: integer, default: 500, maximum: 5000 }, description: "lines of the view returned, at most" }
       - { name: follow, in: query, schema: { type: boolean, default: false }, description: "keep it open (ADR 0025): the lines after `since`, then each new one, as NDJSON" }
+      - { name: view, in: query, schema: { type: string, enum: [app, runtime], default: app }, description: "`app`: what the machine's program printed. `runtime`: what the runtime printed about the machine (the guest kernel, the guest's init with the command it started, Firecracker and its jailer). A line is in one view; `next` is after the last line read, lines of the other view included (ADR 0115). Another value is 400 `invalid`" }
     get:
       summary: "The serial console, paged. With `follow=true`, NDJSON kept open: one `LogLine` per line, across a rotation, `{}` every 30 s, and a last line `{code, error}` when it ends (`destroyed`: the machine was; `shutdown`: the daemon goes down, follow again from the `since` in `error`). Through the fleet a follow is streamed through"
       responses:

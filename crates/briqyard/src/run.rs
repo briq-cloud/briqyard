@@ -195,13 +195,16 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 since,
                 limit,
                 follow,
+                view,
                 id,
             } => {
                 let since = since.unwrap_or_default();
+                let view = view.as_str();
                 let print =
                     |l: &api::LogLine| println!("{} {}", l.ts.format("%H:%M:%S%.3f"), l.line);
                 if follow {
-                    let path = format!("/v1/machines/{id}/logs?since={since}&follow=true");
+                    let path =
+                        format!("/v1/machines/{id}/logs?since={since}&follow=true&view={view}");
                     c.stream(&path, |line| match follow_line(line)? {
                         ControlFlow::Continue(l) => {
                             l.iter().for_each(print);
@@ -217,7 +220,9 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     let res: api::LogsResponse = c
                         .call(
                             GET,
-                            &format!("/v1/machines/{id}/logs?since={since}&limit={limit}"),
+                            &format!(
+                                "/v1/machines/{id}/logs?since={since}&limit={limit}&view={view}"
+                            ),
                             NONE,
                         )
                         .await?;

@@ -1,6 +1,7 @@
 //! Firecracker's client, process and VMM.
 
 use super::*;
+use api::LogView;
 use tokio::net::UnixListener;
 
 mod assigned_resume;
@@ -454,7 +455,7 @@ fn jail_paths() {
             dir.join("api.sock"),
             dir.join("vsock.sock"),
             dir.join("console.log"),
-            dir.join("firecracker.log")
+            dir.join("firecracker.fifo")
         )
     );
     assert_eq!(paths_for(dir, None, "m_abc123"), paths(dir));
@@ -473,7 +474,7 @@ fn jail_paths() {
             root.join("run/firecracker.socket"),
             root.join("vsock.sock"),
             dir.join("console.log"),
-            dir.join("firecracker.log")
+            root.join("firecracker.fifo")
         )
     );
 }
@@ -700,25 +701,91 @@ fn placing_a_file_in_the_jail() {
 }
 
 #[tokio::test]
-async fn console_lines_are_stamped() {
+async fn console_lines_are_stamped_and_each_is_the_apps_or_the_runtimes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("console.log");
     let f = crate::console::Writer::open(dir.path(), 1 << 20)
         .await
         .unwrap();
     let out = std::sync::Arc::new(tokio::sync::Mutex::new(f));
-    stamp(&b"one\ntwo"[..], out).await;
+    let serial = &b"one\n[briqyard] started pid=1\n[    0.5] kernel\ntwo"[..];
+    stamp(serial, out.clone(), crate::console::serial_view).await;
+    stamp(&b"jailer failed\n"[..], out, |_| LogView::Runtime).await;
     let text = std::fs::read_to_string(&path).unwrap();
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 2, "{text:?}");
-    for (line, want) in lines.iter().zip(["one", "two"]) {
-        let (ts, rest) = line.split_once(' ').unwrap();
+    assert_eq!(lines.len(), 5, "{text:?}");
+    let want = [
+        (LogView::App, "one"),
+        (LogView::Runtime, "[briqyard] started pid=1"),
+        (LogView::Runtime, "[    0.5] kernel"),
+        (LogView::App, "two"),
+        (LogView::Runtime, "jailer failed"),
+    ];
+    for (line, (view, text)) in lines.iter().zip(want) {
+        let (of, ts, rest) = crate::console::unstamp(line).unwrap();
         chrono::DateTime::parse_from_rfc3339(ts).unwrap();
-        assert_eq!(rest, want);
+        assert_eq!((of, rest), (view, text));
     }
     // The last line gets its newline even when the source had none.
-    assert!(text.ends_with("two\n"));
+    assert!(text.contains("two\n"));
 }
+
+#[tokio::test]
+async fn firecrackers_log_pipe_goes_to_the_console_as_the_runtimes_until_it_is_done() {
+    use tokio::io::AsyncWriteExt;
+    let dir = tempfile::tempdir().unwrap();
+    let pipe = dir.path().join(LOG_FIFO);
+    make_fifo(&pipe, None).unwrap();
+    let rx = open_fifo(&pipe).unwrap();
+    let console = crate::console::Writer::open(dir.path(), 1 << 20)
+        .await
+        .unwrap();
+    let out = std::sync::Arc::new(tokio::sync::Mutex::new(console));
+    let (done_tx, done) = watch::channel(false);
+    let task = tokio::spawn(log_to_console(rx, out, done));
+    // Firecracker opens its end without blocking, once the daemon has the read end.
+    let mut tx = tokio::net::unix::pipe::OpenOptions::new()
+        .open_sender(&pipe)
+        .unwrap();
+    tx.write_all(b"warn one\nwarn two\n").await.unwrap();
+    // What it left when it died, a last line without its newline included.
+    tx.write_all(b"panic").await.unwrap();
+    done_tx.send(true).unwrap();
+    task.await.unwrap();
+    let text = std::fs::read_to_string(dir.path().join("console.log")).unwrap();
+    let got: Vec<_> = text
+        .lines()
+        .map(|l| crate::console::unstamp(l).unwrap())
+        .map(|(view, _, text)| (view, text))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (LogView::Runtime, "warn one"),
+            (LogView::Runtime, "warn two"),
+            (LogView::Runtime, "panic"),
+        ]
+    );
+}
+
+#[test]
+fn firecracker_logs_warnings_to_its_own_pipe_after_the_one_separator_the_jailer_takes() {
+    let log = Path::new("/firecracker.fifo");
+    let args = |pci| -> Vec<String> {
+        firecracker_log_args(log, pci)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    };
+    assert_eq!(
+        args(false),
+        ["--log-path", "/firecracker.fifo", "--level", "Warning"]
+    );
+    assert_eq!(args(true).last().map(String::as_str), Some("--enable-pci"));
+    // A second `--` would end Firecracker's options, and `--level` after it would be ignored.
+    assert!(!args(true).iter().any(|a| a == "--"));
+}
+
 #[test]
 fn fractional_cpu_quota_respects_kernel_granularity() {
     assert_eq!(cpu_quota(250), (25000, 100000));

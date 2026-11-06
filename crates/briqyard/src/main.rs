@@ -196,6 +196,9 @@ enum MachineCmd {
         limit: usize,
         #[arg(short, long)]
         follow: bool,
+        /// app: what the program printed; runtime: what the runtime printed about the machine
+        #[arg(long, default_value = "app")]
+        view: briqyard_api::LogView,
         id: String,
     },
     /// A new machine from a snapshot of this one, taken now: briqyard machine fork ID [--name N] [--namespace T]

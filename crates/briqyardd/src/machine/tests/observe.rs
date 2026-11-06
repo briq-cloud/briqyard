@@ -343,16 +343,87 @@ async fn logs_read_across_the_rotated_console() {
     // `two` rotated away once: the previous file starts at 1000 in the console.
     std::fs::write(dir.join("console.1000.log"), &one).unwrap();
     std::fs::write(dir.join("console.log"), &two).unwrap();
-    let page = h.m.logs("m_a", "", 10).unwrap();
+    let page = h.m.logs("m_a", "", 10, api::LogView::App).unwrap();
     let got: Vec<&str> = page.lines.iter().map(|l| l.line.as_str()).collect();
     assert_eq!(got, ["one", "two"]);
     let end = 1000 + (one.len() + two.len()) as u64;
     assert_eq!(page.next, end.to_string());
     // A cursor in the current file, and one past the end.
     let mid = (1000 + one.len()).to_string();
-    assert_eq!(h.m.logs("m_a", &mid, 10).unwrap().lines.len(), 1);
-    let after = h.m.logs("m_a", &end.to_string(), 10).unwrap();
+    assert_eq!(
+        h.m.logs("m_a", &mid, 10, api::LogView::App)
+            .unwrap()
+            .lines
+            .len(),
+        1
+    );
+    let after =
+        h.m.logs("m_a", &end.to_string(), 10, api::LogView::App)
+            .unwrap();
     assert_eq!((after.lines.len(), after.next), (0, end.to_string()));
+}
+
+#[tokio::test]
+async fn logs_serve_one_view_of_a_console_and_a_console_from_before_the_views_is_the_apps() {
+    use api::LogView::{App, Runtime};
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.add("m_a", state::RUNNING, 256);
+    let dir = h.m.inner.cfg.run_dir().join("m_a");
+    std::fs::create_dir_all(&dir).unwrap();
+    // Written by a daemon from before the views: nothing marked, the init's lines included.
+    let old = "2026-10-21T10:00:00.000000Z [briqyard] started pid=1 /app\n\
+               2026-10-21T10:00:01.000000Z old app line\n";
+    std::fs::write(dir.join("console.log"), old).unwrap();
+    let page = h.m.logs("m_a", "", 10, App).unwrap();
+    let got: Vec<&str> = page.lines.iter().map(|l| l.line.as_str()).collect();
+    assert_eq!(got, ["[briqyard] started pid=1 /app", "old app line"]);
+    assert_eq!(page.next, old.len().to_string());
+    // No runtime lines yet: an empty page that has read to the end, not an error.
+    let page = h.m.logs("m_a", "", 10, Runtime).unwrap();
+    assert_eq!((page.lines.len(), page.next), (0, old.len().to_string()));
+    // The daemon from after: the console goes on in the same file.
+    let mut w = console::Writer::open(&dir, 1 << 20).await.unwrap();
+    let ts = "2026-10-21T10:00:02.000000Z";
+    w.line(ts, App, b"new app 1").await.unwrap();
+    w.line(ts, Runtime, b"[briqyard] started pid=2 /app --secret")
+        .await
+        .unwrap();
+    w.line(ts, Runtime, b"[    1.000000] kernel").await.unwrap();
+    w.line(ts, App, b"new app 2").await.unwrap();
+    let all = std::fs::metadata(dir.join("console.log")).unwrap().len();
+    let text = |view, since: &str, limit| {
+        let p = h.m.logs("m_a", since, limit, view).unwrap();
+        (
+            p.lines.into_iter().map(|l| l.line).collect::<Vec<_>>(),
+            p.next,
+        )
+    };
+    let (lines, next) = text(App, "", 10);
+    assert_eq!(
+        lines,
+        [
+            "[briqyard] started pid=1 /app",
+            "old app line",
+            "new app 1",
+            "new app 2"
+        ]
+    );
+    assert_eq!(next, all.to_string());
+    let (lines, next) = text(Runtime, "", 10);
+    assert_eq!(
+        lines,
+        [
+            "[briqyard] started pid=2 /app --secret",
+            "[    1.000000] kernel"
+        ]
+    );
+    assert_eq!(next, all.to_string());
+    // `limit` counts the lines of the view; the cursor is after the last line read, so the
+    // next page goes on from there and no line is returned twice.
+    let (lines, next) = text(App, "", 3);
+    assert_eq!(lines.last().map(String::as_str), Some("new app 1"));
+    let (lines, _) = text(App, &next, 3);
+    assert_eq!(lines, ["new app 2"]);
 }
 
 // --- labels, quotas and logs follow (ADR 0025) ---
@@ -407,6 +478,25 @@ async fn followed(rx: &mut tokio::sync::mpsc::Receiver<String>) -> serde_json::V
 }
 
 #[tokio::test]
+async fn logs_follow_sends_only_the_lines_of_its_view() {
+    use api::LogView::{App, Runtime};
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    let m = h.m.create_made(h.request("web")).await.unwrap();
+    let dir = h.m.inner.cfg.run_dir().join(&m.id);
+    let mut w = console::Writer::open(&dir, 1 << 20).await.unwrap();
+    let ts = "2026-10-21T10:00:00.000000Z";
+    w.line(ts, Runtime, b"runtime before").await.unwrap();
+    w.line(ts, App, b"app before").await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    h.m.follow_logs(&m.id, "", Runtime, tx).unwrap();
+    assert_eq!(followed(&mut rx).await["line"], "runtime before");
+    w.line(ts, App, b"app after").await.unwrap();
+    w.line(ts, Runtime, b"runtime after").await.unwrap();
+    assert_eq!(followed(&mut rx).await["line"], "runtime after");
+}
+
+#[tokio::test]
 async fn logs_follow_sends_what_is_there_then_each_line_across_a_rotation_until_destroyed() {
     let h = harness("10.64.0.0/22", 4096).await;
     h.ready().await;
@@ -415,19 +505,29 @@ async fn logs_follow_sends_what_is_there_then_each_line_across_a_rotation_until_
     // The daemon's writer of the console, rotating every two lines.
     let mut w = console::Writer::open(&dir, 64).await.unwrap();
     let ts = "2026-10-21T10:00:00.000000Z";
-    w.line(ts, b"before").await.unwrap();
-    let from = h.m.logs(&m.id, "", 500).unwrap();
+    w.line(ts, api::LogView::App, b"before").await.unwrap();
+    let from = h.m.logs(&m.id, "", 500, api::LogView::App).unwrap();
     assert!(matches!(
-        h.m.follow_logs("m_nope", "", tokio::sync::mpsc::channel(1).0),
+        h.m.follow_logs(
+            "m_nope",
+            "",
+            api::LogView::App,
+            tokio::sync::mpsc::channel(1).0
+        ),
         Err(MError::NotFound)
     ));
     assert!(matches!(
-        h.m.follow_logs(&m.id, "x", tokio::sync::mpsc::channel(1).0),
+        h.m.follow_logs(
+            &m.id,
+            "x",
+            api::LogView::App,
+            tokio::sync::mpsc::channel(1).0
+        ),
         Err(MError::Invalid(_))
     ));
     // From the start: the lines there, the last one written before the follow.
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-    h.m.follow_logs(&m.id, "", tx).unwrap();
+    h.m.follow_logs(&m.id, "", api::LogView::App, tx).unwrap();
     let mut got = vec![];
     for _ in 0..from.lines.len() {
         got.push(
@@ -441,9 +541,12 @@ async fn logs_follow_sends_what_is_there_then_each_line_across_a_rotation_until_
     // From a cursor: only what comes after it, each line as the writer writes it, in the
     // paged answer's shape, across the rotations.
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-    h.m.follow_logs(&m.id, &from.next, tx).unwrap();
+    h.m.follow_logs(&m.id, &from.next, api::LogView::App, tx)
+        .unwrap();
     for i in 0..5 {
-        w.line(ts, format!("line {i}").as_bytes()).await.unwrap();
+        w.line(ts, api::LogView::App, format!("line {i}").as_bytes())
+            .await
+            .unwrap();
         let l = followed(&mut rx).await;
         assert_eq!(
             l,
@@ -476,7 +579,7 @@ async fn a_quiet_follow_sends_a_heartbeat_and_ends_with_the_daemon() {
     h.add("m_a", state::CREATED, 256);
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     // No console yet: nothing to send until a line is written.
-    h.m.follow_logs("m_a", "", tx).unwrap();
+    h.m.follow_logs("m_a", "", api::LogView::App, tx).unwrap();
     tokio::task::yield_now().await;
     tokio::time::pause();
     tokio::time::advance(events::HEARTBEAT + Duration::from_secs(1)).await;
