@@ -147,6 +147,11 @@ pub fn end(dir: &Path) -> std::io::Result<u64> {
     Ok(f.start + len)
 }
 
+/// Where the oldest file kept starts: 0 until the console is first rotated (ADR 0021).
+pub fn oldest(dir: &Path) -> std::io::Result<u64> {
+    Ok(read_from(dir, 0)?.map_or(0, |(at, _)| at))
+}
+
 /// The console from `from` (an offset in the whole console) to its end as it is now: where
 /// it reads from (`from`, or the oldest offset kept when `from` was rotated away) and the
 /// bytes. `None` when the machine has no console yet.

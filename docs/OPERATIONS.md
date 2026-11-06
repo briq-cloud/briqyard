@@ -690,7 +690,7 @@ registry backups, operator archives and local backing/reference scopes are exclu
 - Suspend timing: opt-in debug stages and offline analysis in [Suspend profiling](SUSPEND-PROFILING.md)
   (ADR 0063); snapshot syncing and stop deadlines are unchanged.
 - A machine: `briqyard machine get <id>` (state, why it stopped, its process's exit), `briqyard
-  machine logs <id>` (the program's output; `--view runtime` the kernel's, the init's and Firecracker's; `-f` streams each new line until the machine is destroyed).
+  machine logs <id>` (the program's output; `--view runtime` the kernel's, the init's and Firecracker's; `--limit N` lines per page, the newest by default; `--before`/`--after` take the cursors printed on stderr; `-f` streams each new line until the machine is destroyed).
   `briqyard machine ls -l app=web -l tier` selects by labels (its `metadata`; `run -l K=V` sets them).
 - Quotas (ADR 0025): `briqyard namespace quota <namespace>` shows a namespace's limits and use;
   `--machines N --memory-mb N --vcpus N --disk-gb N` puts exactly those (the control plane sets

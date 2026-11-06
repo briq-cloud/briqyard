@@ -129,17 +129,16 @@ fn machine_lifecycle_commands() {
         _ => panic!("not an ls"),
     }
     match machine(parse(&[
-        "machine", "logs", "-f", "--since", "c9", "--limit", "10", "--view", "runtime", "m1",
+        "machine", "logs", "-f", "--since", "c9", "--view", "runtime", "m1",
     ])) {
         MachineCmd::Logs {
             since,
-            limit,
             follow,
             view,
             id,
+            ..
         } => {
             assert_eq!(since.as_deref(), Some("c9"));
-            assert_eq!(limit, 10);
             assert!(follow);
             assert_eq!(view, briqyard_api::LogView::Runtime);
             assert_eq!(id, "m1");
@@ -150,13 +149,40 @@ fn machine_lifecycle_commands() {
         MachineCmd::Logs {
             since,
             limit,
+            before,
+            after,
             follow,
             view,
             ..
         } => assert!(
-            since.is_none() && limit == 500 && !follow && view == briqyard_api::LogView::App
+            since.is_none()
+                && limit.is_none()
+                && before.is_none()
+                && after.is_none()
+                && !follow
+                && view == briqyard_api::LogView::App
         ),
         _ => panic!("not logs"),
+    }
+    match machine(parse(&[
+        "machine", "logs", "--limit", "5", "--before", "40", "m1",
+    ])) {
+        MachineCmd::Logs { limit, before, .. } => {
+            assert_eq!((limit, before.as_deref()), (Some(5), Some("40")))
+        }
+        _ => panic!("not logs"),
+    }
+    // A page is before or after a cursor, never both; a follow starts at `since` alone.
+    for bad in [
+        &["--before", "1", "--after", "2"][..],
+        &["-f", "--after", "2"][..],
+        &["--since", "2"][..],
+        &["-f", "--limit", "5"][..],
+    ] {
+        let mut args = vec!["briqyard", "machine", "logs"];
+        args.extend(bad);
+        args.push("m1");
+        assert!(Cli::try_parse_from(args).is_err(), "{bad:?}");
     }
     assert!(Cli::try_parse_from(["briqyard", "machine", "logs", "--view", "all", "m1"]).is_err());
     match machine(parse(&["machine", "fork", "--name", "copy", "m1"])) {

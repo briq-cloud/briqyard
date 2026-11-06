@@ -443,10 +443,18 @@ pub struct LogLine {
     pub line: String,
 }
 
-/// A page of the console log; `next` continues after the last line returned.
+/// A page of the console log (ADR 0116), oldest line first. `before` and `after` are cursors
+/// to give back as `?before=` and `?after=`: opaque, covering every byte the page scanned.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LogsResponse {
     pub lines: Vec<LogLine>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub next: String,
+    #[serde(default)]
+    pub before: String,
+    #[serde(default)]
+    pub after: String,
+    #[serde(default)]
+    pub has_older: bool,
+    #[serde(default)]
+    pub has_newer: bool,
 }

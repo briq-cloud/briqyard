@@ -18,9 +18,23 @@ fn request_bounds_hold_at_the_extremes() {
     );
     assert_eq!(wait_timeout(Some(0)), Duration::from_secs(1));
     assert_eq!(wait_timeout(None), Duration::from_secs(60));
-    assert_eq!(log_limit(Some(usize::MAX)), MAX_LOG_LINES);
-    assert_eq!(log_limit(None), 0);
-    assert_eq!(log_limit(Some(10)), 10);
+}
+
+#[test]
+fn a_logs_page_starts_at_one_cursor_or_at_the_tail() {
+    assert_eq!(log_at(None, None, None).unwrap(), LogAt::Tail);
+    assert_eq!(log_at(None, Some("40"), None).unwrap(), LogAt::Before(40));
+    assert_eq!(log_at(None, None, Some("40")).unwrap(), LogAt::After(40));
+    assert_eq!(log_at(None, None, Some("")).unwrap(), LogAt::After(0));
+    for bad in [
+        log_at(None, Some("1"), Some("2")),
+        log_at(None, Some(""), None),
+        log_at(None, Some("x"), None),
+        log_at(None, None, Some("-1")),
+        log_at(Some("1"), None, None),
+    ] {
+        assert!(matches!(bad, Err(MError::Invalid(_))), "{bad:?}");
+    }
 }
 
 #[test]

@@ -354,14 +354,18 @@ fn log_views() {
 
 #[test]
 fn logs() {
+    let line = json!({"ts": "2026-01-02T03:04:05Z", "line": "[briqyard] started pid=1"});
     let l: LogsResponse = round_trip(
-        json!({"lines": [{"ts": "2026-01-02T03:04:05Z", "line": "[briqyard] started pid=1"}]}),
-        json!({"lines": [{"ts": "2026-01-02T03:04:05Z", "line": "[briqyard] started pid=1"}]}),
+        json!({"lines": [line]}),
+        json!({"lines": [line], "before": "", "after": "", "hasOlder": false, "hasNewer": false}),
     );
-    assert_eq!(l.next, "");
     assert_eq!(l.lines[0].ts, ts());
-    let l: LogsResponse = same(json!({"lines": [], "next": "42"}));
-    assert_eq!(l.next, "42");
+    assert!(!l.has_older && !l.has_newer);
+    let page =
+        json!({"lines": [], "before": "40", "after": "42", "hasOlder": true, "hasNewer": true});
+    let l: LogsResponse = same(page);
+    assert_eq!((l.before.as_str(), l.after.as_str()), ("40", "42"));
+    assert!(l.has_older && l.has_newer);
 }
 
 #[test]
