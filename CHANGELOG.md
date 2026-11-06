@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.29 — 2026-11-06
+
+### Features
+
+- list machines partially when the caller asks (#178) ([c711186d](https://github.com/briq-cloud/briqyard/commit/c711186db52a833c18b742a96402089bf9f01976))
+
 ## 0.1.28 — 2026-11-05
 
 ### Upgrade notes
