@@ -798,15 +798,15 @@ registry backups, operator archives and local backing/reference scopes are exclu
 sudo systemctl kill --kill-whom=main -s SIGUSR2 briqyardd
 ```
 
-Still hung after a few seconds:
+A hand-over can take up to a minute. No `serving again` line in the journal by then:
 
 ```bash
 sudo systemctl kill --kill-whom=main -s KILL briqyardd
 ```
 
-The unit starts a new daemon, which adopts the machines. Connections in flight are lost, and so are the last uses and usage the daemon had not written.
+The unit starts a new daemon, which adopts the machines. Connections in flight are lost, and so are the last uses and usage the daemon had not written. A running exec ends with its connection unless it detached (ADR 0029).
 
-Never `systemctl restart` or `stop` here: they suspend every machine. Never `systemctl kill` without `--kill-whom=main`: `KillMode=process` keeps the Firecracker processes in the unit's cgroup, so the signal would reach them too.
+Avoid `systemctl restart` and `stop`: a daemon that still responds suspends every machine, and `stop` also releases the listeners and leaves the daemon down. Never `systemctl kill` without `--kill-whom=main`: `KillMode=process` keeps the Firecracker processes in the unit's cgroup, so the signal would reach them too.
 
 ### Test a hung daemon
 
@@ -822,7 +822,8 @@ During the freeze:
 - Nothing restarts the daemon: the unit has no watchdog.
 - After `placement.down_after_sec` the fleet reports the host `down` and answers 503 for its machines.
 - The "Not answering" alert fires after 2 minutes. Warn whoever receives it.
-- Exec streams drop, and uses are not recorded. After `SIGCONT`, a machine with a short sleep window can suspend.
+- Requests and exec streams stall.
+- Uses are not recorded, so after `SIGCONT` a machine with a short sleep window can suspend (read in the code, not run).
 
 To kill one machine's VM during the test, list its processes by cgroup (jailed hosts), then `sudo kill -KILL <pid>`:
 
