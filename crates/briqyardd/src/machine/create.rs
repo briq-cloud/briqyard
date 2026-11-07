@@ -2,6 +2,20 @@
 
 use super::*;
 
+/// One of the two locks of a seed create: shared or exclusive.
+type SeedHold<'a> = (
+    Option<tokio::sync::RwLockReadGuard<'a, ()>>,
+    Option<tokio::sync::RwLockWriteGuard<'a, ()>>,
+);
+
+async fn seed_hold(lock: &tokio::sync::RwLock<()>, exclusive: bool) -> SeedHold<'_> {
+    if exclusive {
+        (None, Some(lock.write().await))
+    } else {
+        (Some(lock.read().await), None)
+    }
+}
+
 impl Manager {
     // --- create ---
 
@@ -80,13 +94,36 @@ impl Manager {
         req: api::CreateMachineRequest,
         role: Option<Role>,
     ) -> Result<(Arc<Entry>, Make), MError> {
-        let _warm = if req.sandbox_seed.is_some() {
-            Some(self.inner.warm_lock.lock().await)
+        let (exclusive, _warm) = match &req.sandbox_seed {
+            Some(seed) => {
+                let (exclusive, held) = self.seed_warm_admission(seed).await;
+                (exclusive, Some(held))
+            }
+            None => (false, None),
+        };
+        let _admission = self.inner.namespace_lifecycle.read().await;
+        // The second hold agrees with the first: one decision per create.
+        let _sandbox = if req.sandbox_seed.is_some() {
+            Some(seed_hold(&self.inner.sandbox_create_lock, exclusive).await)
         } else {
             None
         };
-        let _admission = self.inner.namespace_lifecycle.read().await;
-        self.record_with_warm_slot(req, role, None, false).await
+        self.record_with_warm_slot(req, role, None, false, exclusive)
+            .await
+    }
+
+    /// A seed create's hold on `warm_lock` (ADR 0117), and whether both its holds are exclusive.
+    /// Shared with other seed creates, which record independently, unless a ready unbound slot
+    /// may serve it: the selector reserves that slot's assignment, one create at a time, so the
+    /// create waits for every holder and takes both locks exclusively. The decision is made once,
+    /// under the shared hold; a slot that turns ready after it is a missed accelerator.
+    async fn seed_warm_admission(&self, seed: &api::SandboxSeed) -> (bool, SeedHold<'_>) {
+        let shared = self.inner.warm_lock.read().await;
+        if !self.unbound_slot_may_serve(seed) {
+            return (false, (Some(shared), None));
+        }
+        drop(shared);
+        (true, (None, Some(self.inner.warm_lock.write().await)))
     }
 
     /// The caller already holds namespace admission (a gateway put keeps it through boot).
@@ -100,7 +137,8 @@ impl Manager {
                 "sandbox create requires warm admission before namespace admission",
             ));
         }
-        self.record_with_warm_slot(req, role, None, false).await
+        self.record_with_warm_slot(req, role, None, false, false)
+            .await
     }
 
     pub(super) async fn record_warm_slot(
@@ -114,7 +152,7 @@ impl Manager {
             .warm_test_barrier("warm_admission", "*")
             .await;
         let _admission = self.inner.namespace_lifecycle.read().await;
-        self.record_with_warm_slot(req, None, Some(slot), false)
+        self.record_with_warm_slot(req, None, Some(slot), false, false)
             .await
     }
 
@@ -124,13 +162,21 @@ impl Manager {
         role: Option<Role>,
         warm_slot: Option<warm::Slot>,
         unbound_factory: bool,
+        // A seed create holds both locks exclusively and may take an unbound slot.
+        exclusive: bool,
     ) -> Result<(Arc<Entry>, Make), MError> {
-        let _sandbox_turn = if req.sandbox_seed.is_some() {
-            Some(self.inner.sandbox_create_lock.lock().await)
-        } else {
-            None
-        };
         req.check_sandbox_seed().map_err(invalid)?;
+        // The request's turn, to the end of the record: a retry waits for the durable writes,
+        // then replays the machine they made.
+        let _turn = match &req.sandbox_seed {
+            Some(seed) => Some(
+                self.inner
+                    .sandbox_turns
+                    .take(&req.namespace, &seed.request_id)
+                    .await,
+            ),
+            None => None,
+        };
         if let Some(previous) = templates::sandbox::replay(self, &req)? {
             return Ok((previous, Make::Existing));
         }
@@ -410,8 +456,11 @@ impl Manager {
         if req.sandbox_seed.is_some() {
             self.ensure_namespace(&req.namespace).await?;
             // Keep the optional assignment journal future off every create/fill caller's stack.
-            if let Some(entry) = Box::pin(self.select_unbound_assignment(&req)).await? {
-                return Ok((entry, Make::Assigned));
+            // Only an exclusive create may take a slot; the others restore the seed.
+            if exclusive {
+                if let Some(entry) = Box::pin(self.select_unbound_assignment(&req)).await? {
+                    return Ok((entry, Make::Assigned));
+                }
             }
         }
         if rec.root_key.is_empty() {

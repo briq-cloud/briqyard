@@ -10,9 +10,9 @@ impl Manager {
         entry: &Arc<Entry>,
         host: u8,
     ) -> Result<()> {
-        let _warm = self.inner.warm_lock.lock().await;
+        let _warm = self.inner.warm_lock.write().await;
         let _namespace = self.inner.namespace_lifecycle.read().await;
-        let _sandbox = self.inner.sandbox_create_lock.lock().await;
+        let _sandbox = self.inner.sandbox_create_lock.write().await;
         let _entry = entry.lock.lock().await;
         self.stage_destination_assignment_locked(request, entry, host)
     }
@@ -103,9 +103,9 @@ impl Manager {
         request: &str,
         digest: &str,
     ) -> Result<Arc<Entry>> {
-        let _warm = self.inner.warm_lock.lock().await;
+        let _warm = self.inner.warm_lock.write().await;
         let _namespace = self.inner.namespace_lifecycle.read().await;
-        let _sandbox = self.inner.sandbox_create_lock.lock().await;
+        let _sandbox = self.inner.sandbox_create_lock.write().await;
         self.commit_destination_assignment_admitted(namespace, request, digest)
             .await
     }

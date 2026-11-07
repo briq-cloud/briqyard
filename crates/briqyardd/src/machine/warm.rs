@@ -238,7 +238,7 @@ impl Manager {
         name: &str,
         request: api::PutWarmPoolRequest,
     ) -> Result<api::WarmPool, MError> {
-        let _turn = self.inner.warm_lock.lock().await;
+        let _turn = self.inner.warm_lock.write().await;
         self.require_warm_pools()?;
         let pool_key = key(namespace, name)?;
         let (snapshot, artifact) =
@@ -291,7 +291,7 @@ impl Manager {
     }
 
     pub async fn delete_warm_pool(&self, namespace: &str, name: &str) -> Result<(), MError> {
-        let _turn = self.inner.warm_lock.lock().await;
+        let _turn = self.inner.warm_lock.write().await;
         let mut pool = self.pool(namespace, name)?;
         pool.closed = true;
         pool.desired = 0;

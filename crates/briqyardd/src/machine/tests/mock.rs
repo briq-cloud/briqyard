@@ -68,6 +68,8 @@ pub(super) struct Mock {
     pub(super) pause_network: Mutex<Option<(&'static str, String)>>,
     pub(super) network_started: tokio::sync::Notify,
     pub(super) network_release: tokio::sync::Notify,
+    /// Callers that reached the paused phase so far (`network_started` coalesces them).
+    pub(super) network_arrived: std::sync::atomic::AtomicUsize,
     pub(super) cleared_ips: Mutex<Vec<String>>,
     pub(super) attachments: Mutex<HashMap<String, Attachment>>,
     /// No guest port accepts: `wait_port` answers only at its deadline.
@@ -147,6 +149,7 @@ impl Mock {
             .as_ref()
             .is_some_and(|(op, address)| *op == operation && (address == "*" || address == ip));
         if paused {
+            self.network_arrived.fetch_add(1, Relaxed);
             self.network_started.notify_one();
             self.network_release.notified().await;
         }
@@ -169,6 +172,7 @@ impl Mock {
             pause_network: Mutex::new(None),
             network_started: tokio::sync::Notify::new(),
             network_release: tokio::sync::Notify::new(),
+            network_arrived: std::sync::atomic::AtomicUsize::new(0),
             cleared_ips: Mutex::new(Vec::new()),
             attachments: Mutex::new(HashMap::new()),
             silent_ports: AtomicBool::new(false),

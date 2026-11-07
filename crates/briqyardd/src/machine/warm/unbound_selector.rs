@@ -23,8 +23,73 @@ fn assignment_error(error: anyhow::Error) -> MError {
     }
 }
 
+/// The pool's rules for a seed, before anything about its slots: what it was built from, and
+/// that it is open and wants slots.
+fn pool_serves_seed(pool: &Pool, seed: &api::SandboxSeed) -> bool {
+    pool.artifact.profile == guest::SANDBOX_READY_V1
+        && pool.source_machine == seed.machine_id
+        && pool.snapshot == seed.snapshot
+        && pool.artifact.generation == seed.generation
+        && !pool.closed
+        && pool.desired != 0
+}
+
 impl Manager {
-    // Called under warm -> namespace -> sandbox admission after request/recipe validation.
+    /// The pool's ready slots nobody has claimed.
+    fn unbound_ready_slots(&self, pool: &Pool, pool_key: &str) -> Vec<Arc<Entry>> {
+        self.inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| {
+                let record = entry.snapshot();
+                unbound_ready_slot(&record)
+                    && record.warm_slot.as_ref().is_some_and(|s| {
+                        s.pool == pool_key
+                            && s.fingerprint == pool.fingerprint
+                            && s.claimed.is_none()
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Whether the selector would find a slot now: a ready unclaimed one, unowned by an
+    /// assignment, of a current pool built for this seed. Stale pools and owned slots do not
+    /// count, or they would make every create of the seed exclusive for nothing. A slot that
+    /// turns ready right after the answer is a missed accelerator; an error is the selector's to
+    /// report.
+    pub(in crate::machine) fn unbound_slot_may_serve(&self, seed: &api::SandboxSeed) -> bool {
+        if !self.unbound_warm_available() {
+            return false;
+        }
+        let Ok(pools) = self.inner.store.list::<Pool>(POOLS) else {
+            return true;
+        };
+        pools.iter().any(|pool| {
+            let Some(pool_key) = pool_serves_seed(pool, seed)
+                .then(|| key(&pool.namespace, &pool.name).ok())
+                .flatten()
+            else {
+                return false;
+            };
+            let free = self
+                .unbound_ready_slots(pool, &pool_key)
+                .iter()
+                .any(|slot| {
+                    self.destination_assignment_owns(&slot.snapshot().id)
+                        .map_or(true, |owned| !owned)
+                });
+            free && !matches!(
+                self.pool_current(pool),
+                Err(MError::Invalid(_) | MError::Conflict(_) | MError::NotFound)
+            )
+        })
+    }
+
+    // Called by a seed create that holds warm and sandbox admission exclusively
+    // (`seed_warm_admission`), after request/recipe validation.
     pub(in crate::machine) async fn select_unbound_assignment(
         &self,
         request: &api::CreateMachineRequest,
@@ -38,14 +103,7 @@ impl Manager {
             .ok_or_else(|| invalid("sandbox selector missing"))?;
         let pools = self.inner.store.list::<Pool>(POOLS)?;
         for pool in pools {
-            if pool.artifact.profile != guest::SANDBOX_READY_V1
-                || pool.source_machine != seed.machine_id
-                || pool.snapshot != seed.snapshot
-                || pool.artifact.generation != seed.generation
-            {
-                continue;
-            }
-            if pool.closed || pool.desired == 0 {
+            if !pool_serves_seed(&pool, seed) {
                 continue;
             }
             // A pool is only an accelerator for this already-valid seed request. If its
@@ -66,23 +124,7 @@ impl Manager {
                 return Err(invalid("unbound pool resource identity differs"));
             }
             let pool_key = key(&pool.namespace, &pool.name)?;
-            let candidates: Vec<_> = self
-                .inner
-                .machines
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|entry| {
-                    let record = entry.snapshot();
-                    unbound_ready_slot(&record)
-                        && record.warm_slot.as_ref().is_some_and(|s| {
-                            s.pool == pool_key
-                                && s.fingerprint == pool.fingerprint
-                                && s.claimed.is_none()
-                        })
-                })
-                .cloned()
-                .collect();
+            let candidates = self.unbound_ready_slots(&pool, &pool_key);
             for entry in candidates {
                 // A parked fill still owns entry. An unused busy slot is an accelerator miss.
                 let Ok(turn) = entry.lock.try_lock() else {

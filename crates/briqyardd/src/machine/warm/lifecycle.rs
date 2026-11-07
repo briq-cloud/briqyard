@@ -32,7 +32,7 @@ impl Manager {
     /// Bounded work in the existing tick. A failed cleanup blocks refill rather than
     /// accumulating failed records or borrowing their capacity.
     pub(in crate::machine) async fn warm_step(&self) {
-        let Ok(_turn) = self.inner.warm_lock.try_lock() else {
+        let Ok(_turn) = self.inner.warm_lock.try_write() else {
             return;
         };
         let enabled = self.require_warm_pools().is_ok();

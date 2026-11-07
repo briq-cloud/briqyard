@@ -70,8 +70,9 @@ impl Manager {
         );
         let inner = Arc::new(Inner {
             stats: Stats::default(),
-            warm_lock: tokio::sync::Mutex::new(()),
-            sandbox_create_lock: tokio::sync::Mutex::new(()),
+            warm_lock: tokio::sync::RwLock::new(()),
+            sandbox_create_lock: tokio::sync::RwLock::new(()),
+            sandbox_turns: Default::default(),
             warm_names: Mutex::new(HashMap::new()),
             assignments: Mutex::new(assignments::State::default()),
             warm_policy: Mutex::new(cfg.templates.warm_policy.clone()),
