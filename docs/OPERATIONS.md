@@ -788,21 +788,43 @@ registry backups, operator archives and local backing/reference scopes are exclu
 | `pool … is not encrypted` | A pool made before ADR 0026 or by hand: move what it holds, destroy it, run the bootstrap again |
 | `… holds files and byard/… is not mounted there` | The daemon's directories hold files on `/` (a host from before ADR 0026): stop the daemon, move the contents onto the dataset (mount it elsewhere, copy, empty the directory) |
 | A jail refuses to start | `machine logs --view runtime` (`<run>/<machine>/console.log`) holds the jailer's own messages |
-| URLs of a host's machines hang with no error, the machines run | The HTTP ingress is the daemon's listener: a hung daemon takes it offline while the kernel still accepts connections. `journalctl -u briqyardd`, then `kill -KILL` its main PID: the unit starts a new one, which adopts the machines |
+| A host's URLs, TCP endpoints and API hang with no error, the machines run | Their listeners are the daemon's: a hung daemon leaves connections queued in the kernel. See [A hung daemon](#a-hung-daemon) |
+
+### A hung daemon
+
+`journalctl -u briqyardd`, then try the hand-over. It keeps the listeners and writes last uses and usage, but needs a daemon that still responds:
+
+```bash
+sudo systemctl kill --kill-whom=main -s SIGUSR2 briqyardd
+```
+
+Still hung after a few seconds:
+
+```bash
+sudo systemctl kill --kill-whom=main -s KILL briqyardd
+```
+
+The unit starts a new daemon, which adopts the machines. Connections in flight are lost, and so are the last uses and usage the daemon had not written.
+
+Never `systemctl restart` or `stop` here: they suspend every machine. Never `systemctl kill` without `--kill-whom=main`: `KillMode=process` keeps the Firecracker processes in the unit's cgroup, so the signal would reach them too.
 
 ### Test a hung daemon
 
 Freeze it with `SIGSTOP`. Schedule the `SIGCONT` first, so a lost SSH session cannot leave it frozen:
 
 ```bash
-pid=$(systemctl show -p MainPID --value briqyardd)
-sudo systemd-run --on-active=4min /bin/kill -CONT "$pid"
-sudo kill -STOP "$pid"
+sudo systemd-run --on-active=4min systemctl kill --kill-whom=main -s CONT briqyardd
+sudo systemctl kill --kill-whom=main -s STOP briqyardd
 ```
 
-`systemctl mask --runtime` plus `kill -KILL` does not keep the daemon down.
+During the freeze:
 
-To kill one machine's VM during the test, find it by its cgroup. Its arguments hold no machine id, so a process match finds other processes:
+- Nothing restarts the daemon: the unit has no watchdog.
+- After `placement.down_after_sec` the fleet reports the host `down` and answers 503 for its machines.
+- The "Not answering" alert fires after 2 minutes. Warn whoever receives it.
+- Exec streams drop, and uses are not recorded. After `SIGCONT`, a machine with a short sleep window can suspend.
+
+To kill one machine's VM during the test, list its processes by cgroup (jailed hosts), then `sudo kill -KILL <pid>`:
 
 ```bash
 sudo cat /sys/fs/cgroup/firecracker/m-<id>/cgroup.procs   # m_abc123 is m-abc123
@@ -891,8 +913,8 @@ rm /root/grafana-password
 | `PROMETHEUS_LISTEN`, `GRAFANA_LISTEN` | `127.0.0.1:9090`, `127.0.0.1:3000` | loopback only |
 | `LARGEST_SLOT_MB` | `16384` | the alert when a region's largest slot is under it: the largest size you offer |
 
-They run as the systemd units `briqyard-prometheus` and `briqyard-grafana`, not as containers.
-It takes about 1.5 GB of disk and 700 MB of memory with a few hosts: Grafana 600 MB, Prometheus
+Prometheus and Grafana run as the systemd units `briqyard-prometheus` and `briqyard-grafana`, not as containers.
+Monitoring takes about 1.5 GB of disk and 700 MB of memory with a few hosts: Grafana 600 MB, Prometheus
 70 MB, growing with series (about 12 per machine). On a server that also runs machines, add the
 memory to `capacity.reserved_memory_mb`.
 
