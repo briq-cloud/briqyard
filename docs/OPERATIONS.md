@@ -788,6 +788,25 @@ registry backups, operator archives and local backing/reference scopes are exclu
 | `pool … is not encrypted` | A pool made before ADR 0026 or by hand: move what it holds, destroy it, run the bootstrap again |
 | `… holds files and byard/… is not mounted there` | The daemon's directories hold files on `/` (a host from before ADR 0026): stop the daemon, move the contents onto the dataset (mount it elsewhere, copy, empty the directory) |
 | A jail refuses to start | `machine logs --view runtime` (`<run>/<machine>/console.log`) holds the jailer's own messages |
+| URLs of a host's machines hang with no error, the machines run | The HTTP ingress is the daemon's listener: a hung daemon takes it offline while the kernel still accepts connections. `journalctl -u briqyardd`, then `kill -KILL` its main PID: the unit starts a new one, which adopts the machines |
+
+### Test a hung daemon
+
+Freeze it with `SIGSTOP`. Schedule the `SIGCONT` first, so a lost SSH session cannot leave it frozen:
+
+```bash
+pid=$(systemctl show -p MainPID --value briqyardd)
+sudo systemd-run --on-active=4min /bin/kill -CONT "$pid"
+sudo kill -STOP "$pid"
+```
+
+`systemctl mask --runtime` plus `kill -KILL` does not keep the daemon down.
+
+To kill one machine's VM during the test, find it by its cgroup. Its arguments hold no machine id, so a process match finds other processes:
+
+```bash
+sudo cat /sys/fs/cgroup/firecracker/m-<id>/cgroup.procs   # m_abc123 is m-abc123
+```
 
 ## A fleet
 
@@ -872,6 +891,7 @@ rm /root/grafana-password
 | `PROMETHEUS_LISTEN`, `GRAFANA_LISTEN` | `127.0.0.1:9090`, `127.0.0.1:3000` | loopback only |
 | `LARGEST_SLOT_MB` | `16384` | the alert when a region's largest slot is under it: the largest size you offer |
 
+They run as the systemd units `briqyard-prometheus` and `briqyard-grafana`, not as containers.
 It takes about 1.5 GB of disk and 700 MB of memory with a few hosts: Grafana 600 MB, Prometheus
 70 MB, growing with series (about 12 per machine). On a server that also runs machines, add the
 memory to `capacity.reserved_memory_mb`.
