@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.31 — 2026-11-07
+
+### Upgrade notes
+
+- The init's digest is expected not to change with this release (ADR 0101): no init source or dependency it uses changed. Confirm it in the candidate's `SHA256SUMS`: seeds sealed under v0.1.28 stay valid.
+- Creates from a seed now overlap in their record step (ADR 0117): the warm and sandbox locks are shared unless a ready warm slot may serve the create. No action is needed. Under a continuous burst of seed creates, the warm refill tick and `fail_fast` claims wait for a gap.
+
+### Documentation
+
+- cover a hung daemon and name the monitoring units (#186) ([acfe42ff](https://github.com/briq-cloud/briqyard/commit/acfe42ff6723aefd7208add7aed9d4ee2dce75c9))
+
+
+### Performance
+
+- seed creates record concurrently (#187) ([9a4ca9af](https://github.com/briq-cloud/briqyard/commit/9a4ca9afdd5cedb3cb81f61328a8b25f4a042e9c))
+
 ## 0.1.30 — 2026-11-06
 
 ### Upgrade notes
