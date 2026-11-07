@@ -212,6 +212,23 @@ async fn a_matching_pool_with_no_ready_slot_does_not_serialize_creates() {
 }
 
 #[tokio::test]
+async fn a_stale_pool_with_a_ready_slot_does_not_serialize_creates() {
+    let (h, seed, slot) = unbound::bounded(unbound::pool()).await;
+    assert!(h.m.unbound_slot_may_serve(&seed));
+    // The pool and its slot agree on a fingerprint that its seed no longer has.
+    let pool_key = slot.snapshot().warm_slot.unwrap().pool;
+    let store = &h.m.inner.store;
+    let mut pool: serde_json::Value = store.get("warm-pools", &pool_key).unwrap().unwrap();
+    pool["fingerprint"] = "stale".into();
+    store.put_durable("warm-pools", &pool_key, &pool).unwrap();
+    {
+        let mut rec = slot.rec.lock().unwrap();
+        rec.warm_slot.as_mut().unwrap().fingerprint = "stale".into();
+    }
+    assert_overlap(&h, &seed).await;
+}
+
+#[tokio::test]
 async fn a_ready_matching_slot_serves_the_create_and_its_retry_gets_the_same_machine() {
     let (h, seed, slot) = unbound::bounded(unbound::pool()).await;
     let req = request(&seed, "one", "create-a");

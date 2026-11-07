@@ -55,21 +55,36 @@ impl Manager {
             .collect()
     }
 
-    /// Whether a ready unclaimed slot of a pool built for this seed exists now. The selector may
-    /// still pass it over (a stale catalog, a busy slot); a slot that turns ready right after
-    /// the answer is a missed accelerator.
+    /// Whether the selector would find a slot now: a ready unclaimed one, unowned by an
+    /// assignment, of a current pool built for this seed. Stale pools and owned slots do not
+    /// count, or they would make every create of the seed exclusive for nothing. A slot that
+    /// turns ready right after the answer is a missed accelerator; an error is the selector's to
+    /// report.
     pub(in crate::machine) fn unbound_slot_may_serve(&self, seed: &api::SandboxSeed) -> bool {
         if !self.unbound_warm_available() {
             return false;
         }
-        // A pool that cannot be read is the selector's to report.
         let Ok(pools) = self.inner.store.list::<Pool>(POOLS) else {
             return true;
         };
         pools.iter().any(|pool| {
-            pool_serves_seed(pool, seed)
-                && key(&pool.namespace, &pool.name)
-                    .is_ok_and(|k| !self.unbound_ready_slots(pool, &k).is_empty())
+            let Some(pool_key) = pool_serves_seed(pool, seed)
+                .then(|| key(&pool.namespace, &pool.name).ok())
+                .flatten()
+            else {
+                return false;
+            };
+            let free = self
+                .unbound_ready_slots(pool, &pool_key)
+                .iter()
+                .any(|slot| {
+                    self.destination_assignment_owns(&slot.snapshot().id)
+                        .map_or(true, |owned| !owned)
+                });
+            free && !matches!(
+                self.pool_current(pool),
+                Err(MError::Invalid(_) | MError::Conflict(_) | MError::NotFound)
+            )
         })
     }
 
