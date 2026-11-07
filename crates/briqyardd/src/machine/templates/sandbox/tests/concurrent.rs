@@ -1,5 +1,6 @@
 //! Seed creates record concurrently (ADR 0117): they hold `warm_lock` and `sandbox_create_lock`
-//! shared, take turns per request id, and stay exclusive against writers and unbound pools.
+//! shared, take turns per request id, and stay exclusive against writers and, while a ready
+//! unbound slot may serve them, against each other.
 //! A create is held at the `count` step, inside the record, after its first durable writes and
 //! before the last.
 use super::*;
@@ -155,24 +156,78 @@ async fn a_writer_of_either_lock_excludes_seed_creates() {
     done(a).await.unwrap();
 }
 
-#[tokio::test]
-async fn with_unbound_pools_available_seed_creates_stay_exclusive() {
-    let (h, _, seed) = source_with_unbound(true).await;
+/// Two creates reach the held step together, and neither lock admits a writer meanwhile.
+async fn assert_overlap(h: &Harness, seed: &api::SandboxSeed) {
     assert!(h.m.unbound_warm_available());
     h.pause_warm_barrier("count");
-    let a = record(&h, request(&seed, "one", "create-a"));
-    wait_arrived(&h, 1).await;
-    let b = record(&h, request(&seed, "two", "create-b"));
-    settle().await;
-    // The second waits for the first, as before.
-    assert_eq!(arrived(&h), 1);
-    assert!(!b.is_finished());
+    let a = record(h, request(seed, "one", "create-a"));
+    let b = record(h, request(seed, "two", "create-b"));
+    wait_arrived(h, 2).await;
     for lock in [&h.m.inner.warm_lock, &h.m.inner.sandbox_create_lock] {
-        assert!(lock.try_read().is_err());
+        assert!(lock.try_read().is_ok());
+        assert!(lock.try_write().is_err());
     }
     h.end_warm_barrier();
-    done(a).await.unwrap();
-    done(b).await.unwrap();
+    let (a, b) = (done(a).await.unwrap(), done(b).await.unwrap());
+    assert!(matches!(a.1, Make::Fork(_, _)) && matches!(b.1, Make::Fork(_, _)));
+    assert_ne!(a.0.snapshot().id, b.0.snapshot().id);
+    assert_eq!(h.m.inner.sandbox_turns.len(), 0);
+}
+
+#[tokio::test]
+async fn with_unbound_available_and_no_pool_seed_creates_overlap() {
+    let (h, _, seed) = source_with_unbound(true).await;
+    assert_overlap(&h, &seed).await;
+}
+
+#[tokio::test]
+async fn a_pool_for_another_seed_does_not_serialize_creates() {
+    let (h, seed, _slot) = unbound::bounded(unbound::pool()).await;
+    // A second template snapshot of the same source: a seed the pool was not built for.
+    let snap =
+        h.m.snapshot(
+            &seed.machine_id,
+            api::SnapshotRequest {
+                memory: true,
+                template: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let other = api::SandboxSeed {
+        snapshot: snap.id,
+        generation: snap.clone_generation.unwrap(),
+        ..seed
+    };
+    assert_overlap(&h, &other).await;
+}
+
+#[tokio::test]
+async fn a_matching_pool_with_no_ready_slot_does_not_serialize_creates() {
+    let (h, seed, slot) = unbound::bounded(unbound::pool()).await;
+    // The slot is not ready any more.
+    slot.rec.lock().unwrap().state = state::STOPPED.into();
+    assert_overlap(&h, &seed).await;
+}
+
+#[tokio::test]
+async fn a_ready_matching_slot_serves_the_create_and_its_retry_gets_the_same_machine() {
+    let (h, seed, slot) = unbound::bounded(unbound::pool()).await;
+    let req = request(&seed, "one", "create-a");
+    let (served, how) = done(record(&h, req.clone())).await.unwrap();
+    assert!(matches!(how, Make::Assigned));
+    assert_eq!(served.snapshot().id, slot.snapshot().id);
+    // The slot is claimed now: the retry takes the shared path and replays the receipt.
+    assert!(!h.m.unbound_slot_may_serve(&seed));
+    let (again, how) = done(record(&h, req)).await.unwrap();
+    assert!(matches!(how, Make::Existing));
+    assert_eq!(again.snapshot().id, served.snapshot().id);
+    // Another request finds no slot left and restores the seed.
+    let other = done(record(&h, request(&seed, "two", "create-b")))
+        .await
+        .unwrap();
+    assert!(matches!(other.1, Make::Fork(_, _)));
     assert_eq!(h.m.inner.sandbox_turns.len(), 0);
 }
 

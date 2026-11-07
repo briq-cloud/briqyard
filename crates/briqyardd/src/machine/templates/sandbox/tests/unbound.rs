@@ -1,7 +1,7 @@
 //! Factory-record and ordinary-create integration with existing mocked disks/lifecycle.
 use super::*;
 
-fn bounded<T>(
+pub(super) fn bounded<T>(
     future: impl std::future::Future<Output = T>,
 ) -> impl std::future::Future<Output = T> {
     let future = Box::pin(future);
@@ -12,7 +12,7 @@ fn bounded<T>(
     }
 }
 
-async fn pool() -> (Harness, api::SandboxSeed, Arc<Entry>) {
+pub(super) async fn pool() -> (Harness, api::SandboxSeed, Arc<Entry>) {
     pool_shaped(Some(2)).await
 }
 async fn pool_shaped(volume: Option<u32>) -> (Harness, api::SandboxSeed, Arc<Entry>) {
