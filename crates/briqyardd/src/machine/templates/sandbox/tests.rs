@@ -1,6 +1,7 @@
 use super::*;
 use crate::machine::tests::{harness_config, Harness};
 
+mod concurrent;
 mod unbound;
 
 async fn source() -> (Harness, Arc<Entry>, api::SandboxSeed) {

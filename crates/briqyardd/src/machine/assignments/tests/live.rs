@@ -168,7 +168,7 @@ async fn concurrent_pending_assignments_cannot_share_quota_name_or_address() {
             other.name = "other".into();
         }
         let host = if conflict == 2 { 2 } else { 3 };
-        let gate = h.m.inner.warm_lock.lock().await;
+        let gate = h.m.inner.warm_lock.write().await;
         let ready = Arc::new(tokio::sync::Barrier::new(3));
         let manager = h.m.clone();
         let start = ready.clone();

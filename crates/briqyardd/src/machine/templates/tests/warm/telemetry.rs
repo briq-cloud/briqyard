@@ -7,7 +7,7 @@ async fn blocked_fill_reasons_count_attempts_and_scrapes_cannot_increment_them()
     desired(&h, 1).await;
     tokio::task::yield_now().await;
     {
-        let _settled = h.m.inner.warm_lock.lock().await;
+        let _settled = h.m.inner.warm_lock.write().await;
     }
     for _ in 0..2 {
         let metrics = h.m.metrics();

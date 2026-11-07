@@ -104,7 +104,12 @@ impl Manager {
                 "sandbox lookup requires configured authentication".into(),
             ));
         }
-        let _turn = self.inner.sandbox_create_lock.lock().await;
+        let _sandbox = self.inner.sandbox_create_lock.read().await;
+        let _turn = self
+            .inner
+            .sandbox_turns
+            .take(&query.namespace, &query.request_id)
+            .await;
         Ok(resolve(
             self,
             &query.namespace,

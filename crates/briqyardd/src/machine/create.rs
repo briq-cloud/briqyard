@@ -81,12 +81,31 @@ impl Manager {
         role: Option<Role>,
     ) -> Result<(Arc<Entry>, Make), MError> {
         let _warm = if req.sandbox_seed.is_some() {
-            Some(self.inner.warm_lock.lock().await)
+            Some(self.seed_admission(&self.inner.warm_lock).await)
         } else {
             None
         };
         let _admission = self.inner.namespace_lifecycle.read().await;
         self.record_with_warm_slot(req, role, None, false).await
+    }
+
+    /// A seed create's hold on `warm_lock` or `sandbox_create_lock` (ADR 0117): shared with other
+    /// seed creates, which record independently, and exclusive against everything else that takes
+    /// the lock. Exclusive too while unbound pools may serve it: their selector picks a slot
+    /// and reserves the assignment, one create at a time. The answer comes from the configuration
+    /// and host facts that do not change while the daemon runs, so both holds of a create agree.
+    async fn seed_admission<'a>(
+        &self,
+        lock: &'a tokio::sync::RwLock<()>,
+    ) -> (
+        Option<tokio::sync::RwLockReadGuard<'a, ()>>,
+        Option<tokio::sync::RwLockWriteGuard<'a, ()>>,
+    ) {
+        if self.unbound_warm_available() {
+            (None, Some(lock.write().await))
+        } else {
+            (Some(lock.read().await), None)
+        }
     }
 
     /// The caller already holds namespace admission (a gateway put keeps it through boot).
@@ -125,12 +144,23 @@ impl Manager {
         warm_slot: Option<warm::Slot>,
         unbound_factory: bool,
     ) -> Result<(Arc<Entry>, Make), MError> {
-        let _sandbox_turn = if req.sandbox_seed.is_some() {
-            Some(self.inner.sandbox_create_lock.lock().await)
+        let _sandbox = if req.sandbox_seed.is_some() {
+            Some(self.seed_admission(&self.inner.sandbox_create_lock).await)
         } else {
             None
         };
         req.check_sandbox_seed().map_err(invalid)?;
+        // The request's turn, to the end of the record: a retry waits for the durable writes,
+        // then replays the machine they made.
+        let _turn = match &req.sandbox_seed {
+            Some(seed) => Some(
+                self.inner
+                    .sandbox_turns
+                    .take(&req.namespace, &seed.request_id)
+                    .await,
+            ),
+            None => None,
+        };
         if let Some(previous) = templates::sandbox::replay(self, &req)? {
             return Ok((previous, Make::Existing));
         }

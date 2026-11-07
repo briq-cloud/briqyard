@@ -829,8 +829,10 @@ pub struct Stats {
 
 struct Inner {
     stats: Stats,
-    warm_lock: tokio::sync::Mutex<()>,
-    sandbox_create_lock: tokio::sync::Mutex<()>,
+    warm_lock: tokio::sync::RwLock<()>,
+    sandbox_create_lock: tokio::sync::RwLock<()>,
+    /// Creates and lookups of one sandbox request, one at a time (`templates::sandbox::Turns`).
+    sandbox_turns: templates::sandbox::Turns,
     warm_names: Mutex<HashMap<(String, String), String>>,
     assignments: Mutex<assignments::State>,
     // Validated operator configuration; requests may change only pool desired counts.

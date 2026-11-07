@@ -24,7 +24,8 @@ fn assignment_error(error: anyhow::Error) -> MError {
 }
 
 impl Manager {
-    // Called under warm -> namespace -> sandbox admission after request/recipe validation.
+    // Called under warm -> namespace -> sandbox admission, all exclusive (`seed_admission`), after
+    // request/recipe validation.
     pub(in crate::machine) async fn select_unbound_assignment(
         &self,
         request: &api::CreateMachineRequest,

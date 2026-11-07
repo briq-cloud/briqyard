@@ -2,7 +2,7 @@ use super::*;
 
 async fn settle(h: &Harness) {
     tokio::task::yield_now().await;
-    let _turn = h.m.inner.warm_lock.lock().await;
+    let _turn = h.m.inner.warm_lock.write().await;
 }
 
 #[tokio::test]

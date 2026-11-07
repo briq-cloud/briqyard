@@ -30,7 +30,8 @@ formatted with an explicit fresh ext4 UUID, synced and checked for exact byte ca
 cloned. Restored init repeats checked exclusive invalidation before mounting.
 
 The namespace/request ID binds one canonical normalized full-create digest to one
-machine under serialized admission. Its existing machine record carries the assignment;
+machine. Admission serializes one request ID (its turn, ADR 0117) and the machines map's
+lock orders the name, address and quota. Its existing machine record carries the assignment;
 a durable index preserves consumption even after record removal. Recovery rebuilds
 missing index entries and rejects conflicting identities. Identical retry returns the
 same machine, including failure; changed replay conflicts. Destroy does not permit

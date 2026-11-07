@@ -74,7 +74,7 @@ async fn pool_shaped(volume: Option<u32>) -> (Harness, api::SandboxSeed, Arc<Ent
     .unwrap();
     // PUT queues refill without yielding after releasing admission. Take that same lock
     // before yielding to its worker, so the fixture supplies the mocked disks first.
-    let turn = h.m.inner.warm_lock.lock().await;
+    let turn = h.m.inner.warm_lock.write().await;
     let pool =
         h.m.inner
             .store
