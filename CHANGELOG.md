@@ -5,7 +5,7 @@
 ### Upgrade notes
 
 - The init's digest is expected not to change with this release (ADR 0101): no init source or dependency it uses changed. Confirm it in the candidate's `SHA256SUMS`: seeds sealed under v0.1.28 stay valid.
-- Creates from a seed now overlap in their record step (ADR 0117): the warm and sandbox locks are shared unless a ready warm slot may serve the create. No action is needed. Under a continuous burst of seed creates, the warm refill tick and `fail_fast` claims wait for a gap.
+- Creates from a seed now overlap in their record step (ADR 0117): the warm and sandbox locks are shared unless a ready warm slot may serve the create. No action is needed. Under a continuous burst of seed creates, the warm refill tick skips and `fail_fast` claims answer pool-empty until there is a gap.
 
 ### Documentation
 
