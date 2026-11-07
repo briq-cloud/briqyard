@@ -798,7 +798,7 @@ registry backups, operator archives and local backing/reference scopes are exclu
 sudo systemctl kill --kill-whom=main -s SIGUSR2 briqyardd
 ```
 
-A hand-over can take up to a minute. No `serving again` line in the journal by then:
+A hand-over takes a few seconds, at most about 65 s, then the new daemon starts. Wait 90 s for `serving again` in the journal. `handover refused; daemon remains serving` means the daemon is up: read the reason first. Neither line:
 
 ```bash
 sudo systemctl kill --kill-whom=main -s KILL briqyardd
