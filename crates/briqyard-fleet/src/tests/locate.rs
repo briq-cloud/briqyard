@@ -213,3 +213,40 @@ async fn delete_fallback_requires_valid_existing_pin_and_exact_delete_path() {
     assert_eq!(pinned(&f.st, "kept").as_deref(), Some("d1"));
     assert_eq!(std::fs::read(&f.st.state_path).unwrap(), written);
 }
+
+/// What the request log reads of a 5xx the fleet answers itself: its code and message ride
+/// in the response. (The `warn` line is written from them in the `auth` middleware.)
+#[tokio::test]
+async fn a_5xx_the_fleet_answers_carries_its_code_and_message_for_the_log() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    let m = ds[0].stub.add("kept", "web", 512);
+    f.st.reg.lock().unwrap().pin("kept", "d1");
+    set_state(&f.st, "d1", "down");
+    let answer = |path: String| {
+        let req = axum::http::Request::builder()
+            .method("DELETE")
+            .uri(path)
+            .header(header::AUTHORIZATION, "Bearer api")
+            .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                40000,
+            ))))
+            .body(Body::empty())
+            .unwrap();
+        app(f.st.clone()).oneshot(req)
+    };
+    let resp = answer(format!("/v1/machines/{}?namespace=kept", m.id))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let refused = resp.extensions().get::<Refused>().expect("a failure kept");
+    assert_eq!(refused.code, "host_down");
+    assert!(
+        refused.error.contains("host d1 is down"),
+        "{}",
+        refused.error
+    );
+    // A client error is answered the same way, and not logged as a failure.
+    let resp = answer("/v1/machines/m_none".into()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
