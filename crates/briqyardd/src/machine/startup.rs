@@ -126,6 +126,8 @@ impl Manager {
             endpoint_events,
             policies: Mutex::new(HashMap::new()),
             namespace_create: tokio::sync::Mutex::new(()),
+            namespace_reserved: Mutex::new(HashMap::new()),
+            namespace_turns: Default::default(),
             namespace_lifecycle: tokio::sync::RwLock::new(()),
             backups,
             boot_gate: tokio::sync::Semaphore::new(boots_at_once as usize),

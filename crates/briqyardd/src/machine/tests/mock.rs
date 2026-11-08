@@ -136,6 +136,8 @@ pub(super) struct Mock {
     pub(super) refuse_disk_rate: AtomicBool,
     pub(super) refuse_balloon_stats: AtomicBool,
     pub(super) pause_bridge_delete: AtomicBool,
+    /// Bridges that `ensure_bridge` refuses, by name.
+    pub(super) refuse_bridge: Mutex<Vec<String>>,
     pub(super) bridge_delete_started: tokio::sync::Notify,
     pub(super) bridge_delete_release: tokio::sync::Notify,
 }
@@ -221,6 +223,7 @@ impl Mock {
             refuse_disk_rate: AtomicBool::new(false),
             refuse_balloon_stats: AtomicBool::new(false),
             pause_bridge_delete: AtomicBool::new(false),
+            refuse_bridge: Mutex::new(Vec::new()),
             bridge_delete_started: tokio::sync::Notify::new(),
             bridge_delete_release: tokio::sync::Notify::new(),
         })
@@ -929,7 +932,11 @@ impl host::Net for Mock {
     }
     async fn ensure_bridge(&self, s: &Subnet) -> Result<String> {
         let name = netw::bridge_name(s.index);
+        self.wait_network("ensure_bridge", &name).await;
         self.record(format!("ensure_bridge {name} {}", s.cidr()));
+        if self.refuse_bridge.lock().unwrap().contains(&name) {
+            anyhow::bail!("synthetic bridge refusal");
+        }
         Ok(name)
     }
 

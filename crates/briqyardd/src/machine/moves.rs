@@ -313,9 +313,18 @@ impl Manager {
                     let o = o.rec.lock().unwrap();
                     o.namespace != from || o.id == r.id
                 });
+            // Safe because `namespace_create` is held: no reservation is taken meanwhile, and one
+            // is dropped only after its namespace is in the map, so a namespace being made is
+            // seen in one or the other.
+            let making = self
+                .inner
+                .namespace_reserved
+                .lock()
+                .unwrap()
+                .contains_key(namespace);
             let mut namespaces = self.inner.namespaces.lock().unwrap();
             match namespaces.get(&from).cloned() {
-                Some(t) if alone && !namespaces.contains_key(namespace) => {
+                Some(t) if alone && !making && !namespaces.contains_key(namespace) => {
                     // Both names resolve at every instant of the swap.
                     let mut renamed = t;
                     renamed.rec.id = namespace.into();

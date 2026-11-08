@@ -16,6 +16,7 @@ mod metering;
 mod mock;
 mod move_addresses;
 mod moves;
+mod namespace_create;
 mod namespace_lifecycle;
 mod network;
 mod observe;
@@ -265,6 +266,8 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             endpoint_events,
             policies: Mutex::new(HashMap::new()),
             namespace_create: tokio::sync::Mutex::new(()),
+            namespace_reserved: Mutex::new(HashMap::new()),
+            namespace_turns: Default::default(),
             namespace_lifecycle: tokio::sync::RwLock::new(()),
             backups,
             boot_gate: tokio::sync::Semaphore::new(2),
