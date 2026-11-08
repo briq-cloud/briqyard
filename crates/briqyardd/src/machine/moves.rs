@@ -313,8 +313,9 @@ impl Manager {
                     let o = o.rec.lock().unwrap();
                     o.namespace != from || o.id == r.id
                 });
-            // The reservation is read first: it is dropped only after the namespace is in the
-            // map, so a namespace being made is seen in one or the other.
+            // Safe because `namespace_create` is held: no reservation is taken meanwhile, and one
+            // is dropped only after its namespace is in the map, so a namespace being made is
+            // seen in one or the other.
             let making = self
                 .inner
                 .namespace_reserved

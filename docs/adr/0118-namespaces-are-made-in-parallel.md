@@ -22,10 +22,10 @@ The lock exists for one reason: two namespaces made together would read the same
 
 ## What stays serial
 
-- Choosing and reserving an index: in memory, microseconds.
+- Choosing and reserving an index: in memory, microseconds. A namespace rename holds the same lock while it waits for the machine to stop, so creates of new namespaces wait for a rename.
 - Plumbing of one index is not shared state: each namespace has its own bridge, address and DNS socket, and the host tables are not written when a namespace is made (a machine's pin and policy are written when it is attached, as before).
 
 ## Consequences
 
 - Creates that each name a new namespace overlap the bridge and the record write; the record's fsync queues on the disk's journal, not on a lock.
-- A failed attempt can leave a bridge with no record until a namespace is made on that index; nothing reads it as a namespace.
+- A failed or cancelled attempt can leave a bridge and its bound DNS socket with no record until a namespace is made on that index; nothing reads them as a namespace.
