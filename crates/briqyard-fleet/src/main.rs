@@ -592,9 +592,21 @@ struct Refusal {
     error: String,
 }
 
+/// What a response the fleet made itself says of its failure, kept in the response for the
+/// request log to read: the code and message of the body, which holds no secret.
+#[derive(Clone)]
+struct Refused {
+    code: &'static str,
+    error: String,
+}
+
 impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
-        (
+        let refused = Refused {
+            code: self.code,
+            error: self.error.clone(),
+        };
+        let mut resp = (
             self.status,
             Json(api::ApiError {
                 error: self.error,
@@ -604,7 +616,9 @@ impl IntoResponse for Refusal {
                 oldest: None,
             }),
         )
-            .into_response()
+            .into_response();
+        resp.extensions_mut().insert(refused);
+        resp
     }
 }
 
@@ -675,7 +689,30 @@ async fn auth(State(st): S, req: Request, next: axum::middleware::Next) -> Respo
     if !open {
         tracing::info!(%method, path, status = resp.status().as_u16(), ms = start.elapsed().as_millis() as u64, "request");
     }
+    log_server_error(&method, &path, &resp);
     resp
+}
+
+/// A 5xx is said once more with its cause, so it is never a bare status line: the code and
+/// message of one the fleet made itself, the host whose answer it relays, or neither (a layer
+/// or extractor answered before any handler).
+fn log_server_error(method: &Method, path: &str, resp: &Response) {
+    let status = resp.status();
+    if !status.is_server_error() {
+        return;
+    }
+    let status = status.as_u16();
+    let host = resp
+        .headers()
+        .get("x-briqyard-host")
+        .and_then(|v| v.to_str().ok());
+    match (resp.extensions().get::<Refused>(), host) {
+        (Some(r), _) => {
+            tracing::warn!(%method, path, status, code = r.code, err = %r.error, "answered an error")
+        }
+        (None, Some(host)) => tracing::warn!(%method, path, status, host, "relayed an error"),
+        (None, None) => tracing::warn!(%method, path, status, "answered an error with no cause"),
+    }
 }
 
 #[cfg(test)]
