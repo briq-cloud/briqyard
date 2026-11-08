@@ -694,25 +694,24 @@ async fn auth(State(st): S, req: Request, next: axum::middleware::Next) -> Respo
 }
 
 /// A 5xx is said once more with its cause, so it is never a bare status line: the code and
-/// message of one the fleet made itself, or the host whose answer it relays.
+/// message of one the fleet made itself, the host whose answer it relays, or neither (a layer
+/// or extractor answered before any handler).
 fn log_server_error(method: &Method, path: &str, resp: &Response) {
     let status = resp.status();
     if !status.is_server_error() {
         return;
     }
     let status = status.as_u16();
-    match resp.extensions().get::<Refused>() {
-        Some(r) => {
+    let host = resp
+        .headers()
+        .get("x-briqyard-host")
+        .and_then(|v| v.to_str().ok());
+    match (resp.extensions().get::<Refused>(), host) {
+        (Some(r), _) => {
             tracing::warn!(%method, path, status, code = r.code, err = %r.error, "answered an error")
         }
-        None => {
-            let host = resp
-                .headers()
-                .get("x-briqyard-host")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-            tracing::warn!(%method, path, status, host, "relayed an error");
-        }
+        (None, Some(host)) => tracing::warn!(%method, path, status, host, "relayed an error"),
+        (None, None) => tracing::warn!(%method, path, status, "answered an error with no cause"),
     }
 }
 
