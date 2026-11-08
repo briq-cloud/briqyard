@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.32 — 2026-11-08
+
+### Upgrade notes
+
+- The init's digest is expected not to change with this release (ADR 0101): no init source or dependency it uses changed. Confirm it in the candidate's `SHA256SUMS`: seeds sealed under v0.1.28 stay valid.
+- Namespaces are made in parallel (ADR 0118): only the choice and reservation of a subnet index stay under `namespace_create`; the bridge, the DNS listener and the record are done outside it, once per namespace. No action is needed. A namespace rename still holds the lock while it waits for its machine to stop.
+- The fleet logs one `warn` line with the code and message of every 5xx it answers itself, and the host of every 5xx it relays.
+
+### Fixes
+
+- log the cause of every 5xx the fleet answers (#189) ([4763719b](https://github.com/briq-cloud/briqyard/commit/4763719bf6b82dd95e642a0541b796666fadc38e))
+
+
+### Performance
+
+- make namespaces in parallel (#190) ([6c20d10b](https://github.com/briq-cloud/briqyard/commit/6c20d10bb1e653c4bcd21f5a7192199ab40ab25c))
+
 ## 0.1.31 — 2026-11-07
 
 ### Upgrade notes
