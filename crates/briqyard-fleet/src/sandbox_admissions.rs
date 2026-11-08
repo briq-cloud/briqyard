@@ -309,27 +309,24 @@ pub(super) fn dispatched(reg: &mut Registry, namespace: &str, id: Option<&str>) 
 }
 /// Forgets the admissions that fence nothing and were last changed longer ago than `window`
 /// (ADR 0119): dispatched, cancelled, or pending without a seed. A pending seed admission fences
-/// its namespace and is never forgotten here, nor is one whose dispatch is still unaccepted (a
-/// retry of that create needs it). One made before the time was kept has no age: it goes when
+/// its namespace and is never forgotten here, nor is one whose route is still kept: a retry of
+/// that create replays through both, so the admission goes with its route, never before it. One made before the time was kept has no age: it goes when
 /// its namespace is no longer pinned, else it starts its window now.
 pub(super) fn prune(reg: &mut Registry, now: chrono::DateTime<chrono::Utc>, window: Duration) {
     let pinned = &reg.namespaces;
     let routes = &reg.sandbox_requests;
     reg.sandbox_admissions.retain(|_, a| {
-        if a.pending_seed()
-            || routes
-                .get(&crate::create_replay::key(&a.namespace, &a.request_id))
-                .is_some_and(|route| !route.accepted)
-        {
+        if a.pending_seed() {
             return true;
         }
+        let routed = routes.contains_key(&crate::create_replay::key(&a.namespace, &a.request_id));
         match a.at {
-            Some(at) => now - at < window,
+            Some(at) => routed || now - at < window,
             None if pinned.contains_key(&a.namespace) => {
                 a.at = Some(now);
                 true
             }
-            None => false,
+            None => routed,
         }
     });
 }

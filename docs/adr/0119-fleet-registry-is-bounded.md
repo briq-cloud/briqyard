@@ -16,7 +16,7 @@ The fleet's registry (`registry.json`, ADR 0043) is written whole at every save:
 | Sandbox request route, accepted | `REPLAY_WINDOW` after acceptance | 24 h |
 | Admission, pending with a sandbox seed | always | none: it fences its namespace (ADR 0076) |
 | Admission, whose dispatch is not accepted | always | its route is kept, so is the admission a retry of that create needs |
-| Any other admission (dispatched, cancelled, pending without a seed) | `REPLAY_WINDOW` after it was made or last changed phase | 24 h |
+| Any other admission (dispatched, cancelled, pending without a seed) | `REPLAY_WINDOW` after it was made or last changed phase, and never before its route goes (a replay reads both) | 24 h |
 | Namespace version | while its namespace is pinned or an unsettled move, admission or request names it | the namespace's life |
 | `pinned_at` | while the namespace is pinned | the pin's |
 

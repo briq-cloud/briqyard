@@ -327,3 +327,31 @@ async fn a_caller_whose_write_failed_is_not_served_by_it() {
         .namespaces
         .contains_key("n"));
 }
+
+#[test]
+fn an_admission_stays_while_its_route_does() {
+    // Dispatched a day ago, its route accepted an hour ago: a replay still reads both.
+    let now = Utc::now();
+    let mut reg = Registry::default();
+    reg.namespaces.insert("n".into(), "h1".into());
+    reg.sandbox_requests.insert(
+        key("n", "r"),
+        serde_json::from_value(route("n", "r", true, Some(now - Duration::hours(1)))).unwrap(),
+    );
+    reg.sandbox_admissions.insert(
+        key("n", "r"),
+        serde_json::from_value(admission(
+            "n",
+            "r",
+            "dispatched",
+            "cold",
+            Some(now - Duration::hours(25)),
+        ))
+        .unwrap(),
+    );
+    reg.prune(now);
+    assert!(has_admission(&reg, "n", "r"));
+    reg.prune(now + Duration::hours(24));
+    assert!(!has_route(&reg, "n", "r"));
+    assert!(!has_admission(&reg, "n", "r"));
+}
