@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.33 — 2026-11-08
+
+### Upgrade notes
+
+- The init's digest is expected not to change with this release (ADR 0101): no init source or dependency it uses changed. Confirm it in the candidate's `SHA256SUMS`: seeds sealed under v0.1.28 stay valid.
+- The fleet forgets settled records (ADR 0119): accepted sandbox routes and settled admissions 24 hours after they settle, namespace versions and pin times once their namespace is pinned nowhere and nothing unsettled names it. It prunes at start and on every heartbeat. Unaccepted routes and pending seed admissions are never pruned. A registry written by an earlier fleet has no times on these records: at the first start, the records of namespaces pinned nowhere go at once and the rest a day later, so the registry shrinks in two steps after the upgrade.
+- A save that finds nothing changed since the last write no longer encodes the registry, and callers that waited behind a write share the next one.
+
+### Performance
+
+- bound the registry and skip saves that find nothing new (#193) ([27717f51](https://github.com/briq-cloud/briqyard/commit/27717f51ed521c23ecd0f8f8df9294a6196ce7e5))
+
 ## 0.1.32 — 2026-11-08
 
 ### Upgrade notes
