@@ -866,8 +866,14 @@ struct Inner {
     /// The egress policy the tables hold for each machine, with its namespace's gateway: what a
     /// stop takes out, even once the gateway machine it names is gone.
     policies: Mutex<HashMap<String, (Ipv4Addr, nft::Policy)>>,
-    /// Held while a namespace is made (its subnet index, bridge and record), see `ensure_namespace`.
+    /// Held while a namespace is looked up, given its subnet index and reserved, or renamed, see
+    /// `ensure_namespace`. Never held over the bridge or the durable record.
     namespace_create: tokio::sync::Mutex<()>,
+    /// The subnet index of each namespace being made, taken under `namespace_create` and kept
+    /// until the namespace is in `namespaces` or its making failed.
+    namespace_reserved: Mutex<HashMap<String, u32>>,
+    /// One turn per namespace being made: a second create of it waits, then finds it made.
+    namespace_turns: templates::sandbox::Turns,
     /// Readers admit machines or change namespaces; deletion owns the write guard through teardown.
     namespace_lifecycle: tokio::sync::RwLock<()>,
     /// The backup store, the gate of scheduled backups, the holders (ADR 0023).
