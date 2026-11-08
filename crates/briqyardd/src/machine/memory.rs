@@ -25,9 +25,20 @@ impl Entry {
             .load(std::sync::atomic::Ordering::SeqCst)
             || (self.live.lock().unwrap().is_some() && self.snapshot().state == state::ERROR)
     }
+    /// A destroying machine keeps its charge while its ownership is unresolved (ADR 0068). Once
+    /// its process death is proven and its leaf retired, nothing of it holds memory (a clone's
+    /// mapping exit was proven before that), and the disk teardown, which can queue behind
+    /// many others, no longer counts. What no destroy decides stays: an assignment not yet
+    /// settled, a launch pending, a live handle.
     pub(super) fn commits_memory(&self, rec: &Record) -> bool {
-        commits_memory(rec)
-            || rec.state == state::DESTROYING
+        let record = if rec.state == state::DESTROYING
+            && self.leaf_retired.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            rec.assigned_run.as_ref().is_some_and(run_unsettled)
+        } else {
+            commits_memory(rec) || rec.state == state::DESTROYING
+        };
+        record
             || self
                 .launch_pending
                 .load(std::sync::atomic::Ordering::SeqCst)
@@ -48,6 +59,7 @@ impl Manager {
     /// Mark ownership before entering the factory, including a legacy resume fallback.
     pub(super) async fn boot_reserved(&self, e: &Entry, boot: &fc::Boot) -> Result<fc::Vm> {
         use std::sync::atomic::Ordering::SeqCst;
+        e.leaf_retired.store(false, SeqCst);
         e.launch_unproven.store(false, SeqCst);
         e.launch_pending.store(true, SeqCst);
         let result = self.inner.vmm.boot(boot).await;

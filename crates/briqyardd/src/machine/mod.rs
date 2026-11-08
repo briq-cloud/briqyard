@@ -447,7 +447,7 @@ fn holds_memory(state: &str) -> bool {
 /// start it (ADR 0048: room is taken when the machine is recorded, not when it boots).
 fn commits_memory(r: &Record) -> bool {
     if let Some(run) = &r.assigned_run {
-        return run.schema != 3 || run.phase != assignments::runs::Phase::Settled;
+        return run_unsettled(run);
     }
     holds_memory(&r.state)
         || r.warm_slot
@@ -459,6 +459,10 @@ fn commits_memory(r: &Record) -> bool {
                 || (origin.stage != templates::CloneStage::Reserved
                     && (origin.stage != templates::CloneStage::Active || !origin.mapping_exited))
         })
+}
+
+fn run_unsettled(run: &assignments::runs::RunRef) -> bool {
+    run.schema != 3 || run.phase != assignments::runs::Phase::Settled
 }
 
 /// What a machine in this record's state holds, for its usage.
@@ -580,6 +584,11 @@ struct Entry {
     launch_pending: AtomicBool,
     /// A boot that failed without proof its VMM never started: its charge is unknown.
     launch_unproven: AtomicBool,
+    /// Set by a destroy once the process's death is proven and its cgroup leaf is retired
+    /// (ADR 0068): the memory is free from then on, though the record stays until the disks
+    /// go. Memory only, so a restarted daemon charges the destroying machine until its retry
+    /// proves it again.
+    leaf_retired: AtomicBool,
     pending_adoption: Mutex<Option<(fc::Vm, bool)>>,
     /// Confirmed for this daemon's live handle; never inferred from an old record alone.
     identity_trusted: AtomicBool,
@@ -622,6 +631,7 @@ impl Entry {
             memory_protection: Mutex::new(None),
             launch_pending: AtomicBool::new(false),
             launch_unproven: AtomicBool::new(false),
+            leaf_retired: AtomicBool::new(false),
             pending_adoption: Mutex::new(None),
             identity_trusted: AtomicBool::new(false),
             stop_req: Mutex::new(None),

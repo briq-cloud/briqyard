@@ -17,6 +17,16 @@ settled result can clear it. A successful managed live handle uses the normal re
 Reconciliation takes the entry lock so it cannot consume the previous launch's receipt while
 a new start is invalidating it. Proven no-launch failures do not charge every error record. An empty leaf alone does not release memory reservations.
 
+The retention ends at the retirement. Once the process's death is proven and its leaf removed,
+the machine's memory and vCPU charge is released, though the record stays until its disks are
+gone: disk teardown can queue behind many others, and counting a machine that holds nothing
+refuses admissions for as long. The destroy marks this in memory only, after the removal
+succeeds, so a failed proof, a failed final read or a failed removal keeps the charge, and a
+restarted daemon charges a destroying machine again until its retry proves the death. A pending
+launch, a live handle and an unsettled assignment keep their charge either way. The host's
+admission, its reported use, warm pool budgets and memory conditions follow this charge;
+namespace quotas never counted a destroying machine.
+
 Hold directory descriptors opened without following symlinks. Use the original machine ID,
 check its reversible Firecracker encoding and refuse collisions in the machine registry.
 Require the canonical root, parent and leaf to remain the held inodes with the expected owner

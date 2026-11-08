@@ -1,5 +1,6 @@
 //! Lifecycle barriers use the synthetic VMM's explicit death and leaf model.
 use super::*;
+use std::sync::atomic::Ordering::SeqCst;
 
 #[tokio::test]
 async fn leaf_failure_retains_destroying_disks_record_and_reservation_then_retries() {
@@ -688,4 +689,64 @@ async fn recovery_timeout_loads_endpoints_read_only_and_keeps_running_traffic() 
     h.m.entry("m_serving").unwrap().rec.lock().unwrap().state = state::STOPPED.into();
     assert!(h.m.ready_addr("m_serving", Duration::ZERO).await.is_err());
     assert!(h.host_calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_destroy_in_its_disk_teardown_no_longer_counts_the_memory_of_a_retired_leaf() {
+    // Room for one machine of 512 MB (768 with the VMM's overhead).
+    let h = harness("10.64.0.0/22", 1024).await;
+    let old = h.add("m_old", state::STOPPED, 512);
+    h.disks(&old).await;
+    let next = h.add("m_next", state::STOPPED, 512);
+    // The disk teardown waits on the pool, as a burst of destroys does.
+    let hold = h.pool.dev().join("hold.destroy");
+    std::fs::write(&hold, "").unwrap();
+    let m = h.m.clone();
+    let destroy = tokio::spawn(async move { m.destroy("m_old", None).await });
+    while !h
+        .pool
+        .zfs
+        .stalled(Duration::ZERO)
+        .is_some_and(|(_, what)| what.contains("destroy"))
+    {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(old.snapshot().state, state::DESTROYING);
+    assert!(h
+        .host
+        .calls()
+        .iter()
+        .any(|c| c.starts_with("retire-cgroup")));
+    // The leaf is retired: nothing is charged, and a start that needs the room is admitted
+    // while the teardown is still held.
+    assert_eq!(h.m.usage().0.memory_mb, 0);
+    h.m.reserve(&next, None).unwrap();
+    assert_eq!(h.m.usage().0.memory_mb, 768);
+    // What a restarted daemon would load charges again until its retry proves the death.
+    let reloaded = Entry::new(old.snapshot(), h.m.inner.events.clone());
+    assert!(reloaded.commits_memory(&reloaded.snapshot()));
+    // A launch still pending keeps the charge.
+    old.launch_pending.store(true, SeqCst);
+    assert!(old.commits_memory(&old.snapshot()));
+    old.launch_pending.store(false, SeqCst);
+    std::fs::remove_file(&hold).unwrap();
+    destroy.await.unwrap().unwrap();
+    assert!(h.m.entry("m_old").is_err());
+    assert_eq!(h.m.usage().0.memory_mb, 768);
+}
+
+#[tokio::test]
+async fn a_destroy_stopped_before_the_retired_leaf_keeps_the_charge_while_its_disks_wait() {
+    let h = harness("10.64.0.0/22", 1024).await;
+    let old = h.add("m_old", state::STOPPED, 512);
+    h.disks(&old).await;
+    h.host.refuse_retirement.store(true, Relaxed);
+    assert!(h.m.destroy("m_old", None).await.is_err());
+    assert!(!old.leaf_retired.load(SeqCst));
+    assert_eq!(h.m.usage().0.memory_mb, 768);
+    let next = h.add("m_next", state::STOPPED, 512);
+    assert!(h.m.reserve(&next, None).is_err());
+    h.host.refuse_retirement.store(false, Relaxed);
+    h.m.destroy("m_old", None).await.unwrap();
+    assert!(h.m.reserve(&next, None).is_ok());
 }

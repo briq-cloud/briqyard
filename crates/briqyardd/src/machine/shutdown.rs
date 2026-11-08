@@ -703,6 +703,10 @@ impl Manager {
                 .vmm
                 .retire_cgroup(id, self.jail_for(&rec).is_some())
                 .context("retire machine cgroup before disk teardown")?;
+            // The process is dead and its leaf gone: its memory is free, whatever the disk
+            // teardown that follows takes (ADR 0068).
+            e.leaf_retired
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         self.inner
             .net
