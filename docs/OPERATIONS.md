@@ -1336,3 +1336,33 @@ explicit removal and revocation remain possible. Retained protection adds at lea
 execution configuration does not remove protection or the permanent compatibility
 floor. Do not prune or replace scoped journals to recover capacity. The fixed bounds
 and remaining qualification requirements are in ADR 0124.
+
+### Standalone authority
+
+```sh
+briqyard-fleet --config /etc/briqyard/authority.yaml authority
+```
+
+This mode reads a separate strict configuration and opens only the execution listener.
+It starts no registry, placement, bootstrap, host polling, backup or administrator API.
+The file must exist. Its required root fields are:
+
+| Field | Value |
+|---|---|
+| `execution` | Fleet execution object above: `channel`, `host_id`, `host_url`, `authority`, `key_id`, `signing_key` |
+| `host_tls_fingerprint` | Independently provisioned host certificate pin |
+| `host_administrator_file` | Absolute path to the host administrator comparison bearer |
+| `fleet_administrator_file` | Distinct absolute path to the fleet administrator comparison bearer |
+
+Administrator files contain the exact bearer bytes, without a trailing newline, at
+0600 and owned by the service user. Each is bounded to 4 KiB and must match its value
+in the credentials bundle. Unknown root fields, normal fleet configuration fields,
+missing files, malformed pins and mismatches refuse startup. A separate service must
+own this process and its journal; do not share registry or journal files with another
+process. Use the normal fleet command for administrator placement and management.
+
+Clock loss during installation leaves the intent pending. Loss after ACK persistence
+retains the evidence with a permanent refusal key. A recovered clock cannot replay or
+revive that intent. Reconcile under a fresh intent and the required fencing protocol;
+never remove refusal evidence. Native qualification of the real authenticated guest
+path is still required before the first protected admission.

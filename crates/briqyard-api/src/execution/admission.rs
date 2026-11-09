@@ -19,7 +19,7 @@ pub use projection::{Projection, ProjectionEvidence, MAX_PROJECTION_BYTES};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
@@ -101,6 +101,8 @@ struct State {
     delegation_intents: BTreeMap<String, DelegationIntent>,
     #[serde(default)]
     operation_intents: BTreeMap<String, OperationIntent>,
+    #[serde(default)]
+    uncertain_installations: BTreeSet<String>,
 }
 
 /// Authenticated installer input. These records are never constructed from a grant.
@@ -198,6 +200,31 @@ pub struct Journal {
     poisoned: bool,
 }
 impl Journal {
+    /// Clock loss after a durable host ACK must never promote that uncertain
+    /// intent again. Retain its full evidence and a permanent bounded refusal.
+    pub fn refuse_installation_readiness(&mut self, kind: &str, id: &str) -> Result<(), Error> {
+        self.ownership()?;
+        if !valid_id(id)
+            || !matches!(
+                kind,
+                "authority" | "discovery" | "protection" | "delegation"
+            )
+        {
+            return Err(Error::Binding);
+        }
+        let mut next = self.state.clone();
+        next.uncertain_installations.insert(format!("{kind}:{id}"));
+        let result = self.commit(next);
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+    fn installation_uncertain(&self, kind: &str, id: &str) -> bool {
+        self.state
+            .uncertain_installations
+            .contains(&format!("{kind}:{id}"))
+    }
     /// Retained ordering evidence for explicit revocation/removal only. This is
     /// never qualified time and must not authorize admission or release protection.
     pub fn revocation_order(&self) -> Clock {
@@ -278,6 +305,7 @@ impl Journal {
                 protection_intents: BTreeMap::new(),
                 delegation_intents: BTreeMap::new(),
                 operation_intents: BTreeMap::new(),
+                uncertain_installations: BTreeSet::new(),
             },
         };
         if state
@@ -292,6 +320,7 @@ impl Journal {
             || state.protection_intents.len() > MAX_RECORDS
             || state.delegation_intents.len() > MAX_RECORDS
             || state.operation_intents.len() > MAX_RECORDS
+            || state.uncertain_installations.len() > MAX_RECORDS
         {
             return Err(Error::Full);
         }
@@ -900,6 +929,7 @@ impl Journal {
             || next.authority_highwater.len() > MAX_RECORDS
             || next.discovery_intents.len() > MAX_RECORDS
             || next.protection_intents.len() > MAX_RECORDS
+            || next.uncertain_installations.len() > MAX_RECORDS
         {
             return Err(Error::Full);
         }

@@ -81,14 +81,14 @@ pub(super) fn router(
     host: HostTransport,
     host_id: String,
     credentials: Credentials,
-    fleet_config: &crate::config::Config,
+    administrator: &str,
     trust: TrustConfig,
     clock: Arc<dyn ClockSource>,
 ) -> Result<Router, &'static str> {
     if host_id.is_empty()
         || host_id != host.host_id()
         || credentials.host_administrator != host.administrator_token()
-        || credentials.administrator != fleet_config.token
+        || credentials.administrator != administrator
         || !valid_credentials(&credentials)
         || trust.keys.is_empty()
         || trust.central_issuer.is_empty()
@@ -298,8 +298,15 @@ async fn handle(
 fn value<T: Serialize>(v: T) -> Result<serde_json::Value, StatusCode> {
     serde_json::to_value(v).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
-fn install_error(_: crate::execution_install::InstallError) -> StatusCode {
-    StatusCode::CONFLICT
+fn install_error(error: crate::execution_install::InstallError) -> StatusCode {
+    if matches!(
+        error,
+        crate::execution_install::InstallError::ClockUnavailable
+    ) {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::CONFLICT
+    }
 }
 fn operation_error(error: crate::execution_operation::Error) -> StatusCode {
     use crate::execution_operation::Error;
@@ -348,34 +355,39 @@ async fn run(
     match action {
         "register" => {
             let dto: Registration = parse(body)?;
-            let c = clock(service.clock.as_ref())?;
             let state = installer
-                .register(&dto.id, dto.record, c)
+                .register(&dto.id, dto.record, || {
+                    clock(service.clock.as_ref())
+                        .map_err(|_| crate::execution_install::InstallError::ClockUnavailable)
+                })
                 .await
                 .map_err(install_error)?;
             installation_reply(installer.journal, "registration", &dto.id, state)
         }
         "discover" => {
             let dto: Discovery = parse(body)?;
-            let c = clock(service.clock.as_ref())?;
             let state = installer
-                .discover(&dto.id, &dto.registration, dto.control, c)
+                .discover(&dto.id, &dto.registration, dto.control, || {
+                    clock(service.clock.as_ref())
+                        .map_err(|_| crate::execution_install::InstallError::ClockUnavailable)
+                })
                 .await
                 .map_err(install_error)?;
             installation_reply(installer.journal, "discovery", &dto.id, state)
         }
         "ownership" => {
             let dto: Ownership = parse(body)?;
-            let c = clock(service.clock.as_ref())?;
             let state = installer
-                .ownership(&dto.id, &dto.discovery, c)
+                .ownership(&dto.id, &dto.discovery, || {
+                    clock(service.clock.as_ref())
+                        .map_err(|_| crate::execution_install::InstallError::ClockUnavailable)
+                })
                 .await
                 .map_err(install_error)?;
             installation_reply(installer.journal, "ownership", &dto.id, state)
         }
         "protect" => {
             let dto: Protection = parse(body)?;
-            let c = clock(service.clock.as_ref())?;
             let state = installer
                 .protect(
                     &dto.id,
@@ -384,7 +396,10 @@ async fn run(
                         admission: dto.committed.admission,
                         expires_at_ms: dto.committed.expires_at_ms,
                     },
-                    c,
+                    || {
+                        clock(service.clock.as_ref())
+                            .map_err(|_| crate::execution_install::InstallError::ClockUnavailable)
+                    },
                 )
                 .await
                 .map_err(install_error)?;
@@ -392,7 +407,6 @@ async fn run(
         }
         "delegation" => {
             let dto: Delegation = parse(body)?;
-            let c = clock(service.clock.as_ref())?;
             let state = installer
                 .delegation(
                     &dto.id,
@@ -412,7 +426,10 @@ async fn run(
                         allocations: dto.signed.allocations,
                     },
                     &service.trust.borrowed(),
-                    c,
+                    || {
+                        clock(service.clock.as_ref())
+                            .map_err(|_| crate::execution_install::InstallError::ClockUnavailable)
+                    },
                 )
                 .await
                 .map_err(install_error)?;
@@ -438,6 +455,7 @@ async fn run(
         }
         "installation_status" => {
             let dto: InstallationStatus = parse(body)?;
+            clock(service.clock.as_ref())?;
             installation_reply(installer.journal, &dto.kind, &dto.id, Outcome::Pending)
         }
         "projection_lookup" => {

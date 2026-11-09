@@ -54,6 +54,22 @@ pub(super) enum Error {
     Unconfirmed,
 }
 
+/// Independently trusted destination identity, separate from any routing request.
+pub(super) struct TrustedHost<'a> {
+    pub id: &'a str,
+    pub tls_fingerprint: &'a str,
+    pub administrator: &'a str,
+}
+impl<'a> From<&'a HostRec> for TrustedHost<'a> {
+    fn from(host: &'a HostRec) -> Self {
+        Self {
+            id: &host.id,
+            tls_fingerprint: &host.tls_fingerprint,
+            administrator: &host.token,
+        }
+    }
+}
+
 pub(super) struct HostTransport {
     client: Client,
     origin: Url,
@@ -81,12 +97,27 @@ impl HostTransport {
         execution: &str,
         timeout: Duration,
     ) -> Result<Self, Error> {
+        Self::from_trusted(
+            TrustedHost::from(host),
+            endpoint,
+            installer,
+            execution,
+            timeout,
+        )
+    }
+    pub(super) fn from_trusted(
+        host: TrustedHost<'_>,
+        endpoint: &str,
+        installer: &str,
+        execution: &str,
+        timeout: Duration,
+    ) -> Result<Self, Error> {
         if host.id.is_empty()
             || installer.is_empty()
             || execution.is_empty()
             || installer == execution
-            || installer == host.token
-            || execution == host.token
+            || installer == host.administrator
+            || execution == host.administrator
             || timeout.is_zero()
             || timeout > Duration::from_secs(300)
         {
@@ -104,7 +135,7 @@ impl HostTransport {
             return Err(Error::Configuration);
         }
         let pin =
-            api::tls::parse_fingerprint(&host.tls_fingerprint).map_err(|_| Error::Configuration)?;
+            api::tls::parse_fingerprint(host.tls_fingerprint).map_err(|_| Error::Configuration)?;
         let bearer = |token: &str| {
             if token
                 .bytes()
@@ -132,8 +163,8 @@ impl HostTransport {
             origin,
             installer: bearer(installer)?,
             execution: bearer(execution)?,
-            administrator: host.token.clone(),
-            host_id: host.id.clone(),
+            administrator: host.administrator.into(),
+            host_id: host.id.into(),
         })
     }
 

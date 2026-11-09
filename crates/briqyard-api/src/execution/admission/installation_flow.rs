@@ -254,6 +254,9 @@ impl Journal {
     }
 
     pub fn discovery_intent_ready(&self, id: &str) -> Result<bool, Error> {
+        if self.installation_uncertain("discovery", id) {
+            return Ok(false);
+        }
         let Some(intent) = self.discovery_intent(id)? else {
             return Ok(false);
         };
@@ -377,6 +380,9 @@ impl Journal {
     }
 
     pub fn protection_intent_ready(&self, id: &str) -> Result<bool, Error> {
+        if self.installation_uncertain("protection", id) {
+            return Ok(false);
+        }
         let Some(intent) = self.protection_intent(id)? else {
             return Ok(false);
         };

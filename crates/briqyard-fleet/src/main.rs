@@ -3,6 +3,7 @@
 //! registry of hosts from their heartbeats, and bootstraps the servers added to it. It buys no
 //! server: it says what ran out (ADR 0042), and something outside adds hosts.
 
+mod authority;
 mod backup;
 mod bootstrap;
 mod config;
@@ -67,6 +68,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Serve only the scoped authority listener, using a separate strict configuration.
+    Authority,
     /// Make an age identity for the registry's backup (ADR 0032): written to OUT (0600), its
     /// recipient printed, for `backup.recipient`. Keep OUT off the fleet's host.
     Keygen {
@@ -325,6 +328,9 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
 }
 
 async fn run(args: Args) -> Result<()> {
+    if matches!(args.cmd, Some(Cmd::Authority)) {
+        return authority::run(&args.config).await;
+    }
     let path = if args.config.exists() {
         Some(args.config.as_path())
     } else if args.config.as_path() == std::path::Path::new("/etc/briqyard/fleet.yaml") {
@@ -342,6 +348,7 @@ async fn run(args: Args) -> Result<()> {
         Some(Cmd::Restore { identity, from }) => {
             return restore(&cfg, &state_path, &identity, &from).await
         }
+        Some(Cmd::Authority) => unreachable!("authority dispatched before fleet configuration"),
         None => {}
     }
     // The registry holds every host's token and pool key: the fleet's alone.
@@ -496,8 +503,6 @@ fn provision_execution(
     state: &Arc<AppState>,
     execution: &config::Execution,
 ) -> Result<(axum_server::tls_rustls::RustlsConfig, Router)> {
-    let channel = &execution.channel;
-    let (credentials, keys, tls) = channel.load().map_err(anyhow::Error::msg)?;
     let host = state
         .reg
         .lock()
@@ -506,60 +511,11 @@ fn provision_execution(
         .get(&execution.host_id)
         .cloned()
         .context("execution host absent from registry")?;
-    anyhow::ensure!(
-        credentials.host_administrator == host.token
-            && credentials.fleet_administrator == state.cfg.token,
-        "execution administrator identity mismatch"
-    );
-    let transport = execution_host::HostTransport::with_endpoint(
-        &host,
-        &execution.host_url,
-        &credentials.host_installer,
-        &credentials.host_execution,
-        std::time::Duration::from_secs(75),
+    authority::provision(
+        execution,
+        execution_host::TrustedHost::from(&host),
+        &state.cfg.token,
     )
-    .map_err(|_| anyhow!("invalid execution host transport"))?;
-    let journal = api::execution::admission::Journal::open(
-        &channel.journal,
-        api::execution::admission::Role::Authority(execution.authority.clone()),
-    )?;
-    let key = api::execution::provision::read(&execution.signing_key, true, 16 * 1024)
-        .map_err(anyhow::Error::msg)?;
-    let issuer =
-        api::execution::DurableIssuer::from_pkcs8(journal, &key, execution.key_id.clone())?;
-    anyhow::ensure!(
-        keys.iter()
-            .any(|key| key.role == api::execution::KeyRole::Authority
-                && key.kid == execution.key_id
-                && key.issuer == channel.authority_issuer
-                && key.authority.as_deref() == Some(&execution.authority)
-                && key.public_key.as_slice() == issuer.public_key()),
-        "execution signing identity mismatch"
-    );
-    let router = execution_service::router(
-        issuer,
-        transport,
-        host.id,
-        execution_service::Credentials {
-            installer: credentials.central_installer,
-            gateway: credentials.gateway,
-            administrator: credentials.fleet_administrator,
-            host_administrator: credentials.host_administrator,
-        },
-        &state.cfg,
-        execution_service::TrustConfig {
-            keys,
-            central_issuer: channel.central_issuer.clone(),
-            authority_issuer: channel.authority_issuer.clone(),
-            audience: channel.audience.clone(),
-        },
-        Arc::new(api::execution::clock::KernelClock),
-    )
-    .map_err(anyhow::Error::msg)?;
-    Ok((
-        axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls)),
-        router,
-    ))
 }
 
 /// `briqyard-fleet restore`: the registry from its backup, written where the fleet keeps it,

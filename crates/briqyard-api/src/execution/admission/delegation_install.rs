@@ -212,6 +212,9 @@ impl Journal {
     }
 
     pub fn delegation_intent_ready(&self, id: &str) -> Result<bool, Error> {
+        if self.installation_uncertain("delegation", id) {
+            return Ok(false);
+        }
         let Some(intent) = self.delegation_intent(id)? else {
             return Ok(false);
         };

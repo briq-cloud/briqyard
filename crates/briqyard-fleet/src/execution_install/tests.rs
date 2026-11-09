@@ -243,7 +243,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
     };
     assert_eq!(
         installer
-            .register("registration", registration, clock)
+            .register("registration", registration, || Ok(clock))
             .await
             .unwrap(),
         Outcome::Ready
@@ -265,14 +265,14 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
     };
     assert_eq!(
         installer
-            .discover("discovery", "registration", control, clock)
+            .discover("discovery", "registration", control, || Ok(clock))
             .await
             .unwrap(),
         Outcome::Ready
     );
     assert_eq!(
         installer
-            .ownership("ownership", "discovery", clock)
+            .ownership("ownership", "discovery", || Ok(clock))
             .await
             .unwrap(),
         Outcome::Ready
@@ -286,7 +286,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                     admission: "admission".into(),
                     expires_at_ms: 1_060_001
                 },
-                clock
+                || Ok(clock)
             )
             .await
             .unwrap(),
@@ -386,7 +386,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                 allocations: vec![allocation.clone()]
             },
             &trust,
-            clock
+            || Ok(clock)
         )
         .await
         .is_err());
@@ -408,7 +408,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                 allocations: vec![allocation.clone()]
             },
             &trust,
-            clock
+            || Ok(clock)
         )
         .await
         .is_err());
@@ -429,7 +429,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                 allocations: vec![allocation.clone(), calls_allocation.clone()],
             },
             &trust,
-            clock,
+            || Ok(clock),
         )
         .await
         .is_err());
@@ -449,7 +449,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                     allocations: vec![allocation.clone(), calls_allocation.clone()]
                 },
                 &trust,
-                clock
+                || Ok(clock)
             )
             .await
             .unwrap(),
@@ -490,7 +490,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                 allocations: vec![allocation.clone(), calls_allocation.clone()]
             },
             &trust,
-            clock
+            || Ok(clock)
         )
         .await
         .is_err());
@@ -522,7 +522,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                 allocations: vec![allocation.clone(), calls_allocation.clone()]
             },
             &trust,
-            clock
+            || Ok(clock)
         )
         .await
         .is_err());
@@ -538,7 +538,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                     allocations: vec![allocation.clone(), calls_allocation.clone()]
                 },
                 &trust,
-                clock
+                || Ok(clock)
             )
             .await
             .unwrap(),
@@ -583,7 +583,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                 allocations: vec![allocation.clone()]
             },
             &trust,
-            clock
+            || Ok(clock)
         )
         .await
         .is_err());
@@ -603,7 +603,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                     allocations: vec![allocation.clone()]
                 },
                 &trust,
-                clock
+                || Ok(clock)
             )
             .await
             .unwrap(),
@@ -762,7 +762,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                 admission: "renewed-admission".into(),
                 expires_at_ms: 1060000,
             },
-            clock,
+            || Ok(clock),
         )
         .await
         .unwrap();
@@ -789,7 +789,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                 allocations: vec![allocation.clone(), calls_allocation.clone()]
             },
             &trust,
-            clock
+            || Ok(clock)
         )
         .await
         .is_err());
@@ -811,7 +811,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                 allocations: vec![allocation.clone(), calls_allocation.clone()]
             },
             &trust,
-            clock
+            || Ok(clock)
         )
         .await
         .is_err());
@@ -909,7 +909,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                 allocations: vec![allocation]
             },
             &trust,
-            clock
+            || Ok(clock)
         )
         .await
         .is_err());
@@ -1013,4 +1013,156 @@ async fn unavailable_host_does_not_prevent_local_invalidation_or_revocation() {
         AuthorityPayload::Revoke { .. }
     ));
     assert!(!installer.journal.authority_intent_ready("revoke").unwrap());
+}
+
+#[tokio::test]
+async fn clock_loss_during_host_call_or_after_ack_fsync_never_becomes_ready_or_replays() {
+    use axum::{extract::State, http::Uri, response::IntoResponse, Router};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use sha2::{Digest, Sha256};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    struct Server {
+        handle: axum_server::Handle,
+        task: tokio::task::JoinHandle<std::io::Result<()>>,
+    }
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.handle.shutdown();
+            self.task.abort();
+        }
+    }
+    async fn endpoint(
+        State((alive, calls)): State<(Arc<AtomicBool>, Arc<AtomicUsize>)>,
+        uri: Uri,
+        body: axum::body::Bytes,
+    ) -> axum::response::Response {
+        if uri.path().ends_with("/instance") {
+            return axum::Json(Instance {
+                host_instance: "host-instance".into(),
+            })
+            .into_response();
+        }
+        let record: HostRegistration = serde_json::from_slice(&body).unwrap();
+        calls.fetch_add(1, Ordering::SeqCst);
+        alive.store(false, Ordering::SeqCst);
+        axum::Json(InstallationAck {
+            host_instance: record.host_instance.clone(),
+            generation: record.generation,
+            digest: URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(&record).unwrap())),
+        })
+        .into_response()
+    }
+    for after_ack in [false, true] {
+        let alive = Arc::new(AtomicBool::new(true));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+        let tls = briqyard_api::tls::server_config(
+            cert.cert.pem().as_bytes(),
+            cert.key_pair.serialize_pem().as_bytes(),
+        )
+        .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = crate::registry::HostRec {
+            id: "host".into(),
+            url: format!("https://{}", listener.local_addr().unwrap()),
+            token: "admin".into(),
+            tls_fingerprint: briqyard_api::tls::fingerprint(cert.cert.der()),
+            ..Default::default()
+        };
+        let handle = axum_server::Handle::new();
+        let server_handle = handle.clone();
+        let state = (alive.clone(), calls.clone());
+        let task = tokio::spawn(async move {
+            axum_server::from_tcp_rustls(
+                listener,
+                axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls)),
+            )
+            .handle(server_handle)
+            .serve(
+                Router::new()
+                    .fallback(endpoint)
+                    .with_state(state)
+                    .into_make_service(),
+            )
+            .await
+        });
+        let _server = Server { handle, task };
+        let host =
+            HostTransport::new(&host, "installer", "execution", Duration::from_secs(5)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(
+            &dir.path().join("journal"),
+            Role::Authority("region".into()),
+        )
+        .unwrap();
+        let record = HostRegistration {
+            authority: "region".into(),
+            epoch: journal.instance().into(),
+            key_id: "key".into(),
+            public_key: [2; 32],
+            host_instance: "host-instance".into(),
+            generation: 1,
+        };
+        let mut installer = Installer {
+            journal: &mut journal,
+            host: &host,
+            host_id: "host",
+        };
+        let clock = Clock {
+            now: 1010,
+            uncertainty: 1,
+        };
+        let mut observations = 0;
+        let result = installer
+            .register("uncertain", record.clone(), || {
+                observations += 1;
+                if (after_ack && observations == 6) || (!after_ack && !alive.load(Ordering::SeqCst))
+                {
+                    Err(InstallError::ClockUnavailable)
+                } else {
+                    Ok(clock)
+                }
+            })
+            .await;
+        assert!(matches!(result, Err(InstallError::ClockUnavailable)));
+        assert!(!installer
+            .journal
+            .authority_intent_ready("uncertain")
+            .unwrap());
+        assert_eq!(
+            installer
+                .journal
+                .authority_intent("uncertain")
+                .unwrap()
+                .unwrap()
+                .acknowledgement
+                .is_some(),
+            after_ack
+        );
+        assert_eq!(
+            installer
+                .register("uncertain", record, || Ok(clock))
+                .await
+                .unwrap(),
+            Outcome::Pending
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a pending intent must not resend after clock recovery"
+        );
+        if after_ack {
+            let state: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(dir.path().join("journal/journal.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                state["uncertain_installations"],
+                serde_json::json!(["authority:uncertain"])
+            );
+        }
+    }
 }

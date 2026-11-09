@@ -529,8 +529,41 @@ partition and process crash at every durable boundary; handover of both listener
 and downgrade/old-configuration rollback against the exact candidate binaries.
 Mac unit checks or a mock guest do not qualify these paths.
 
-The current fleet provisioner runs inside the normal fleet process. It does not
-provide an authority-only process or suppress that process's registry polling,
-placement API and background management. Independent authority placement requires
-a dedicated process mode with an immutable trusted host record; never share live
-registry or journal files between writers.
+## Standalone authority process
+
+`briqyard-fleet --config <file> authority` branches before normal fleet configuration,
+registry state, AppState construction or background tasks. Its separate strict
+configuration requires `execution`, `host_tls_fingerprint`,
+`host_administrator_file` and `fleet_administrator_file`. No fields have defaults.
+Fleet management, registry, placement, bootstrap, backup, administrator listener
+and metrics fields are rejected. The configured file must already exist.
+
+The process holds one immutable trusted host identity, configured execution URL,
+certificate pin and independently read administrator references. Host transport
+uses the same narrow identity input when the normal fleet derives it from its
+registry. No synthetic registry or administrator config is constructed. The shared
+service, installer, coordinator, issuer and journal remain the only execution path.
+The sole listener uses explicit TLS, systemd socket retention and bounded shutdown.
+No administrator routes, polling, management tasks, fallback or replay are started.
+Never share live registry or journal files between writers.
+
+Administrator references are distinct private files containing exact raw ASCII
+bearers without whitespace or a trailing newline. Both must match the credential
+bundle's administrator comparisons before a journal opens. Reads have a 4 KiB bound,
+require current ownership and private regular files, and reject symlinks.
+
+Installer admission methods accept a fresh qualified-clock callback. They sample
+before intent persistence, after host-instance waits, before transmitting persisted
+work, before host acknowledgement persistence and after its fsync. Clock loss after
+a host call leaves the immutable intent pending. Clock loss after ACK fsync retains
+the ACK and adds a permanent uncertain-installation refusal before reporting failure.
+Readiness and all dependent installations then remain false; a recovered clock never
+makes that ID resend or ready. These refusal keys share the existing journal's
+16 MiB bound and a 16,384-key ceiling. A refusal write failure poisons the live journal;
+a restart rotates its epoch and cannot revive old readiness. Installation status
+requires fresh qualification before advertising ready. Explicit invalidation and
+revocation retain their clock-independent ordering path.
+
+The standalone mode and clock callbacks remain candidates until independent review
+and native qualification. They do not supply real-guest, closure-race, partition,
+crash or clock-step evidence for the authenticated end-to-end execution path.

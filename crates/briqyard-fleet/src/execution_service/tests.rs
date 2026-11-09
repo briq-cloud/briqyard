@@ -79,10 +79,7 @@ fn configured_fixture(
         transport,
         host_id,
         credentials,
-        &crate::config::Config {
-            token: "fleet-admin".into(),
-            ..Default::default()
-        },
+        "fleet-admin",
         TrustConfig {
             keys: vec![VerificationKey {
                 kid: "central".into(),
