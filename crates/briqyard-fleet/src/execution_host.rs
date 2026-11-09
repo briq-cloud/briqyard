@@ -187,7 +187,7 @@ impl HostTransport {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use axum::{
         extract::State,
@@ -199,9 +199,10 @@ mod tests {
 
     type Calls = Arc<Mutex<Vec<(String, String)>>>;
 
-    struct Server {
-        host: HostRec,
-        calls: Calls,
+    pub(crate) struct Server {
+        pub(crate) host: HostRec,
+        pub(crate) calls: Calls,
+        pub(crate) instance: Arc<Mutex<String>>,
         handle: axum_server::Handle,
         task: tokio::task::JoinHandle<std::io::Result<()>>,
     }
@@ -214,7 +215,7 @@ mod tests {
     }
 
     async fn endpoint(
-        State(calls): State<Calls>,
+        State((calls, instance)): State<(Calls, Arc<Mutex<String>>)>,
         uri: Uri,
         headers: HeaderMap,
         body: axum::body::Bytes,
@@ -224,6 +225,10 @@ mod tests {
             headers[header::AUTHORIZATION].to_str().unwrap().into(),
         ));
         match uri.path() {
+            "/internal/execution/v1/instance" => axum::Json(api::execution::channel::Instance {
+                host_instance: instance.lock().unwrap().clone(),
+            })
+            .into_response(),
             "/internal/execution/v1/protect" => (
                 StatusCode::TEMPORARY_REDIRECT,
                 [(header::LOCATION, "/unexpected")],
@@ -247,7 +252,7 @@ mod tests {
         }
     }
 
-    fn server() -> Server {
+    pub(crate) fn server() -> Server {
         let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
         let config = api::tls::server_config(
             cert.cert.pem().as_bytes(),
@@ -258,10 +263,11 @@ mod tests {
         let mut host = host(&format!("https://{}", listener.local_addr().unwrap()));
         host.tls_fingerprint = api::tls::fingerprint(cert.cert.der());
         let calls = Calls::default();
+        let instance = Arc::new(Mutex::new("host-instance".to_owned()));
         let router = Router::new()
             .fallback(endpoint)
             .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))
-            .with_state(calls.clone());
+            .with_state((calls.clone(), instance.clone()));
         let handle = axum_server::Handle::new();
         let running = handle.clone();
         let task = tokio::spawn(async move {
@@ -276,6 +282,7 @@ mod tests {
         Server {
             host,
             calls,
+            instance,
             handle,
             task,
         }

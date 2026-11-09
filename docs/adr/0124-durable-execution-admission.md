@@ -453,3 +453,12 @@ The production provisioner for the regional listener, its two central credential
 trusted keys, pinned host endpoint and qualified clock is still missing. This source
 candidate does not activate scoped access or satisfy the native lifecycle, retention,
 downgrade and Linux qualification gates above.
+
+Installer-only `identity` accepts an empty object and returns the live authority
+journal identity/epoch, fixed host identity and the current host journal instance
+read over pinned installer transport. Every request reads the host again and
+requires qualified clock evidence before and after that call. It changes no
+registration, ownership or admission. This response is neither installation
+readiness nor a trust bootstrap: authority verification keys and control generations
+must still arrive through independent trusted provisioning. A host restart or
+epoch change requires reconciliation and fencing before any installation is ready.

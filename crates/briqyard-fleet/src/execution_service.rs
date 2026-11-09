@@ -124,6 +124,9 @@ struct Id {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Empty {}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Registration {
     id: String,
     record: HostRegistration,
@@ -251,7 +254,8 @@ async fn handle(
 ) -> Response {
     let installer_role = matches!(
         action.as_str(),
-        "register"
+        "identity"
+            | "register"
             | "discover"
             | "ownership"
             | "protect"
@@ -320,6 +324,28 @@ async fn run(
     body: &[u8],
 ) -> Result<serde_json::Value, StatusCode> {
     let mut issuer = service.issuer.lock().await;
+    if action == "identity" {
+        let _: Empty = parse(body)?;
+        clock(service.clock.as_ref())?;
+        let authority_epoch = issuer.instance().to_owned();
+        let authority = match issuer.installation_journal().role() {
+            briqyard_api::execution::admission::Role::Authority(id) => id.clone(),
+            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+        let host: briqyard_api::execution::channel::Instance = service
+            .host
+            .call(crate::execution_host::Route::Instance, &())
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        clock(service.clock.as_ref())?;
+        // Identity discovery is not installation readiness or a source of trusted keys.
+        return value(serde_json::json!({
+            "authority": authority,
+            "authority_epoch": authority_epoch,
+            "host": service.host_id,
+            "host_instance": host.host_instance,
+        }));
+    }
     let host_id = &service.host_id;
     let mut installer = Installer {
         journal: issuer.installation_journal(),
