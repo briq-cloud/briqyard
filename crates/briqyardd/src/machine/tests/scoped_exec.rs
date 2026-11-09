@@ -57,6 +57,39 @@ async fn internal_execution_route_requires_its_installer_credential_on_loopback(
             }
         );
     }
+
+    // Parsing a supported logical input must fit even when JSON expands it 6x.
+    // No credential is sent, so the command cannot reach guest dispatch.
+    let dispatch = access::channel::Dispatch {
+        bundle: access::channel::BundleRequest {
+            installation: "installation".into(),
+            generation: 1,
+            delegation: "delegation".into(),
+            grant: "untrusted".into(),
+            allocations: vec![],
+            permit: "untrusted".into(),
+        },
+        admission: "admission".into(),
+        request: api::ExecRequest {
+            cmd: vec!["true".into()],
+            stdin: "\0".repeat(1024 * 1024),
+            ..Default::default()
+        },
+    };
+    let body = serde_json::to_vec(&dispatch).unwrap();
+    assert!(body.len() > 6 * 1024 * 1024);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/execution/v1/dispatch")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 fn sign(body: &impl Serialize, typ: &str, seed: u8, kid: &str) -> String {

@@ -6,7 +6,7 @@ use reqwest::{header, Client, Method, Url};
 use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 
-const MAX_BODY: usize = 2 * 1024 * 1024;
+const MAX_BODY: usize = api::execution::MAX_BODY_BYTES;
 
 #[derive(Clone, Copy)]
 pub(super) enum Route {
@@ -205,6 +205,7 @@ mod tests {
         State(calls): State<Calls>,
         uri: Uri,
         headers: HeaderMap,
+        body: axum::body::Bytes,
     ) -> axum::response::Response {
         calls.lock().unwrap().push((
             uri.path().into(),
@@ -221,6 +222,15 @@ mod tests {
                 (StatusCode::SERVICE_UNAVAILABLE, "{}").into_response()
             }
             "/internal/execution/v1/status" => " ".repeat(MAX_BODY + 1).into_response(),
+            "/internal/execution/v1/register" => axum::Json(api::ExecResult {
+                stdout: serde_json::from_slice::<api::ExecRequest>(&body)
+                    .unwrap()
+                    .stdin,
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            })
+            .into_response(),
             _ => "{}".into_response(),
         }
     }
@@ -236,7 +246,10 @@ mod tests {
         let mut host = host(&format!("https://{}", listener.local_addr().unwrap()));
         host.tls_fingerprint = api::tls::fingerprint(cert.cert.der());
         let calls = Calls::default();
-        let router = Router::new().fallback(endpoint).with_state(calls.clone());
+        let router = Router::new()
+            .fallback(endpoint)
+            .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))
+            .with_state(calls.clone());
         let handle = axum_server::Handle::new();
         let running = handle.clone();
         let task = tokio::spawn(async move {
@@ -392,5 +405,26 @@ mod tests {
             Err(Error::Request)
         );
         assert!(server.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_mib_of_json_control_bytes_fits_in_both_directions() {
+        let server = server();
+        let transport = HostTransport::new(
+            &server.host,
+            "installer",
+            "execution",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let request = api::ExecRequest {
+            cmd: vec!["true".into()],
+            stdin: "\0".repeat(1024 * 1024),
+            ..Default::default()
+        };
+        assert!(serde_json::to_vec(&request).unwrap().len() > 6 * 1024 * 1024);
+        let result: api::ExecResult = transport.call(Route::Register, &request).await.unwrap();
+        assert_eq!(result.stdout, request.stdin);
+        assert_eq!(server.calls.lock().unwrap().len(), 1);
     }
 }

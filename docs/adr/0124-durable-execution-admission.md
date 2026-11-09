@@ -283,7 +283,10 @@ The dormant fleet host transport captures a trusted registry destination and
 requires its provisioned certificate pin over HTTPS. It disables redirects,
 proxies and retries. Fixed internal routes select distinct installer or execution
 credentials; neither may equal the host administrator credential. Requests and
-responses are bounded to 2 MiB. Any failed or malformed response is unconfirmed,
+responses share an 8 MiB wire bound with the host router. JSON can encode each
+control byte as six bytes, so a 1 MiB logical input or output needs more than
+6 MiB including its envelope. Admission must check the complete serialized
+operation against the wire bound before debit. Any failed or malformed response is unconfirmed,
 never permission to resend dispatch or choose another host. Typed replies still
 require exact validation against durable installation intent before readiness.
 

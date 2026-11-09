@@ -6,7 +6,7 @@ use crate::machine::{
     ScopedExecutionContext,
 };
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{header, HeaderMap, StatusCode},
     routing::{get, post},
     Json, Router,
@@ -186,6 +186,7 @@ pub fn router(state: Arc<HostExecutionChannel>) -> Router {
         .route("/internal/execution/v1/prepare", post(prepare))
         .route("/internal/execution/v1/dispatch", post(dispatch))
         .route("/internal/execution/v1/status", post(status))
+        .layer(DefaultBodyLimit::max(access::MAX_BODY_BYTES))
         .with_state(state)
 }
 

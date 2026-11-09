@@ -25,6 +25,9 @@ pub const GRANT_TYPE: &str = "briqyard-execution-grant+jwt";
 pub const ALLOCATION_TYPE: &str = "briqyard-execution-allocation+jwt";
 pub const PERMIT_TYPE: &str = "briqyard-execution-permit+jwt";
 pub const MAX_TOKEN_BYTES: usize = 16_384;
+/// JSON can expand each control byte to six bytes. The initial 1 MiB input/output
+/// allowance needs room for that encoding and the signed credential envelope.
+pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_ALLOCATIONS: usize = 16;
 pub const MAX_RESOURCES: usize = 64;
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
