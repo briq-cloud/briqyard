@@ -109,6 +109,7 @@ async fn failed_save_cannot_publish_a_receipt_or_target() {
     h.ready().await;
     let e = h.add("m_receipt", state::STOPPED, 256);
     let before = e.snapshot();
+    let (mut events, _) = e.events.subscribe();
     let tmp = h.m.inner.store.dir("machines").join("m_receipt.json.tmp");
     std::fs::create_dir(&tmp).unwrap();
     assert!(h
@@ -118,6 +119,10 @@ async fn failed_save_cannot_publish_a_receipt_or_target() {
         .is_err());
     assert_eq!(e.snapshot().version, before.version);
     assert!(e.snapshot().pending.is_none());
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
     assert!(h
         .m
         .stopped_update_receipt("m_receipt", "n_failed")
@@ -285,6 +290,7 @@ async fn directory_sync_failure_is_recovered_only_after_exact_get_resync() {
     h.ready().await;
     let e = h.add("m_receipt", state::STOPPED, 256);
     let before = e.snapshot();
+    let (mut events, _) = e.events.subscribe();
     h.m.inner.store.fail_next_sync.store(true, Relaxed);
     assert!(h
         .m
@@ -292,6 +298,10 @@ async fn directory_sync_failure_is_recovered_only_after_exact_get_resync() {
         .await
         .is_err());
     assert!(e.snapshot().version > before.version);
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
     let durable = h.stored("m_receipt").unwrap();
     assert!(durable.version > before.version);
     h.host

@@ -77,6 +77,33 @@ impl Events {
         self.emit_at(ev, Utc::now())
     }
 
+    /// Reserve a version, commit its record, then announce it. Failed commits burn
+    /// the version without announcing success, including an uncertain directory sync.
+    /// The callback must not emit events or acquire machine locks.
+    pub(crate) fn commit_then_emit<T>(
+        &self,
+        ev: Ev,
+        commit: impl FnOnce(u64) -> Result<T>,
+    ) -> Result<T> {
+        anyhow::ensure!(!FOLDED.contains(&ev.reason), "committed events cannot fold");
+        let tx = &self.inner.tx;
+        let mut log = self.inner.log.lock().unwrap();
+        if !ev.machine_id.is_empty() {
+            log.flush(tx, |key, _| key.1 == ev.machine_id);
+        }
+        let seq = log.seq.checked_add(1).context("event sequence exhausted")?;
+        let committed = match commit(seq) {
+            Ok(value) => value,
+            Err(error) => {
+                log.seq = seq;
+                return Err(error);
+            }
+        };
+        *log.emitted.entry((ev.kind, ev.reason)).or_default() += 1;
+        log.line(tx, ev, Utc::now(), 1, None);
+        Ok(committed)
+    }
+
     pub(super) fn emit_at(&self, ev: Ev, now: DateTime<Utc>) -> Option<u64> {
         let tx = &self.inner.tx;
         let mut log = self.inner.log.lock().unwrap();
@@ -332,6 +359,35 @@ mod tests {
     use super::*;
     use crate::events::testutil::*;
     use briqyard_api::reason;
+
+    #[test]
+    fn committed_events_wait_for_success_and_never_reuse_a_failed_version() {
+        let (_dir, ev) = open();
+        let (mut rx, _) = ev.subscribe();
+        let mut failed_version = 0;
+        let event = || Ev::normal(reason::UPDATED, "target accepted").of("m_1", "t1");
+        let failed: Result<()> = ev.commit_then_emit(event(), |seq| {
+            failed_version = seq;
+            anyhow::bail!("record sync failed")
+        });
+        assert!(failed.is_err());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        let committed_version = ev
+            .commit_then_emit(event(), |seq| {
+                assert!(seq > failed_version);
+                assert!(matches!(
+                    rx.try_recv(),
+                    Err(broadcast::error::TryRecvError::Empty)
+                ));
+                Ok(seq)
+            })
+            .unwrap();
+        assert_eq!(rx.try_recv().unwrap().seq, committed_version);
+        assert_eq!(ev.read(0, &Filter::default(), 10).unwrap().events.len(), 1);
+    }
 
     #[test]
     fn seqs_go_on_across_a_restart_and_from_the_records() {

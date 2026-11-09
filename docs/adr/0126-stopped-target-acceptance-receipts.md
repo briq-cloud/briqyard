@@ -24,6 +24,11 @@ memory retains the complete candidate even if directory sync fails. A durability
 requires directory sync before later writes or lifecycle effects. Loaded receipts start
 latched too. Known pre-rename failures leave the old record intact.
 
+Acceptance reserves its event version under the event log lock before writing the
+record. Only a successful durable write emits the acceptance event. A failed write
+burns that version without announcing acceptance; exact-nonce recovery stays status-only.
+The write callback holds existing machine locks and acquires no further machine locks.
+
 GET requires exact persisted and in-memory record agreement, current settlement,
 namespace, host identity, boot and version, then syncs the directory before success.
 It never infers acceptance from target equality or rolls memory back. A later claim,
