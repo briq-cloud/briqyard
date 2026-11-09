@@ -32,10 +32,12 @@ On a fresh disposable native CI runner, build the normal native artifacts plus:
 
 ```bash
 cargo build --release -p briqyard-testing --features scoped-native --bin scoped-execution-native
+bash hack/native-ci.sh "$PWD"
 bash hack/scoped-execution-native.sh
 ```
 
-The harness reuses `native-ci.sh` and its checked bootstrap/development installer.
+The native workflow runs this proof after its ordinary suites on the same disposable fixture.
+`native-ci.sh` supplies the checked bootstrap/development installer.
 It installs separate authenticated TLS host and authority listeners, local signing keys,
 and distinct role credentials. Two public Alpine guests and a registered namespace gateway
 form the discovered closure. Central-signed grant/allocation installation precedes projection

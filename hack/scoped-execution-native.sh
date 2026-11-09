@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fresh disposable native CI host only. Builds must already match this source.
+# Disposable native CI host after native-ci.sh installation. Builds must match this source.
 # cargo build --release -p briqyard-testing --features scoped-native --bin scoped-execution-native
 # Reuses native-ci.sh's checked bootstrap and install-dev.sh; never a shared dev host.
 set -euo pipefail
@@ -13,7 +13,6 @@ DRIVER=$TARGET/release/scoped-execution-native
 export BRIQYARD_URL=http://127.0.0.1:7420
 # No arbitrary endpoint overrides: this fixture owns the disposable local host.
 unset BRIQYARD_TOKEN BRIQYARD_TLS_FINGERPRINT
-bash hack/native-ci.sh "$ROOT"
 T=scoped-native-$$
 D=$(sudo mktemp -d /var/lib/briqyard/scoped-native.XXXXXX)
 AUTHORITY_PID=
