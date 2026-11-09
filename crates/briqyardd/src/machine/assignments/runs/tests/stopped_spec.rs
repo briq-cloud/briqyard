@@ -188,13 +188,24 @@ async fn stopped_image_env_replacement_keeps_identity_volume_and_waits_for_start
 
 #[tokio::test]
 async fn stopped_env_coalescing_clear_cancel_and_uncertain_write_recover() {
+    eprintln!(
+        "stopped-coalescing future-bytes={}",
+        std::mem::size_of_val(&stopped_env_coalescing_body())
+    );
+    stopped_env_coalescing_body().await;
+}
+
+async fn stopped_env_coalescing_body() {
+    eprintln!("stopped-coalescing stage=fixture-enter");
     let (h, entry) = settled_run(false).await;
+    eprintln!("stopped-coalescing stage=fixture-ready");
     let before = entry.snapshot();
     let id = before.id.clone();
     let replacement = BTreeMap::from([("NEW".into(), "value".into())]);
     h.m.update(&id, patch(None, replacement, None), None)
         .await
         .unwrap();
+    eprintln!("stopped-coalescing stage=first-update-ready");
     let blocked =
         h.m.inner
             .store
@@ -206,16 +217,20 @@ async fn stopped_env_coalescing_clear_cancel_and_uncertain_write_recover() {
         .update(&id, patch(None, BTreeMap::new(), None), None)
         .await
         .is_err());
+    eprintln!("stopped-coalescing stage=uncertain-clear-ready");
     let outstanding: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
     assert!(h
         .m
         .update(&id, patch(None, before.env.clone(), None), None)
         .await
         .is_err());
+    eprintln!("stopped-coalescing stage=uncertain-cancel-ready");
     let retained: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
     assert_eq!(outstanding.digest().unwrap(), retained.digest().unwrap());
     std::fs::remove_dir(blocked).unwrap();
+    eprintln!("stopped-coalescing stage=restart-enter");
     restart(&h).unwrap();
+    eprintln!("stopped-coalescing stage=restart-ready");
     assert_eq!(
         h.m.entry(&id)
             .unwrap()
@@ -230,9 +245,13 @@ async fn stopped_env_coalescing_clear_cancel_and_uncertain_write_recover() {
     h.m.update(&id, patch(None, before.env.clone(), None), None)
         .await
         .unwrap();
+    eprintln!("stopped-coalescing stage=restart-enter");
     restart(&h).unwrap();
+    eprintln!("stopped-coalescing stage=restart-ready");
     assert!(h.m.entry(&id).unwrap().snapshot().pending.is_none());
+    eprintln!("stopped-coalescing stage=start-enter");
     h.m.start(&id, None).await.unwrap();
+    eprintln!("stopped-coalescing stage=start-ready");
     assert_eq!(h.m.entry(&id).unwrap().snapshot().env, before.env);
     assert!(h
         .m
