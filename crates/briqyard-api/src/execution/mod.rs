@@ -8,6 +8,16 @@ use serde::{Deserialize, Serialize};
 mod verify;
 #[cfg(feature = "execution-verifier")]
 pub use verify::*;
+#[cfg(feature = "execution-admission")]
+pub mod admission;
+#[cfg(feature = "execution-admission")]
+mod issuer;
+#[cfg(feature = "execution-admission")]
+pub use issuer::*;
+#[cfg(feature = "execution-verifier")]
+mod request;
+#[cfg(feature = "execution-verifier")]
+pub use request::*;
 
 pub const GRANT_TYPE: &str = "briqyard-execution-grant+jwt";
 pub const ALLOCATION_TYPE: &str = "briqyard-execution-allocation+jwt";

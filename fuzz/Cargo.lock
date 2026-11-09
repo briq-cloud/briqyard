@@ -249,9 +249,11 @@ dependencies = [
 name = "briqyard-api"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "hex",
  "nix 0.29.0",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

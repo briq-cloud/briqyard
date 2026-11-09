@@ -1,0 +1,389 @@
+use super::*;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use ring::signature::{Ed25519KeyPair, KeyPair};
+use serde_json::{json, Value};
+use std::os::unix::fs::PermissionsExt;
+
+fn clock() -> Clock {
+    Clock {
+        now: 1010,
+        uncertainty: 1,
+    }
+}
+fn sign(body: &impl Serialize, typ: &str, seed: u8, kid: &str) -> String {
+    let key = Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap();
+    let head = json!({"alg":"EdDSA","typ":typ,"kid":kid,"v":1});
+    let input = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(head.to_string()),
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(body).unwrap())
+    );
+    format!(
+        "{}.{}",
+        input,
+        URL_SAFE_NO_PAD.encode(key.sign(input.as_bytes()).as_ref())
+    )
+}
+struct Fixture {
+    grant: Grant,
+    grant_token: String,
+    allocations: Vec<String>,
+    permit: Permit,
+    keys: Vec<VerificationKey>,
+}
+impl Fixture {
+    fn new(epoch: &str) -> Self {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/execution-v1.json"))
+                .unwrap();
+        let grant: Grant = serde_json::from_value(fixture["grant"].clone()).unwrap();
+        let grant_token = fixture["grant_token"].as_str().unwrap().to_owned();
+        let mut allocations = Vec::new();
+        let mut refs = Vec::new();
+        for (id, bucket, units) in [("general", "requests", 2), ("calls", "exec_calls", 1)] {
+            let mut a: Allocation = serde_json::from_value(fixture["allocation"].clone()).unwrap();
+            a.id = id.into();
+            a.bucket = bucket.into();
+            a.units = units;
+            a.authority_epoch = epoch.into();
+            let token = sign(&a, ALLOCATION_TYPE, 1, "central-test");
+            refs.push(AllocationRef {
+                id: a.id,
+                epoch: a.epoch,
+                digest: token_digest(&token),
+                units: 1,
+            });
+            allocations.push(token);
+        }
+        let mut permit: Permit = serde_json::from_value(fixture["permit"].clone()).unwrap();
+        permit.allocations = refs;
+        permit.authority_epoch = epoch.into();
+        let keys = [
+            (1, "central-test", KeyRole::Central, "central", None),
+            (
+                2,
+                "authority-test",
+                KeyRole::Authority,
+                "authority",
+                Some("authority-1"),
+            ),
+        ]
+        .into_iter()
+        .map(|(seed, kid, role, issuer, authority)| VerificationKey {
+            kid: kid.into(),
+            role,
+            issuer: issuer.into(),
+            authority: authority.map(str::to_owned),
+            public_key: Ed25519KeyPair::from_seed_unchecked(&[seed; 32])
+                .unwrap()
+                .public_key()
+                .as_ref()
+                .try_into()
+                .unwrap(),
+        })
+        .collect();
+        Self {
+            grant,
+            grant_token,
+            allocations,
+            permit,
+            keys,
+        }
+    }
+    fn trust(&self) -> Trust<'_> {
+        Trust {
+            keys: &self.keys,
+            central_issuer: "central",
+            authority_issuer: "authority",
+            audience: "runtime",
+        }
+    }
+    fn context(&self) -> DispatchContext<'_> {
+        DispatchContext {
+            principal: &self.grant.principal,
+            team: &self.grant.team,
+            subject: &self.grant.subject,
+            target: &self.grant.target,
+            resource_set: &self.grant.resource_set,
+            metadata_revision: &self.grant.metadata_revision,
+            authority: &self.permit.authority,
+            authority_epoch: &self.permit.authority_epoch,
+            installed_allocations: &self.permit.allocations,
+            operation: self.permit.operation,
+            request_digest: &self.permit.request_digest,
+        }
+    }
+    fn bundle(&self) -> VerifiedBundle {
+        verify_bundle(
+            &self.grant_token,
+            &sign(&self.permit, PERMIT_TYPE, 2, "authority-test"),
+            &self
+                .allocations
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            &self.trust(),
+            clock(),
+            &self.context(),
+        )
+        .unwrap()
+    }
+}
+fn host(path: &Path, fixture: &Fixture) -> Journal {
+    let mut j = Journal::open(path, Role::Host("host-1".into())).unwrap();
+    let instance = j.instance().to_owned();
+    j.fence(
+        "authority-1",
+        &fixture.permit.authority_epoch,
+        &instance,
+        clock(),
+    )
+    .unwrap();
+    j.install(&fixture.bundle(), &instance, clock()).unwrap();
+    j
+}
+
+#[test]
+fn complete_vector_is_atomic_and_duplicates_never_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut f = Fixture::new("authority-epoch-1");
+    let mut journal = host(&dir.path().join("host"), &f);
+    let bundle = f.bundle();
+    journal.consume(&bundle, clock()).unwrap();
+    assert!(matches!(
+        journal.consume(&bundle, clock()),
+        Err(Error::AlreadyAdmitted)
+    ));
+    f.permit.admission = "second".into();
+    assert!(matches!(
+        journal.consume(&f.bundle(), clock()),
+        Err(Error::Exhausted)
+    ));
+    assert_eq!(journal.state.allocations["general"].used, 1);
+    assert_eq!(journal.state.allocations["calls"].used, 1);
+    assert!(journal.status("second").unwrap().is_none());
+    journal.finish(bundle.permit(), clock()).unwrap();
+    assert_eq!(
+        journal.status(&bundle.permit().admission).unwrap(),
+        Some(Status::Finished)
+    );
+    assert!(matches!(
+        journal.consume(&bundle, clock()),
+        Err(Error::AlreadyAdmitted)
+    ));
+}
+#[test]
+fn reopen_rotates_instance_clears_allocations_and_preserves_no_replay_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host");
+    let f = Fixture::new("authority-epoch-1");
+    let mut j = host(&path, &f);
+    let previous = j.instance().to_owned();
+    j.consume(&f.bundle(), clock()).unwrap();
+    drop(j);
+    let mut j = Journal::open(&path, Role::Host("host-1".into())).unwrap();
+    assert_ne!(previous, j.instance());
+    assert!(j.state.allocations.is_empty());
+    assert_eq!(
+        j.status(&f.permit.admission).unwrap(),
+        Some(Status::Consumed)
+    );
+    assert!(j.install(&f.bundle(), &previous, clock()).is_err());
+    let instance = j.instance().to_owned();
+    assert!(j
+        .fence("authority-1", &f.permit.authority_epoch, &instance, clock())
+        .is_err());
+    let newer = Fixture::new("new-authority-epoch");
+    j.fence(
+        "authority-1",
+        &newer.permit.authority_epoch,
+        &instance,
+        clock(),
+    )
+    .unwrap();
+    j.install(&newer.bundle(), &instance, clock()).unwrap();
+    assert!(matches!(
+        j.consume(&newer.bundle(), clock()),
+        Err(Error::AlreadyAdmitted)
+    ));
+}
+#[test]
+fn allocation_fence_refuses_delayed_old_epoch_and_repeated_install_preserves_debits() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = Fixture::new("old-epoch");
+    let mut j = host(&dir.path().join("host"), &f);
+    let instance = j.instance().to_owned();
+    j.consume(&f.bundle(), clock()).unwrap();
+    j.install(&f.bundle(), &instance, clock()).unwrap();
+    assert_eq!(j.state.allocations["calls"].used, 1);
+    j.fence("authority-1", "new-epoch", &instance, clock())
+        .unwrap();
+    assert!(matches!(
+        j.consume(&f.bundle(), clock()),
+        Err(Error::Binding)
+    ));
+    assert!(j.install(&f.bundle(), &instance, clock()).is_err());
+    assert!(j
+        .fence("authority-1", "old-epoch", &instance, clock())
+        .is_err());
+}
+#[test]
+fn exclusive_lock_wrong_role_symlink_and_replaced_inode_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host");
+    let f = Fixture::new("epoch");
+    let j = host(&path, &f);
+    assert!(matches!(
+        Journal::open(&path, Role::Host("host-1".into())),
+        Err(Error::Ownership)
+    ));
+    std::fs::rename(path.join("writer.lock"), path.join("old.lock")).unwrap();
+    std::os::unix::fs::symlink(path.join("old.lock"), path.join("writer.lock")).unwrap();
+    assert!(matches!(j.status("unknown"), Err(Error::Ownership)));
+    assert!(Journal::open(&path, Role::Host("host-1".into())).is_err());
+    drop(j);
+    std::fs::remove_file(path.join("writer.lock")).unwrap();
+    assert!(Journal::open(&path, Role::Host("other-host".into())).is_err());
+}
+#[test]
+fn uncertain_persistence_poisoning_never_licenses_replay_or_silent_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host");
+    let f = Fixture::new("epoch");
+    let mut j = host(&path, &f);
+    std::fs::write(path.join("journal.next"), b"unresolved").unwrap();
+    assert!(matches!(
+        j.consume(&f.bundle(), clock()),
+        Err(Error::Persistence)
+    ));
+    assert!(matches!(
+        j.consume(&f.bundle(), clock()),
+        Err(Error::Persistence)
+    ));
+    drop(j);
+    assert!(Journal::open(&path, Role::Host("host-1".into())).is_err());
+}
+#[test]
+fn prune_never_refunds_and_clock_rollback_cannot_revive_expired_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = Fixture::new("epoch");
+    let mut j = host(&dir.path().join("host"), &f);
+    j.consume(&f.bundle(), clock()).unwrap();
+    j.prune(Clock {
+        now: 1050,
+        uncertainty: 1,
+    })
+    .unwrap();
+    assert!(j.status(&f.permit.admission).unwrap().is_none());
+    assert_eq!(j.state.allocations["calls"].used, 1);
+    assert!(j.consume(&f.bundle(), clock()).is_err());
+}
+#[test]
+fn issuer_releases_only_after_durable_full_reservation_and_retry_is_status_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let j = Journal::open(
+        &dir.path().join("authority"),
+        Role::Authority("authority-1".into()),
+    )
+    .unwrap();
+    let f = Fixture::new(j.instance());
+    let mut issuer = DurableIssuer::new(
+        j,
+        Ed25519KeyPair::from_seed_unchecked(&[2; 32]).unwrap(),
+        "authority-test".into(),
+    )
+    .unwrap();
+    let allocations = f.allocations.iter().map(String::as_str).collect::<Vec<_>>();
+    let token = issuer
+        .issue(
+            &f.grant_token,
+            &allocations,
+            f.permit.clone(),
+            &f.trust(),
+            clock(),
+            &f.context(),
+        )
+        .unwrap();
+    verify_bundle(
+        &f.grant_token,
+        &token,
+        &allocations,
+        &f.trust(),
+        clock(),
+        &f.context(),
+    )
+    .unwrap();
+    assert_eq!(
+        issuer.status(&f.permit.admission).unwrap(),
+        Some(Status::Reserved)
+    );
+    assert!(matches!(
+        issuer.issue(
+            &f.grant_token,
+            &allocations,
+            f.permit.clone(),
+            &f.trust(),
+            clock(),
+            &f.context()
+        ),
+        Err(IssueError::Journal(Error::AlreadyAdmitted))
+    ));
+}
+#[test]
+fn private_permissions_and_malformed_or_oversized_state_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host");
+    std::fs::create_dir(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(
+        Journal::open(&path, Role::Host("host-1".into())),
+        Err(Error::Ownership)
+    ));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(path.join("journal.json"), b"broken").unwrap();
+    std::fs::set_permissions(
+        path.join("journal.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert!(matches!(
+        Journal::open(&path, Role::Host("host-1".into())),
+        Err(Error::Persistence)
+    ));
+}
+
+#[test]
+fn issuer_can_prune_expired_receipts_without_rotating_its_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let j = Journal::open(
+        &dir.path().join("authority"),
+        Role::Authority("authority-1".into()),
+    )
+    .unwrap();
+    let f = Fixture::new(j.instance());
+    let mut issuer = DurableIssuer::new(
+        j,
+        Ed25519KeyPair::from_seed_unchecked(&[2; 32]).unwrap(),
+        "authority-test".into(),
+    )
+    .unwrap();
+    let instance = issuer.instance().to_owned();
+    issuer
+        .issue(
+            &f.grant_token,
+            &f.allocations.iter().map(String::as_str).collect::<Vec<_>>(),
+            f.permit.clone(),
+            &f.trust(),
+            clock(),
+            &f.context(),
+        )
+        .unwrap();
+    issuer
+        .prune(Clock {
+            now: 1050,
+            uncertainty: 1,
+        })
+        .unwrap();
+    assert_eq!(issuer.instance(), instance);
+    assert_eq!(issuer.status(&f.permit.admission).unwrap(), None);
+}

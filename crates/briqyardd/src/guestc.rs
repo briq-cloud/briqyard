@@ -9,6 +9,10 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+mod deadline;
+pub use deadline::CommandDeadline;
+use deadline::ExpiringConnection;
+
 /// An exec's connection to the init, past its request: its output frames to read, its input
 /// frames to write (ADR 0029). Closing it ends the command.
 pub trait Conn: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -32,6 +36,16 @@ pub trait Guest: Send + Sync {
     async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()>;
     /// Starts a command and hands its connection over: [`collect`] reads it to the exit.
     async fn session(&self, vsock: &Path, req: Request) -> Result<Box<dyn Conn>>;
+    /// Scoped dispatch requires an expiry check at the actual guest write boundary.
+    /// An older transport must refuse rather than use the unrestricted session path.
+    async fn scoped_session(
+        &self,
+        _vsock: &Path,
+        _req: Request,
+        _deadline: CommandDeadline,
+    ) -> Result<Box<dyn Conn>> {
+        Err(anyhow!("scoped guest dispatch unavailable"))
+    }
     async fn exec_stream_v1(&self, _vsock: &Path, _req: Request) -> Result<Box<dyn Conn>> {
         Err(anyhow!("exec stream v1 unavailable"))
     }
@@ -148,6 +162,20 @@ impl Guest for Vsock {
     }
     async fn session(&self, vsock: &Path, req: Request) -> Result<Box<dyn Conn>> {
         Ok(Box::new(session(vsock, req).await?))
+    }
+    async fn scoped_session(
+        &self,
+        vsock: &Path,
+        req: Request,
+        deadline: CommandDeadline,
+    ) -> Result<Box<dyn Conn>> {
+        let conn = tokio::time::timeout_at(deadline.instant, dial(vsock))
+            .await
+            .context("scoped guest handshake expired")??;
+        let mut conn = ExpiringConnection { conn, deadline };
+        conn.deadline.check()?;
+        write_request(&mut conn, &req).await?;
+        Ok(Box::new(conn))
     }
     async fn exec_stream_v1(&self, vsock: &Path, mut req: Request) -> Result<Box<dyn Conn>> {
         req.op = "exec_stream_v1".into();
@@ -343,6 +371,20 @@ pub async fn session(uds: &Path, mut req: Request) -> Result<UnixStream> {
 
 /// Reads an exec's output frames to its `exit`; a connection closed before it is [`Closed`].
 pub async fn collect<R: AsyncRead + Unpin>(s: &mut R) -> Result<ExecOutput> {
+    collect_with_limit(s, None).await
+}
+
+/// Counts all output bytes, including bytes beyond the retained buffers. A scoped
+/// operation closes the connection on exhaustion rather than silently exceeding its cap.
+pub async fn collect_limited<R: AsyncRead + Unpin>(s: &mut R, limit: u64) -> Result<ExecOutput> {
+    collect_with_limit(s, Some(limit)).await
+}
+
+async fn collect_with_limit<R: AsyncRead + Unpin>(
+    s: &mut R,
+    limit: Option<u64>,
+) -> Result<ExecOutput> {
+    let mut received = 0u64;
     let mut out = ExecOutput {
         stdout: Vec::new(),
         stderr: Vec::new(),
@@ -351,6 +393,14 @@ pub async fn collect<R: AsyncRead + Unpin>(s: &mut R) -> Result<ExecOutput> {
     };
     loop {
         let r: Response = read_frame(s).await?;
+        if matches!(r.kind.as_str(), "stdout" | "stderr") {
+            received = received
+                .checked_add(r.data.len() as u64)
+                .ok_or_else(|| anyhow!("execution output limit exceeded"))?;
+            if limit.is_some_and(|limit| received > limit) {
+                return Err(anyhow!("execution output limit exceeded"));
+            }
+        }
         match r.kind.as_str() {
             "stdout" => append(&mut out.stdout, &r.data),
             "stderr" => append(&mut out.stderr, &r.data),
@@ -848,6 +898,38 @@ mod tests {
         assert!(seen.interactive && seen.tty);
         assert_eq!((seen.cols, seen.rows), (100, 30));
         assert_eq!((input.as_str(), close.as_str()), ("stdin", "close_stdin"));
+    }
+
+    #[tokio::test]
+    async fn scoped_output_counts_both_streams_and_refuses_excess_instead_of_truncating() {
+        let frames = [
+            Response {
+                kind: "stdout".into(),
+                data: b"ab".to_vec(),
+                ..Default::default()
+            },
+            Response {
+                kind: "stderr".into(),
+                data: b"cd".to_vec(),
+                ..Default::default()
+            },
+            Response {
+                kind: "exit".into(),
+                ..Default::default()
+            },
+        ]
+        .iter()
+        .flat_map(frame)
+        .collect::<Vec<_>>();
+        let mut exact = frames.as_slice();
+        let out = collect_limited(&mut exact, 4).await.unwrap();
+        assert_eq!((out.stdout, out.stderr), (b"ab".to_vec(), b"cd".to_vec()));
+        let mut excessive = frames.as_slice();
+        assert!(collect_limited(&mut excessive, 3)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("output limit exceeded"));
     }
 
     #[tokio::test]

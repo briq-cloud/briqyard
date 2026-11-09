@@ -265,6 +265,15 @@ impl guestc::Guest for Mock {
         anyhow::ensure!(req.op == "exec_stream_v1", "distinct operation required");
         self.session(vsock, req).await
     }
+    async fn scoped_session(
+        &self,
+        vsock: &Path,
+        req: guest::Request,
+        deadline: guestc::CommandDeadline,
+    ) -> Result<Box<dyn guestc::Conn>> {
+        deadline.check()?;
+        self.session(vsock, req).await
+    }
     async fn session(&self, vsock: &Path, req: guest::Request) -> Result<Box<dyn guestc::Conn>> {
         use std::sync::atomic::Ordering::SeqCst;
         use tokio::io::AsyncWriteExt;
