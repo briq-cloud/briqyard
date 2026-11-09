@@ -3,6 +3,8 @@
 //! Opening rotates the service instance and clears installed authority. Reinstallation
 //! requires the trusted control channel's acknowledgement of this exact new instance.
 use super::*;
+mod authority_install;
+pub use authority_install::{AuthorityIntent, AuthorityPayload};
 use nix::libc;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -75,6 +77,10 @@ struct State {
     prepared: BTreeMap<String, PreparedAdmission>,
     #[serde(default)]
     protections: BTreeMap<String, InstalledProtection>,
+    #[serde(default)]
+    authority_intents: BTreeMap<String, AuthorityIntent>,
+    #[serde(default)]
+    authority_highwater: BTreeMap<String, u64>,
 }
 
 /// Authenticated installer input. These records are never constructed from a grant.
@@ -236,6 +242,8 @@ impl Journal {
                 delegation_tombstones: BTreeMap::new(),
                 prepared: BTreeMap::new(),
                 protections: BTreeMap::new(),
+                authority_intents: BTreeMap::new(),
+                authority_highwater: BTreeMap::new(),
             },
         };
         if state.admissions.len() > MAX_RECORDS || state.allocations.len() > MAX_RECORDS {
@@ -861,6 +869,8 @@ impl Journal {
             || next.delegation_tombstones.len() > MAX_RECORDS
             || next.prepared.len() > MAX_RECORDS
             || next.protections.len() > MAX_RECORDS
+            || next.authority_intents.len() > MAX_RECORDS
+            || next.authority_highwater.len() > MAX_RECORDS
         {
             return Err(Error::Full);
         }

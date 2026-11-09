@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-briqyard-api = { workspace = true, features = ["tls", "listeners", "host-process"] }
+briqyard-api = { workspace = true, features = ["tls", "listeners", "host-process", "execution-admission"] }
 briqyard-version = { workspace = true }
 briqyard-objstore = { workspace = true }
 age = { workspace = true }
