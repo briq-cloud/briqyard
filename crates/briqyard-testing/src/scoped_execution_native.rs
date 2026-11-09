@@ -50,6 +50,7 @@ struct Channel {
     installer: String,
     gateway: String,
     host_installer: String,
+    host_execution: String,
 }
 impl Channel {
     async fn request(&self, role: &str, action: &str, body: &Value) -> Result<reqwest::Response> {
@@ -113,6 +114,7 @@ async fn main() -> Result<()> {
         .use_preconfigured_tls(briqyard_api::tls::pinned_client(&pin))
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
         .timeout(Duration::from_secs(75))
         .build()?;
     let channel = Channel {
@@ -129,11 +131,17 @@ async fn main() -> Result<()> {
             .as_str()
             .context("host credential")?
             .into(),
+        host_execution: credentials["host_execution"]
+            .as_str()
+            .context("host execution credential")?
+            .into(),
     };
     // Both TLS and role negatives are read-only and precede installation.
     let wrong_pin = Client::builder()
         .use_preconfigured_tls(briqyard_api::tls::pinned_client(&"00".repeat(32)))
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
         .timeout(Duration::from_secs(5))
         .build()?;
     ensure!(
@@ -277,7 +285,22 @@ async fn main() -> Result<()> {
         .await?;
     ensure!(
         status["state"] == "known" && status["evidence"]["phase"] == "finished",
-        "finished host admission not observed"
+        "finished authority admission not observed"
+    );
+    let host_status = channel
+        .client
+        .post("https://127.0.0.1:7441/internal/execution/v1/status")
+        .bearer_auth(&channel.host_execution)
+        .json(&json!({"admission":"counter"}))
+        .send()
+        .await?;
+    ensure!(host_status.status().is_success(), "host status refused");
+    let host_status: briqyard_api::execution::channel::AdmissionStatus = host_status.json().await?;
+    ensure!(
+        host_status.prepared
+            && host_status.dispatched
+            && host_status.journal == Some(briqyard_api::execution::admission::Status::Finished),
+        "host journal did not confirm finished admission"
     );
     let read = channel
         .call(

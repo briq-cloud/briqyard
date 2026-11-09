@@ -42,7 +42,8 @@ It installs separate authenticated TLS host and authority listeners, local signi
 and distinct role credentials. Two public Alpine guests and a registered namespace gateway
 form the discovered closure. Central-signed grant/allocation installation precedes projection
 lookup and synchronous scoped guest execution. A counter, duplicate operation and second
-scoped read check no replay; host observation checks the finished admission. Wrong pins,
+scoped read check no replay; a direct authenticated host-status request checks its journal.
+Manual dispatch of older refs without this harness skips only the scoped proof. Wrong pins,
 wrong roles and a grant omitting the native gateway must refuse. The trap removes the owned
 namespace, stops the authority and restores the daemon configuration. It retains the host's
 compatibility floor; the runner must be disposable.

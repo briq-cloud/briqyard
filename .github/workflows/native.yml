@@ -96,12 +96,23 @@ jobs:
           shared-key: native
           save-if: false
       - name: Build the head
+        id: build
+        env:
+          SOURCE_REF: ${{ inputs.ref }}
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y musl-tools pkg-config libssl-dev bc jq openssl postgresql-client openssh-server python3-yaml
           cargo build --release --locked --workspace --exclude briqyard-init
           cargo build --release --locked -p briqyard-init --target x86_64-unknown-linux-musl
-          cargo build --release --locked -p briqyard-testing --features scoped-native --bin scoped-execution-native
+          if [ -f hack/scoped-execution-native.sh ]; then
+            cargo build --release --locked -p briqyard-testing --features scoped-native --bin scoped-execution-native
+            echo 'scoped=true' >> "$GITHUB_OUTPUT"
+          elif [ -n "$SOURCE_REF" ]; then
+            echo 'scoped=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Scoped native harness missing from current source' >&2
+            exit 1
+          fi
       - name: Install isolated native host and fleet
         run: bash .native-harness/hack/native-ci.sh "$GITHUB_WORKSPACE"
       - name: e2e
@@ -134,7 +145,7 @@ jobs:
           echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
           exit "$rc"
       - name: Scoped execution through authenticated channels
-        if: ${{ !cancelled() && steps.fleet.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.build.outputs.scoped == 'true' && steps.fleet.outcome != 'skipped' }}
         id: scoped
         timeout-minutes: 15
         run: |
