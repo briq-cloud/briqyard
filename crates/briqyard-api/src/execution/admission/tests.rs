@@ -547,3 +547,25 @@ fn pre_permit_installation_requires_fences_and_never_resets_debits() {
         Err(Error::Binding)
     ));
 }
+
+#[test]
+fn incompatible_journal_evidence_is_refused_without_rewrite() {
+    for unknown_field in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("authority");
+        let journal = Journal::open(&path, Role::Authority("authority-1".into())).unwrap();
+        drop(journal);
+        let file = path.join("journal.json");
+        let mut state: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        if unknown_field {
+            state["future_retained_fence"] = json!({"revoked": true});
+        } else {
+            state["v"] = json!(255);
+        }
+        let evidence = serde_json::to_vec(&state).unwrap();
+        std::fs::write(&file, &evidence).unwrap();
+        assert!(Journal::open(&path, Role::Authority("authority-1".into())).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), evidence);
+        assert!(!path.join("journal.next").exists());
+    }
+}
