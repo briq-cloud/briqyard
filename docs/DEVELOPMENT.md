@@ -603,7 +603,46 @@ cleanup, capability checks for inherited restores, and bounded conntrack diagnos
 kill/reap coverage. Each reviewed failure was reproduced before its fix; Linux network and
 microVM gates remain required before push.
 
-Native e2e additionally runs `hack/e2e-seals.sh` (4 checks): both sandbox seed disk shapes seal, create and execute their first command. The init root-only `--ignored run_as` filter includes loopback ext4 sync, freeze rollback, thaw, deadline and connection-close tests (ADR 0092).
+Native e2e additionally runs `hack/e2e-seals.sh` (32 checks, disposable CI host only): both sandbox seed disk shapes seal,
+create siblings with distinct network identities and vsock nonces, execute their first commands,
+check restored wall clocks and retain the source exec barrier. The positive-DATA source supplies an observed recipe
+for a test-only unbound catalog, validated by the installed configuration parser. Desired zero
+restores the selected seed; warm acceptance requires the actual paused slot ID, unchanged
+kernel process incarnation, credentials, boot identity and open root/DATA devices. It checks
+the physical VMM memory ceiling, independent root and DATA budget refusal, exact replay, changed-body
+conflict and bounded refill with independent DATA. Destination environment and boot files must
+be visible to the first command exactly once. Cleanup drains the pool and destroys owned
+namespaces before the conservative maintenance observation permits configuration restoration
+and handover. A missing process/device observation fails; cold restore cannot pass a warm
+claim. These added native gates require a native run; offline fixture tests do not qualify them.
+
+Restoration failures print only fixed categories for configuration validation/copy,
+previous incarnation, PID queries/change, signal, start, readiness and the outer timeout.
+Restored readiness uses `briqyard status` with the original CLI authentication, including
+an originally empty token. Its observation must carry a new nonempty incarnation and the
+exact restored configuration identity. Recovery faults omit the observation and fail this
+check. The pre-handover maintenance query still requires the fixture token.
+Readiness exhaustion distinguishes query failure, query timeout and identity mismatch. The
+90-second ownership drain and 10-second file restore bounds remain. Handover has one
+128-second budget: 22 seconds for bounded preflight calls, the runtime's five-second admission
+and 60-second shutdown, five seconds for PID observation, seven for start, 25 for readiness
+and four for failure evidence. Command allowances include kill grace. Calls consume the
+remaining phase budget; PID polling reserves restoration time and readiness never resets the
+shared deadline.
+After an attempted SIGUSR2, a failure also projects journal evidence from the recorded daemon
+PID since that attempt. Only disposable CI reads it: at most 129 entries to detect a 128-entry
+limit, 128 KiB and a three-second reader deadline (one-second kill grace). Exact structured
+refusal reasons distinguish maintenance and compatibility; accepted shutdown, shutdown timeout
+and completion remain separate. Missing, malformed, mismatched, conflicting or over-limit
+evidence is unknown. Raw journal messages and errors are suppressed. Only the recorded PID is
+signaled; these diagnostics never retry handover or relax restoration identity checks.
+`python3 -m unittest hack/test_native_seals.py` exercises the exported Bash caller with offline,
+authentication-aware command fakes. A fake clock covers accepted shutdown beyond 15 seconds,
+including full preflight/admission/shutdown allowances, then restored readiness. Refusal,
+expiry and configuration/incarnation mismatches still fail. These tests do not establish the
+cause of a native failure or qualify native handover.
+
+The init root-only `--ignored run_as` filter includes loopback ext4 sync, freeze rollback, thaw, deadline and connection-close tests (ADR 0092).
 
 ADR 0092 checks achieved consistency and two timed unsynced 27-byte regressions
 (snapshot restore and running-source disk fork), plus up to five crash opt-out controls.

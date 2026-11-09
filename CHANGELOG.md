@@ -20,6 +20,7 @@
 ### Upgrade notes
 
 - Stopped assigned machines accept image and complete environment updates, including before the first continuation (ADR 0080). An empty environment clears it; omission retains the pending environment. The next start consumes the update and boots cold. Schema 2 creation-update authority requires this release; a rollback must support any durable update authority still present.
+- Initial running assignments accept DATA-volume growth before their first continuation; stopped assignments accept complete boot-file replacement (`[]` clears it, omission preserves pending files). These updates use schema 3, the `assigned-update-v3` capability and permanent protocol floor 4. Managed installation, handover and automatic rollback reject weaker binaries; schema 1/2 journals retain their existing bytes and validation (ADR 0125). Clearing boot files does not delete paths previously written in the guest.
 - **Breaking:** SIGUSR2 now checks the same conservative warm-catalog predicate as `briqyard warm-maintenance`, under exclusive warm then namespace admission retained through exit. Compatible replacement capabilities alone no longer permit handover with outstanding warm ownership, including healthy assigned workloads. Settle ownership through its normal lifecycle; the check never drains workloads. The daemon being replaced must implement this guard, so it cannot protect the first upgrade from an older daemon.
 - Pools with nonzero desired capacity, outstanding claims, warm machines, holds, transitions, pending assignments and unsettled run authority refuse maintenance. Valid historical claim receipts whose destinations are absent from both live and durable machines, and settled run histories with matching durable machine/reference and reader links, remain valid history. Malformed, inaccessible, inconsistent or over-budget state refuses without repair or cleanup. An eligible observation is not a handover permit.
 - Native handover, workload continuity, warm auto-claim/refill and recovery qualification remain open. Init digest continuity and any need to reseal seeds remain pending `hack/init-digest-check.sh` and comparison of the exact candidate's init digests in `SHA256SUMS` (ADR 0101).
@@ -36,6 +37,7 @@
 
 - A record deleted during a store listing is not an error (#195) ([c07f068a](https://github.com/briq-cloud/briqyard/commit/c07f068ab16f41246e1ee1da47219db152dad2b1)).
 - Support stopped assigned image and complete environment updates, including an initial assignment before its first continuation (#198, ADR 0080) ([c1942295](https://github.com/briq-cloud/briqyard/commit/c194229582f6e982022c790adce31dc0de9e8626)).
+- Preserve original process authority during initial assigned volume growth and stopped boot-file updates (#204, ADR 0125) ([3d75053b](https://github.com/briq-cloud/briqyard/commit/3d75053be23669169a0e3357f2ff757cf014ec0d)).
 
 ## 0.1.33 — 2026-11-08
 

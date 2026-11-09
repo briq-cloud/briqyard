@@ -145,3 +145,60 @@ async fn maintenance_http_requires_api_auth_and_exposes_only_fixed_projection() 
         }
     }
 }
+
+#[tokio::test]
+async fn status_observes_the_same_runtime_without_requiring_configured_maintenance_auth() {
+    use tower::ServiceExt;
+    let h = crate::machine::tests::harness_config(|cfg| {
+        cfg.loaded_identity = api::LoadedConfigIdentity::File {
+            sha256: "a".repeat(64),
+        };
+    })
+    .await;
+    let expected = h.m.warm_catalog_eligibility().await.observation;
+    for fault in [false, true] {
+        *h.m.inner.recovery_fault.lock().unwrap() = fault.then_some("recovery_unresolved");
+        for (configured, bearer, authorized) in [
+            ("test-admin", None, false),
+            ("test-admin", Some("metrics-only"), false),
+            ("test-admin", Some("test-admin"), true),
+            ("", None, true),
+        ] {
+            let router = crate::api::router(Arc::new(crate::api::AppState {
+                mgr: h.m.clone(),
+                token: configured.into(),
+                metrics_token: "metrics-only".into(),
+                loopback: true,
+                openapi: "",
+                tls_fingerprint: String::new(),
+            }));
+            let mut request = axum::http::Request::builder().uri("/v1/status");
+            if let Some(token) = bearer {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            let response = router
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            if !authorized {
+                assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+                continue;
+            }
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 16384)
+                .await
+                .unwrap();
+            let view: api::Status = serde_json::from_slice(&body).unwrap();
+            if fault {
+                assert!(view.observation.is_none());
+            } else {
+                let observed = view.observation.unwrap();
+                assert_eq!(observed.incarnation, expected.incarnation);
+                assert_eq!(observed.config, expected.config);
+                assert_eq!(observed.host_id, expected.host_id);
+                assert_eq!(observed.host_boot_id, expected.host_boot_id);
+                assert_eq!(observed.version, expected.version);
+            }
+        }
+    }
+}
