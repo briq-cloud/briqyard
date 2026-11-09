@@ -325,3 +325,57 @@ async fn stopped_env_only_replacement_starts_cold_with_fresh_config_and_same_dis
         assert!(!config.env.contains_key("DESTINATION_ONLY"));
     }
 }
+
+// This is the first stopped destination assignment, before a continuation created Current.
+// It has valid immutable creation/bind authority and is an existing machine eligible for upgrade.
+#[tokio::test]
+async fn initial_stopped_provider_image_env_replacement_preserves_creation_authority() {
+    let (h, entry) = stopped(false).await;
+    let before = entry.snapshot();
+    let id = before.id.clone();
+    assert!(before.assigned_run.is_none());
+    assert!(h.m.inner.store.get::<Current>(RUNS, &id).unwrap().is_none());
+    h.m.check_assigned_bound_record(&before)
+        .expect("initial assignment has valid immutable creation and bind authority");
+    let image = format!("alpine@sha256:{}", "4".repeat(64));
+    let request: api::UpdateMachineRequest = serde_json::from_value(serde_json::json!({
+        "image": image,
+        "env": { "REPLACEMENT": "new" }
+    }))
+    .unwrap();
+    assert_eq!(request.spec.image.as_deref(), Some(image.as_str()));
+    assert_eq!(
+        request
+            .spec
+            .env
+            .as_ref()
+            .unwrap()
+            .get("REPLACEMENT")
+            .map(String::as_str),
+        Some("new")
+    );
+    let updated = h.m.update(&id, request, Some(before.version)).await.expect(
+        "an initial stopped assignment must accept the provider's image/full-env replacement",
+    );
+    assert_eq!(updated.state, state::STOPPED);
+    assert!(entry.live.lock().unwrap().is_none());
+    let after = entry.snapshot();
+    assert_eq!(after.launch_identity, before.launch_identity);
+    assert_eq!(after.volume, before.volume);
+    assert_eq!(
+        after.pending.as_ref().unwrap().image.as_deref(),
+        Some(image.as_str())
+    );
+    assert_eq!(
+        after
+            .pending
+            .as_ref()
+            .unwrap()
+            .env
+            .as_ref()
+            .unwrap()
+            .get("REPLACEMENT")
+            .map(String::as_str),
+        Some("new")
+    );
+}
