@@ -427,7 +427,17 @@ It requires exact grant possession, current ready dependencies, an unrevoked del
 and qualified clock coverage for grant, source and protection. Dispatch repeats those
 checks under the issuer turn and requires the same projection digest before any admission.
 A previous read cannot authorize a later command. No signed credentials or allocations
-are returned by this read.
+are returned by this read. Gateway `projection_lookup` accepts `{delegation,grant}`
+and resolves exactly one retained intent by delegation and compact-token digest before
+applying the same eligibility checks. Zero or multiple matches refuse; an ineligible
+historical match never falls back to another version. Dispatch uses the returned exact
+intent and projection digest without another lookup.
+
+Authenticated control also installs an opaque `policy_revision` identifier. It is part
+of immutable intent equality and must remain identical across renewal. Missing legacy
+revisions fail readiness. The runtime records this snapshot; the control-plane caller
+still owns policy authorization and revocation. Installer status returns stored policy,
+registration, ownership and protection identities with the existing acknowledgement.
 
 Renewal retains the delegation, principal, ownership and source identity and installs a
 strictly higher version with a fresh grant, protection admission and projection. Starting

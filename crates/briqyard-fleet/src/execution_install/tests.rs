@@ -369,6 +369,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         ownership: "ownership".into(),
         protection: "protection".into(),
         projection: projection(),
+        policy_revision: "policy-one".into(),
         source: briqyard_api::execution::Source {
             kind: "api_key".into(),
             id: "credential".into(),
@@ -460,6 +461,39 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         .presented_projection("signed", &grant, clock)
         .unwrap();
     assert_eq!(evidence.projection, projection());
+    assert_eq!(
+        installer
+            .journal
+            .lookup_projection("delegation", &grant, clock)
+            .unwrap()
+            .intent,
+        "signed"
+    );
+    for (delegation, presented) in [
+        ("another-delegation", grant.as_str()),
+        ("delegation", "wrong-grant"),
+    ] {
+        assert!(installer
+            .journal
+            .lookup_projection(delegation, presented, clock)
+            .is_err());
+    }
+    let mut changed_policy = control();
+    changed_policy.policy_revision = "policy-two".into();
+    assert!(installer
+        .delegation(
+            "signed",
+            "registration",
+            changed_policy,
+            SignedDelegation {
+                grant: grant.clone(),
+                allocations: vec![allocation.clone(), calls_allocation.clone()]
+            },
+            &trust,
+            clock
+        )
+        .await
+        .is_err());
     assert!(installer
         .journal
         .presented_projection("signed", "another grant", clock)
@@ -532,6 +566,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         ownership: "ownership".into(),
         protection: "protection".into(),
         projection: projection(),
+        policy_revision: "policy-one".into(),
         source: briqyard_api::execution::Source {
             kind: "api_key".into(),
             id: "credential".into(),
@@ -739,6 +774,31 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
     renewal.protection = "renewed-protection".into();
     renewal.projection =
         briqyard_api::execution::admission::Projection::new(b"renewed snapshot".to_vec()).unwrap();
+    let mut changed_policy = control();
+    changed_policy.version = renewal.version;
+    changed_policy.protection = renewal.protection.clone();
+    changed_policy.projection = renewal.projection.clone();
+    changed_policy.policy_revision = "policy-two".into();
+    assert!(installer
+        .delegation(
+            "changed-policy-renewal",
+            "registration",
+            changed_policy,
+            SignedDelegation {
+                grant: renewed_grant.clone(),
+                allocations: vec![allocation.clone(), calls_allocation.clone()]
+            },
+            &trust,
+            clock
+        )
+        .await
+        .is_err());
+    assert!(installer
+        .journal
+        .delegation_intent("changed-policy-renewal")
+        .unwrap()
+        .is_none());
+    assert!(installer.journal.delegation_intent_ready("signed").unwrap());
     // The host deliberately returns a wrong expiration for version 2. The durable
     // replacement still fences the old version before acknowledgement.
     assert!(installer
@@ -764,6 +824,14 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         .journal
         .presented_projection("signed", &grant, clock)
         .is_err());
+    assert!(installer
+        .journal
+        .lookup_projection("delegation", &grant, clock)
+        .is_err());
+    assert!(installer
+        .journal
+        .lookup_projection("delegation", &renewed_grant, clock)
+        .is_err());
     let expected = installer
         .journal
         .delegation_intent("renewed")
@@ -787,6 +855,14 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
             .unwrap()
             .version,
         2
+    );
+    assert_eq!(
+        installer
+            .journal
+            .lookup_projection("delegation", &renewed_grant, clock)
+            .unwrap()
+            .intent,
+        "renewed"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 11);
     installer

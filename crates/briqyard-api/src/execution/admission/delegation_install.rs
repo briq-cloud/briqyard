@@ -16,6 +16,9 @@ pub struct DelegationIntent {
     pub trusted_source: Option<Source>,
     #[serde(default)]
     pub projection: Option<Projection>,
+    /// Opaque authenticated control snapshot; absence never establishes readiness.
+    #[serde(default)]
+    pub policy_revision: Option<String>,
     pub request: InstallDelegation,
     pub expected: HostDelegation,
     pub acknowledgement: Option<HostDelegation>,
@@ -35,6 +38,7 @@ impl Journal {
             || !valid_id(&intended.request.id)
             || intended.request.version == 0
             || intended.projection.is_none()
+            || !intended.policy_revision.as_deref().is_some_and(valid_id)
             || !intended.trusted_source.as_ref().is_some_and(|source| {
                 valid_id(&source.kind)
                     && valid_id(&source.id)
@@ -70,6 +74,7 @@ impl Journal {
                 && prior.protection == intended.protection
                 && prior.trusted_source == intended.trusted_source
                 && prior.projection == intended.projection
+                && prior.policy_revision == intended.policy_revision
                 && prior.request == intended.request
                 && prior.expected == intended.expected
             {
@@ -91,6 +96,7 @@ impl Journal {
                 || intended.authority_epoch != prior.authority_epoch
                 || intended.registration != prior.registration
                 || intended.ownership != prior.ownership
+                || intended.policy_revision != prior.policy_revision
                 || intended.request.principal != prior.request.principal
                 || intended.request.installation != prior.request.installation
                 || intended.request.generation != prior.request.generation
@@ -211,6 +217,7 @@ impl Journal {
         };
         Ok(intent.authority_epoch == self.instance()
             && intent.projection.is_some()
+            && intent.policy_revision.as_deref().is_some_and(valid_id)
             && !self.state.delegation_intents.values().any(|other| {
                 other.request.id == intent.request.id
                     && other.request.version > intent.request.version

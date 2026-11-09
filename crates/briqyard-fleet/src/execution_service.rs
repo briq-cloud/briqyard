@@ -171,6 +171,7 @@ struct DelegationControlDto {
     ownership: String,
     protection: String,
     source: Source,
+    policy_revision: String,
     projection: briqyard_api::execution::admission::Projection,
 }
 #[derive(Deserialize)]
@@ -261,7 +262,7 @@ async fn handle(
     );
     let gateway_role = matches!(
         action.as_str(),
-        "exec" | "projection" | "operation_status" | "observe"
+        "exec" | "projection" | "projection_lookup" | "operation_status" | "observe"
     );
     if !installer_role && !gateway_role {
         return StatusCode::NOT_FOUND.into_response();
@@ -385,6 +386,7 @@ async fn run(
                         protection: dto.control.protection,
                         source: dto.control.source,
                         projection: dto.control.projection,
+                        policy_revision: dto.control.policy_revision,
                     },
                     SignedDelegation {
                         grant: dto.signed.grant,
@@ -418,6 +420,15 @@ async fn run(
         "installation_status" => {
             let dto: InstallationStatus = parse(body)?;
             installation_reply(installer.journal, &dto.kind, &dto.id, Outcome::Pending)
+        }
+        "projection_lookup" => {
+            let dto: ProjectionLookup = parse(body)?;
+            value(
+                installer
+                    .journal
+                    .lookup_projection(&dto.delegation, &dto.grant, clock(service.clock.as_ref())?)
+                    .map_err(|_| StatusCode::CONFLICT)?,
+            )
         }
         "projection" => {
             let dto: ProjectionRead = parse(body)?;
@@ -503,6 +514,13 @@ struct InstallationStatus {
 #[serde(deny_unknown_fields)]
 struct ProjectionRead {
     delegation_intent: String,
+    grant: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectionLookup {
+    delegation: String,
     grant: String,
 }
 
@@ -618,7 +636,9 @@ fn installation_reply(
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
                 intent.acknowledgement.as_ref().map(|r| {
                     serde_json::json!({"acknowledgement":r,"projection":intent.projection,
-                        "intent":id,"authority_epoch":intent.authority_epoch})
+                        "intent":id,"authority_epoch":intent.authority_epoch,
+                        "policy_revision":intent.policy_revision,"registration":intent.registration,
+                        "ownership":intent.ownership,"protection":intent.protection})
                 }),
             )
         }
@@ -785,12 +805,36 @@ mod tests {
             uncertainty: 1,
         }))));
         let status = br#"{"id":"missing"}"#.to_vec();
-        for token in ["", "central-installer", "fleet-admin"] {
-            assert_eq!(
-                request(&app, "projection", token, vec![]).await.status(),
-                StatusCode::UNAUTHORIZED
-            );
+        for action in ["projection", "projection_lookup"] {
+            for token in ["", "central-installer", "fleet-admin"] {
+                assert_eq!(
+                    request(&app, action, token, vec![]).await.status(),
+                    StatusCode::UNAUTHORIZED
+                );
+            }
         }
+        assert_eq!(
+            request(
+                &app,
+                "projection_lookup",
+                "gateway-only",
+                br#"{"delegation":"missing","grant":"presented"}"#.to_vec()
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            request(
+                &app,
+                "projection_lookup",
+                "gateway-only",
+                br#"{"delegation":"missing"}"#.to_vec()
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
         assert_eq!(
             request(
                 &app,

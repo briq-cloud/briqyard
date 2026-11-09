@@ -73,6 +73,26 @@ pub struct ProjectionEvidence {
 }
 
 impl Journal {
+    /// Resolve only the exact presented grant. A historical or pending match
+    /// refuses; it never falls back to another ready installation.
+    pub fn lookup_projection(
+        &self,
+        delegation: &str,
+        grant: &str,
+        clock: Clock,
+    ) -> Result<ProjectionEvidence, Error> {
+        self.check(clock)?;
+        let digest = token_digest(grant);
+        let mut matches = self.state.delegation_intents.iter().filter(|(_, intent)| {
+            intent.request.id == delegation && intent.expected.grant_digest == digest
+        });
+        let (id, _) = matches.next().ok_or(Error::Binding)?;
+        if matches.next().is_some() {
+            return Err(Error::Binding);
+        }
+        self.presented_projection(id, grant, clock)
+    }
+
     /// Possession is rechecked for each read and dispatch. A prior projection read
     /// is never authorization for a later operation.
     pub fn presented_projection(
