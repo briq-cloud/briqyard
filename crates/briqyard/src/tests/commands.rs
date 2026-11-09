@@ -84,6 +84,10 @@ fn machine_lifecycle_commands() {
         ),
         (vec!["machine", "snapshot", "ls", "m1"], "ls"),
         (
+            vec!["machine", "snapshot", "sandbox-recipe", "m1", "s_1"],
+            "recipe",
+        ),
+        (
             vec!["machine", "snapshot", "restore", "m1", "before"],
             "restore",
         ),
@@ -98,6 +102,11 @@ fn machine_lifecycle_commands() {
                 _ => "?",
             },
             MachineCmd::Snapshot(SnapshotCmd::Ls { id }) if id == "m1" => "ls",
+            MachineCmd::Snapshot(SnapshotCmd::SandboxRecipe { id, snap })
+                if id == "m1" && snap == "s_1" =>
+            {
+                "recipe"
+            }
             MachineCmd::Snapshot(SnapshotCmd::Restore { id, snap })
                 if id == "m1" && snap == "before" =>
             {

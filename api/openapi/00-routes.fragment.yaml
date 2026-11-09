@@ -370,6 +370,19 @@ paths:
         "204": { description: deleted }
         "404": { description: no such machine }
         "409": { description: "`bad_state`: a restore unfinished" }
+  /v1/machines/{id}/snapshots/{snap}/sandbox-recipe:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/snap" }]
+    get:
+      summary: "Observe a validated sealed sandbox recipe on its source daemon; exact snapshot ID only, configured API authentication required"
+      description: "No guest configuration, reader reservation or pool is returned or created. Source lifecycle admission has a 5-second wait limit. The observation grants no later mutation."
+      responses:
+        "200": { description: validated recipe at this observation, content: { application/json: { schema: { $ref: "#/components/schemas/SealedSandboxRecipe" } } } }
+        "400": { description: snapshot profile is unavailable or common template provenance is incompatible }
+        "401": { description: API authentication required }
+        "404": { description: machine or exact snapshot ID not found }
+        "409": { description: source busy or API authentication not configured }
+        "500": { description: sandbox recipe validation or artifact-file verification failed }
+        "503": { description: "`capacity`: startup recovery is unresolved" }
   /v1/machines/{id}/snapshots/{snap}/restore:
     parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/snap" }]
     post:

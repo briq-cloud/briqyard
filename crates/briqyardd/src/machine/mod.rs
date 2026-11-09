@@ -38,6 +38,7 @@ mod gateway;
 mod launch_identity;
 mod leaves;
 mod logpage;
+mod maintenance;
 mod memory;
 mod memory_host;
 mod moves;
@@ -828,6 +829,7 @@ pub struct Stats {
 }
 
 struct Inner {
+    observation_incarnation: String,
     stats: Stats,
     warm_lock: tokio::sync::RwLock<()>,
     sandbox_create_lock: tokio::sync::RwLock<()>,

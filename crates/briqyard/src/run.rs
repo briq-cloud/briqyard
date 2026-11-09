@@ -473,6 +473,14 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     )
                     .await?,
                 ),
+                SnapshotCmd::SandboxRecipe { id, snap } => print_json(
+                    &c.call::<api::SealedSandboxRecipe>(
+                        GET,
+                        &format!("/v1/machines/{id}/snapshots/{snap}/sandbox-recipe"),
+                        NONE,
+                    )
+                    .await?,
+                ),
                 SnapshotCmd::Rm { id, snap } => {
                     c.raw(DELETE, &format!("/v1/machines/{id}/snapshots/{snap}"), NONE)
                         .await?;

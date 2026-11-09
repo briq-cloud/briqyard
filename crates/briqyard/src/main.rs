@@ -598,6 +598,8 @@ enum SnapshotCmd {
     },
     /// List a machine's snapshots
     Ls { id: String },
+    /// Inspect one exact sealed sandbox recipe on its daemon, without reserving a clone
+    SandboxRecipe { id: String, snap: String },
     /// Take the disks back to a snapshot (an id or a name); a running machine boots again
     Restore { id: String, snap: String },
     /// Delete a snapshot (an id or a name)

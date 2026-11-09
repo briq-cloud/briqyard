@@ -3,7 +3,7 @@
 use crate::{fc, netw};
 use anyhow::{bail, Context, Result};
 use briqyard_api as api;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -16,17 +16,7 @@ pub use sandbox::SandboxRecipe;
 mod warm;
 pub use warm::*;
 
-/// Identity of the input validated by this process, never a later read of its path.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-#[serde(tag = "source", rename_all = "snake_case")]
-pub enum LoadedConfigIdentity {
-    #[default]
-    Unobserved,
-    Defaults,
-    File {
-        sha256: String,
-    },
-}
+pub use api::LoadedConfigIdentity;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]

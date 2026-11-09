@@ -87,6 +87,16 @@ pub(super) async fn snapshots(
     Ok(Json(st.mgr.snapshots(&id).await?))
 }
 
+pub(super) async fn sealed_sandbox_recipe(
+    State(st): S,
+    Path((id, snap)): Path<(String, String)>,
+) -> Result<Json<api::SealedSandboxRecipe>, AppError> {
+    if st.token.is_empty() {
+        return Err(MError::Conflict("configured API authentication is required".into()).into());
+    }
+    Ok(Json(st.mgr.sealed_sandbox_recipe(&id, &snap).await?))
+}
+
 pub(super) async fn delete_snapshot(
     State(st): S,
     Path((id, snap)): Path<(String, String)>,

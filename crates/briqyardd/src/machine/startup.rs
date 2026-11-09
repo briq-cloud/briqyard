@@ -69,6 +69,7 @@ impl Manager {
             },
         );
         let inner = Arc::new(Inner {
+            observation_incarnation: hex::encode(rand::random::<[u8; 16]>()),
             stats: Stats::default(),
             warm_lock: tokio::sync::RwLock::new(()),
             sandbox_create_lock: tokio::sync::RwLock::new(()),

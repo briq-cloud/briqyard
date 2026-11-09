@@ -154,6 +154,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/machines/:id/snapshots", get(snapshots).post(snapshot))
         .route(
+            "/v1/machines/:id/snapshots/:snap/sandbox-recipe",
+            get(sealed_sandbox_recipe),
+        )
+        .route(
             "/v1/machines/:id/snapshots/:snap",
             axum::routing::delete(delete_snapshot),
         )
