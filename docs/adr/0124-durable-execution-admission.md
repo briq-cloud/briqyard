@@ -300,6 +300,17 @@ Beginning registration replacement makes old ownership unready, including when
 the host instance stays the same. A new registration ACK never revives that
 ownership; it must be independently installed under the new registration.
 
+The dormant fleet installer now records authenticated logical ownership input
+before discovery and records the exact typed host receipt before ownership.
+It checks the full ordered resource vector, every public mapping and the host
+instance; omitted public members refuse installation. Ownership readiness also
+depends on that exact discovery intent and its current registration. After a
+committed idle deadline is supplied, the installer records the ownership,
+admission, full resource vector, revision and exact millisecond deadline before
+calling host protection. Only a matching ordered ACK is ready. Pending calls
+are never resent by this path. These steps use the issuer's existing exclusive
+journal and do not create another authority ledger.
+
 No mounted HTTP route or configuration accepts these credentials yet. Administrator routes do not
 call this boundary and keep their existing authentication and behavior.
 

@@ -4,7 +4,11 @@
 //! requires the trusted control channel's acknowledgement of this exact new instance.
 use super::*;
 mod authority_install;
+mod installation_flow;
 pub use authority_install::{AuthorityIntent, AuthorityPayload};
+pub use installation_flow::{
+    validate_discovery_receipt, DiscoveryIntent, OwnershipControl, ProtectionIntent,
+};
 use nix::libc;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -81,6 +85,10 @@ struct State {
     authority_intents: BTreeMap<String, AuthorityIntent>,
     #[serde(default)]
     authority_highwater: BTreeMap<String, u64>,
+    #[serde(default)]
+    discovery_intents: BTreeMap<String, DiscoveryIntent>,
+    #[serde(default)]
+    protection_intents: BTreeMap<String, ProtectionIntent>,
 }
 
 /// Authenticated installer input. These records are never constructed from a grant.
@@ -244,9 +252,15 @@ impl Journal {
                 protections: BTreeMap::new(),
                 authority_intents: BTreeMap::new(),
                 authority_highwater: BTreeMap::new(),
+                discovery_intents: BTreeMap::new(),
+                protection_intents: BTreeMap::new(),
             },
         };
-        if state.admissions.len() > MAX_RECORDS || state.allocations.len() > MAX_RECORDS {
+        if state.admissions.len() > MAX_RECORDS
+            || state.allocations.len() > MAX_RECORDS
+            || state.discovery_intents.len() > MAX_RECORDS
+            || state.protection_intents.len() > MAX_RECORDS
+        {
             return Err(Error::Full);
         }
         let mut random = [0u8; 24];
@@ -871,6 +885,8 @@ impl Journal {
             || next.protections.len() > MAX_RECORDS
             || next.authority_intents.len() > MAX_RECORDS
             || next.authority_highwater.len() > MAX_RECORDS
+            || next.discovery_intents.len() > MAX_RECORDS
+            || next.protection_intents.len() > MAX_RECORDS
         {
             return Err(Error::Full);
         }

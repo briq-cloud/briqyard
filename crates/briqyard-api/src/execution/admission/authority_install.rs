@@ -38,7 +38,7 @@ impl AuthorityPayload {
         }
     }
 
-    fn expected_ack(&self, host_instance: &str) -> Result<InstallationAck, Error> {
+    pub(super) fn expected_ack(&self, host_instance: &str) -> Result<InstallationAck, Error> {
         let (generation, bytes) = match self {
             Self::Registration(r) => (r.generation, serde_json::to_vec(r)),
             Self::Ownership(r) => (r.generation, serde_json::to_vec(r)),
@@ -64,6 +64,8 @@ pub struct AuthorityIntent {
     /// Missing in older records: ownership without this dependency is unready.
     #[serde(default)]
     pub registration_dependency: Option<AuthorityRegistrationDependency>,
+    #[serde(default)]
+    pub discovery_dependency: Option<String>,
     pub payload: AuthorityPayload,
     pub acknowledgement: Option<InstallationAck>,
     #[serde(default)]
@@ -96,6 +98,7 @@ impl Journal {
             return Err(Error::Binding);
         }
         let mut registration_dependency = None;
+        let mut discovery_dependency = None;
         match &payload {
             AuthorityPayload::Registration(r) => {
                 if r.host_instance != host_instance
@@ -132,6 +135,30 @@ impl Journal {
                 if registration_dependency.is_none() {
                     return Err(Error::Binding);
                 }
+                discovery_dependency =
+                    self.state
+                        .discovery_intents
+                        .iter()
+                        .find_map(|(discovery_id, discovery)| {
+                            let receipt = discovery.receipt.as_ref()?;
+                            (discovery.host == host
+                                && discovery.authority_epoch == self.instance()
+                                && self.discovery_intent_ready(discovery_id).unwrap_or(false)
+                                && discovery.control.installation == r.installation
+                                && discovery.control.generation == r.generation
+                                && discovery.control.team == r.team
+                                && discovery.control.primary_id == r.subject
+                                && discovery.control.metadata_revision == r.metadata_revision
+                                && receipt.host_instance == r.host_instance
+                                && receipt.primary == r.primary
+                                && receipt.public_seeds == r.public_seeds
+                                && receipt.public_resources == r.public_resources
+                                && receipt.resource_set == r.resource_set)
+                                .then(|| discovery_id.clone())
+                        });
+                if discovery_dependency.is_none() {
+                    return Err(Error::Binding);
+                }
             }
             AuthorityPayload::Invalidate { .. } | AuthorityPayload::Revoke { .. } => {}
         }
@@ -140,6 +167,7 @@ impl Journal {
             host_instance: host_instance.into(),
             authority_epoch: self.instance().into(),
             registration_dependency,
+            discovery_dependency,
             payload,
             acknowledgement: None,
             instance_confirmed: false,
@@ -149,6 +177,7 @@ impl Journal {
                 && prior.host_instance == intended.host_instance
                 && prior.authority_epoch == intended.authority_epoch
                 && prior.registration_dependency == intended.registration_dependency
+                && prior.discovery_dependency == intended.discovery_dependency
                 && prior.payload == intended.payload
             {
                 return Ok(false);
@@ -256,11 +285,20 @@ impl Journal {
         } else {
             true
         };
+        let discovery_current = if matches!(intent.payload, AuthorityPayload::Ownership(_)) {
+            intent
+                .discovery_dependency
+                .as_ref()
+                .is_some_and(|id| self.discovery_intent_ready(id).unwrap_or(false))
+        } else {
+            true
+        };
         Ok(intent.authority_epoch == self.instance()
             && (intent.acknowledgement.is_some() || intent.instance_confirmed)
             && self.state.authority_highwater.get(&key) == Some(&generation)
             && !invalidated
-            && registration_current)
+            && registration_current
+            && discovery_current)
     }
 
     /// Invalidation and revocation return the current host instance only.
@@ -356,6 +394,46 @@ mod tests {
     }
 
     fn install_ownership(journal: &mut Journal, id: &str, owner: HostOwnership) {
+        let registration = journal.state.authority_intents.iter()
+            .find_map(|(id, intent)| matches!(&intent.payload, AuthorityPayload::Registration(r)
+                if r.host_instance == owner.host_instance && journal.authority_intent_ready(id).unwrap()).then(|| id.clone()))
+            .unwrap();
+        let control = OwnershipControl {
+            host_instance: owner.host_instance.clone(),
+            installation: owner.installation.clone(),
+            generation: owner.generation,
+            team: owner.team.clone(),
+            primary_id: owner.subject.clone(),
+            seeds: owner
+                .public_resources
+                .iter()
+                .map(|p| PublicSeed {
+                    id: p.id.clone(),
+                    machine: p.target.machine.clone(),
+                    namespace: p.target.namespace.clone(),
+                    team: owner.team.clone(),
+                    expected_version: None,
+                })
+                .collect(),
+            metadata_revision: owner.metadata_revision.clone(),
+        };
+        let discovery = format!("discovery-{id}");
+        journal
+            .begin_discovery_intent(&discovery, "host-1", &registration, control, clock())
+            .unwrap();
+        journal
+            .acknowledge_discovery_intent(
+                &discovery,
+                DiscoveryReceipt {
+                    host_instance: owner.host_instance.clone(),
+                    primary: owner.primary.clone(),
+                    public_seeds: owner.public_seeds.clone(),
+                    public_resources: owner.public_resources.clone(),
+                    resource_set: owner.resource_set.clone(),
+                },
+                clock(),
+            )
+            .unwrap();
         let payload = AuthorityPayload::Ownership(Box::new(owner.clone()));
         journal
             .begin_authority_intent(id, "host-1", &owner.host_instance, payload.clone(), clock())

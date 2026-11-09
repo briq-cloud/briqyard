@@ -17,7 +17,7 @@ pub struct InstallationAck {
     pub digest: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Protect {
     pub installation: String,
@@ -26,7 +26,7 @@ pub struct Protect {
     pub expires_at_ms: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProtectionAck {
     pub admission: String,
