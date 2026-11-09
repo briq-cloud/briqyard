@@ -160,6 +160,30 @@ fn safe_id(id: &str) -> bool {
 }
 
 impl Manager {
+    /// The final stop decision shares the record mutex with activity registration.
+    /// A refused idle stop changes neither its state nor its stop intent.
+    pub(super) fn admit_stop(
+        &self,
+        entry: &Entry,
+        why: &str,
+        deadline: tokio::time::Instant,
+        event: Ev,
+    ) -> bool {
+        entry.set_state_when(
+            state::STOPPING,
+            |record| {
+                why != stop::IDLE
+                    || (entry.in_flight.load(Relaxed) == 0
+                        && self.idle_stop_allowed(record, Utc::now()))
+            },
+            |_| {
+                *entry.stop_req.lock().unwrap() = Some(why.into());
+                *entry.stop_deadline.lock().unwrap() = Some(deadline);
+                Some(event)
+            },
+        )
+    }
+
     pub(super) fn protected_sleeps_at(&self, r: &Record) -> Option<DateTime<Utc>> {
         let protection = self.inner.idle_protection.lock().unwrap();
         if protection.poisoned {

@@ -3,6 +3,38 @@
 use super::*;
 
 #[tokio::test]
+async fn final_idle_admission_rejects_activity_after_an_earlier_idle_snapshot() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    let machine = h.m.create_made(h.request("admission-race")).await.unwrap();
+    let entry = h.m.entry(&machine.id).unwrap();
+    for completed in [false, true] {
+        entry.rec.lock().unwrap().last_used_at = Some(Utc::now() - chrono::Duration::hours(1));
+        let earlier = entry.snapshot();
+        assert!(h.m.idle_stop_allowed(&earlier, Utc::now()));
+        let in_use = InUse::new(entry.clone());
+        let in_use = if completed {
+            drop(in_use);
+            None
+        } else {
+            Some(in_use)
+        };
+        let version = entry.snapshot().version;
+        assert!(!h.m.admit_stop(
+            &entry,
+            stop::IDLE,
+            tokio::time::Instant::now() + Duration::from_secs(20),
+            Ev::normal(reason::STOPPING, "idle stop"),
+        ));
+        assert_eq!(entry.snapshot().state, state::RUNNING);
+        assert_eq!(entry.snapshot().version, version);
+        assert!(entry.stop_req.lock().unwrap().is_none());
+        assert!(entry.stop_deadline.lock().unwrap().is_none());
+        drop(in_use);
+    }
+}
+
+#[tokio::test]
 async fn queued_idle_stop_rechecks_new_protection_and_explicit_stop_wins() {
     let h = harness("10.64.0.0/22", 4096).await;
     h.ready().await;

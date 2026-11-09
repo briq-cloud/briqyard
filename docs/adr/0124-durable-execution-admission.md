@@ -105,6 +105,9 @@ inspection before network setup or ticks and derives each machine's maximum expi
 Idle sleep uses the later of actual last use and that expiry, plus the sleep window;
 it never changes actual use or the record version. Tick is preliminary: both ordinary
 and assigned idle stops recheck under the lifecycle lock immediately before `stopping`.
+The final admission predicate and state transition also share the record mutex with
+activity registration. A command arriving after an earlier idle snapshot cannot be
+stopped using that stale snapshot. A refused stop writes no stop intent or deadline.
 Gateway idle stop checks the same bound. A protected deadline is released only when
 the lower clock bound has passed it. Explicit stops still take precedence.
 

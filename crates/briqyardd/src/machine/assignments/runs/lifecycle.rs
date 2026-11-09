@@ -186,12 +186,14 @@ impl Manager {
                     "unverified current run preserved; stop cannot infer ownership".into(),
                 ));
             }
-            *entry.stop_req.lock().unwrap() = Some(why.into());
-            *entry.stop_deadline.lock().unwrap() =
-                Some(tokio::time::Instant::now() + grace + Duration::from_secs(20));
-            entry.set_state(state::STOPPING, |_| {
-                Some(Ev::normal(reason::STOPPING, format!("stopping ({why})")))
-            });
+            if !self.admit_stop(
+                entry,
+                why,
+                tokio::time::Instant::now() + grace + Duration::from_secs(20),
+                Ev::normal(reason::STOPPING, format!("stopping ({why})")),
+            ) {
+                return Ok(());
+            }
             self.save(entry)?;
             if suspend {
                 self.settle_assigned_run_locked(entry, Disposition::CheckpointAvailable)

@@ -475,21 +475,20 @@ impl Manager {
                 Some(l) => l,
                 None => return Err(MError::NotRunning("no process".into())),
             };
-            *e.stop_req.lock().unwrap() = Some(why.to_string());
-            // What this call waits at most below, the lock released: a start waits as long.
-            *e.stop_deadline.lock().unwrap() =
-                Some(tokio::time::Instant::now() + timeout + Duration::from_secs(20));
             let started = Instant::now();
-            e.set_state(state::STOPPING, |_| {
-                let text = match &refused {
-                    Some(class) => format!("stopping ({why}); suspend: refused ({class})"),
-                    None => format!("stopping ({why})"),
-                };
-                Some(
-                    Ev::normal(reason::STOPPING, text)
-                        .data(json!({ "reason": why, "suspend": suspend })),
-                )
-            });
+            let text = match &refused {
+                Some(class) => format!("stopping ({why}); suspend: refused ({class})"),
+                None => format!("stopping ({why})"),
+            };
+            if !self.admit_stop(
+                e,
+                why,
+                tokio::time::Instant::now() + timeout + Duration::from_secs(20),
+                Ev::normal(reason::STOPPING, text)
+                    .data(json!({ "reason": why, "suspend": suspend })),
+            ) {
+                return Ok(());
+            }
             let saved = self.save(e);
             stage(
                 operation,
