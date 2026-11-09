@@ -202,7 +202,7 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
         h.host
             .calls()
             .iter()
-            .filter(|c| c.starts_with("session "))
+            .filter(|c| c.starts_with("exec "))
             .count(),
         1
     );
@@ -229,9 +229,9 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
             h.host
                 .calls()
                 .iter()
-                .filter(|c| c.starts_with("session "))
+                .filter(|c| c.starts_with("exec "))
                 .count(),
-            1
+            0
         );
     }
 }
