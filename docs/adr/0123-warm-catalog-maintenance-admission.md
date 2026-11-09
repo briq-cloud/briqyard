@@ -47,3 +47,20 @@ admission and shutdown allowances before PID change and exact restored readiness
 refusal and identity mismatch still fail. Accepted-shutdown evidence alone does not prove
 why shutdown was delayed. Runtime bounds and behavior are unchanged; native qualification
 still requires a new native run.
+
+## Replay admission settlement
+
+The native acceptance run at `a23ac83` passed both exact warm-create replay assertions
+and the cleanup ownership predicate, then reported accepted shutdown exceeding 60 seconds.
+Source tracing found that `create` reserves a make I/O scope before recording, including
+replays. `spawn_make_admitted` returned for `Make::Existing` without running that scope.
+An abandoned scope is deliberately fenced, so `hand_over` waited in `drain_backups`
+even after the fixture removed every warm record and namespace.
+
+The existing retained make task now settles an empty scope for a replay and returns before
+machine work or warm metrics. Uncertain abandoned scopes still fence; admission, identity,
+authentication, configuration and cleanup predicates and all deadlines stay unchanged.
+A unit regression dispatches two replay admissions and requires handover to finish with
+both maintenance gates held, preserving the machine record and issuing no machine work.
+This source-established defect explains a permanent shutdown drain after the successful
+replays; the complete native restoration outcome still needs validation on the fixed head.

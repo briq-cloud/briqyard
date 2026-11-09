@@ -47,11 +47,14 @@ impl Manager {
     /// The exact reservation crosses the accepted record boundary synchronously, before
     /// the worker can be queued or admission closed. The worker owns it through settlement.
     pub(super) fn spawn_make_admitted(&self, scope: crate::zfs::IoScope, e: Arc<Entry>, how: Make) {
-        if matches!(how, Make::Existing) {
-            return;
-        }
         let m = self.clone();
         tokio::spawn(async move {
+            if matches!(how, Make::Existing) {
+                // Replay dispatched no work. Positively settle its reserved admission:
+                // dropping it would fence the I/O drain until shutdown times out.
+                scope.run(async {}).await;
+                return;
+            }
             let warm = e.snapshot().warm_slot.is_some();
             let operation = if matches!(how, Make::Assigned) {
                 metrics::warm::Operation::Claim
