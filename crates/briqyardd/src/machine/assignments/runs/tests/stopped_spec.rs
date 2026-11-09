@@ -67,6 +67,27 @@ async fn stopped_image_env_replacement_keeps_identity_volume_and_waits_for_start
         assert_eq!(pending.pending.as_ref().unwrap().env, Some(env.clone()));
         let intent: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
         intent.check(&run).unwrap();
+        let replay =
+            h.m.update(&id, patch(Some(image.clone()), env.clone(), size), None)
+                .await
+                .unwrap();
+        assert_eq!(replay.version, updated.version);
+        // An image-only retry omits env and must preserve its pending replacement.
+        let omitted = api::UpdateMachineRequest {
+            spec: api::SpecChange {
+                image: Some(image.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let omitted = h.m.update(&id, omitted, None).await.unwrap();
+        assert_eq!(omitted.version, updated.version);
+        assert_eq!(
+            entry.snapshot().pending.as_ref().unwrap().env,
+            Some(env.clone())
+        );
+        let retained: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
+        assert_eq!(retained.digest().unwrap(), intent.digest().unwrap());
         assert!(h
             .m
             .update(
@@ -186,4 +207,54 @@ async fn stopped_env_update_refuses_missing_creation_authority() {
         .get::<UpdateIntent>(UPDATES, &id)
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn stopped_env_only_replacement_starts_cold_with_fresh_config_and_same_disks() {
+    for env in [
+        BTreeMap::from([("REPLACEMENT".into(), "fresh".into())]),
+        BTreeMap::new(),
+    ] {
+        let (h, entry) = stopped(true).await;
+        let before = entry.snapshot();
+        assert!(before.suspended);
+        let id = before.id.clone();
+        let root_guid = h.pool.zfs.guid(&before.root_dataset()).await.unwrap();
+        let data_guid = h.pool.zfs.guid(&before.data_dataset()).await.unwrap();
+        h.m.update(&id, patch(None, env.clone(), None), None)
+            .await
+            .unwrap();
+        assert_eq!(entry.snapshot().state, state::STOPPED);
+        assert!(entry.live.lock().unwrap().is_none());
+        let pending = entry.snapshot().pending.unwrap();
+        assert!(pending.image.is_none());
+        assert!(pending.size.is_none());
+        assert_eq!(pending.env, Some(env.clone()));
+        restart(&h).unwrap();
+        tokio::time::timeout(Duration::from_secs(60), h.m.start(&id, None))
+            .await
+            .unwrap()
+            .unwrap();
+        let applied = h.m.entry(&id).unwrap().snapshot();
+        assert_eq!(applied.env, env);
+        assert!(!applied.suspended);
+        assert_eq!(applied.image, before.image);
+        assert_eq!(applied.launch_identity, before.launch_identity);
+        assert_eq!(applied.volume, before.volume);
+        assert_eq!(
+            h.pool.zfs.guid(&before.root_dataset()).await.unwrap(),
+            root_guid
+        );
+        assert_eq!(
+            h.pool.zfs.guid(&before.data_dataset()).await.unwrap(),
+            data_guid
+        );
+        let current: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+        let Mode::Fresh { drive_base64, .. } = &current.mode else {
+            panic!("environment changes require a fresh boot")
+        };
+        let (config, _) = model::parse_drive(&guest::base64_decode(drive_base64).unwrap()).unwrap();
+        assert_eq!(config.env, env);
+        assert!(!config.env.contains_key("DESTINATION_ONLY"));
+    }
 }
