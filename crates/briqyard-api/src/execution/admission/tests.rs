@@ -168,6 +168,68 @@ fn host(path: &Path, fixture: &Fixture) -> Journal {
 }
 
 #[test]
+fn installation_highwater_and_restart_retire_old_epoch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host");
+    let mut journal = Journal::open(&path, Role::Host("host-1".into())).unwrap();
+    let instance = journal.instance().to_owned();
+    let registration = HostRegistration {
+        authority: "authority-1".into(),
+        epoch: "epoch-1".into(),
+        key_id: "key-1".into(),
+        public_key: [7; 32],
+        host_instance: instance.clone(),
+        generation: 1,
+    };
+    journal
+        .register_host(registration.clone(), clock())
+        .unwrap();
+    journal.register_host(registration, clock()).unwrap();
+    let fixture = Fixture::new("epoch-1");
+    let target = fixture.grant.target.clone();
+    let owner = HostOwnership {
+        installation: "install-1".into(),
+        generation: 1,
+        team: fixture.grant.team.clone(),
+        subject: fixture.grant.subject.clone(),
+        metadata_revision: fixture.grant.metadata_revision.clone(),
+        primary: target.clone(),
+        public_seeds: vec![target.clone()],
+        public_resources: vec![PublicResource {
+            id: fixture.grant.subject.clone(),
+            target,
+        }],
+        resource_set: fixture.grant.resource_set.clone(),
+        host_instance: instance,
+    };
+    journal.install_ownership(owner.clone(), clock()).unwrap();
+    assert!(journal
+        .install_ownership(
+            HostOwnership {
+                generation: 2,
+                ..owner.clone()
+            },
+            clock()
+        )
+        .is_err());
+    journal
+        .invalidate_ownership("install-1", 2, clock())
+        .unwrap();
+    assert!(journal.install_ownership(owner, clock()).is_err());
+    drop(journal);
+    let journal = Journal::open(&path, Role::Host("host-1".into())).unwrap();
+    assert!(journal.registration().unwrap().is_none());
+    assert!(journal.installed_ownership("install-1").unwrap().is_none());
+    assert!(journal.protection("old").unwrap().is_none());
+    assert!(journal
+        .state
+        .retired
+        .get("authority-1")
+        .unwrap()
+        .contains(&"epoch-1".into()));
+}
+
+#[test]
 fn complete_vector_is_atomic_and_duplicates_never_dispatch() {
     let dir = tempfile::tempdir().unwrap();
     let mut f = Fixture::new("authority-epoch-1");

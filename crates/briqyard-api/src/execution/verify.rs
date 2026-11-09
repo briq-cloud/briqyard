@@ -11,6 +11,7 @@ pub enum KeyRole {
 }
 
 /// Only locally configured raw Ed25519 public keys. No token controls key discovery.
+#[derive(Clone)]
 pub struct VerificationKey {
     pub kid: String,
     pub role: KeyRole,

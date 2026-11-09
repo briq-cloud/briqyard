@@ -11,6 +11,8 @@ pub use verify::*;
 #[cfg(feature = "execution-admission")]
 pub mod admission;
 #[cfg(feature = "execution-admission")]
+pub mod channel;
+#[cfg(feature = "execution-admission")]
 mod issuer;
 #[cfg(feature = "execution-admission")]
 pub use issuer::*;
@@ -162,6 +164,43 @@ pub struct Permit {
     pub request_digest: String,
     pub metadata_revision: String,
     pub limits: Limits,
+}
+
+/// Logical public seeds on the authenticated installer channel. The host resolves
+/// actual run and placement; callers never manufacture those identities.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PublicSeed {
+    pub id: String,
+    pub machine: String,
+    pub namespace: String,
+    pub team: String,
+    pub expected_version: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PublicResource {
+    pub id: String,
+    pub target: Target,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryRequest {
+    pub host_instance: String,
+    pub primary_id: String,
+    pub seeds: Vec<PublicSeed>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryReceipt {
+    pub host_instance: String,
+    pub primary: Target,
+    pub public_seeds: Vec<Target>,
+    pub public_resources: Vec<PublicResource>,
+    pub resource_set: ResourceSet,
 }
 
 #[cfg(all(test, feature = "execution-verifier"))]

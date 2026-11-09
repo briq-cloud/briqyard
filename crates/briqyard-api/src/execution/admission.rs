@@ -59,6 +59,89 @@ struct State {
     fences: BTreeMap<String, String>,
     retired: BTreeMap<String, Vec<String>>,
     admissions: BTreeMap<String, Admission>,
+    #[serde(default)]
+    registration: Option<HostRegistration>,
+    #[serde(default)]
+    registration_highwater: u64,
+    #[serde(default)]
+    ownership: BTreeMap<String, HostOwnership>,
+    #[serde(default)]
+    ownership_highwater: BTreeMap<String, u64>,
+    #[serde(default)]
+    delegations: BTreeMap<String, HostDelegation>,
+    #[serde(default)]
+    delegation_tombstones: BTreeMap<String, u64>,
+    #[serde(default)]
+    prepared: BTreeMap<String, PreparedAdmission>,
+    #[serde(default)]
+    protections: BTreeMap<String, InstalledProtection>,
+}
+
+/// Authenticated installer input. These records are never constructed from a grant.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostRegistration {
+    pub authority: String,
+    pub epoch: String,
+    pub key_id: String,
+    pub public_key: [u8; 32],
+    pub host_instance: String,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostOwnership {
+    pub installation: String,
+    pub generation: u64,
+    pub team: String,
+    pub subject: String,
+    pub metadata_revision: String,
+    pub primary: Target,
+    pub public_seeds: Vec<Target>,
+    pub public_resources: Vec<PublicResource>,
+    pub resource_set: ResourceSet,
+    pub host_instance: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostDelegation {
+    pub id: String,
+    pub version: u64,
+    pub ownership: String,
+    pub ownership_generation: u64,
+    pub grant_digest: String,
+    pub allocation_digests: Vec<String>,
+    pub principal: String,
+    pub expires_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedAdmission {
+    pub admission: String,
+    pub delegation: String,
+    pub grant_digest: String,
+    pub permit_digest: String,
+    pub request_digest: String,
+    pub allocation_refs: Vec<AllocationRef>,
+    pub ownership: String,
+    pub ownership_generation: u64,
+    pub host_instance: String,
+    pub expires_at: u64,
+    pub dispatched: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledProtection {
+    pub installation: String,
+    pub generation: u64,
+    pub admission: String,
+    pub expires_at_ms: u64,
+    pub resources: Vec<Target>,
+    pub resource_revision: String,
 }
 
 /// Fixed errors contain no submitted claims or credential material.
@@ -145,6 +228,14 @@ impl Journal {
                 fences: BTreeMap::new(),
                 retired: BTreeMap::new(),
                 admissions: BTreeMap::new(),
+                registration: None,
+                registration_highwater: 0,
+                ownership: BTreeMap::new(),
+                ownership_highwater: BTreeMap::new(),
+                delegations: BTreeMap::new(),
+                delegation_tombstones: BTreeMap::new(),
+                prepared: BTreeMap::new(),
+                protections: BTreeMap::new(),
             },
         };
         if state.admissions.len() > MAX_RECORDS || state.allocations.len() > MAX_RECORDS {
@@ -166,6 +257,9 @@ impl Journal {
             }
         }
         state.fences.clear();
+        // A host restart retires the old registration. Ownership and prepared
+        // records remain as rejection evidence, never as current authority.
+        state.registration = None;
         let mut journal = Self {
             root,
             directory,
@@ -181,6 +275,294 @@ impl Journal {
     }
     pub fn role(&self) -> &Role {
         &self.state.role
+    }
+
+    pub fn registration(&self) -> Result<Option<&HostRegistration>, Error> {
+        self.ownership()?;
+        Ok(self.state.registration.as_ref())
+    }
+
+    /// The installer supplies the expected current instance. Fencing is durable before
+    /// registration can be acknowledged; a crash between writes leaves no ready ACK.
+    pub fn register_host(&mut self, record: HostRegistration, clock: Clock) -> Result<(), Error> {
+        self.check(clock)?;
+        if !matches!(self.role(), Role::Host(_))
+            || record.host_instance != self.instance()
+            || !valid_id(&record.authority)
+            || !valid_id(&record.epoch)
+            || !valid_id(&record.key_id)
+            || record.generation == 0
+        {
+            return Err(Error::Binding);
+        }
+        if self.state.registration.as_ref() == Some(&record) {
+            return Ok(());
+        }
+        if record.generation <= self.state.registration_highwater {
+            return Err(Error::Binding);
+        }
+        self.fence(
+            &record.authority,
+            &record.epoch,
+            &record.host_instance,
+            clock,
+        )?;
+        let mut next = self.state.clone();
+        next.registration_highwater = record.generation;
+        next.registration = Some(record);
+        next.ownership.clear();
+        next.delegations.clear();
+        next.prepared.clear();
+        next.protections.clear();
+        next.clock_floor = clock.now;
+        self.commit(next)
+    }
+
+    pub fn installed_ownership(&self, installation: &str) -> Result<Option<&HostOwnership>, Error> {
+        self.ownership()?;
+        Ok(self.state.ownership.get(installation))
+    }
+
+    pub fn install_ownership(&mut self, record: HostOwnership, clock: Clock) -> Result<(), Error> {
+        self.check(clock)?;
+        if self.state.registration.is_none()
+            || record.host_instance != self.instance()
+            || !valid_id(&record.installation)
+            || !valid_id(&record.team)
+            || !valid_id(&record.subject)
+            || !valid_id(&record.metadata_revision)
+            || record.generation == 0
+            || record.public_seeds.is_empty()
+            || record.public_resources.is_empty()
+            || record.resource_set.resources.is_empty()
+        {
+            return Err(Error::Binding);
+        }
+        let high = self
+            .state
+            .ownership_highwater
+            .get(&record.installation)
+            .copied()
+            .unwrap_or(0);
+        if self.state.ownership.get(&record.installation) == Some(&record) {
+            return Ok(());
+        }
+        // A replacement must first invalidate and acknowledge the old mapping.
+        if self.state.ownership.contains_key(&record.installation) {
+            return Err(Error::Binding);
+        }
+        if record.generation <= high {
+            return Err(Error::Binding);
+        }
+        if self.state.ownership.iter().any(|(id, other)| {
+            id != &record.installation
+                && other.public_resources.iter().any(|a| {
+                    record
+                        .public_resources
+                        .iter()
+                        .any(|b| a.target.machine == b.target.machine || a.id == b.id)
+                })
+        }) {
+            return Err(Error::Binding);
+        }
+        let mut next = self.state.clone();
+        next.ownership_highwater
+            .insert(record.installation.clone(), record.generation);
+        next.delegations
+            .retain(|_, d| d.ownership != record.installation);
+        next.protections
+            .retain(|_, p| p.installation != record.installation);
+        next.ownership.insert(record.installation.clone(), record);
+        next.clock_floor = clock.now;
+        self.commit(next)
+    }
+
+    pub fn invalidate_ownership(
+        &mut self,
+        installation: &str,
+        generation: u64,
+        clock: Clock,
+    ) -> Result<(), Error> {
+        self.check(clock)?;
+        if !valid_id(installation) || generation == 0 {
+            return Err(Error::Binding);
+        }
+        let high = self
+            .state
+            .ownership_highwater
+            .get(installation)
+            .copied()
+            .unwrap_or(0);
+        if generation < high {
+            return Err(Error::Binding);
+        }
+        let mut next = self.state.clone();
+        next.ownership_highwater
+            .insert(installation.into(), generation);
+        next.ownership.remove(installation);
+        next.delegations.retain(|_, d| d.ownership != installation);
+        next.protections
+            .retain(|_, p| p.installation != installation);
+        next.clock_floor = clock.now;
+        self.commit(next)
+    }
+
+    pub fn delegation(&self, id: &str) -> Result<Option<&HostDelegation>, Error> {
+        self.ownership()?;
+        Ok(self.state.delegations.get(id))
+    }
+
+    pub fn protection(&self, admission: &str) -> Result<Option<&InstalledProtection>, Error> {
+        self.ownership()?;
+        Ok(self.state.protections.get(admission))
+    }
+
+    pub fn record_protection(
+        &mut self,
+        record: InstalledProtection,
+        clock: Clock,
+    ) -> Result<(), Error> {
+        self.check(clock)?;
+        let Some(owner) = self.state.ownership.get(&record.installation) else {
+            return Err(Error::Binding);
+        };
+        if owner.generation != record.generation
+            || owner.resource_set.resources != record.resources
+            || owner.resource_set.revision != record.resource_revision
+            || !valid_id(&record.admission)
+            || record.expires_at_ms
+                <= clock
+                    .now
+                    .saturating_add(clock.uncertainty)
+                    .saturating_mul(1000)
+        {
+            return Err(Error::Binding);
+        }
+        if self.state.protections.get(&record.admission) == Some(&record) {
+            return Ok(());
+        }
+        if self.state.protections.contains_key(&record.admission) {
+            return Err(Error::Binding);
+        }
+        let mut next = self.state.clone();
+        next.protections.insert(record.admission.clone(), record);
+        next.clock_floor = clock.now;
+        self.commit(next)
+    }
+
+    pub fn install_delegation(
+        &mut self,
+        record: HostDelegation,
+        clock: Clock,
+    ) -> Result<(), Error> {
+        self.check(clock)?;
+        let Some(owner) = self.state.ownership.get(&record.ownership) else {
+            return Err(Error::Binding);
+        };
+        if owner.generation != record.ownership_generation
+            || !valid_id(&record.id)
+            || record.version == 0
+            || record.expires_at <= clock.now.saturating_add(clock.uncertainty)
+            || self.state.delegation_tombstones.contains_key(&record.id)
+        {
+            return Err(Error::Binding);
+        }
+        if self.state.delegations.get(&record.id) == Some(&record) {
+            return Ok(());
+        }
+        if self.state.delegations.contains_key(&record.id) {
+            return Err(Error::Binding);
+        }
+        let mut next = self.state.clone();
+        next.delegations.insert(record.id.clone(), record);
+        next.clock_floor = clock.now;
+        self.commit(next)
+    }
+
+    pub fn revoke_delegation(&mut self, id: &str, version: u64, clock: Clock) -> Result<(), Error> {
+        self.check(clock)?;
+        if !valid_id(id) || version == 0 {
+            return Err(Error::Binding);
+        }
+        let mut next = self.state.clone();
+        let high = next.delegation_tombstones.get(id).copied().unwrap_or(0);
+        if version < high {
+            return Err(Error::Binding);
+        }
+        next.delegation_tombstones.insert(id.into(), version);
+        next.delegations.remove(id);
+        next.clock_floor = clock.now;
+        self.commit(next)
+    }
+
+    pub fn prepared(&self, id: &str) -> Result<Option<&PreparedAdmission>, Error> {
+        self.ownership()?;
+        Ok(self.state.prepared.get(id))
+    }
+
+    pub fn prepare(&mut self, record: PreparedAdmission, clock: Clock) -> Result<(), Error> {
+        self.check(clock)?;
+        let Some(delegation) = self.state.delegations.get(&record.delegation) else {
+            return Err(Error::Binding);
+        };
+        let Some(owner) = self.state.ownership.get(&record.ownership) else {
+            return Err(Error::Binding);
+        };
+        if record.host_instance != self.instance()
+            || record.expires_at <= clock.now.saturating_add(clock.uncertainty)
+            || record.ownership_generation != owner.generation
+            || delegation.ownership != record.ownership
+            || delegation.ownership_generation != owner.generation
+            || delegation.grant_digest != record.grant_digest
+            || !valid_id(&record.admission)
+            || !valid_id(&record.request_digest)
+        {
+            return Err(Error::Binding);
+        }
+        if self.state.prepared.get(&record.admission) == Some(&record) {
+            return Ok(());
+        }
+        if self.state.prepared.contains_key(&record.admission) {
+            return Err(Error::AlreadyAdmitted);
+        }
+        let mut next = self.state.clone();
+        next.prepared.insert(record.admission.clone(), record);
+        next.clock_floor = clock.now;
+        self.commit(next)
+    }
+
+    /// Called before invoking the manager. A lost response can only be inspected.
+    pub fn mark_dispatched(&mut self, id: &str, clock: Clock) -> Result<PreparedAdmission, Error> {
+        self.check(clock)?;
+        let current = self.state.prepared.get(id).ok_or(Error::Binding)?;
+        if current.host_instance != self.instance()
+            || current.expires_at <= clock.now.saturating_add(clock.uncertainty)
+            || self.state.registration.is_none()
+            || self
+                .state
+                .ownership
+                .get(&current.ownership)
+                .map(|o| o.generation)
+                != Some(current.ownership_generation)
+            || self
+                .state
+                .delegations
+                .get(&current.delegation)
+                .map(|d| (&d.ownership, d.ownership_generation))
+                != Some((&current.ownership, current.ownership_generation))
+        {
+            return Err(Error::Binding);
+        }
+        let mut next = self.state.clone();
+        let saved = next.prepared.get_mut(id).ok_or(Error::Binding)?;
+        if saved.dispatched {
+            return Err(Error::AlreadyAdmitted);
+        }
+        let record = saved.clone();
+        saved.dispatched = true;
+        next.clock_floor = clock.now;
+        self.commit(next)?;
+        Ok(record)
     }
 
     /// Host acknowledgement of the current authority epoch. The trusted installer must
@@ -416,6 +798,12 @@ impl Journal {
         let mut next = self.state.clone();
         next.admissions.retain(|_, a| a.permit.exp > earliest);
         next.allocations.retain(|_, a| a.allocation.exp > earliest);
+        next.prepared.retain(|_, a| a.expires_at > earliest);
+        next.delegations.retain(|_, a| a.expires_at > earliest);
+        next.protections
+            .retain(|_, p| p.expires_at_ms / 1000 > earliest);
+        // High-water and tombstones remain: a delayed installation cannot revive
+        // a previously revoked identity even after its status record is pruned.
         next.clock_floor = clock.now;
         self.commit(next)
     }
@@ -467,6 +855,12 @@ impl Journal {
         if next.admissions.len() > MAX_RECORDS
             || next.allocations.len() > MAX_RECORDS
             || next.retired.values().map(Vec::len).sum::<usize>() > MAX_RECORDS
+            || next.ownership.len() > MAX_RECORDS
+            || next.ownership_highwater.len() > MAX_RECORDS
+            || next.delegations.len() > MAX_RECORDS
+            || next.delegation_tombstones.len() > MAX_RECORDS
+            || next.prepared.len() > MAX_RECORDS
+            || next.protections.len() > MAX_RECORDS
         {
             return Err(Error::Full);
         }

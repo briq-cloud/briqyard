@@ -246,7 +246,40 @@ qualification remains required before activation.
 
 ### Authenticated installation and qualification
 
-No HTTP route or configuration accepts these credentials yet. Administrator routes do not
+The host now contains a dormant dedicated internal router. It is not merged with
+the administrator router and has no listener or configuration rollout. Its
+installer and execution credentials are mandatory, distinct and checked on every
+route, including loopback. A future listener must provide authenticated pinned
+transport and credential provisioning before mounting it.
+
+The host journal retains registration high-water, ownership generations,
+delegation tombstones, exact protection receipts and prepared admissions with
+the existing fsync/rename/directory-sync write. A restart retires the old
+authority epoch and removes registration readiness. The installer discovers
+actual run targets from logical public seeds and validates host metadata
+(`briq_id`, `team`, namespace and machine version). Ownership installation
+rechecks the full closure. Every public member needs an explicit mapping;
+an unmapped member is accepted only when it is the namespace's registered
+native gateway. Replacement ownership requires explicit invalidation first.
+
+Delegation installation checks the signed credentials against installed
+ownership and the exact persisted millisecond protection receipt. The signed
+whole-second deadline is the inward floor of that receipt. It installs no host
+allocation and issues no permit. Prepare verifies the signed permit against the
+active registered authority key, then installs its exact allocation vector and
+persists the prepared request binding. Dispatch marks that binding spent before
+calling the manager. Every uncertain retry is status-only. Invalidation holds
+the exclusive admission guard; dispatch holds its read guard through the
+manager's first guest write. Lock order is admission guard, lifecycle turns,
+then journal. Handlers make no network calls while holding lifecycle turns or
+the journal.
+
+This is a disabled source candidate. The internal listener, fleet installation
+authority, bounded clock qualification, retention and downgrade barriers, and
+Linux lifecycle/partition/crash evidence remain activation gates. No public
+scoped access is mounted.
+
+No mounted HTTP route or configuration accepts these credentials yet. Administrator routes do not
 call this boundary and keep their existing authentication and behavior.
 
 Activation still requires authenticated ownership/metadata installation, host-instance and

@@ -8,6 +8,57 @@ use api::execution::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 
+#[tokio::test]
+async fn internal_execution_route_requires_its_installer_credential_on_loopback() {
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let h = harness("10.64.0.0/22", 4096).await;
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Journal::open(&dir.path().join("journal"), Role::Host("h_test".into())).unwrap();
+    let key = VerificationKey {
+        kid: "authority-key".into(),
+        role: KeyRole::Authority,
+        issuer: "authority".into(),
+        authority: Some("authority-1".into()),
+        public_key: [7; 32],
+    };
+    let channel = crate::api::execution::HostExecutionChannel::new(
+        h.m,
+        journal,
+        "installer-secret".into(),
+        "execution-secret".into(),
+        vec![key],
+        "central".into(),
+        "authority".into(),
+        "runtime".into(),
+        1,
+    )
+    .unwrap();
+    let app = crate::api::execution::router(std::sync::Arc::new(channel));
+    for token in [None, Some("execution-secret"), Some("installer-secret")] {
+        let mut builder = Request::builder().uri("/internal/execution/v1/instance");
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if token == Some("installer-secret") {
+                StatusCode::OK
+            } else {
+                StatusCode::UNAUTHORIZED
+            }
+        );
+    }
+}
+
 fn sign(body: &impl Serialize, typ: &str, seed: u8, kid: &str) -> String {
     let key = Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap();
     let header = serde_json::json!({"alg":"EdDSA","typ":typ,"kid":kid,"v":1});

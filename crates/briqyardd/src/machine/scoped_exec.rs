@@ -4,7 +4,9 @@
 use super::execution_resources::ExecutionResourceScope;
 use super::*;
 use api::execution::{
-    self as access, admission::Journal, DispatchContext, Operation, Target, Trust,
+    self as access,
+    admission::{HostOwnership, Journal},
+    DispatchContext, Operation, Target, Trust,
 };
 
 /// Exact request from the authenticated ownership installer, before a grant or
@@ -40,6 +42,150 @@ pub struct ScopedExecutionContext<'a> {
 }
 
 impl Manager {
+    pub async fn execution_public_members(
+        &self,
+        resources: &access::ResourceSet,
+        team: &str,
+        journal: &tokio::sync::Mutex<Journal>,
+    ) -> Result<Vec<access::PublicResource>, MError> {
+        let mut public = Vec::new();
+        let mut ids = std::collections::BTreeSet::new();
+        for target in &resources.resources {
+            let e = self.entry(&target.machine)?;
+            let record = {
+                let _turn = e.lock.lock().await;
+                let ledger = journal.lock().await;
+                if self.scoped_target(&e, ledger.instance())? != *target {
+                    return Err(MError::Conflict("execution closure member changed".into()));
+                }
+                e.snapshot()
+            };
+            if let Some(id) = record.metadata.get("briq_id") {
+                if record.metadata.get("team").map(String::as_str) != Some(team)
+                    || !ids.insert(id.clone())
+                {
+                    return Err(MError::Conflict(
+                        "public execution ownership changed".into(),
+                    ));
+                }
+                public.push(access::PublicResource {
+                    id: id.clone(),
+                    target: target.clone(),
+                });
+            } else if self
+                .gateway_of(&target.namespace)
+                .as_ref()
+                .map(|g| g.snapshot().id)
+                != Some(target.machine.clone())
+            {
+                return Err(MError::Conflict("unclassified execution dependency".into()));
+            }
+        }
+        Ok(public)
+    }
+    pub async fn resolve_execution_public_seed(
+        &self,
+        seed: &access::PublicSeed,
+        journal: &tokio::sync::Mutex<Journal>,
+    ) -> Result<Target, MError> {
+        let e = self.entry(&seed.machine)?;
+        let _turn = e.lock.lock().await;
+        let ledger = journal.lock().await;
+        self.scoped_journal(&ledger)?;
+        let target = self.scoped_target(&e, ledger.instance())?;
+        let record = e.snapshot();
+        if record.metadata.get("briq_id") != Some(&seed.id)
+            || record.metadata.get("team") != Some(&seed.team)
+            || record.namespace != seed.namespace
+            || seed
+                .expected_version
+                .is_some_and(|v| target.placement != format!("version-{v}"))
+        {
+            return Err(MError::Conflict("public execution seed changed".into()));
+        }
+        Ok(target)
+    }
+    /// Resolve the complete closure from installed seeds, then classify every member.
+    /// A missing public identity does not make a machine native: only the host's
+    /// registered namespace gateway is a supported native dependency.
+    pub async fn verify_execution_ownership(
+        &self,
+        owner: &HostOwnership,
+        journal: &tokio::sync::Mutex<Journal>,
+    ) -> Result<access::ResourceSet, MError> {
+        if owner.public_seeds.is_empty()
+            || !owner.public_seeds.contains(&owner.primary)
+            || owner.public_resources.len() > access::MAX_RESOURCES
+        {
+            return Err(invalid("invalid installed public execution scope"));
+        }
+        let scope = ExecutionResourceScope {
+            primary: &owner.primary,
+            required: &owner.public_seeds,
+        };
+        let discovered = self.execution_resources(scope, journal).await?;
+        if discovered != owner.resource_set {
+            return Err(MError::Conflict(
+                "execution ownership closure changed".into(),
+            ));
+        }
+        let mut mapped = std::collections::BTreeSet::new();
+        let mut public_ids = std::collections::BTreeSet::new();
+        for public in &owner.public_resources {
+            if !mapped.insert(public.target.machine.clone())
+                || !public_ids.insert(public.id.clone())
+                || public.id.is_empty()
+                || !discovered.resources.contains(&public.target)
+            {
+                return Err(invalid("invalid installed public execution mapping"));
+            }
+            let e = self.entry(&public.target.machine)?;
+            let _turn = e.lock.lock().await;
+            let ledger = journal.lock().await;
+            if self.scoped_target(&e, ledger.instance())? != public.target {
+                return Err(MError::Conflict("public execution run changed".into()));
+            }
+            let record = e.snapshot();
+            if record.metadata.get("briq_id") != Some(&public.id)
+                || record.metadata.get("team") != Some(&owner.team)
+                || record.namespace != public.target.namespace
+                || (public.target == owner.primary && public.id != owner.subject)
+            {
+                return Err(MError::Conflict(
+                    "public execution ownership changed".into(),
+                ));
+            }
+        }
+        for resource in &discovered.resources {
+            if mapped.contains(&resource.machine) {
+                continue;
+            }
+            let gateway = self
+                .gateway_of(&resource.namespace)
+                .ok_or_else(|| MError::Conflict("unclassified execution dependency".into()))?;
+            if gateway.snapshot().id != resource.machine {
+                return Err(MError::Conflict("unclassified execution dependency".into()));
+            }
+            if gateway.snapshot().metadata.contains_key("briq_id") {
+                return Err(MError::Conflict(
+                    "public execution dependency omitted".into(),
+                ));
+            }
+        }
+        for seed in &owner.public_seeds {
+            if !mapped.contains(&seed.machine) {
+                return Err(invalid("unmapped public execution seed"));
+            }
+        }
+        if self
+            .execution_public_members(&discovered, &owner.team, journal)
+            .await?
+            != owner.public_resources
+        {
+            return Err(MError::Conflict("public execution mapping changed".into()));
+        }
+        Ok(discovered)
+    }
     /// Install a pre-permit idle bound on every exact local run. The trusted caller
     /// retains its ownership revision fence across this call. This receipt alone
     /// does not freeze membership or authorize descriptor issuance.
