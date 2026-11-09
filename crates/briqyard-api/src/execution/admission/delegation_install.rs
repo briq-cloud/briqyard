@@ -14,6 +14,11 @@ pub struct DelegationIntent {
     /// Authenticated source snapshot captured before signed credential inspection.
     #[serde(default)]
     pub trusted_source: Option<Source>,
+    #[serde(default)]
+    pub projection: Option<Projection>,
+    /// Opaque authenticated control snapshot; absence never establishes readiness.
+    #[serde(default)]
+    pub policy_revision: Option<String>,
     pub request: InstallDelegation,
     pub expected: HostDelegation,
     pub acknowledgement: Option<HostDelegation>,
@@ -32,6 +37,8 @@ impl Journal {
             || !valid_id(&intended.host)
             || !valid_id(&intended.request.id)
             || intended.request.version == 0
+            || intended.projection.is_none()
+            || !intended.policy_revision.as_deref().is_some_and(valid_id)
             || !intended.trusted_source.as_ref().is_some_and(|source| {
                 valid_id(&source.kind)
                     && valid_id(&source.id)
@@ -66,6 +73,8 @@ impl Journal {
                 && prior.ownership == intended.ownership
                 && prior.protection == intended.protection
                 && prior.trusted_source == intended.trusted_source
+                && prior.projection == intended.projection
+                && prior.policy_revision == intended.policy_revision
                 && prior.request == intended.request
                 && prior.expected == intended.expected
             {
@@ -73,14 +82,30 @@ impl Journal {
             }
             return Err(Error::Binding);
         }
-        if self.state.delegation_intents.len() >= MAX_RECORDS
-            || self
-                .state
-                .delegation_intents
-                .values()
-                .any(|intent| intent.request.id == intended.request.id)
-        {
+        if self.state.delegation_intents.len() >= MAX_RECORDS {
             return Err(Error::Full);
+        }
+        for prior in self
+            .state
+            .delegation_intents
+            .values()
+            .filter(|p| p.request.id == intended.request.id)
+        {
+            if intended.request.version <= prior.request.version
+                || intended.host != prior.host
+                || intended.authority_epoch != prior.authority_epoch
+                || intended.registration != prior.registration
+                || intended.ownership != prior.ownership
+                || intended.policy_revision != prior.policy_revision
+                || intended.request.principal != prior.request.principal
+                || intended.request.installation != prior.request.installation
+                || intended.request.generation != prior.request.generation
+                || intended.protection == prior.protection
+                || intended.expected.grant_digest == prior.expected.grant_digest
+                || !matches!((&intended.trusted_source, &prior.trusted_source), (Some(a),Some(b)) if a.kind == b.kind && a.id == b.id)
+            {
+                return Err(Error::Binding);
+            }
         }
         let mut next = self.state.clone();
         next.delegation_intents.insert(intent_id.into(), intended);
@@ -191,6 +216,12 @@ impl Journal {
             return Ok(false);
         };
         Ok(intent.authority_epoch == self.instance()
+            && intent.projection.is_some()
+            && intent.policy_revision.as_deref().is_some_and(valid_id)
+            && !self.state.delegation_intents.values().any(|other| {
+                other.request.id == intent.request.id
+                    && other.request.version > intent.request.version
+            })
             && intent.trusted_source.is_some()
             && intent.acknowledgement.as_ref() == Some(&intent.expected)
             && !self.delegation_revoked(&intent.request.id)?
@@ -201,5 +232,58 @@ impl Journal {
                 &intent.protection,
                 &intent.request,
             )?)
+    }
+}
+
+impl Journal {
+    pub fn install_delegation(
+        &mut self,
+        record: HostDelegation,
+        clock: Clock,
+    ) -> Result<(), Error> {
+        self.check(clock)?;
+        let Some(owner) = self.state.ownership.get(&record.ownership) else {
+            return Err(Error::Binding);
+        };
+        if owner.generation != record.ownership_generation
+            || !valid_id(&record.id)
+            || record.version == 0
+            || record.expires_at <= clock.now.saturating_add(clock.uncertainty)
+            || self.state.delegation_tombstones.contains_key(&record.id)
+        {
+            return Err(Error::Binding);
+        }
+        if self.state.delegations.get(&record.id) == Some(&record) {
+            return Ok(());
+        }
+        let history = self.state.delegation_versions.get(&record.id);
+        for prior in history
+            .into_iter()
+            .flatten()
+            .chain(self.state.delegations.get(&record.id))
+        {
+            if record.version <= prior.version
+                || record.ownership != prior.ownership
+                || record.ownership_generation != prior.ownership_generation
+                || record.principal != prior.principal
+                || record.grant_digest == prior.grant_digest
+            {
+                return Err(Error::Binding);
+            }
+        }
+        let mut next = self.state.clone();
+        let history = next
+            .delegation_versions
+            .entry(record.id.clone())
+            .or_default();
+        if let Some(prior) = self.state.delegations.get(&record.id) {
+            if !history.contains(prior) {
+                history.push(prior.clone());
+            }
+        }
+        history.push(record.clone());
+        next.delegations.insert(record.id.clone(), record);
+        next.clock_floor = clock.now;
+        self.commit(next)
     }
 }

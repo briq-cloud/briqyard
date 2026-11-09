@@ -7,6 +7,7 @@ mod authority_install;
 mod delegation_install;
 mod installation_flow;
 mod operation;
+mod projection;
 pub use authority_install::{AuthorityIntent, AuthorityPayload};
 pub use delegation_install::DelegationIntent;
 pub use installation_flow::{
@@ -14,6 +15,7 @@ pub use installation_flow::{
 };
 use nix::libc;
 pub use operation::{OperationIntent, OperationPhase};
+pub use projection::{Projection, ProjectionEvidence, MAX_PROJECTION_BYTES};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -79,6 +81,8 @@ struct State {
     ownership_highwater: BTreeMap<String, u64>,
     #[serde(default)]
     delegations: BTreeMap<String, HostDelegation>,
+    #[serde(default)]
+    delegation_versions: BTreeMap<String, Vec<HostDelegation>>,
     #[serde(default)]
     delegation_tombstones: BTreeMap<String, u64>,
     #[serde(default)]
@@ -255,6 +259,7 @@ impl Journal {
                 ownership: BTreeMap::new(),
                 ownership_highwater: BTreeMap::new(),
                 delegations: BTreeMap::new(),
+                delegation_versions: BTreeMap::new(),
                 delegation_tombstones: BTreeMap::new(),
                 prepared: BTreeMap::new(),
                 protections: BTreeMap::new(),
@@ -266,7 +271,13 @@ impl Journal {
                 operation_intents: BTreeMap::new(),
             },
         };
-        if state.admissions.len() > MAX_RECORDS
+        if state
+            .delegation_versions
+            .values()
+            .map(Vec::len)
+            .sum::<usize>()
+            > MAX_RECORDS
+            || state.admissions.len() > MAX_RECORDS
             || state.allocations.len() > MAX_RECORDS
             || state.discovery_intents.len() > MAX_RECORDS
             || state.protection_intents.len() > MAX_RECORDS
@@ -484,35 +495,6 @@ impl Journal {
         self.commit(next)
     }
 
-    pub fn install_delegation(
-        &mut self,
-        record: HostDelegation,
-        clock: Clock,
-    ) -> Result<(), Error> {
-        self.check(clock)?;
-        let Some(owner) = self.state.ownership.get(&record.ownership) else {
-            return Err(Error::Binding);
-        };
-        if owner.generation != record.ownership_generation
-            || !valid_id(&record.id)
-            || record.version == 0
-            || record.expires_at <= clock.now.saturating_add(clock.uncertainty)
-            || self.state.delegation_tombstones.contains_key(&record.id)
-        {
-            return Err(Error::Binding);
-        }
-        if self.state.delegations.get(&record.id) == Some(&record) {
-            return Ok(());
-        }
-        if self.state.delegations.contains_key(&record.id) {
-            return Err(Error::Binding);
-        }
-        let mut next = self.state.clone();
-        next.delegations.insert(record.id.clone(), record);
-        next.clock_floor = clock.now;
-        self.commit(next)
-    }
-
     pub fn revoke_delegation(&mut self, id: &str, version: u64, clock: Clock) -> Result<(), Error> {
         self.check(clock)?;
         if !valid_id(id) || version == 0 {
@@ -582,8 +564,12 @@ impl Journal {
                 .state
                 .delegations
                 .get(&current.delegation)
-                .map(|d| (&d.ownership, d.ownership_generation))
-                != Some((&current.ownership, current.ownership_generation))
+                .map(|d| (&d.ownership, d.ownership_generation, &d.grant_digest))
+                != Some((
+                    &current.ownership,
+                    current.ownership_generation,
+                    &current.grant_digest,
+                ))
         {
             return Err(Error::Binding);
         }
@@ -886,7 +872,13 @@ impl Journal {
     }
     fn commit(&mut self, next: State) -> Result<(), Error> {
         self.ownership()?;
-        if next.admissions.len() > MAX_RECORDS
+        if next
+            .delegation_versions
+            .values()
+            .map(Vec::len)
+            .sum::<usize>()
+            > MAX_RECORDS
+            || next.admissions.len() > MAX_RECORDS
             || next.allocations.len() > MAX_RECORDS
             || next.retired.values().map(Vec::len).sum::<usize>() > MAX_RECORDS
             || next.ownership.len() > MAX_RECORDS

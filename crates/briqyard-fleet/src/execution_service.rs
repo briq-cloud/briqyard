@@ -171,6 +171,8 @@ struct DelegationControlDto {
     ownership: String,
     protection: String,
     source: Source,
+    policy_revision: String,
+    projection: briqyard_api::execution::admission::Projection,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -197,6 +199,8 @@ struct Revocation {
 struct Execution {
     id: String,
     delegation_intent: String,
+    grant: String,
+    projection_digest: String,
     request: briqyard_api::ExecRequest,
 }
 #[derive(Serialize)]
@@ -256,7 +260,10 @@ async fn handle(
             | "revoke"
             | "installation_status"
     );
-    let gateway_role = matches!(action.as_str(), "exec" | "operation_status" | "observe");
+    let gateway_role = matches!(
+        action.as_str(),
+        "exec" | "projection" | "projection_lookup" | "operation_status" | "observe"
+    );
     if !installer_role && !gateway_role {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -378,6 +385,8 @@ async fn run(
                         ownership: dto.control.ownership,
                         protection: dto.control.protection,
                         source: dto.control.source,
+                        projection: dto.control.projection,
+                        policy_revision: dto.control.policy_revision,
                     },
                     SignedDelegation {
                         grant: dto.signed.grant,
@@ -412,6 +421,28 @@ async fn run(
             let dto: InstallationStatus = parse(body)?;
             installation_reply(installer.journal, &dto.kind, &dto.id, Outcome::Pending)
         }
+        "projection_lookup" => {
+            let dto: ProjectionLookup = parse(body)?;
+            value(
+                installer
+                    .journal
+                    .lookup_projection(&dto.delegation, &dto.grant, clock(service.clock.as_ref())?)
+                    .map_err(|_| StatusCode::CONFLICT)?,
+            )
+        }
+        "projection" => {
+            let dto: ProjectionRead = parse(body)?;
+            value(
+                installer
+                    .journal
+                    .presented_projection(
+                        &dto.delegation_intent,
+                        &dto.grant,
+                        clock(service.clock.as_ref())?,
+                    )
+                    .map_err(|_| StatusCode::CONFLICT)?,
+            )
+        }
         "exec" => {
             let dto: Execution = parse(body)?;
             let mut coordinator = Coordinator {
@@ -424,6 +455,8 @@ async fn run(
                     Control {
                         id: dto.id,
                         delegation_intent: dto.delegation_intent,
+                        grant: dto.grant,
+                        projection_digest: dto.projection_digest,
                         request: dto.request,
                     },
                     &service.trust.borrowed(),
@@ -475,6 +508,20 @@ async fn run(
 struct InstallationStatus {
     kind: String,
     id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectionRead {
+    delegation_intent: String,
+    grant: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectionLookup {
+    delegation: String,
+    grant: String,
 }
 
 fn installation_reply(
@@ -587,10 +634,12 @@ fn installation_reply(
                 journal
                     .delegation_intent_ready(id)
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-                intent
-                    .acknowledgement
-                    .as_ref()
-                    .map(|r| serde_json::to_value(r).unwrap()),
+                intent.acknowledgement.as_ref().map(|r| {
+                    serde_json::json!({"acknowledgement":r,"projection":intent.projection,
+                        "intent":id,"authority_epoch":intent.authority_epoch,
+                        "policy_revision":intent.policy_revision,"registration":intent.registration,
+                        "ownership":intent.ownership,"protection":intent.protection})
+                }),
             )
         }
         _ => return Err(StatusCode::BAD_REQUEST),
@@ -602,397 +651,4 @@ fn installation_reply(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::registry::HostRec;
-    use briqyard_api::execution::{
-        admission::{Journal, Role},
-        KeyRole,
-    };
-    use ring::signature::{Ed25519KeyPair, KeyPair};
-    use tower::ServiceExt;
-
-    struct FixedClock(Option<Clock>);
-    impl ClockSource for FixedClock {
-        fn qualified(&self) -> Option<QualifiedClock> {
-            self.0.map(|interval| QualifiedClock {
-                interval,
-                valid_until: Instant::now() + std::time::Duration::from_secs(5),
-            })
-        }
-    }
-    struct StaleClock;
-    impl ClockSource for StaleClock {
-        fn qualified(&self) -> Option<QualifiedClock> {
-            Some(QualifiedClock {
-                interval: Clock {
-                    now: 1000,
-                    uncertainty: 1,
-                },
-                valid_until: Instant::now() - std::time::Duration::from_secs(1),
-            })
-        }
-    }
-    fn fixture(clock: Arc<dyn ClockSource>) -> (Router, tempfile::TempDir) {
-        let host = HostRec {
-            id: "host".into(),
-            url: "https://127.0.0.1:1".into(),
-            token: "host-admin".into(),
-            tls_fingerprint: "ab".repeat(32),
-            ..Default::default()
-        };
-        let (app, dir, _) = fixture_with_host(clock, host);
-        (app, dir)
-    }
-    fn fixture_with_host(
-        clock: Arc<dyn ClockSource>,
-        host: HostRec,
-    ) -> (Router, tempfile::TempDir, String) {
-        let (app, dir, epoch) = configured_fixture(clock, host, |_, _| {});
-        (app.unwrap(), dir, epoch)
-    }
-    fn configured_fixture(
-        clock: Arc<dyn ClockSource>,
-        host: HostRec,
-        configure: impl FnOnce(&mut String, &mut Credentials),
-    ) -> (Result<Router, &'static str>, tempfile::TempDir, String) {
-        let dir = tempfile::tempdir().unwrap();
-        let journal =
-            Journal::open(&dir.path().join("issuer"), Role::Authority("region".into())).unwrap();
-        let key = Ed25519KeyPair::from_seed_unchecked(&[2; 32]).unwrap();
-        let issuer =
-            briqyard_api::execution::DurableIssuer::new(journal, key, "authority".into()).unwrap();
-        let epoch = issuer.instance().to_owned();
-        let transport = HostTransport::new(
-            &host,
-            "host-installer",
-            "host-execution",
-            std::time::Duration::from_secs(1),
-        )
-        .unwrap();
-        let mut host_id = host.id;
-        let mut credentials = Credentials {
-            installer: "central-installer".into(),
-            gateway: "gateway-only".into(),
-            administrator: "fleet-admin".into(),
-            host_administrator: "host-admin".into(),
-        };
-        configure(&mut host_id, &mut credentials);
-        let app = router(
-            issuer,
-            transport,
-            host_id,
-            credentials,
-            &crate::config::Config {
-                token: "fleet-admin".into(),
-                ..Default::default()
-            },
-            TrustConfig {
-                keys: vec![VerificationKey {
-                    kid: "central".into(),
-                    role: KeyRole::Central,
-                    issuer: "central".into(),
-                    authority: None,
-                    public_key: [1; 32],
-                }],
-                central_issuer: "central".into(),
-                authority_issuer: "authority".into(),
-                audience: "host".into(),
-            },
-            clock,
-        );
-        (app, dir, epoch)
-    }
-    #[test]
-    fn constructor_checks_actual_host_and_fleet_administrator_credentials() {
-        for change in 0..5 {
-            let host = HostRec {
-                id: "host".into(),
-                url: "https://127.0.0.1:1".into(),
-                token: "host-admin".into(),
-                tls_fingerprint: "ab".repeat(32),
-                ..Default::default()
-            };
-            let (result, _dir, _) =
-                configured_fixture(Arc::new(FixedClock(None)), host, |host_id, credentials| {
-                    if change == 0 {
-                        *host_id = "another-host".into();
-                    } else if change < 3 {
-                        credentials.host_administrator = "unrelated-placeholder".into();
-                        if change == 1 {
-                            credentials.installer = "host-admin".into();
-                        } else {
-                            credentials.gateway = "host-admin".into();
-                        }
-                    } else {
-                        credentials.administrator = "unrelated-placeholder".into();
-                        if change == 3 {
-                            credentials.installer = "fleet-admin".into();
-                        } else {
-                            credentials.gateway = "fleet-admin".into();
-                        }
-                    }
-                });
-            assert!(result.is_err());
-        }
-    }
-    async fn request(app: &Router, action: &str, token: &str, body: Vec<u8>) -> Response {
-        let mut request = Request::builder()
-            .method("POST")
-            .uri(format!("/internal/authority/v1/{action}"))
-            .header(header::CONTENT_TYPE, "application/json");
-        if !token.is_empty() {
-            request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
-        }
-        app.clone()
-            .oneshot(request.body(Body::from(body)).unwrap())
-            .await
-            .unwrap()
-    }
-    #[tokio::test]
-    async fn roles_body_limit_and_unknown_status_are_enforced_at_router() {
-        let (app, _dir) = fixture(Arc::new(FixedClock(Some(Clock {
-            now: 1000,
-            uncertainty: 1,
-        }))));
-        let status = br#"{"id":"missing"}"#.to_vec();
-        assert_eq!(
-            request(&app, "operation_status", "", status.clone())
-                .await
-                .status(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            request(
-                &app,
-                "operation_status",
-                "central-installer",
-                status.clone()
-            )
-            .await
-            .status(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            request(
-                &app,
-                "installation_status",
-                "gateway-only",
-                br#"{"kind":"delegation","id":"missing"}"#.to_vec()
-            )
-            .await
-            .status(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            request(&app, "register", "fleet-admin", vec![])
-                .await
-                .status(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            request(&app, "revoke", "gateway-only", vec![])
-                .await
-                .status(),
-            StatusCode::UNAUTHORIZED
-        );
-        let response = request(&app, "operation_status", "gateway-only", status).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = to_bytes(response.into_body(), 1024).await.unwrap();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
-            serde_json::json!({"state":"unknown","evidence":null})
-        );
-        assert_eq!(
-            request(
-                &app,
-                "installation_status",
-                "central-installer",
-                br#"{"kind":"delegation","id":"missing"}"#.to_vec()
-            )
-            .await
-            .status(),
-            StatusCode::OK
-        );
-        assert_eq!(
-            request(&app, "exec", "gateway-only", vec![b'x'; MAX_BODY_BYTES + 1])
-                .await
-                .status(),
-            StatusCode::PAYLOAD_TOO_LARGE
-        );
-    }
-    #[tokio::test]
-    async fn stale_or_absent_clock_refuses_mutation_before_host_call() {
-        for source in [
-            Arc::new(StaleClock) as Arc<dyn ClockSource>,
-            Arc::new(FixedClock(None)),
-        ] {
-            let host = HostRec {
-                id: "host".into(),
-                url: "https://127.0.0.1:1".into(),
-                token: "host-admin".into(),
-                tls_fingerprint: "ab".repeat(32),
-                ..Default::default()
-            };
-            let (app, _dir, epoch) = fixture_with_host(source, host);
-            let record = HostRegistration {
-                authority: "region".into(),
-                epoch,
-                key_id: "authority".into(),
-                public_key: Ed25519KeyPair::from_seed_unchecked(&[2; 32])
-                    .unwrap()
-                    .public_key()
-                    .as_ref()
-                    .try_into()
-                    .unwrap(),
-                host_instance: "instance".into(),
-                generation: 1,
-            };
-            let body =
-                serde_json::to_vec(&serde_json::json!({"id":"new","record":record})).unwrap();
-            assert_eq!(
-                request(&app, "register", "central-installer", body)
-                    .await
-                    .status(),
-                StatusCode::SERVICE_UNAVAILABLE
-            );
-            assert_eq!(
-                request(
-                    &app,
-                    "observe",
-                    "gateway-only",
-                    br#"{"id":"unknown"}"#.to_vec()
-                )
-                .await
-                .status(),
-                StatusCode::SERVICE_UNAVAILABLE
-            );
-        }
-    }
-    #[tokio::test]
-    async fn registration_route_returns_exact_ack_and_duplicate_is_status_only() {
-        use axum::{extract::State, response::IntoResponse};
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-        use sha2::{Digest, Sha256};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        async fn endpoint(
-            State(calls): State<Arc<AtomicUsize>>,
-            uri: axum::http::Uri,
-            body: axum::body::Bytes,
-        ) -> Response {
-            if uri.path().ends_with("/instance") {
-                return Json(briqyard_api::execution::channel::Instance {
-                    host_instance: "instance".into(),
-                })
-                .into_response();
-            }
-            calls.fetch_add(1, Ordering::SeqCst);
-            let record: HostRegistration = serde_json::from_slice(&body).unwrap();
-            Json(briqyard_api::execution::channel::InstallationAck {
-                host_instance: record.host_instance,
-                generation: record.generation,
-                digest: URL_SAFE_NO_PAD.encode(Sha256::digest(body)),
-            })
-            .into_response()
-        }
-        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
-        let config = briqyard_api::tls::server_config(
-            cert.cert.pem().as_bytes(),
-            cert.key_pair.serialize_pem().as_bytes(),
-        )
-        .unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let host = HostRec {
-            id: "host".into(),
-            url: format!("https://{}", listener.local_addr().unwrap()),
-            token: "host-admin".into(),
-            tls_fingerprint: briqyard_api::tls::fingerprint(cert.cert.der()),
-            ..Default::default()
-        };
-        let calls = Arc::new(AtomicUsize::new(0));
-        let handle = axum_server::Handle::new();
-        let running = handle.clone();
-        let app_host = axum::Router::new()
-            .fallback(endpoint)
-            .with_state(calls.clone());
-        let task = tokio::spawn(async move {
-            axum_server::from_tcp_rustls(
-                listener,
-                axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(config)),
-            )
-            .handle(running)
-            .serve(app_host.into_make_service())
-            .await
-        });
-        let (app, _dir, epoch) = fixture_with_host(
-            Arc::new(FixedClock(Some(Clock {
-                now: 1000,
-                uncertainty: 1,
-            }))),
-            host,
-        );
-        let record = HostRegistration {
-            authority: "region".into(),
-            epoch,
-            key_id: "authority".into(),
-            public_key: Ed25519KeyPair::from_seed_unchecked(&[2; 32])
-                .unwrap()
-                .public_key()
-                .as_ref()
-                .try_into()
-                .unwrap(),
-            host_instance: "instance".into(),
-            generation: 1,
-        };
-        let body =
-            serde_json::to_vec(&serde_json::json!({"id":"registration", "record":record})).unwrap();
-        let first = request(&app, "register", "central-installer", body.clone()).await;
-        assert_eq!(first.status(), StatusCode::OK);
-        let first: serde_json::Value =
-            serde_json::from_slice(&to_bytes(first.into_body(), 4096).await.unwrap()).unwrap();
-        assert_eq!(first["state"], "ready");
-        assert_eq!(first["evidence"]["host_instance"], "instance");
-        let second = request(&app, "register", "central-installer", body).await;
-        assert_eq!(second.status(), StatusCode::OK);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            request(
-                &app,
-                "installation_status",
-                "central-installer",
-                br#"{"kind":"ownership","id":"registration"}"#.to_vec()
-            )
-            .await
-            .status(),
-            StatusCode::BAD_REQUEST
-        );
-        handle.shutdown();
-        task.abort();
-    }
-
-    #[test]
-    fn credential_configuration_refuses_reuse_and_empty_values() {
-        // Constructor validation is pure and occurs before a listener exists.
-        let c = Credentials {
-            installer: "i".into(),
-            gateway: "g".into(),
-            administrator: "a".into(),
-            host_administrator: "h".into(),
-        };
-        assert!(valid_credentials(&c));
-        for (i, g, a, h) in [
-            ("", "g", "a", "h"),
-            ("i", "", "a", "h"),
-            ("x", "x", "a", "h"),
-            ("a", "g", "a", "h"),
-            ("i", "h", "a", "h"),
-        ] {
-            assert!(!valid_credentials(&Credentials {
-                installer: i.into(),
-                gateway: g.into(),
-                administrator: a.into(),
-                host_administrator: h.into()
-            }));
-        }
-    }
-}
+mod tests;
