@@ -65,12 +65,13 @@ fn configured_fixture(
         std::time::Duration::from_secs(1),
     )
     .unwrap();
+    let host_administrator = host.token.clone();
     let mut host_id = host.id;
     let mut credentials = Credentials {
         installer: "central-installer".into(),
         gateway: "gateway-only".into(),
         administrator: "fleet-admin".into(),
-        host_administrator: "host-admin".into(),
+        host_administrator,
     };
     configure(&mut host_id, &mut credentials);
     let app = router(
@@ -143,6 +144,141 @@ async fn request(app: &Router, action: &str, token: &str, body: Vec<u8>) -> Resp
         .oneshot(request.body(Body::from(body)).unwrap())
         .await
         .unwrap()
+}
+#[tokio::test]
+async fn identity_reads_live_journals_only_for_the_installer() {
+    let server = crate::execution_host::tests::server();
+    let (app, _dir, epoch) = fixture_with_host(
+        Arc::new(FixedClock(Some(Clock {
+            now: 1000,
+            uncertainty: 1,
+        }))),
+        server.host.clone(),
+    );
+    for token in [
+        "",
+        "gateway-only",
+        "fleet-admin",
+        server.host.token.as_str(),
+    ] {
+        assert_eq!(
+            request(&app, "identity", token, b"{}".to_vec())
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        request(
+            &app,
+            "identity",
+            "central-installer",
+            br#"{"host":"other"}"#.to_vec()
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert!(server.calls.lock().unwrap().is_empty());
+    for instance in ["first-host-instance", "replacement-host-instance"] {
+        *server.instance.lock().unwrap() = instance.into();
+        let response = request(&app, "identity", "central-installer", b"{}".to_vec()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            serde_json::json!({
+                "authority":"region", "authority_epoch":epoch, "host":"host-one", "host_instance":instance,
+            })
+        );
+    }
+    assert_eq!(
+        *server.calls.lock().unwrap(),
+        vec![
+            (
+                "/internal/execution/v1/instance".into(),
+                "Bearer host-installer".into()
+            ),
+            (
+                "/internal/execution/v1/instance".into(),
+                "Bearer host-installer".into()
+            ),
+        ]
+    );
+    let (replacement, _dir, next_epoch) = fixture_with_host(
+        Arc::new(FixedClock(Some(Clock {
+            now: 1000,
+            uncertainty: 1,
+        }))),
+        server.host.clone(),
+    );
+    assert_ne!(epoch, next_epoch);
+    let response = request(
+        &replacement,
+        "identity",
+        "central-installer",
+        b"{}".to_vec(),
+    )
+    .await;
+    let bytes = to_bytes(response.into_body(), 1024).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["authority_epoch"],
+        next_epoch
+    );
+}
+
+#[tokio::test]
+async fn identity_refuses_untrusted_host_and_unqualified_clock() {
+    let server = crate::execution_host::tests::server();
+    let mut host = server.host.clone();
+    host.tls_fingerprint = "ab".repeat(32);
+    let (app, _dir, _) = fixture_with_host(
+        Arc::new(FixedClock(Some(Clock {
+            now: 1000,
+            uncertainty: 1,
+        }))),
+        host,
+    );
+    assert_eq!(
+        request(&app, "identity", "central-installer", b"{}".to_vec())
+            .await
+            .status(),
+        StatusCode::BAD_GATEWAY
+    );
+    let (app, _dir, _) = fixture_with_host(Arc::new(StaleClock), server.host.clone());
+    assert_eq!(
+        request(&app, "identity", "central-installer", b"{}".to_vec())
+            .await
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert!(server.calls.lock().unwrap().is_empty());
+
+    struct Once(std::sync::atomic::AtomicBool);
+    impl ClockSource for Once {
+        fn qualified(&self) -> Option<QualifiedClock> {
+            self.0
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+                .then_some(QualifiedClock {
+                    interval: Clock {
+                        now: 1000,
+                        uncertainty: 1,
+                    },
+                    valid_until: Instant::now() + std::time::Duration::from_secs(5),
+                })
+        }
+    }
+    let (app, _dir, _) = fixture_with_host(
+        Arc::new(Once(std::sync::atomic::AtomicBool::new(true))),
+        server.host.clone(),
+    );
+    assert_eq!(
+        request(&app, "identity", "central-installer", b"{}".to_vec())
+            .await
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(server.calls.lock().unwrap().len(), 1);
 }
 #[tokio::test]
 async fn roles_body_limit_and_unknown_status_are_enforced_at_router() {
