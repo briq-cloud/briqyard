@@ -5,6 +5,67 @@ mod public_lifecycle;
 mod recovery;
 mod terminal;
 
+#[tokio::test]
+async fn maintenance_valid_settled_run_history_is_not_pending_authority() {
+    let (h, entry) = stopped(false).await;
+    h.m.launch_assigned_run(&entry, false).await.unwrap();
+    let live = entry.live.lock().unwrap().clone().unwrap();
+    h.m.inner.vmm.kill(live.pid);
+    h.m.settle_assigned_run(&entry, super::terminal::Disposition::Stopped)
+        .await
+        .unwrap();
+    let inspect = || {
+        let mut budget = crate::store::InspectionBudget::new(
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        );
+        let machines = h.m.inner.store.inspect::<Record>("machines", &mut budget)?;
+        h.m.maintenance_runs(&mut budget, &machines, &BTreeMap::new())
+    };
+    assert_eq!(inspect().unwrap(), 0);
+    assert!(h
+        .m
+        .inner
+        .store
+        .get::<Current>(RUNS, &entry.snapshot().id)
+        .unwrap()
+        .is_some());
+    // Other retained warm ownership is still checked by the complete predicate.
+    assert!(!h.m.warm_catalog_eligibility().await.eligible);
+    let id = entry.snapshot().id;
+    let reader: Reader = h.m.inner.store.get(READERS, &id).unwrap().unwrap();
+    h.m.inner.store.delete_durable(READERS, &id).unwrap();
+    assert!(inspect().is_err(), "missing reader is not settled history");
+    h.m.inner.store.put_durable(READERS, &id, &reader).unwrap();
+    let machine: Record = h.m.inner.store.get("machines", &id).unwrap().unwrap();
+    h.m.inner.store.delete_durable("machines", &id).unwrap();
+    assert!(inspect().is_err(), "missing machine is not settled history");
+    let mut changed = machine.clone();
+    changed.assigned_run.as_mut().unwrap().sequence += 1;
+    h.m.inner
+        .store
+        .put_durable("machines", &id, &changed)
+        .unwrap();
+    assert!(
+        inspect().is_err(),
+        "different reference is not settled history"
+    );
+    changed = machine.clone();
+    changed.name = "different-owner-binding".into();
+    h.m.inner
+        .store
+        .put_durable("machines", &id, &changed)
+        .unwrap();
+    assert!(
+        inspect().is_err(),
+        "different immutable machine is not settled history"
+    );
+    h.m.inner
+        .store
+        .put_durable("machines", &id, &machine)
+        .unwrap();
+    assert_eq!(inspect().unwrap(), 0);
+}
+
 #[test]
 fn run_reference_is_explicit_and_rejects_unknown_fields() {
     let reference = RunRef {

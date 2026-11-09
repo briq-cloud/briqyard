@@ -44,6 +44,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Validate configuration and print only its loaded identity, without opening host state.
+    CheckConfig,
     /// Print the SHA-256 of the API's certificate, making the certificate if there is none
     /// yet; nothing when the API is plain HTTP. What the fleet pins (ADR 0020).
     TlsFingerprint,
@@ -60,6 +62,22 @@ enum Cmd {
 fn main() {
     one_malloc_arena();
     let args = Args::parse();
+    // This path validates only configuration: no runtime, host state, TLS or listeners.
+    if matches!(args.cmd, Some(Cmd::CheckConfig)) {
+        let checked = config_path(&args.config).and_then(config::Config::load);
+        match checked {
+            Ok(cfg) => println!(
+                "{}",
+                serde_json::to_string(&cfg.loaded_identity).expect("config identity JSON")
+            ),
+            Err(_) => {
+                // Parser/validation errors may contain input values. Keep them private.
+                eprintln!("configuration_invalid");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let filter = tracing_subscriber::EnvFilter::try_from_env("BRIQYARD_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     // Logs on stderr: stdout is a subcommand's answer (`tls-fingerprint`).
@@ -92,6 +110,16 @@ fn one_malloc_arena() {
     }
 }
 
+fn config_path(path: &std::path::Path) -> Result<Option<&std::path::Path>> {
+    if path.exists() {
+        Ok(Some(path))
+    } else if path == std::path::Path::new("/etc/briqyard/config.yaml") {
+        Ok(None)
+    } else {
+        Err(anyhow!("config {} not found", path.display()))
+    }
+}
+
 async fn run(args: Args) -> Result<()> {
     if matches!(args.cmd, Some(Cmd::StateCapabilities)) {
         println!("launch-identity-v1");
@@ -111,14 +139,7 @@ async fn run(args: Args) -> Result<()> {
     }
     // Capture before an installer replaces this path; /proc/self/exe later names old bytes.
     let executable = std::env::current_exe()?;
-    let default = PathBuf::from("/etc/briqyard/config.yaml");
-    let path = if args.config.exists() {
-        Some(args.config.as_path())
-    } else if args.config == default {
-        None
-    } else {
-        return Err(anyhow!("config {} not found", args.config.display()));
-    };
+    let path = config_path(&args.config)?;
     let began = std::time::Instant::now();
     let cfg = config::Config::load(path)?;
     if let Some(Cmd::TlsFingerprint) = args.cmd {

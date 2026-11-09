@@ -166,7 +166,7 @@ async fn legacy_records_need_no_launch_holds() {
 #[tokio::test]
 async fn compatible_handover_fences_new_admission_through_target_check() {
     use std::os::unix::fs::PermissionsExt;
-    let (h, _, _) = held().await;
+    let (h, record, _) = held().await;
     let dir = tempfile::tempdir().unwrap();
     let executable = dir.path().join("replacement");
     std::fs::write(
@@ -175,10 +175,14 @@ async fn compatible_handover_fences_new_admission_through_target_check() {
     )
     .unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // A compatible binary cannot override outstanding warm ownership.
+    assert!(h.m.handover_admission(&executable).await.is_err());
+    h.m.release_launch_hold(&record.id).unwrap();
     let admission = h.m.handover_admission(&executable).await.unwrap();
     assert!(h.m.inner.namespace_lifecycle.try_read().is_err());
-    assert!(h.m.held_addresses(1).contains(&2));
+    assert!(h.m.inner.warm_lock.try_read().is_err());
     drop(admission);
+    assert!(h.m.inner.warm_lock.try_write().is_ok());
     assert!(h.m.inner.namespace_lifecycle.try_read().is_ok());
 }
 
@@ -222,6 +226,7 @@ async fn handover_admission_deadline_and_cancellation_release_queued_writer() {
     ));
     // A stop signal/server completion drops the pending acquisition in main's select.
     drop(pending);
+    assert!(h.m.inner.warm_lock.try_write().is_ok());
     assert!(h.m.inner.namespace_lifecycle.try_read().is_ok());
     drop(reader);
     assert!(h.m.inner.namespace_lifecycle.try_write().is_ok());
@@ -432,4 +437,35 @@ async fn late_lifecycle_writer_rechecks_schema2_only_candidate_inside_handover_f
     drop(admission);
     assert!(pending.await.is_err());
     assert!(h.m.inner.namespace_lifecycle.try_read().is_ok());
+}
+
+#[tokio::test]
+async fn maintenance_pending_names_and_durable_only_holds_refuse_without_cleanup() {
+    let h = harness_config(|cfg| {
+        cfg.network.range = "10.64.0.0/22".into();
+        cfg.jailer = "/mock/jailer".into();
+    })
+    .await;
+    h.m.inner
+        .warm_names
+        .lock()
+        .unwrap()
+        .insert(("t1".into(), "worker".into()), "m_owned".into());
+    let view = h.m.warm_catalog_eligibility().await;
+    assert!(!view.eligible);
+    assert_eq!(view.counts.unwrap().warm_names, 1);
+    h.m.inner.warm_names.lock().unwrap().clear();
+    let identity = LaunchIdentity::new(&h.m.inner.cfg, "t1", 1, 2).unwrap();
+    let path = h.m.inner.store.dir("launch-holds").join("m_owned.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({"machine":"m_owned","identity":identity})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        h.m.warm_catalog_eligibility().await.reason,
+        api::WarmMaintenanceReason::StateUnknown
+    );
+    assert!(h.m.inner.launch_holds.lock().unwrap().is_empty());
+    assert!(path.exists());
 }

@@ -13,6 +13,10 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::WarmPool(command) => warm::run(c, command).await?,
         Cmd::Status => print_json(&c.call::<api::Status>(GET, "/v1/status", NONE).await?),
+        Cmd::WarmMaintenance => print_json(
+            &c.call::<api::WarmCatalogEligibility>(GET, "/v1/maintenance/warm-catalog", NONE)
+                .await?,
+        ),
         Cmd::Openapi => print!("{}", c.raw(GET, "/v1/openapi.yaml", NONE).await?),
         Cmd::Machine(m) => match *m {
             MachineCmd::Ls { namespace, labels } => {
@@ -469,6 +473,14 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     &c.call::<api::Machine>(
                         POST,
                         &format!("/v1/machines/{id}/snapshots/{snap}/restore"),
+                        NONE,
+                    )
+                    .await?,
+                ),
+                SnapshotCmd::SandboxRecipe { id, snap } => print_json(
+                    &c.call::<api::SealedSandboxRecipe>(
+                        GET,
+                        &format!("/v1/machines/{id}/snapshots/{snap}/sandbox-recipe"),
                         NONE,
                     )
                     .await?,

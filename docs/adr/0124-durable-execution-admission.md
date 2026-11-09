@@ -1,4 +1,4 @@
-# ADR 0121: Durable scoped execution admission
+# ADR 0124: Durable scoped execution admission
 
 Date: 2026-11-09 · Status: implemented boundary; scoped HTTP access remains unavailable
 

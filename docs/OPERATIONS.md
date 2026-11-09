@@ -336,6 +336,8 @@ what a failed destroy or a crash left. A `.next` dataset is a restore under way.
 
 ## Upgrade
 
+Before a warm-catalog change, `briqyard warm-maintenance` against the source daemon reports its loaded configuration identity and conservative eligibility (ADR 0123). An observation is not a permit. SIGUSR2 takes warm then namespace admission and checks again, retaining both through exit. Desired pools, warm machines (including claimed/failed slots), holds, pending assignments or run authority refuse handover even with a compatible replacement. Settle ownership through its normal lifecycle; never remove records or owner workloads to force eligibility. Malformed, inaccessible, over-budget or inconsistent state is unknown and refuses. Older daemons do not enforce this check during their own replacement.
+
 Through the fleet, one host or every host, machines running (ADR 0027). The fleet first, then
 the hosts: a host is never newer than its fleet.
 
