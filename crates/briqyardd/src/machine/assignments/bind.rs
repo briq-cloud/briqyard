@@ -224,7 +224,7 @@ impl Manager {
         );
         let binding = origin.sandbox.as_ref().unwrap();
         let bind = binding.bind.as_ref().context("assigned payload missing")?;
-        let resolved = templates::sandbox::destination_bind(record, &origin)?;
+        let resolved = templates::sandbox::destination_bind(record, origin)?;
         anyhow::ensure!(
             binding.ack_sha256.as_ref() == Some(&templates::sandbox::binding_hash(bind)?)
                 && bind.fingerprint_bytes()? == resolved.fingerprint_bytes()?,
