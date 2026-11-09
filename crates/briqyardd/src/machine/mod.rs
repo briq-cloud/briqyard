@@ -55,6 +55,7 @@ mod shutdown;
 mod snapshots;
 mod start;
 mod startup;
+mod stopped_update;
 mod templates;
 #[cfg(test)]
 mod tests;
@@ -336,6 +337,9 @@ pub struct Record {
     /// Current assigned-run authority; creation provenance remains on clone_origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_run: Option<assignments::runs::RunRef>,
+    /// Accepted nonces remain reserved after their receipt becomes stale.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stopped_updates: BTreeMap<String, stopped_update::Accepted>,
     /// What a newer daemon wrote and this one does not know: kept as it is, so a rollback that
     /// rewrites the record does not drop it (ADR 0027).
     #[serde(flatten)]
@@ -578,6 +582,8 @@ struct Entry {
     /// Serializes lifecycle operations on one machine; owned by a hand-over (ADR 0027).
     lock: Arc<tokio::sync::Mutex<()>>,
     rec: Mutex<Record>,
+    /// A stopped target was renamed but its directory sync has not succeeded yet.
+    stopped_update_unsynced: AtomicBool,
     live: Mutex<Option<fc::Vm>>,
     memory_protection: Mutex<Option<fc::MemoryProtection>>,
     launch_pending: AtomicBool,
@@ -618,9 +624,13 @@ struct Entry {
 
 impl Entry {
     fn new(rec: Record, events: Events) -> Arc<Self> {
+        // A recovered acceptance needs its directory boundary re-established before
+        // any recovery writer or lifecycle can replace the loaded record.
+        let stopped_update_unsynced = !rec.stopped_updates.is_empty();
         Arc::new(Self {
             lock: Default::default(),
             rec: Mutex::new(rec),
+            stopped_update_unsynced: AtomicBool::new(stopped_update_unsynced),
             live: Mutex::new(None),
             memory_protection: Mutex::new(None),
             launch_pending: AtomicBool::new(false),

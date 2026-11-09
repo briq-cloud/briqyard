@@ -248,6 +248,7 @@ impl Manager {
             api::check_snapshot_name(n).map_err(invalid)?;
         }
         let _lock = e.lock.lock().await;
+        self.settle_stopped_update(&e)?;
         let r = e.snapshot();
         if req.memory && (r.state != state::RUNNING || e.live.lock().unwrap().is_none()) {
             return Err(MError::NotRunning(

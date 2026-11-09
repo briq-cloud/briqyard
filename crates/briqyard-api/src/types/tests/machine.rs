@@ -457,3 +457,19 @@ fn sandbox_seed_volume_is_absent_or_a_work_volume() {
     request.start = Some(false);
     assert!(request.check_sandbox_seed().is_err());
 }
+
+#[test]
+fn stopped_update_requires_complete_explicit_fields() {
+    for value in [
+        serde_json::json!({"claim_nonce":"n","image":"alpine"}),
+        serde_json::json!({"claim_nonce":"n","env":{}}),
+        serde_json::json!({"image":"alpine","env":{}}),
+        serde_json::json!({"claim_nonce":"n","image":"alpine","env":{},"extra":true}),
+    ] {
+        assert!(serde_json::from_value::<StoppedUpdateRequest>(value).is_err());
+    }
+    assert!(serde_json::from_value::<StoppedUpdateRequest>(
+        serde_json::json!({"claim_nonce":"n","image":"alpine","env":{}})
+    )
+    .is_ok());
+}

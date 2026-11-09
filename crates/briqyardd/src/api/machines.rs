@@ -187,3 +187,43 @@ pub(super) async fn sandbox_request_lookup(
             .into_response()),
     }
 }
+
+/// No fallback to PATCH: older daemons must reject the named operation before effects.
+pub(super) async fn stopped_update(
+    State(st): S,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<api::StoppedUpdateRequest>,
+) -> Result<Json<api::StoppedUpdateReceipt>, AppError> {
+    let at = stopped_update_version(&headers)?;
+    let m = st.mgr.clone();
+    Ok(Json(
+        detached(async move { m.stopped_update(&id, req, at).await }).await?,
+    ))
+}
+
+pub(super) async fn stopped_update_receipt(
+    State(st): S,
+    Path((id, nonce)): Path<(String, String)>,
+) -> Result<Json<api::StoppedUpdateReceipt>, AppError> {
+    Ok(Json(st.mgr.stopped_update_receipt(&id, &nonce).await?))
+}
+
+fn stopped_update_version(headers: &HeaderMap) -> Result<u64, AppError> {
+    if_match(headers)?
+        .ok_or_else(|| MError::Invalid("stopped update requires If-Match".into()).into())
+}
+
+#[cfg(test)]
+mod stopped_update_tests {
+    use super::*;
+    #[test]
+    fn stopped_update_requires_a_numeric_cas() {
+        assert!(stopped_update_version(&HeaderMap::new()).is_err());
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_MATCH, "123".parse().unwrap());
+        assert_eq!(stopped_update_version(&headers).ok(), Some(123));
+        headers.insert(header::IF_MATCH, "*".parse().unwrap());
+        assert!(stopped_update_version(&headers).is_err());
+    }
+}

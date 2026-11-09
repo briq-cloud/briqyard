@@ -13,6 +13,8 @@ pub const NAMESPACES: &str = "tenants";
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
+    #[cfg(test)]
+    pub(crate) fail_next_sync: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A shared limit for a read-only inspection, not an I/O cancellation guarantee.
@@ -103,6 +105,8 @@ impl Store {
         }
         Ok(Self {
             root: root.to_path_buf(),
+            #[cfg(test)]
+            fail_next_sync: Default::default(),
         })
     }
 
@@ -155,7 +159,14 @@ impl Store {
         crate::assignment_compatibility::ensure_assigned_run_lifecycle_floor(&self.root)
     }
 
-    fn sync_dir(&self, kind: &str) -> Result<()> {
+    pub(crate) fn sync_dir(&self, kind: &str) -> Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_next_sync
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected directory sync failure");
+        }
         let dir = self.dir(kind);
         std::fs::File::open(&dir)
             .and_then(|d| d.sync_all())
@@ -164,7 +175,20 @@ impl Store {
 
     /// Crash-durable record boundary for immutable snapshot publication and read intents.
     pub fn put_durable<T: Serialize>(&self, kind: &str, key: &str, v: &T) -> Result<()> {
+        self.put_durable_published(kind, key, v, || {})
+    }
+
+    /// Publish the renamed record to its owner before directory sync can fail. The owner
+    /// must retain it on an uncertain sync and fence later persistence until durable.
+    pub(crate) fn put_durable_published<T: Serialize>(
+        &self,
+        kind: &str,
+        key: &str,
+        v: &T,
+        published: impl FnOnce(),
+    ) -> Result<()> {
         self.put(kind, key, v)?;
+        published();
         self.sync_dir(kind)
     }
 
