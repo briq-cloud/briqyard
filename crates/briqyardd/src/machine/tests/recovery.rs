@@ -55,17 +55,10 @@ async fn failed_adoption_publication_keeps_process_and_pending_evidence() {
         .calls()
         .iter()
         .any(|call| call.starts_with("kill ") || call.starts_with("recover-stopped ")));
-    assert!(h
-        .m
-        .inner
-        .execution_fence
-        .lock()
-        .unwrap()
-        .snapshot(
-            &h.m.inner.store,
-            &["t1".into()],
-            crate::machine::execution_mutations::execution_now_ms().unwrap(),
-        )
+    let mut fence = h.m.inner.execution_fence.lock().unwrap();
+    let retained = fence.last_observed_ms();
+    assert!(fence
+        .snapshot(&h.m.inner.store, &["t1".into()], retained)
         .is_err());
 }
 

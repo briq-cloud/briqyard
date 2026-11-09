@@ -171,7 +171,7 @@ async fn compatible_handover_fences_new_admission_through_target_check() {
     let executable = dir.path().join("replacement");
     std::fs::write(
         &executable,
-        b"#!/bin/sh\ncase $1 in\nstate-capabilities) printf 'launch-identity-v1\\n';;\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\nassigned-run-lifecycle-capabilities) printf 'assigned-run-lifecycle-v1\\n';;\nassigned-update-capabilities) printf 'assigned-update-v3\\n';;\n*) exit 1;;\nesac\n",
+        b"#!/bin/sh\ncase $1 in\nstate-capabilities) printf 'launch-identity-v1\\n';;\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\nassigned-run-lifecycle-capabilities) printf 'assigned-run-lifecycle-v1\\n';;\nassigned-update-capabilities) printf 'assigned-update-v3\\n';;\nscoped-execution-capabilities) printf 'scoped-execution-v1\\n';;\n*) exit 1;;\nesac\n",
     )
     .unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();

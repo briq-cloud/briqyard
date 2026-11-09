@@ -108,11 +108,20 @@ pub fn requirement(root: &Path) -> Result<Requirement> {
 }
 /// Inspect both committed evidence and a pending write using the same exact schemas.
 pub fn record_requirement(kind: &str, value: &Value) -> Result<Requirement> {
-    if matches!(
-        kind,
-        "execution-idle-protection" | "execution-namespace-fence"
-    ) {
+    if kind == "execution-idle-protection" {
         return Ok(Requirement::ScopedExecution);
+    }
+    if kind == "execution-namespace-fence" {
+        // Ordinary lifecycle mutations also persist namespace generations and
+        // pending tickets. Only retained command protection activates this floor.
+        let protected = value["protected_until_ms"]
+            .as_object()
+            .context("invalid execution namespace protection evidence")?;
+        return Ok(if protected.is_empty() {
+            Requirement::None
+        } else {
+            Requirement::ScopedExecution
+        });
     }
     if kind == "machines" {
         if let Some(run) = value.get("assigned_run").filter(|v| !v.is_null()) {
@@ -295,6 +304,28 @@ async fn probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ordinary_namespace_fences_preserve_default_compatibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        let mut record = serde_json::json!({"generations":{"ordinary":1},
+            "protected_until_ms":{}, "pending":{}, "max_observed_ms":1});
+        store
+            .put_durable("execution-namespace-fence", "state", &record)
+            .unwrap();
+        assert_eq!(requirement(dir.path()).unwrap(), Requirement::None);
+        assert!(!dir.path().join("meta").join(FLOOR).exists());
+        record["protected_until_ms"] = serde_json::json!({"ordinary":60000});
+        store
+            .put_durable("execution-namespace-fence", "state", &record)
+            .unwrap();
+        assert_eq!(floor(dir.path()).unwrap(), Requirement::ScopedExecution);
+        std::fs::remove_file(dir.path().join("meta").join(FLOOR)).unwrap();
+        assert_eq!(
+            requirement(dir.path()).unwrap(),
+            Requirement::ScopedExecution
+        );
+    }
     #[test]
     fn scoped_floor_precedes_protection_and_reconstructs_without_config() {
         let dir = tempfile::tempdir().unwrap();

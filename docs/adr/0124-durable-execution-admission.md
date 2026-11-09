@@ -492,7 +492,11 @@ failure, invalid fractions, negative error values and arithmetic overflow refuse
 fraction change units. Error adds maximum error, absolute offset, estimated error,
 monotonic syscall bracket, one second of freshness and outward quantization. The
 existing five-second ceiling applies after whole-second rounding. Unsupported
-systems have no production fallback. Fresh observations guard admission, protection,
+systems have no production fallback. Every observation must remain consistent with
+the first wall/monotonic anchor retained for the process lifetime. Accepted samples
+never reset that anchor: repeated individually small steps cannot accumulate time
+authority. Excess cumulative drift refuses until restart, whose retained-protection
+drain still applies. Fresh observations guard admission, protection,
 consumption, completion, protected broadening and the final idle stop decision.
 Explicit revocation and removal use retained ordering evidence without granting time
 based authority. Lost clock qualification cannot release retained protection.
@@ -508,6 +512,9 @@ accepted bounded command retains access. This adds recovery latency after scoped
 protection has been used, including when execution configuration is removed.
 
 The existing permanent assignment floor gains schema 5, `scoped-execution-v1`.
+Ordinary namespace generations and mutation tickets do not raise this floor.
+Nonempty retained namespace protection or any idle-protection receipt reconstructs
+it after marker loss, including when execution configuration is absent.
 Previous readers reject this unknown schema instead of silently ignoring a separate
 marker. The floor is fsynced before the first scoped listener journal or durable
 protection/fence write. Surviving receipts or namespace fences reconstruct a missing

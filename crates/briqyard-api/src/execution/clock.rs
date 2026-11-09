@@ -77,16 +77,18 @@ impl ClockSample {
             began,
             ended.checked_duration_since(began)?,
         )?;
-        // Retain the last qualified anchor across clock loss. A later wall step
+        // Retain the first qualified anchor for the entire process lifetime. A later wall step
         // cannot manufacture fresh authority merely because NTP status cleared.
-        static LAST: std::sync::Mutex<Option<ClockSample>> = std::sync::Mutex::new(None);
-        let mut last = LAST.lock().ok()?;
-        if let Some(previous) = last.as_ref() {
+        static ANCHOR: std::sync::Mutex<Option<ClockSample>> = std::sync::Mutex::new(None);
+        let mut anchor = ANCHOR.lock().ok()?;
+        if let Some(previous) = anchor.as_ref() {
             if !sample.follows(previous) {
                 return None;
             }
         }
-        *last = Some(sample.clone());
+        // Never reset after an accepted sample: pairwise overlapping error
+        // intervals otherwise permit unbounded accumulation of small wall steps.
+        anchor.get_or_insert_with(|| sample.clone());
         Some(sample)
     }
     #[cfg(any(target_os = "linux", test))]
@@ -165,6 +167,31 @@ mod tests {
         assert!(!next.follows(&first));
         next.wall = Duration::from_secs(90);
         assert!(!next.follows(&first));
+    }
+    #[test]
+    fn repeated_subthreshold_steps_cannot_accumulate_authority() {
+        let anchor = ClockSample {
+            wall: Duration::from_secs(100),
+            monotonic: Instant::now(),
+            uncertainty: Duration::from_secs(1),
+        };
+        let mut previous = anchor.clone();
+        for step in 1..=60 {
+            let sample = ClockSample {
+                wall: anchor.wall + Duration::from_secs(step * 2),
+                monotonic: anchor.monotonic + Duration::from_secs(step),
+                uncertainty: Duration::from_secs(1),
+            };
+            // Every +1s step passes the flawed moving-anchor predicate.
+            assert!(sample.follows(&previous));
+            assert_eq!(sample.follows(&anchor), step <= 2);
+            if sample.follows(&anchor) {
+                // Its lower bound cannot outrun the original upper bound
+                // advanced by monotonic elapsed time.
+                assert!(sample.lower_ms().unwrap() <= anchor.upper_ms().unwrap() + step * 1000);
+            }
+            previous = sample;
+        }
     }
     #[test]
     fn interval_rounds_outward_and_refuses_excess_error() {
