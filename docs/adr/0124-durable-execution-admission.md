@@ -279,6 +279,14 @@ authority, bounded clock qualification, retention and downgrade barriers, and
 Linux lifecycle/partition/crash evidence remain activation gates. No public
 scoped access is mounted.
 
+The dormant fleet host transport captures a trusted registry destination and
+requires its provisioned certificate pin over HTTPS. It disables redirects,
+proxies and retries. Fixed internal routes select distinct installer or execution
+credentials; neither may equal the host administrator credential. Requests and
+responses are bounded to 2 MiB. Any failed or malformed response is unconfirmed,
+never permission to resend dispatch or choose another host. Typed replies still
+require exact validation against durable installation intent before readiness.
+
 No mounted HTTP route or configuration accepts these credentials yet. Administrator routes do not
 call this boundary and keep their existing authentication and behavior.
 
