@@ -117,6 +117,10 @@ async fn creation_image_swap_full_startup_recovers_each_durable_boundary() {
             assert!(!h.pool.zfs.exists(&next).await.unwrap());
         }
         full_startup(&h).await.unwrap();
+        // The reboot override above qualifies startup's no-adoption fence. Mock's
+        // newly booted processes use its fixed original incarnation boot ID, so
+        // restore that host identity for the independent explicit-start check.
+        h.set_host_boot_id(Some("11111111-1111-4111-8111-111111111111"));
         tokio::time::timeout(Duration::from_secs(60), h.m.start(&id, None))
             .await
             .unwrap()

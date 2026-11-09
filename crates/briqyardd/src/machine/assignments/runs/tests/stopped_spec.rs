@@ -263,10 +263,15 @@ async fn stopped_env_update_refuses_missing_creation_authority() {
         .await
         .is_err());
     assert_eq!(serde_json::to_value(entry.snapshot()).unwrap(), before);
-    h.m.inner
-        .store
-        .delete(super::super::super::REQUESTS, &run.receipt.key())
-        .unwrap();
+    // Store deletion correctly refuses permanent authority. Model external loss
+    // directly, as the existing assignment recovery fixtures do.
+    std::fs::remove_file(
+        h.m.inner
+            .store
+            .dir(super::super::super::REQUESTS)
+            .join(format!("{}.json", run.receipt.key())),
+    )
+    .unwrap();
     assert!(h
         .m
         .update(&id, patch(None, BTreeMap::new(), None), None)
@@ -500,7 +505,8 @@ async fn creation_update_refuses_mixed_tampered_and_missing_authority() {
         ("launch-holds", id.clone()),
     ] {
         let original: serde_json::Value = h.m.inner.store.get(kind, &key).unwrap().unwrap();
-        h.m.inner.store.delete_durable(kind, &key).unwrap();
+        // Inject external evidence loss without weakening Store's permanence guard.
+        std::fs::remove_file(h.m.inner.store.dir(kind).join(format!("{key}.json"))).unwrap();
         assert!(h.m.check_update_source(&update).is_err(), "missing {kind}");
         h.m.inner.store.put_durable(kind, &key, &original).unwrap();
         h.m.check_update_source(&update).unwrap();
