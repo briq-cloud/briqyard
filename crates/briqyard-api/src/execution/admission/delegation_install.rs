@@ -11,6 +11,9 @@ pub struct DelegationIntent {
     pub registration: String,
     pub ownership: String,
     pub protection: String,
+    /// Authenticated source snapshot captured before signed credential inspection.
+    #[serde(default)]
+    pub trusted_source: Option<Source>,
     pub request: InstallDelegation,
     pub expected: HostDelegation,
     pub acknowledgement: Option<HostDelegation>,
@@ -29,6 +32,11 @@ impl Journal {
             || !valid_id(&intended.host)
             || !valid_id(&intended.request.id)
             || intended.request.version == 0
+            || !intended.trusted_source.as_ref().is_some_and(|source| {
+                valid_id(&source.kind)
+                    && valid_id(&source.id)
+                    && source.expires_at > clock.now.saturating_add(clock.uncertainty)
+            })
             || intended.authority_epoch != self.instance()
             || intended.acknowledgement.is_some()
             || self.delegation_revoked(&intended.request.id)?
@@ -57,6 +65,7 @@ impl Journal {
                 && prior.registration == intended.registration
                 && prior.ownership == intended.ownership
                 && prior.protection == intended.protection
+                && prior.trusted_source == intended.trusted_source
                 && prior.request == intended.request
                 && prior.expected == intended.expected
             {
@@ -182,6 +191,7 @@ impl Journal {
             return Ok(false);
         };
         Ok(intent.authority_epoch == self.instance()
+            && intent.trusted_source.is_some()
             && intent.acknowledgement.as_ref() == Some(&intent.expected)
             && !self.delegation_revoked(&intent.request.id)?
             && self.delegation_dependencies_ready(

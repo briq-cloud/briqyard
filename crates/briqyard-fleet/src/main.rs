@@ -13,6 +13,8 @@ mod create_replay;
 mod execution_host;
 #[allow(dead_code)]
 mod execution_install;
+#[allow(dead_code)]
+mod execution_operation;
 mod forward;
 mod hosts;
 mod join;

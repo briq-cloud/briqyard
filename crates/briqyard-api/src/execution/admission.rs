@@ -6,12 +6,14 @@ use super::*;
 mod authority_install;
 mod delegation_install;
 mod installation_flow;
+mod operation;
 pub use authority_install::{AuthorityIntent, AuthorityPayload};
 pub use delegation_install::DelegationIntent;
 pub use installation_flow::{
     validate_discovery_receipt, DiscoveryIntent, OwnershipControl, ProtectionIntent,
 };
 use nix::libc;
+pub use operation::{OperationIntent, OperationPhase};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -93,6 +95,8 @@ struct State {
     protection_intents: BTreeMap<String, ProtectionIntent>,
     #[serde(default)]
     delegation_intents: BTreeMap<String, DelegationIntent>,
+    #[serde(default)]
+    operation_intents: BTreeMap<String, OperationIntent>,
 }
 
 /// Authenticated installer input. These records are never constructed from a grant.
@@ -259,6 +263,7 @@ impl Journal {
                 discovery_intents: BTreeMap::new(),
                 protection_intents: BTreeMap::new(),
                 delegation_intents: BTreeMap::new(),
+                operation_intents: BTreeMap::new(),
             },
         };
         if state.admissions.len() > MAX_RECORDS
@@ -266,6 +271,7 @@ impl Journal {
             || state.discovery_intents.len() > MAX_RECORDS
             || state.protection_intents.len() > MAX_RECORDS
             || state.delegation_intents.len() > MAX_RECORDS
+            || state.operation_intents.len() > MAX_RECORDS
         {
             return Err(Error::Full);
         }

@@ -327,6 +327,36 @@ host allocation, issues no permit and dispatches no command.
 No mounted HTTP route or configuration accepts these credentials yet. Administrator routes do not
 call this boundary and keep their existing authentication and behavior.
 
+### Dormant regional synchronous execution
+
+The regional coordinator accepts an operation ID, a current installed delegation intent ID and
+a generic runtime `ExecRequest` from an authenticated control handler. The installed delegation
+retains the independently authenticated source kind, ID and expiry. Its trusted principal, team,
+subject, exact closure, metadata revision, ownership generation, host instance, authority epoch,
+protection receipt and signed allocation digests construct the dispatch context. Source revocation
+must be propagated as a retained delegation revoke before another operation can be admitted.
+No public or administrator route invokes this coordinator.
+
+The issuer's existing exclusive journal keeps each immutable operation ID bound to its delegation,
+epoch, request commitment and destination before permit issuance. A retained ID always returns
+status only; a changed request conflicts. The issuer verifies the full signed vector and checks
+both complete serialized prepare and dispatch envelopes against the 8 MiB wire limit before debit
+or permit release. The permit stays inside the issuer until quota reservation is durable. A crash
+after intent persistence conservatively burns the operation ID, including before debit. There is
+no resend, host fallback or permit regeneration.
+
+An exact typed prepare ACK is durable before dispatch intent. Its request, permit and grant
+digests, allocation references, ownership generation, host instance, admission and expiry must
+match. Dispatch intent is durable before one host dispatch. The caller supplies a fresh qualified
+clock at each security transition, including after network calls; the earlier clock estimate is
+not reused as evidence of remaining authority. The positive request timeout fits both the signed
+limit and remaining permit lifetime. Failed, missing or malformed replies are
+unconfirmed; host status absence is never evidence of non-execution. A confirmed first result
+must fit the permit's combined UTF-8 stdout and stderr limit. It returns bounded guest output
+transiently and persists only its outcome hash. An over-limit response is unconfirmed. Later
+calls return status without guest output. This source candidate keeps scoped access dormant pending
+the host lifecycle and Linux qualification gates below.
+
 Activation still requires authenticated ownership/metadata installation, host-instance and
 allocation acknowledgement transport, authority registration/key provisioning, regional
 routing, bounded clock monitoring and integrated lifecycle/partition/crash qualification.

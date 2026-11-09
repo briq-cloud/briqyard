@@ -10,6 +10,10 @@ pub struct DurableIssuer {
     key: Ed25519KeyPair,
     kid: String,
 }
+pub struct IssueCredentials<'a> {
+    pub grant: &'a str,
+    pub allocations: &'a [&'a str],
+}
 #[derive(Debug, thiserror::Error)]
 pub enum IssueError {
     #[error(transparent)]
@@ -57,6 +61,27 @@ impl DurableIssuer {
         clock: Clock,
         context: &DispatchContext<'_>,
     ) -> Result<String, IssueError> {
+        self.issue_with_preflight(
+            IssueCredentials { grant, allocations },
+            permit,
+            trust,
+            clock,
+            context,
+            |_| Ok(()),
+        )
+    }
+
+    /// The trusted coordinator checks the complete serialized host envelope before
+    /// either quota debit or permit release. The key and unsigned token stay here.
+    pub fn issue_with_preflight(
+        &mut self,
+        credentials: IssueCredentials<'_>,
+        permit: Permit,
+        trust: &Trust<'_>,
+        clock: Clock,
+        context: &DispatchContext<'_>,
+        preflight: impl FnOnce(&str) -> Result<(), IssueError>,
+    ) -> Result<String, IssueError> {
         let header = Header {
             alg: "EdDSA".into(),
             typ: PERMIT_TYPE.into(),
@@ -75,7 +100,15 @@ impl DurableIssuer {
             signed,
             URL_SAFE_NO_PAD.encode(self.key.sign(signed.as_bytes()).as_ref())
         );
-        let bundle = verify_bundle(grant, &token, allocations, trust, clock, context)?;
+        let bundle = verify_bundle(
+            credentials.grant,
+            &token,
+            credentials.allocations,
+            trust,
+            clock,
+            context,
+        )?;
+        preflight(&token)?;
         let instance = self.journal.instance().to_string();
         self.journal.install(&bundle, &instance, clock)?;
         self.journal.reserve(&bundle, clock)?;
