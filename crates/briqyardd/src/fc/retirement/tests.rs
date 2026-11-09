@@ -1,5 +1,15 @@
 use super::*;
-use std::{fs, os::unix::fs::symlink};
+use std::{
+    fs,
+    os::unix::fs::{symlink, PermissionsExt},
+    path::Path,
+};
+
+fn control(directory: &Path, name: &str, contents: &str) {
+    let path = directory.join(name);
+    fs::write(&path, contents).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+}
 
 struct Fixture {
     temp: tempfile::TempDir,
@@ -11,12 +21,12 @@ impl Fixture {
         let path = temp.path().join("firecracker/m-owned");
         fs::create_dir_all(&path).unwrap();
         for directory in [temp.path(), path.parent().unwrap(), path.as_path()] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
             for name in ["cgroup.procs", "cgroup.threads"] {
-                fs::write(directory.join(name), "").unwrap();
+                control(directory, name, "");
             }
         }
-        fs::write(path.join("cgroup.procs"), "").unwrap();
-        fs::write(path.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+        control(&path, "cgroup.events", "populated 0\nfrozen 0\n");
         Self { temp, path }
     }
     fn held(&self) -> Leaf {
@@ -131,7 +141,6 @@ fn final_counter_snapshot_requires_cpu_memory_and_local_oom_evidence() {
 
 #[test]
 fn absent_leaf_still_requires_valid_existing_ancestor_membership() {
-    use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     // Only this owned ordinary-directory fixture is removed; no kernel cgroup is used.
     fs::remove_dir_all(&f.path).unwrap();
@@ -148,13 +157,12 @@ fn absent_leaf_still_requires_valid_existing_ancestor_membership() {
     .unwrap();
     fs::remove_file(f.path.parent().unwrap().join("cgroup.threads")).unwrap();
     assert!(Leaf::open(f.temp.path(), "m_owned").is_err());
-    fs::write(f.path.parent().unwrap().join("cgroup.threads"), "").unwrap();
+    control(f.path.parent().unwrap(), "cgroup.threads", "");
     assert!(Leaf::open(f.temp.path(), "m_owned").unwrap().is_none());
 }
 
 #[test]
 fn empty_leaf_refuses_ancestor_membership_drift_after_capture() {
-    use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     let held = f.held();
     fs::set_permissions(
@@ -185,10 +193,11 @@ fn identity_follows_the_directory_not_its_name() {
     // The same name over another directory is another group.
     let other = f.temp.path().join("firecracker/m-other");
     fs::create_dir(&other).unwrap();
+    fs::set_permissions(&other, fs::Permissions::from_mode(0o700)).unwrap();
     for name in ["cgroup.procs", "cgroup.threads"] {
-        fs::write(other.join(name), "").unwrap();
+        control(&other, name, "");
     }
-    fs::write(other.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+    control(&other, "cgroup.events", "populated 0\nfrozen 0\n");
     let held = f.held();
     fs::rename(&f.path, f.temp.path().join("old")).unwrap();
     fs::rename(&other, &f.path).unwrap();

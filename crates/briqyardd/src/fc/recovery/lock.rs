@@ -87,11 +87,18 @@ impl DomainLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
     fn uid() -> Owner {
         Owner {
             uid: unsafe { libc::geteuid() },
             gid: unsafe { libc::getegid() },
         }
+    }
+    fn domain_base() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        temp
     }
     #[tokio::test]
     async fn a_concurrent_restart_cannot_enter_the_same_domain() {
@@ -103,7 +110,7 @@ mod tests {
             assert!(matches!(error.raw_os_error(), Some(libc::EWOULDBLOCK)));
             return;
         }
-        let fixture = tempfile::tempdir().unwrap();
+        let fixture = domain_base();
         let path = fixture.path().canonicalize().unwrap();
         let _held = DomainLock::at(&path, uid()).unwrap();
         let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
@@ -140,7 +147,7 @@ mod tests {
     }
     #[test]
     fn fixed_domain_serializes_different_configuration_directories_and_keeps_inode() {
-        let t = tempfile::tempdir().unwrap();
+        let t = domain_base();
         let p = t.path().canonicalize().unwrap();
         let lock = DomainLock::at(&p, uid()).unwrap();
         assert!(DomainLock::at(&p, uid()).is_err());
@@ -151,7 +158,7 @@ mod tests {
     }
     #[test]
     fn replaced_or_symlinked_lock_cannot_authorize_startup() {
-        let t = tempfile::tempdir().unwrap();
+        let t = domain_base();
         let p = t.path().canonicalize().unwrap();
         let lock = DomainLock::at(&p, uid()).unwrap();
         std::fs::rename(p.join("briqyard/cgroup-domain.lock"), p.join("old")).unwrap();
