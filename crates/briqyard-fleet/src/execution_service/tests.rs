@@ -155,7 +155,12 @@ async fn identity_reads_live_journals_only_for_the_installer() {
         }))),
         server.host.clone(),
     );
-    for token in ["", "gateway-only", "fleet-admin", "host-admin"] {
+    for token in [
+        "",
+        "gateway-only",
+        "fleet-admin",
+        server.host.token.as_str(),
+    ] {
         assert_eq!(
             request(&app, "identity", token, b"{}".to_vec())
                 .await
