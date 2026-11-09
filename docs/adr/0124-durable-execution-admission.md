@@ -571,6 +571,13 @@ a restart rotates its epoch and cannot revive old readiness. Installation status
 requires fresh qualification before advertising ready. Explicit invalidation and
 revocation retain their clock-independent ordering path.
 
+Every qualified wall interval is translated to one process-lifetime monotonic origin.
+The retained intersection of all accepted intervals may narrow but never widen or
+reset after clock loss. Overlap with the first sample alone is insufficient: two
+later samples could occupy opposite sides and release protection before a retained
+command timer expires. A contradictory sample refuses qualification without changing
+the retained evidence. Restart still requires the full monotonic command drain.
+
 The standalone mode and clock callbacks remain candidates until independent review
 and native qualification. They do not supply real-guest, closure-race, partition,
 crash or clock-step evidence for the authenticated end-to-end execution path.

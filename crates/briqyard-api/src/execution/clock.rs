@@ -27,6 +27,43 @@ pub struct ClockSample {
     pub monotonic: Instant,
     pub uncertainty: Duration,
 }
+/// The common wall-time interval at one immutable monotonic origin. Accepted
+/// observations may narrow this evidence, but never replace or widen it.
+#[cfg(any(target_os = "linux", test))]
+struct ClockEvidence {
+    origin: Instant,
+    lower: Duration,
+    upper: Duration,
+}
+#[cfg(any(target_os = "linux", test))]
+impl ClockEvidence {
+    fn first(sample: &ClockSample) -> Option<Self> {
+        Some(Self {
+            origin: sample.monotonic,
+            lower: sample.wall.checked_sub(sample.uncertainty)?,
+            upper: sample.wall.checked_add(sample.uncertainty)?,
+        })
+    }
+    fn admit(&mut self, sample: &ClockSample) -> Option<()> {
+        let elapsed = sample.monotonic.checked_duration_since(self.origin)?;
+        let lower = sample
+            .wall
+            .checked_sub(sample.uncertainty)?
+            .checked_sub(elapsed)?;
+        let upper = sample
+            .wall
+            .checked_add(sample.uncertainty)?
+            .checked_sub(elapsed)?;
+        let lower = self.lower.max(lower);
+        let upper = self.upper.min(upper);
+        if lower > upper {
+            return None;
+        }
+        self.lower = lower;
+        self.upper = upper;
+        Some(())
+    }
+}
 impl ClockSample {
     pub fn interval(&self) -> Option<Clock> {
         // Flooring wall time introduces up to one second of additional error.
@@ -77,21 +114,18 @@ impl ClockSample {
             began,
             ended.checked_duration_since(began)?,
         )?;
-        // Retain the first qualified anchor for the entire process lifetime. A later wall step
-        // cannot manufacture fresh authority merely because NTP status cleared.
-        static ANCHOR: std::sync::Mutex<Option<ClockSample>> = std::sync::Mutex::new(None);
-        let mut anchor = ANCHOR.lock().ok()?;
-        if let Some(previous) = anchor.as_ref() {
-            if !sample.follows(previous) {
-                return None;
-            }
+        // Every accepted interval must share evidence with all earlier intervals.
+        // Overlap with the first interval alone permits contradictory later samples.
+        static EVIDENCE: std::sync::Mutex<Option<ClockEvidence>> = std::sync::Mutex::new(None);
+        let mut evidence = EVIDENCE.lock().ok()?;
+        if let Some(previous) = evidence.as_mut() {
+            previous.admit(&sample)?;
+        } else {
+            *evidence = Some(ClockEvidence::first(&sample)?);
         }
-        // Never reset after an accepted sample: pairwise overlapping error
-        // intervals otherwise permit unbounded accumulation of small wall steps.
-        anchor.get_or_insert_with(|| sample.clone());
         Some(sample)
     }
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(test)]
     fn follows(&self, previous: &Self) -> bool {
         let Some(elapsed) = self.monotonic.checked_duration_since(previous.monotonic) else {
             return false;
@@ -176,6 +210,7 @@ mod tests {
             uncertainty: Duration::from_secs(1),
         };
         let mut previous = anchor.clone();
+        let mut evidence = ClockEvidence::first(&anchor).unwrap();
         for step in 1..=60 {
             let sample = ClockSample {
                 wall: anchor.wall + Duration::from_secs(step * 2),
@@ -185,6 +220,7 @@ mod tests {
             // Every +1s step passes the flawed moving-anchor predicate.
             assert!(sample.follows(&previous));
             assert_eq!(sample.follows(&anchor), step <= 2);
+            assert_eq!(evidence.admit(&sample).is_some(), step <= 2);
             if sample.follows(&anchor) {
                 // Its lower bound cannot outrun the original upper bound
                 // advanced by monotonic elapsed time.
@@ -192,6 +228,38 @@ mod tests {
             }
             previous = sample;
         }
+    }
+    #[test]
+    fn opposite_sides_of_original_interval_cannot_release_live_protection() {
+        let anchor = ClockSample {
+            wall: Duration::from_secs(100),
+            monotonic: Instant::now(),
+            uncertainty: Duration::from_secs(4),
+        };
+        let dispatch = ClockSample {
+            wall: Duration::from_millis(104_900),
+            monotonic: anchor.monotonic + Duration::from_secs(10),
+            uncertainty: Duration::from_millis(1100),
+        };
+        let release = ClockSample {
+            wall: Duration::from_millis(136_200),
+            monotonic: anchor.monotonic + Duration::from_millis(31_100),
+            uncertainty: Duration::from_millis(1100),
+        };
+        assert!(dispatch.follows(&anchor));
+        assert!(release.follows(&anchor));
+        assert!(release.lower_ms().unwrap() - 5000 > 130_000);
+        let mut evidence = ClockEvidence::first(&anchor).unwrap();
+        evidence.admit(&dispatch).unwrap();
+        let retained = (evidence.lower, evidence.upper);
+        assert!(evidence.admit(&release).is_none());
+        assert_eq!((evidence.lower, evidence.upper), retained);
+        let consistent = ClockSample {
+            wall: dispatch.wall + Duration::from_millis(21_100),
+            monotonic: release.monotonic,
+            uncertainty: dispatch.uncertainty,
+        };
+        assert!(evidence.admit(&consistent).is_some());
     }
     #[test]
     fn interval_rounds_outward_and_refuses_excess_error() {
