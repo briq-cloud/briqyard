@@ -613,7 +613,16 @@ conflict and bounded refill with independent DATA. Destination environment and b
 be visible to the first command exactly once. Cleanup drains the pool and destroys owned
 namespaces before the conservative maintenance observation permits configuration restoration
 and handover. A missing process/device observation fails; cold restore cannot pass a warm
-claim. These added native gates require a native run; offline fixture tests do not qualify them. The init root-only `--ignored run_as` filter includes loopback ext4 sync, freeze rollback, thaw, deadline and connection-close tests (ADR 0092).
+claim. These added native gates require a native run; offline fixture tests do not qualify them.
+
+Restoration failures print only fixed categories for configuration validation/copy,
+previous incarnation, PID queries/change, signal, start, readiness and the outer timeout.
+Readiness exhaustion distinguishes query failure, query timeout and identity mismatch. The
+90-second ownership drain, 10-second file restore and 70-second handover bounds remain.
+`python3 -m unittest hack/test_native_seals.py` exercises the exported Bash caller with offline,
+authentication-aware command fakes; it does not establish the cause of a native failure.
+
+The init root-only `--ignored run_as` filter includes loopback ext4 sync, freeze rollback, thaw, deadline and connection-close tests (ADR 0092).
 
 ADR 0092 checks achieved consistency and two timed unsynced 27-byte regressions
 (snapshot restore and running-source disk fork), plus up to five crash opt-out controls.

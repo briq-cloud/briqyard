@@ -19,3 +19,12 @@ Cancellation or failure drops both admission guards and leaves the daemon servin
 This deliberately tightens SIGUSR2: compatible replacement capabilities no longer permit handover with outstanding warm ownership, including a healthy assigned workload. Operators must settle that ownership through its normal lifecycle; maintenance never destroys or drains it. Ordinary workloads without warm authority remain eligible. The daemon being replaced must implement this check; it cannot protect the first upgrade from an older daemon.
 
 Native handover, workload continuity, warm auto-claim/refill and recovery remain separate acceptance gates. Unit observations establish neither deployed eligibility nor physical capacity.
+
+## Acceptance diagnostics
+
+The sealed acceptance cleanup records fixed restoration failure categories at every return
+boundary, including command and overall timeouts. It suppresses command diagnostics and
+prints no configuration, credentials, paths or command arguments. Readiness still requires a
+new serving incarnation and the exact restored configuration identity after signal and PID
+change; no fallback or longer deadline is introduced. Offline exported-function caller tests
+cover success, refusal and exhaustion. These diagnostics do not establish a native root cause.

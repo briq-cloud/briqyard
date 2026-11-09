@@ -20,26 +20,41 @@ seal_api() {
 # Called only after restoring both the file and the original CLI authentication.
 # Success requires the new daemon to acknowledge exactly that file's identity.
 seal_restore_handover() {
-  local expected before=$1 old_pid new_pid observed until
-  expected=$(timeout --kill-after=2 5s sudo briqyardd --config /etc/briqyard/config.yaml check-config) || return 1
-  old_pid=$(timeout --kill-after=2 3s systemctl show -p MainPID --value briqyardd) || return 1
-  [[ "$old_pid" =~ ^[1-9][0-9]*$ ]] || return 1
-  timeout --kill-after=2 5s sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd || return 1
+  local expected before=$1 old_pid new_pid observed until status last=unavailable
+  # Only fixed categories cross the native log boundary. Command stderr can contain
+  # configuration, credentials or response values, so never forward it here.
+  seal_restore_failure() {
+    local category=$1 status=${2:-1}
+    case "$status" in 124|137) category=${category}_timeout;; esac
+    printf 'sealed restoration: %s\n' "$category" >&2
+    return 1
+  }
+  expected=$(timeout --kill-after=2 5s sudo briqyardd --config /etc/briqyard/config.yaml check-config 2>/dev/null) || { seal_restore_failure check_config "$?"; return 1; }
+  old_pid=$(timeout --kill-after=2 3s systemctl show -p MainPID --value briqyardd 2>/dev/null) || { seal_restore_failure old_pid_query "$?"; return 1; }
+  [[ "$old_pid" =~ ^[1-9][0-9]*$ ]] || { seal_restore_failure old_pid_invalid; return 1; }
+  timeout --kill-after=2 5s sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd >/dev/null 2>&1 || { seal_restore_failure signal "$?"; return 1; }
   until=$((SECONDS + 15))
   while [ "$SECONDS" -lt "$until" ]; do
-    new_pid=$(timeout --kill-after=2 3s systemctl show -p MainPID --value briqyardd) || return 1
+    new_pid=$(timeout --kill-after=2 3s systemctl show -p MainPID --value briqyardd 2>/dev/null) || { seal_restore_failure new_pid_query "$?"; return 1; }
     [ "$new_pid" != "$old_pid" ] && break
     sleep 0.1
   done
-  [ "$new_pid" != "$old_pid" ] || return 1
-  timeout --kill-after=2 5s sudo systemctl start briqyardd || return 1
+  [ "$new_pid" != "$old_pid" ] || { seal_restore_failure pid_change_exhausted; return 1; }
+  timeout --kill-after=2 5s sudo systemctl start briqyardd >/dev/null 2>&1 || { seal_restore_failure start "$?"; return 1; }
   until=$((SECONDS + 25))
   while [ "$SECONDS" -lt "$until" ]; do
-    observed=$(timeout --kill-after=2 3s briqyard warm-maintenance) || observed=
-    if printf '%s' "$observed" | jq -e --arg old "$before" --argjson config "$expected" \
-      '.observation.incarnation != $old and (.observation.incarnation | type == "string" and length > 0) and .observation.config == $config' >/dev/null; then return 0; fi
+    status=0
+    observed=$(timeout --kill-after=2 3s briqyard warm-maintenance 2>/dev/null) || status=$?
+    if [ "$status" = 0 ]; then
+      if printf '%s' "$observed" | jq -e --arg old "$before" --argjson config "$expected" \
+        '.observation.incarnation != $old and (.observation.incarnation | type == "string" and length > 0) and .observation.config == $config' >/dev/null 2>&1; then return 0; fi
+      last=identity_mismatch
+    else
+      case "$status" in 124|137) last=query_timeout;; *) last=query_failed;; esac
+    fi
     sleep 0.1
   done
+  seal_restore_failure "readiness_exhausted_$last"
   return 1
 }
 seal_cleanup() {
@@ -51,7 +66,7 @@ seal_cleanup() {
   # while authentication and the catalog configuration are still installed.
   # One 90-second ownership drain, then at most 10 seconds for restoration and
   # 70 seconds for handover. Never spend the restoration reserve on API retries.
-  local clean=0 restored=0 maintenance namespaces before=
+  local clean=0 restored=0 maintenance namespaces status before=
   seal_cleanup_until=$((SECONDS + 90))
   seal_cleanup_cli() {
     local left=$((seal_cleanup_until - SECONDS))
@@ -89,19 +104,42 @@ seal_cleanup() {
   # The old daemon still uses the fixture token. Capture it before switching CLI
   # authentication; only the replacement is queried using the original token.
   if [ "$clean" = 1 ]; then
-    before=$(seal_cleanup_cli warm-maintenance | jq -er .observation.incarnation) || { clean=0; rc=1; }
+    if before=$(seal_cleanup_cli warm-maintenance 2>/dev/null); then
+      before=$(printf '%s' "$before" | jq -er '.observation.incarnation | select(type == "string" and length > 0)' 2>/dev/null) || {
+        echo 'sealed restoration: previous_incarnation_invalid' >&2
+        clean=0; rc=1
+      }
+    else
+      status=$?
+      case "$status" in
+        124|137) echo 'sealed restoration: previous_incarnation_timeout' >&2;;
+        *) echo 'sealed restoration: previous_incarnation_query' >&2;;
+      esac
+      clean=0; rc=1
+    fi
   fi
-  if timeout --kill-after=2 10s sudo cp "$seal_config" /etc/briqyard/config.yaml; then
+  if timeout --kill-after=2 10s sudo cp "$seal_config" /etc/briqyard/config.yaml 2>/dev/null; then
     rm -f "$seal_config"
     restored=1
   else
+    status=$?
+    case "$status" in
+      124|137) echo 'sealed restoration: config_restore_timeout' >&2;;
+      *) echo 'sealed restoration: config_restore' >&2;;
+    esac
     echo 'original configuration restore failed; private backup retained' >&2
     rc=1
   fi
   if [ -n "$seal_original_token" ]; then export BRIQYARD_TOKEN=$seal_original_token; else unset BRIQYARD_TOKEN; fi
   if [ "$clean" = 1 ] && [ "$restored" = 1 ]; then
     export -f seal_restore_handover
-    timeout --kill-after=2 70s bash -c 'seal_restore_handover "$1"' seal-restoration "$before" || rc=1
+    timeout --kill-after=2 70s bash -c 'seal_restore_handover "$1"' seal-restoration "$before" || {
+      case "$?" in
+        124|137) echo 'sealed restoration: overall_timeout' >&2;;
+        *) echo 'sealed restoration: handover_failed' >&2;;
+      esac
+      rc=1
+    }
   fi
   printf "%s %s\n" "$pass" "$fail" > "$seal_counts"
   exit "$rc"

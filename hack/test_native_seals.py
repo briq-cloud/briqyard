@@ -228,49 +228,131 @@ briqyard() {
                 result = subprocess.run(["bash", "-c", script, "fixture", directory, scenario], capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, 0 if scenario == "success" else 1, result.stderr)
 
-    def test_cleanup_queries_each_incarnation_with_its_own_token(self):
+    def test_cleanup_exports_real_bash_handover_with_fixed_failure_categories(self):
         source = (HACK / "e2e-seals.sh").read_text()
         functions = ""
         for name in ["seal_restore_handover", "seal_cleanup"]:
             functions += name + "() {" + source.split(name + "() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
         functions = functions.replace('sudo cp "$seal_config" /etc/briqyard/config.yaml', 'sudo cp "$seal_config" "$events/restored"')
         prelude = r"""
-T=owned; pass=0; fail=0; seal_saved=1; seal_original_token=original
-export BRIQYARD_TOKEN=native-seal-test
-seal_config=$1/config; seal_counts=$1/counts; events=$1
+set -euo pipefail
+T=owned; pass=0; fail=0; seal_saved=1
+seal_original_token=${3-original}; export scenario=$2 events=$1
+export BRIQYARD_URL=http://offline-fixture BRIQYARD_TOKEN=native-seal-test
+seal_config=$1/config; seal_counts=$1/counts
 printf original > "$seal_config"
-timeout() { shift; shift; if [ "$1" = bash ]; then seal_restore_handover "$5"; else "$@"; fi; }
+timeout() {
+  shift; shift
+  local boundary=
+  case "$1" in
+    bash)
+      [ "$scenario" != overall_timeout ] || return 124
+      # Execute the actual exported function in a new Bash, preserving env only.
+      "$@"; return $?;;
+    sudo)
+      case "$2" in
+        briqyardd) boundary=check_config;;
+        cp) boundary=copy;;
+        systemctl) boundary=$3;;
+      esac;;
+    systemctl)
+      if [ -e "$events/signaled" ]; then boundary=new_pid_query; else boundary=old_pid_query; fi;;
+    briqyard)
+      if [ "$2" = warm-maintenance ]; then
+        if [ -e "$events/signaled" ]; then boundary=readiness_query; else boundary=previous_incarnation; fi
+      fi;;
+  esac
+  if [ "$scenario" = "$boundary" ] || [ "$scenario" = "${boundary}_timeout" ]; then
+    echo 'synthetic-private-token/config/path/argument' >&2
+    case "$scenario" in *_timeout) return 124;; *) return 1;; esac
+  fi
+  "$@"
+}
 sleep() { SECONDS=$((SECONDS+30)); }
 ok() { pass=$((pass+1)); }
-sudo() { if [ "$1" = briqyardd ]; then echo '{"source":"file","sha256":"original"}'; else "$@"; fi; }
+sudo() {
+  if [ "$1" = briqyardd ]; then echo '{"source":"file","sha256":"original"}'; else "$@"; fi
+}
 systemctl() {
   case "$1" in
-    show) if [ -e "$events/signaled" ]; then echo 22; else echo 11; fi;;
+    show)
+      if [ -e "$events/signaled" ]; then
+        if [ "$scenario" = pid_change_exhausted ]; then echo 11; else echo 22; fi
+      elif [ "$scenario" = old_pid_invalid ]; then echo 0; else echo 11; fi;;
     kill) echo signal > "$events/signaled";;
     start) :;;
   esac
 }
 briqyard() {
-  if [ "$1 $2" = 'namespace ls' ]; then echo '[]'; return; fi
+  if [ "$1 ${2-}" = 'namespace ls' ]; then echo '[]'; return; fi
   if [ "$1" = warm-maintenance ]; then
     if [ -e "$events/signaled" ]; then
-      [ "$BRIQYARD_TOKEN" = original ] || return 22
+      [ "${BRIQYARD_TOKEN-}" = "${seal_expected_token-}" ] || return 22
       echo new >> "$events/queries"
-      echo '{"observation":{"incarnation":"new","config":{"source":"file","sha256":"original"}}}'
+      local incarnation=new digest=original
+      [ "$scenario" != sameincarnation ] || incarnation=old
+      [ "$scenario" != wrongconfig ] || digest=fixture
+      if [ "$scenario" = malformed ]; then echo '{'; else
+        printf '{"observation":{"incarnation":"%s","config":{"source":"file","sha256":"%s"}}}\n' "$incarnation" "$digest"
+      fi
     else
       [ "$BRIQYARD_TOKEN" = native-seal-test ] || return 22
       echo old >> "$events/queries"
-      echo '{"observation":{"incarnation":"old"}}'
+      if [ "$scenario" = missingincarnation ]; then echo '{"observation":{}}'; else
+        echo '{"observation":{"incarnation":"old"}}'
+      fi
     fi
   fi
 }
 seal_api() { echo '{"eligible":true,"reason":"eligible","counts":{"desired_slots":0,"pool_claims":0,"warm_machines":0,"launch_holds":0,"launch_transitions":0,"warm_names":0,"pending_assignments":0,"run_authorities":0}}'; }
+export seal_expected_token=$seal_original_token
+export -f timeout sleep sudo systemctl briqyard
 """
-        with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run(["bash", "-c", prelude + functions + "\nseal_cleanup", "fixture", directory], capture_output=True, text=True, timeout=5)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((Path(directory) / "queries").read_text().splitlines(), ["old", "new"])
-            self.assertEqual((Path(directory) / "restored").read_text(), "original")
+        scenarios = {"success": None, "missingincarnation": "previous_incarnation_invalid",
+                     "previous_incarnation": "previous_incarnation_query", "previous_incarnation_timeout": "previous_incarnation_timeout",
+                     "copy": "config_restore", "copy_timeout": "config_restore_timeout",
+                     "old_pid_invalid": "old_pid_invalid", "pid_change_exhausted": "pid_change_exhausted",
+                     "sameincarnation": "readiness_exhausted_identity_mismatch",
+                     "wrongconfig": "readiness_exhausted_identity_mismatch", "malformed": "readiness_exhausted_identity_mismatch",
+                     "readiness_query": "readiness_exhausted_query_failed",
+                     "readiness_query_timeout": "readiness_exhausted_query_timeout", "overall_timeout": "overall_timeout"}
+        for boundary in ["check_config", "old_pid_query", "new_pid_query", "kill", "start"]:
+            category = "signal" if boundary == "kill" else boundary
+            scenarios[boundary] = category
+            scenarios[boundary + "_timeout"] = category + "_timeout"
+        for scenario, category in scenarios.items():
+            for original_token in (["original", ""] if scenario == "success" else ["original"]):
+                with self.subTest(scenario=scenario, authenticated=bool(original_token)), tempfile.TemporaryDirectory() as directory:
+                    # Guard against missing function exports invoking any host command.
+                    guard = Path(directory) / "bin"
+                    guard.mkdir()
+                    for command in ["sudo", "systemctl", "briqyard", "briqyardd", "timeout"]:
+                        fake = guard / command
+                        fake.write_text("#!/bin/sh\necho offline_guard >&2\nexit 99\n")
+                        fake.chmod(0o700)
+                    script = 'export PATH="$1/bin:$PATH"\n' + prelude + functions + "\ntrap seal_cleanup EXIT\nexit 0"
+                    result = subprocess.run(["bash", "-c", script, "fixture", directory, scenario, original_token],
+                                            capture_output=True, text=True, timeout=5)
+                    root = Path(directory)
+                    self.assertEqual(result.returncode, 0 if category is None else 1, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    if category is None:
+                        self.assertEqual(result.stderr, "")
+                        self.assertEqual((root / "queries").read_text().splitlines(), ["old", "new"])
+                    else:
+                        expected = "sealed restoration: " + category
+                        lines = [expected]
+                        if scenario in ["copy", "copy_timeout"]:
+                            lines.append("original configuration restore failed; private backup retained")
+                        elif scenario not in ["previous_incarnation", "previous_incarnation_timeout", "missingincarnation", "overall_timeout"]:
+                            lines.append("sealed restoration: handover_failed")
+                        self.assertEqual(result.stderr.splitlines(), lines)
+                    if scenario not in ["copy", "copy_timeout"]:
+                        self.assertEqual((root / "restored").read_text(), "original")
+                    self.assertTrue((root / "counts").exists())
+                    if scenario in ["previous_incarnation", "previous_incarnation_timeout", "missingincarnation", "copy", "copy_timeout", "check_config", "check_config_timeout",
+                                    "old_pid_query", "old_pid_query_timeout", "old_pid_invalid", "kill", "kill_timeout", "overall_timeout"]:
+                        self.assertFalse((root / "signaled").exists())
 
     def test_cleanup_refuses_handover_when_authority_is_outstanding(self):
         source = (HACK / "e2e-seals.sh").read_text()
