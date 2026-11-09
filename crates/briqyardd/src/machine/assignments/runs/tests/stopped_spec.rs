@@ -669,3 +669,21 @@ async fn legacy_settled_update_keeps_exact_field_order_bytes_and_digest() {
 }
 
 mod recovery_boundaries;
+
+// The factories are never invoked: measure generated state without allocating the
+// futures or running a machine. Useful when an inline test frame cannot be entered.
+#[test]
+fn stopped_spec_future_layout_diagnostic() {
+    fn bytes<F: std::future::Future>(_: impl FnOnce() -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+    let manager: Option<&Manager> = None;
+    let update = bytes(|| {
+        manager
+            .unwrap()
+            .update("diagnostic", Default::default(), None)
+    });
+    let start = bytes(|| manager.unwrap().start("diagnostic", None));
+    let fixture = bytes(|| settled_run(false));
+    eprintln!("future-layout bytes: update={update} start={start} settled_fixture={fixture}");
+}

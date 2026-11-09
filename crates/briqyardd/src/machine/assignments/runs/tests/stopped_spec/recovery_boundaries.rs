@@ -13,6 +13,7 @@ fn assert_no_launch_or_adoption(calls: &[String]) {
         "exec ",
         "count ",
         "adopt ",
+        "adopt-state ",
         "ping ",
     ]
     .iter()
