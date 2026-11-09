@@ -1,4 +1,5 @@
-"""Exercise the seal test's actual configuration fixture, outside a native host."""
+"""Exercise the seal test's configuration and identity checks outside a native host."""
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -10,6 +11,75 @@ import unittest
 import yaml
 
 HACK = Path(__file__).parent
+
+
+class NativeSealIdentity(unittest.TestCase):
+    def setUp(self):
+        self.source = (HACK / "e2e-seals.sh").read_text()
+        self.network = self.source.split("<<'PYNETWORK'\n", 1)[1].split("\nPYNETWORK", 1)[0]
+        self.views = [
+            {"name": name, "hostname": name + ".internal", "ip": f"10.64.1.{n}",
+             "memory_origin": {"source_machine": "m_seed", "stage": "active", "snapshot": "s_seed",
+                               "generation": "g_seed", "ram_marker": "shared-ram",
+                               "identity": {"ip": f"10.64.1.{n}/24", "hostname": name,
+                                            "mac": [2, 0, 0, 0, 0, n]}}}
+            for n, name in [(3, "first"), (4, "second")]
+        ]
+        self.observations = [
+            f"02:00:00:00:00:{n:02x}\n10.64.1.{n}/24\n{name}\n"
+            f"default via 10.64.1.1 dev eth0\n10.64.1.0/24 dev eth0 scope link src 10.64.1.{n}"
+            for n, name in [(3, "first"), (4, "second")]
+        ]
+
+    def network_check(self, views, observations):
+        args = [{"id": "m_seed", "ip": "10.64.1.2", "snapshot": "s_seed", "generation": "g_seed"},
+                *views, {"subnet": "10.64.1.0/24", "router": "10.64.1.1"}]
+        return subprocess.run([sys.executable, "-c", self.network, *map(json.dumps, args), *observations],
+                              capture_output=True, text=True)
+
+    def test_short_guest_hostname_matches_public_dns_name(self):
+        result = self.network_check(self.views, self.observations)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_network_contract_rejects_independent_identity_and_route_mismatches(self):
+        for field, value in [("ip", "10.64.1.9"), ("hostname", "other.internal"), ("name", "other")]:
+            with self.subTest(public_field=field):
+                views = copy.deepcopy(self.views)
+                views[0][field] = value
+                self.assertNotEqual(self.network_check(views, self.observations).returncode, 0)
+        for field, value in [("ip", "10.64.1.9/24"), ("ip", "10.64.1.3/25"),
+                             ("hostname", "other"), ("mac", [2, 0, 0, 0, 0, 9])]:
+            with self.subTest(receipt_field=field, value=value):
+                views = copy.deepcopy(self.views)
+                views[0]["memory_origin"]["identity"][field] = value
+                self.assertNotEqual(self.network_check(views, self.observations).returncode, 0)
+        for before, after in [("02:00:00:00:00:03", "06:b1:0a:40:01:02"),
+                              ("10.64.1.3/24", "10.64.1.3/25"),
+                              ("10.64.1.3/24", "10.64.1.9/24"), ("\nfirst\n", "\nother\n"),
+                              ("via 10.64.1.1", "via 10.64.1.9"), ("dev eth0", "dev eth1"),
+                              ("src 10.64.1.3", "src 10.64.1.9"),
+                              ("10.64.1.0/24", "10.64.2.0/24")]:
+            with self.subTest(guest=before, replacement=after):
+                observations = self.observations.copy()
+                observations[0] = observations[0].replace(before, after)
+                self.assertNotEqual(self.network_check(self.views, observations).returncode, 0)
+
+    def test_source_exec_requires_specific_daemon_refusal_without_nonce(self):
+        line = next(line for line in self.source.splitlines() if 'check "seed $seal_gb source keeps' in line)
+        check = line.split("'", 1)[1].rsplit("'", 1)[0]
+        helper = "seal_source_blocked() {" + self.source.split("seal_source_blocked() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+        command = helper + 'seal_source_rc=$1; seal_source_reply=$2; seal_source_nonce=source-nonce; ' + check
+        refusal = "error: sealed template builder permits status, memory seal and destroy only (conflict)"
+        for code, reply, accepted in [(1, refusal, True),
+                                      (1, refusal[:-1] + ", request abc-123)", True),
+                                      (0, refusal, False), (2, refusal, False),
+                                      (1, "error: connection refused", False),
+                                      (1, refusal.replace("conflict", "internal"), False),
+                                      (1, "error: clone barrier: operation unavailable (internal)", False),
+                                      (1, "source-nonce\n" + refusal, False)]:
+            with self.subTest(code=code, reply=reply):
+                result = subprocess.run(["bash", "-c", command, "fixture", str(code), reply], capture_output=True)
+                self.assertEqual(result.returncode == 0, accepted)
 
 
 class NativeSealConfig(unittest.TestCase):
