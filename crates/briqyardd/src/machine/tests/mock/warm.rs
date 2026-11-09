@@ -69,7 +69,7 @@ impl Mock {
                             .then(|| fc::BootIdentity::ambiguous(&identity.device_profile))
                     })
                 }),
-            incarnation: Some(mock_incarnation(pid)),
+            incarnation: Some(process.incarnation.clone()),
             exited: process.exited.subscribe(),
             exit: Self::exit_of(process),
             vmm_oom: process.vmm_oom.clone(),

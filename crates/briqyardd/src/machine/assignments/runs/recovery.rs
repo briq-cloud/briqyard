@@ -113,6 +113,13 @@ impl Manager {
     }
 
     pub(super) fn check_run_creation_authority(&self, run: &Current) -> Result<()> {
+        if let Some(update) = run
+            .consumed_update
+            .as_ref()
+            .filter(|update| update.creation_source.is_some())
+        {
+            self.check_creation_update_authority(update)?;
+        }
         let receipt = self
             .inner
             .store

@@ -18,12 +18,29 @@ impl Manager {
         at: Option<u64>,
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        if e.snapshot().assigned_run.is_some() {
+        if self.assigned_lifecycle(&e.snapshot())
+            && e.snapshot().state != state::STOPPED
+            && (req.spec.image.is_some()
+                || req.spec.env.is_some()
+                || req.spec.size.is_some()
+                || req.spec.entrypoint.is_some()
+                || req.spec.cmd.is_some()
+                || req.spec.files.is_some()
+                || req.spec.ports.is_some()
+                || req.spec.restart.is_some())
+        {
+            return Err(MError::BadState(
+                "assigned spec updates require a stopped machine".into(),
+            ));
+        }
+        if e.snapshot().assigned_run.is_some()
+            || (self.assigned_lifecycle(&e.snapshot()) && e.snapshot().state == state::STOPPED)
+        {
             if self.assigned_lifecycle(&e.snapshot()) {
                 if req.spec.volume.is_some() && e.snapshot().state == state::RUNNING {
                     return self.update_assigned_volume(&e, req, at).await;
                 }
-                return self.update_assigned_stopped_size(&e, req, at).await;
+                return self.update_assigned_stopped_spec(&e, req, at).await;
             }
             return Err(MError::Conflict(
                 "assigned-run updates require journal integration; pending intent retained".into(),

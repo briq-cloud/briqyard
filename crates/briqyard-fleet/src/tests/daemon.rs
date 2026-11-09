@@ -21,6 +21,8 @@ pub(super) struct Daemon {
     /// Its event log, and the `If-Match` of each request that had one.
     pub(super) events: Mutex<Vec<api::Event>>,
     pub(super) if_match: Mutex<Vec<String>>,
+    /// Exact flattened PATCH bodies received over HTTP; no runtime behavior is simulated.
+    pub(super) patches: Mutex<Vec<(String, serde_json::Value)>>,
     /// The open watch's sender: a test sends its live lines.
     pub(super) watcher: Mutex<Option<tokio::sync::mpsc::Sender<String>>>,
     /// Its certificate's, when it serves TLS.
@@ -161,6 +163,7 @@ pub(super) async fn start_daemon_on(
         list_answer: Mutex::new(None),
         events: Mutex::new(vec![]),
         if_match: Mutex::new(vec![]),
+        patches: Mutex::new(vec![]),
         watcher: Mutex::new(None),
         tls_fingerprint: cert
             .map(|c| api::tls::fingerprint(c.cert.der()))
@@ -481,6 +484,14 @@ pub(super) async fn start_daemon_on(
                 .into_response(),
         }
     }
+    async fn patch_machine(
+        State(d): D,
+        Path(id): Path<String>,
+        Json(body): Json<serde_json::Value>,
+    ) -> Response {
+        d.patches.lock().unwrap().push((id.clone(), body));
+        get_machine(State(d), Path(id)).await
+    }
     async fn delete_machine(State(d): D, Path(id): Path<String>) -> StatusCode {
         let mut ms = d.machines.lock().unwrap();
         let before = ms.len();
@@ -748,7 +759,10 @@ pub(super) async fn start_daemon_on(
             axum::routing::put(set_gateway).delete(delete_gateway),
         )
         .route("/v1/machines", get(list).post(create))
-        .route("/v1/machines/:id", get(get_machine).delete(delete_machine))
+        .route(
+            "/v1/machines/:id",
+            get(get_machine).patch(patch_machine).delete(delete_machine),
+        )
         .route("/v1/machines/:id/start", post(start_machine))
         .route("/v1/machines/:id/stop", post(stop_machine))
         .route("/v1/machines/:id/move", post(move_machine))

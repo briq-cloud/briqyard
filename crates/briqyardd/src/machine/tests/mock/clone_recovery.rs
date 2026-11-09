@@ -6,7 +6,15 @@ impl Mock {
         if self.refuse_clone_exit.load(Relaxed) {
             return Ok(false);
         }
-        if saved != &mock_incarnation(saved.pid) {
+        let incarnation = self
+            .procs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|process| process.pid == saved.pid && process.id == id)
+            .map(|process| process.incarnation.clone())
+            .unwrap_or_else(|| mock_incarnation(saved.pid));
+        if *saved != incarnation {
             return Ok(false);
         }
         let alive = self

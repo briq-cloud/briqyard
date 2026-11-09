@@ -426,7 +426,7 @@ async fn concurrent_assigned_volume_growths_reserve_namespace_quota_atomically()
         let intent = UpdateIntent {
             schema: 1,
             machine: source.id.clone(),
-            source_current_sha256: "a".repeat(64),
+            source_current_sha256: Some("a".repeat(64)),
             source_record: Box::new(source),
             change: api::SpecChange {
                 volume: Some(api::VolumeSize { size_gb: 2 }),
@@ -437,6 +437,7 @@ async fn concurrent_assigned_volume_growths_reserve_namespace_quota_atomically()
             predecessor_target: None,
             resolved_image: None,
             root_swap: None,
+            creation_source: None,
         };
         tasks.push(tokio::task::spawn_blocking(move || {
             gate.wait();
@@ -617,7 +618,9 @@ async fn assigned_image_root_swap_recovers_each_zfs_rename_boundary() {
         let source_guid = h.pool.zfs.guid(&root).await.unwrap();
         let suffix = sha(format!(
             "{}:{}:{}",
-            update.source_current_sha256, resolved_image.key, source_guid
+            update.source_current_sha256.as_deref().unwrap(),
+            resolved_image.key,
+            source_guid
         )
         .as_bytes());
         let retired = format!(
@@ -1360,7 +1363,7 @@ async fn update_shape_rejects_tampered_predecessor_bindings() {
             serde_json::json!({"size_gb": first_gb + 2, "mount": earlier["volume"]["mount"]}),
         ),
         ("volume", serde_json::Value::Null),
-        ("pending", serde_json::json!({"env": {"INJECTED": "value"}})),
+        ("pending", serde_json::json!({"cmd": ["injected"]})),
         (
             "pending",
             serde_json::json!({"size": {"vcpus": 0, "memory_mb": 0}}),

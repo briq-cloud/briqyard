@@ -41,6 +41,9 @@ impl Manager {
                 }
                 continue;
             }
+            if self.recover_creation_update_stopped(&entry).await? {
+                continue;
+            }
             let ended = record.boot_incarnation.as_ref().is_some_and(|old| {
                 fc::valid_host_boot_id(&old.host_boot_id) && old.host_boot_id != host
             });
