@@ -434,8 +434,9 @@ strictly higher version with a fresh grant, protection admission and projection.
 that immutable intent fences all older versions for new admission, even while its host
 ACK is pending. Only the current acknowledged version is eligible; there is no fallback
 to an older ready installation. Hosts retain immutable version records and reject changed
-or lower versions. Revocation remains delegation-wide. Existing operations keep their
-status and cannot be redispatched. Retained version records share the bounded journal;
+or lower versions. Host dispatch also requires the prepared grant digest to match
+the current delegation. Revocation remains delegation-wide. Existing operations keep
+their status and cannot be redispatched. Retained version records share the bounded journal;
 exhaustion refuses admission rather than dropping rejection evidence.
 
 The production provisioner for the regional listener, its two central credentials,

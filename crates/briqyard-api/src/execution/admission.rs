@@ -564,8 +564,12 @@ impl Journal {
                 .state
                 .delegations
                 .get(&current.delegation)
-                .map(|d| (&d.ownership, d.ownership_generation))
-                != Some((&current.ownership, current.ownership_generation))
+                .map(|d| (&d.ownership, d.ownership_generation, &d.grant_digest))
+                != Some((
+                    &current.ownership,
+                    current.ownership_generation,
+                    &current.grant_digest,
+                ))
         {
             return Err(Error::Binding);
         }

@@ -216,6 +216,24 @@ fn installation_highwater_and_restart_retire_old_epoch() {
     journal
         .install_delegation(original.clone(), clock())
         .unwrap();
+    journal
+        .prepare(
+            PreparedAdmission {
+                admission: "prepared-v1".into(),
+                delegation: original.id.clone(),
+                grant_digest: original.grant_digest.clone(),
+                permit_digest: "permit-one".into(),
+                request_digest: "request-one".into(),
+                allocation_refs: vec![],
+                ownership: owner.installation.clone(),
+                ownership_generation: owner.generation,
+                host_instance: journal.instance().into(),
+                expires_at: 1050,
+                dispatched: false,
+            },
+            clock(),
+        )
+        .unwrap();
     let renewed = HostDelegation {
         version: 2,
         grant_digest: "grant-two".into(),
@@ -227,6 +245,11 @@ fn installation_highwater_and_restart_retire_old_epoch() {
     assert!(journal
         .install_delegation(original.clone(), clock())
         .is_err());
+    assert!(matches!(
+        journal.mark_dispatched("prepared-v1", clock()),
+        Err(Error::Binding)
+    ));
+    assert!(!journal.prepared("prepared-v1").unwrap().unwrap().dispatched);
     assert_eq!(journal.delegation("delegation-1").unwrap(), Some(&renewed));
     assert_eq!(
         journal.state.delegation_versions["delegation-1"],
