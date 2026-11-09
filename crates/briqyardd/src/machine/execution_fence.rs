@@ -47,6 +47,37 @@ pub(super) struct ExecutionFence {
 }
 
 impl ExecutionFence {
+    /// Reconstruction has no witness that its rules equal the protected topology.
+    /// Preserve the existing kernel state until every retained deadline has drained.
+    pub(super) async fn drain_at_start(&self) -> Result<()> {
+        let delay = self.startup_delay(execution_mutations::execution_now_ms()?)?;
+        if !delay.is_zero() {
+            tracing::info!(
+                delay_ms = delay.as_millis() as u64,
+                "waiting for execution protection before recovery"
+            );
+            tokio::time::sleep(delay).await;
+        }
+        anyhow::ensure!(
+            self.startup_delay(execution_mutations::execution_now_ms()?)?
+                .is_zero(),
+            "execution protection deadline has not drained"
+        );
+        Ok(())
+    }
+
+    fn startup_delay(&self, now_ms: u64) -> Result<Duration> {
+        self.check_clock(now_ms)?;
+        let Some(deadline) = self.record.protected_until_ms.values().max() else {
+            return Ok(Duration::ZERO);
+        };
+        let released_at = deadline
+            .checked_add(CLOCK_UNCERTAINTY_MS)
+            .and_then(|end| end.checked_add(1))
+            .context("execution protection deadline exceeds clock range")?;
+        Ok(Duration::from_millis(released_at.saturating_sub(now_ms)))
+    }
+
     pub(super) fn load(store: &Store) -> Result<Self> {
         let dir = store.dir(KIND);
         for entry in
@@ -363,6 +394,46 @@ mod tests {
 
     fn names(values: &[&str]) -> Vec<String> {
         values.iter().map(|name| (*name).into()).collect()
+    }
+
+    #[test]
+    fn startup_drain_retains_all_deadlines_and_pending_evidence() {
+        let (_dir, store) = open();
+        let mut fence = ExecutionFence::load(&store).unwrap();
+        for (name, deadline) in [("old", 30_000), ("current", 40_000)] {
+            let snapshot = fence.snapshot(&store, &names(&[name]), 10_000).unwrap();
+            fence.protect(&store, &snapshot, deadline, 10_000).unwrap();
+        }
+        fence
+            .begin_mutation(&store, &names(&["old"]), MutationMode::Invalidate, 10_000)
+            .unwrap();
+        let mut reopened = ExecutionFence::load(&store).unwrap();
+        assert_eq!(
+            reopened.startup_delay(10_000).unwrap(),
+            Duration::from_millis(35_001)
+        );
+        assert_eq!(
+            reopened.startup_delay(45_000).unwrap(),
+            Duration::from_millis(1)
+        );
+        assert_eq!(reopened.startup_delay(45_001).unwrap(), Duration::ZERO);
+        assert!(reopened.snapshot(&store, &names(&["old"]), 45_001).is_err());
+        assert!(reopened.startup_delay(4_999).is_err());
+        reopened.poison();
+        assert!(reopened.startup_delay(45_001).is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_monotonic_wait_does_not_replace_wall_clock_proof() {
+        let (_dir, store) = open();
+        let mut fence = ExecutionFence::load(&store).unwrap();
+        let now = execution_mutations::execution_now_ms().unwrap();
+        let snapshot = fence.snapshot(&store, &names(&["a"]), now).unwrap();
+        fence.protect(&store, &snapshot, now + 30_000, now).unwrap();
+        // Tokio advances the monotonic timer; the wall clock remains before expiry.
+        let error = fence.drain_at_start().await.unwrap_err();
+        assert!(error.to_string().contains("has not drained"));
+        assert!(fence.startup_delay(now).unwrap() > Duration::ZERO);
     }
 
     #[test]

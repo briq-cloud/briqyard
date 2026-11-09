@@ -1252,6 +1252,12 @@ that metadata, provide an explicit restore size when restoring through the fleet
 
 ## Unresolved startup
 
+Before backing or network recovery, the daemon waits for retained execution protection
+deadlines plus five seconds of clock uncertainty. Existing VMMs and kernel networking
+remain untouched during this wait. A clock rollback or invalid protection state refuses
+startup; inspect the startup error before retrying. This wait does not clear unresolved
+namespace mutation tickets.
+
 `memory_protection` with `recovery_unresolved` refuses placement across the host.
 The host-condition alert fires when this condition remains true for a minute.
 Recovery waits up to 10 seconds for previous service members before reconciliation.

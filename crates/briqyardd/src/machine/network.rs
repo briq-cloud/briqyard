@@ -38,8 +38,9 @@ impl Manager {
     /// namespace once: `namespace_create` is held only to choose and reserve the subnet index,
     /// so two namespaces made together never read the same free index; the bridge and the
     /// durable record are done outside it, under the namespace's own turn, so a second create of
-    /// the same namespace waits and then finds it made. A failure releases the reservation; the
-    /// namespace exists for others only once its record is written and it is in `namespaces`.
+    /// the same namespace waits and then finds it made. Once the mutation is fenced, a failed
+    /// effect retains its subnet reservation for reconciliation. The namespace exists for others
+    /// only once its durable record is written and it is in `namespaces`.
     /// Callers hold `namespace_lifecycle` shared, so a delete never runs over a namespace being made.
     pub(super) async fn ensure_namespace(&self, id: &str) -> Result<Namespace> {
         if let Some(t) = self.inner.namespaces.lock().unwrap().get(id) {
@@ -51,6 +52,15 @@ impl Manager {
             if let Some(t) = self.inner.namespaces.lock().unwrap().get(id) {
                 return Ok(t.clone());
             }
+            anyhow::ensure!(
+                !self
+                    .inner
+                    .namespace_reserved
+                    .lock()
+                    .unwrap()
+                    .contains_key(id),
+                "namespace {id} has an unresolved creation"
+            );
             let namespaces = self.inner.namespaces.lock().unwrap();
             let idx = self.free_namespace_subnet(&namespaces)?;
             let t = Namespace::new(
@@ -65,15 +75,26 @@ impl Manager {
             let reserved = Reservation::take(&self.inner.namespace_reserved, id, idx);
             (t, reserved)
         };
+        let ticket = self
+            .begin_execution_mutation(&[id.to_owned()], execution_fence::MutationMode::Broaden)?;
+        // A cancelled future is an uncertain effect too. Once the ticket exists, dropping
+        // this guard must not return its subnet to the allocator.
+        let mut reserved = reserved;
+        reserved.retain_on_drop();
+        // Persist the subnet reservation before a network effect can outlive this process.
+        self.inner
+            .store
+            .put_durable(crate::store::NAMESPACES, id, &t.rec)?;
         self.plumb_namespace(&t).await?;
-        self.inner.store.put(crate::store::NAMESPACES, id, &t.rec)?;
         self.inner
             .namespaces
             .lock()
             .unwrap()
             .insert(id.to_string(), t.clone());
         // Only now: the index is never free between the reservation and the namespace.
+        reserved.release_on_drop();
         drop(reserved);
+        self.finish_execution_mutation(&ticket)?;
         Ok(t)
     }
 
@@ -555,6 +576,7 @@ fn checked_via_target(
 struct Reservation<'a> {
     held: &'a Mutex<HashMap<String, u32>>,
     id: String,
+    release: bool,
 }
 
 impl<'a> Reservation<'a> {
@@ -563,12 +585,24 @@ impl<'a> Reservation<'a> {
         Self {
             held,
             id: id.to_string(),
+            release: true,
         }
+    }
+
+    /// A failed or cancelled fenced effect may have changed the network.
+    fn retain_on_drop(&mut self) {
+        self.release = false;
+    }
+
+    fn release_on_drop(&mut self) {
+        self.release = true;
     }
 }
 
 impl Drop for Reservation<'_> {
     fn drop(&mut self) {
-        self.held.lock().unwrap().remove(&self.id);
+        if self.release {
+            self.held.lock().unwrap().remove(&self.id);
+        }
     }
 }

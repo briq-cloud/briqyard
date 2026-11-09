@@ -101,7 +101,7 @@ async fn two_creates_of_one_new_namespace_make_it_once() {
 }
 
 #[tokio::test]
-async fn a_failed_namespace_leaves_no_reservation_and_no_record() {
+async fn a_failed_namespace_keeps_its_durable_subnet_and_pending_ticket() {
     let h = harness("10.64.0.0/22", 4096).await;
     serve_all(&h);
     let all: Vec<String> = (0..h.m.inner.range.count())
@@ -109,16 +109,146 @@ async fn a_failed_namespace_leaves_no_reservation_and_no_record() {
         .collect();
     *h.host.refuse_bridge.lock().unwrap() = all;
     assert!(h.m.ensure_namespace("a").await.is_err());
-    assert!(h.m.inner.namespace_reserved.lock().unwrap().is_empty());
+    assert_eq!(
+        h.m.inner.namespace_reserved.lock().unwrap().get("a"),
+        Some(&0)
+    );
     assert!(h.m.inner.namespaces.lock().unwrap().is_empty());
     assert_eq!(h.m.inner.namespace_turns.len(), 0);
-    let stored: Option<NamespaceRec> = h.m.inner.store.get(crate::store::NAMESPACES, "a").unwrap();
-    assert!(stored.is_none());
-    // Nothing trusts the failed attempt: the next create makes it, on the index just freed.
+    let stored: NamespaceRec =
+        h.m.inner
+            .store
+            .get(crate::store::NAMESPACES, "a")
+            .unwrap()
+            .unwrap();
+    assert_eq!(stored.subnet_index, 0);
+    let mut reopened = execution_fence::ExecutionFence::load(&h.m.inner.store).unwrap();
+    assert!(reopened
+        .snapshot(
+            &h.m.inner.store,
+            &["a".into()],
+            crate::machine::execution_mutations::execution_now_ms().unwrap(),
+        )
+        .is_err());
+    let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+    assert!(h
+        .m
+        .inner
+        .execution_fence
+        .lock()
+        .unwrap()
+        .snapshot(&h.m.inner.store, &["a".into()], now,)
+        .is_err());
+    // The same name cannot start a second effect while the first is unresolved.
     h.host.refuse_bridge.lock().unwrap().clear();
-    let t = h.m.ensure_namespace("a").await.unwrap();
-    assert_eq!(t.rec.subnet_index, 0);
+    assert!(h.m.ensure_namespace("a").await.is_err());
+    let t = h.m.ensure_namespace("b").await.unwrap();
+    assert_eq!(t.rec.subnet_index, 1);
+    assert_eq!(
+        h.m.inner.namespace_reserved.lock().unwrap().get("a"),
+        Some(&0)
+    );
+}
+
+#[tokio::test]
+async fn cancelled_namespace_create_keeps_its_subnet_and_ticket() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    serve_all(&h);
+    h.pause_warm_barrier("ensure_bridge");
+    let create = ensure(&h, "a");
+    arrived_at_bridge(&h, 1).await;
+    create.abort();
+    assert!(matches!(create.await, Err(error) if error.is_cancelled()));
+    h.end_warm_barrier();
+    assert_eq!(
+        h.m.inner.namespace_reserved.lock().unwrap().get("a"),
+        Some(&0)
+    );
+    let stored: NamespaceRec =
+        h.m.inner
+            .store
+            .get(crate::store::NAMESPACES, "a")
+            .unwrap()
+            .unwrap();
+    assert_eq!(stored.subnet_index, 0);
+    let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+    assert!(h
+        .m
+        .inner
+        .execution_fence
+        .lock()
+        .unwrap()
+        .snapshot(&h.m.inner.store, &["a".into()], now)
+        .is_err());
+    assert!(h.m.ensure_namespace("a").await.is_err());
+    assert_eq!(h.m.ensure_namespace("b").await.unwrap().rec.subnet_index, 1);
+}
+
+#[tokio::test]
+async fn protected_name_refuses_creation_before_bridge_setup() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+    {
+        let mut fence = h.m.inner.execution_fence.lock().unwrap();
+        let generations = fence
+            .snapshot(&h.m.inner.store, &["a".into()], now)
+            .unwrap();
+        fence
+            .protect(&h.m.inner.store, &generations, now + 30_000, now)
+            .unwrap();
+    }
+    assert!(h.m.ensure_namespace("a").await.is_err());
+    assert!(h.host_calls().is_empty());
     assert!(h.m.inner.namespace_reserved.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn failed_durable_namespace_write_keeps_pending_ticket_and_subnet() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    serve_all(&h);
+    let dir = h.m.inner.store.dir(crate::store::NAMESPACES);
+    let moved = dir.with_extension("held");
+    std::fs::rename(&dir, &moved).unwrap();
+    std::fs::write(&dir, b"not a directory").unwrap();
+    let result = h.m.ensure_namespace("a").await;
+    std::fs::remove_file(&dir).unwrap();
+    std::fs::rename(&moved, &dir).unwrap();
+    assert!(result.is_err());
+    assert_eq!(
+        h.m.inner.namespace_reserved.lock().unwrap().get("a"),
+        Some(&0)
+    );
+    assert!(h.m.inner.namespaces.lock().unwrap().get("a").is_none());
+    let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+    assert!(h
+        .m
+        .inner
+        .execution_fence
+        .lock()
+        .unwrap()
+        .snapshot(&h.m.inner.store, &["a".into()], now,)
+        .is_err());
+    assert!(h.m.ensure_namespace("a").await.is_err());
+    assert_eq!(h.m.ensure_namespace("b").await.unwrap().rec.subnet_index, 1);
+}
+
+#[tokio::test]
+async fn deleted_namespace_name_can_be_created_again() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    serve_all(&h);
+    let first = h.m.ensure_namespace("a").await.unwrap();
+    h.m.delete_namespace("a").await.unwrap();
+    assert!(h.m.namespace("a").is_err());
+    serve_all(&h);
+    let second = h.m.ensure_namespace("a").await.unwrap();
+    assert_eq!(second.rec.subnet_index, first.rec.subnet_index);
+    let stored: NamespaceRec =
+        h.m.inner
+            .store
+            .get(crate::store::NAMESPACES, "a")
+            .unwrap()
+            .unwrap();
+    assert_eq!(stored.subnet_index, second.rec.subnet_index);
 }
 
 #[tokio::test]

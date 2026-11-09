@@ -66,3 +66,57 @@ async fn deletion_refuses_an_admitted_machine() {
         .any(|c| c.starts_with("delete_bridge ")));
     h.m.destroy_machine(&e.snapshot().id, None).await.unwrap();
 }
+
+#[tokio::test]
+async fn protected_empty_namespace_retains_network_and_subnet() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let t = h.namespace("t1");
+    let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+    {
+        let mut fence = h.m.inner.execution_fence.lock().unwrap();
+        let generations = fence
+            .snapshot(&h.m.inner.store, &["t1".into()], now)
+            .unwrap();
+        fence
+            .protect(&h.m.inner.store, &generations, now + 30_000, now)
+            .unwrap();
+    }
+    h.host_calls();
+    assert!(h.m.delete_namespace("t1").await.is_err());
+    assert!(h.m.namespace("t1").is_ok());
+    assert!(!h
+        .host_calls()
+        .iter()
+        .any(|c| c.starts_with("delete_bridge ")));
+    let namespaces = h.m.inner.namespaces.lock().unwrap();
+    assert_eq!(namespaces["t1"].rec.subnet_index, t.rec.subnet_index);
+}
+
+#[tokio::test]
+async fn failed_namespace_record_deletion_keeps_subnet_reserved() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let t = h.namespace("t1");
+    let dir = h.m.inner.store.dir(crate::store::NAMESPACES);
+    let moved = dir.with_extension("held");
+    std::fs::rename(&dir, &moved).unwrap();
+    std::fs::write(&dir, b"not a directory").unwrap();
+    let result = h.m.delete_namespace("t1").await;
+    std::fs::remove_file(&dir).unwrap();
+    std::fs::rename(&moved, &dir).unwrap();
+    assert!(result.is_err());
+    assert_eq!(h.m.namespace("t1").unwrap().subnet, t.subnet.cidr());
+    let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+    assert!(h
+        .m
+        .inner
+        .execution_fence
+        .lock()
+        .unwrap()
+        .snapshot(&h.m.inner.store, &["t1".into()], now,)
+        .is_err());
+    let namespaces = h.m.inner.namespaces.lock().unwrap();
+    assert_ne!(
+        h.m.free_namespace_subnet(&namespaces).unwrap(),
+        t.rec.subnet_index
+    );
+}

@@ -160,27 +160,28 @@ gateway replacement, assigned ownership and live publication, policy replacement
 explicit network revocation. Composite tickets remain pending through durable record
 publication, including directory synchronization, and network and DNS effects. Source
 and destination namespaces share one ticket for ownership transfers.
-This is not yet the complete publication fence: ordinary startup reconstruction and
-namespace removal/address reuse still need their composite contracts.
 Complete reachable-set discovery, pending-ticket
 reconciliation, retention and a downgrade compatibility barrier remain activation gates.
 No public scoped route is enabled by these hooks.
 
-The remaining lifecycle contract retains namespace records as subnet reservations.
+The lifecycle contract retains namespace records as subnet reservations.
 Machine and gateway teardown may proceed, but empty namespace network deletion is a
 broadening operation: protection refuses it before DNS or bridge removal. Successful
 teardown durably deletes the namespace record before releasing its in-memory reservation.
-Namespace creation must fence before bridge/DNS setup and retain its ticket through a
-durable namespace record and map publication.
+Namespace creation fences and durably reserves its namespace record before bridge/DNS
+setup. Its ticket remains through map publication. Failed setup retains the durable
+reservation across restart.
 
-Startup must drain the maximum retained protection deadline before backing recovery or
+Startup drains the maximum retained protection deadline before backing recovery or
 network reconstruction, while preserving native startup ownership, existing processes
 and kernel topology. Validate the persisted clock floor, wait monotonically through the
 deadline plus uncertainty, then recheck the wall-clock lower bound. Invalid state or an
-insufficient bound leaves startup diagnostically closed. Deferred adoption is not failed
-adoption. Ordinary adoption still needs a composite ticket through durable publication;
-a failed save must retain process ownership and pending evidence. Draining deadlines
-never clears pending tickets. These lifecycle requirements are not implemented yet.
+insufficient bound refuses startup without reconstructing topology. Reconstruction
+advances namespace generations before forwarding, bridges, DNS or rules change, and
+retires its tickets after those effects complete. Deferred adoption is not failed
+adoption. Ordinary adoption holds a composite ticket through durable publication;
+a failed save aborts recovery while retaining process ownership and pending evidence.
+Draining deadlines never clears pending tickets.
 
 Request commitment v1 is SHA-256, unpadded base64url, over these bytes:
 
