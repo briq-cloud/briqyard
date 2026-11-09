@@ -24,7 +24,6 @@ mod probing;
 mod quotas;
 mod recovery;
 mod retirement;
-#[cfg(target_os = "linux")]
 mod scoped_exec;
 mod sessions;
 mod siblings;

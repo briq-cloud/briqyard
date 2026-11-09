@@ -160,8 +160,8 @@ gateway replacement, assigned ownership and live publication, policy replacement
 explicit network revocation. Composite tickets remain pending through durable record
 publication, including directory synchronization, and network and DNS effects. Source
 and destination namespaces share one ticket for ownership transfers.
-Complete reachable-set discovery, pending-ticket
-reconciliation, retention and a downgrade compatibility barrier remain activation gates.
+Pending-ticket reconciliation, retention and a downgrade compatibility barrier remain
+activation gates.
 No public scoped route is enabled by these hooks.
 
 The lifecycle contract retains namespace records as subnet reservations.
@@ -204,6 +204,47 @@ and write poll. Unsupported guest transports refuse scoped dispatch. Connection 
 bounds access; it does not prove cleanup of detached descendants or undo committed effects.
 
 ## Remaining activation gates
+
+### Host-owned private resource closure
+
+The host boundary uses one resolver for discovery, protection and dispatch.
+Its independently installed scope contains a primary target and required public-runtime
+seeds, separate from the submitted resource set. Discovery returns the canonical complete
+closure; it grants no authority. Native gateways retain real runtime targets without
+fabricated public identities. Remote seeds and a 65th resource refuse local admission.
+
+Private edges require a shared namespace and both endpoints' installed bridge policies.
+An endpoint permits its peer when it is not strict `Via`, enables siblings, or its exact
+installed `to` and `to_tap` identify that peer. Apply this predicate at both endpoints,
+then take transitive closure from the trusted seeds. `egress:none` still permits private
+peers. Missing or unresolved installed policy never implies open access. This closure
+covers managed private resources, not arbitrary public-URL reachability.
+
+Snapshot namespace generations before enumeration. Acquire selected lifecycle turns,
+validate kernel run identities and trusted seeds, recompute membership, then require the
+same generations before returning a revision. Exclude stopped or quarantined entries only
+with lifecycle/process evidence; uncertain publication or launch is a refusal, not absence.
+Protection independently recomputes exact closure and checks identities and generations
+again after durable idle receipt persistence. Dispatch repeats closure validation before
+consuming admission: a namespace deadline alone cannot attest a caller's proposed subset.
+Stopped entries require a settled launch, no live process or adoption, no pending launch
+and no retained launch hold before exclusion. Running builders and inactive clones refuse
+admission until positive kernel quarantine evidence is available; record metadata alone
+does not establish absence. Unresolved same-namespace state conservatively refuses even
+when the final reachable component might exclude that entry.
+
+Six focused Mac tests cover the installed graph, transitive and bounded closure, uncertain
+records, builder metadata, multiple local seed namespaces and retained launch identity/process
+proof. Matching IDs never discharge a launch hold: the complete record identity must match,
+and existing provenance/process verification must confirm the live launch. Enumeration clones
+records before inspecting other entry mutexes, preserving persistence's removal/record lock order.
+Daemon Clippy, formatting and diff checks pass. Static security review found no remaining
+production-code issue after these fixes. The signed manager integration
+case compiles on Mac but requires Linux to run; it checks native gateway inclusion and a
+validly signed subset refused before consumption. Actual kernel/network and lifecycle race
+qualification remains required before activation.
+
+### Authenticated installation and qualification
 
 No HTTP route or configuration accepts these credentials yet. Administrator routes do not
 call this boundary and keep their existing authentication and behavior.

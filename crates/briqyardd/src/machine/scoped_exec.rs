@@ -1,6 +1,7 @@
 //! Scoped execution never takes the administrator route or wakes a machine. The
 //! caller supplies an installed trusted ownership snapshot and the regional key set.
 //! No HTTP route calls this boundary until authenticated snapshot installation exists.
+use super::execution_resources::ExecutionResourceScope;
 use super::*;
 use api::execution::{
     self as access, admission::Journal, DispatchContext, Operation, Target, Trust,
@@ -11,7 +12,7 @@ use api::execution::{
 pub struct ExecutionProtectionRequest<'a> {
     pub admission: &'a str,
     pub expires_at_ms: u64,
-    pub target: &'a Target,
+    pub scope: ExecutionResourceScope<'a>,
     pub subject: &'a str,
     pub resources: &'a [Target],
     pub resource_revision: &'a str,
@@ -31,6 +32,13 @@ pub struct ScopedCredentials<'a> {
     pub allocations: &'a [&'a str],
 }
 
+/// Independently installed binding and discovery seeds. Submitted credentials must
+/// never supply either part of this trusted context.
+pub struct ScopedExecutionContext<'a> {
+    pub binding: &'a DispatchContext<'a>,
+    pub scope: ExecutionResourceScope<'a>,
+}
+
 impl Manager {
     /// Install a pre-permit idle bound on every exact local run. The trusted caller
     /// retains its ownership revision fence across this call. This receipt alone
@@ -41,6 +49,7 @@ impl Manager {
         journal: &tokio::sync::Mutex<Journal>,
         clock_uncertainty_seconds: u64,
     ) -> Result<ExecutionProtectionReceipt, MError> {
+        self.validate_execution_scope(request.scope)?;
         let targets = request.resources;
         if targets.is_empty() || targets.len() > access::MAX_RESOURCES {
             return Err(invalid("invalid execution protection resources"));
@@ -73,9 +82,9 @@ impl Manager {
         }
         let entry = entries
             .iter()
-            .find(|e| e.snapshot().id == request.target.machine)
+            .find(|e| e.snapshot().id == request.scope.primary.machine)
             .ok_or_else(|| invalid("execution target missing from resources"))?;
-        if !targets.contains(request.target) {
+        if !targets.contains(request.scope.primary) {
             return Err(invalid("execution primary target missing from resources"));
         }
         if entry.snapshot().metadata.get("briq_id").map(String::as_str) != Some(request.subject) {
@@ -93,13 +102,12 @@ impl Manager {
             return Err(invalid("execution protection interval exceeds policy"));
         }
         let snapshot = self.execution_namespace_snapshot(targets)?;
-        if execution_mutations::execution_resource_revision(targets, &snapshot)?
-            != request.resource_revision
-        {
-            return Err(MError::Conflict(
-                "execution namespace generation changed".into(),
-            ));
-        }
+        self.validate_execution_set_locked(
+            request.scope,
+            targets,
+            request.resource_revision,
+            ledger.instance(),
+        )?;
         self.inner
             .execution_fence
             .lock()
@@ -131,6 +139,12 @@ impl Manager {
                 "execution subject changed after protection".into(),
             ));
         }
+        self.validate_execution_set_locked(
+            request.scope,
+            targets,
+            request.resource_revision,
+            ledger.instance(),
+        )?;
         Ok(ExecutionProtectionReceipt {
             admission: request.admission.into(),
             expires_at_ms,
@@ -153,14 +167,18 @@ impl Manager {
         self.scoped_target(&e, ledger.instance())
     }
 
-    fn scoped_journal(&self, journal: &Journal) -> Result<(), MError> {
+    pub(super) fn scoped_journal(&self, journal: &Journal) -> Result<(), MError> {
         if journal.role() != &access::admission::Role::Host(self.inner.host_id.clone()) {
             return Err(invalid("execution journal belongs to another host"));
         }
         Ok(())
     }
 
-    fn scoped_target(&self, e: &Entry, admission_instance: &str) -> Result<Target, MError> {
+    pub(super) fn scoped_target(
+        &self,
+        e: &Entry,
+        admission_instance: &str,
+    ) -> Result<Target, MError> {
         let record = e.snapshot();
         self.ordinary_operation(&record)?;
         if record.state != state::RUNNING || *e.removed.lock().unwrap() {
@@ -209,16 +227,24 @@ impl Manager {
         request: api::ExecRequest,
         credentials: ScopedCredentials<'_>,
         trust: &Trust<'_>,
-        context: &DispatchContext<'_>,
+        installed: ScopedExecutionContext<'_>,
         journal: &tokio::sync::Mutex<Journal>,
         clock_uncertainty_seconds: u64,
     ) -> Result<api::ExecResult, MError> {
+        let ScopedExecutionContext {
+            binding: context,
+            scope,
+        } = installed;
         if context.operation != Operation::Exec
             || context.resource_set.resources.is_empty()
             || context.resource_set.resources.len() > access::MAX_RESOURCES
         {
             return Err(invalid("unsupported scoped operation"));
         }
+        if context.target != scope.primary {
+            return Err(invalid("installed execution primary changed"));
+        }
+        self.validate_execution_scope(scope)?;
         self.own_entry(&context.target.machine)?;
         // Stable order is shared by every scoped operation. Stop/move/restore already
         // use these lifecycle locks. Remote frozen members need a distributed fence;
@@ -273,6 +299,12 @@ impl Manager {
         let deadline = guestc::CommandDeadline::new(bundle.permit().exp, clock.uncertainty)
             .map_err(not_running_if_unreachable)?;
         let snapshot = self.execution_namespace_snapshot(&context.resource_set.resources)?;
+        self.validate_execution_set_locked(
+            scope,
+            &context.resource_set.resources,
+            &context.resource_set.revision,
+            ledger.instance(),
+        )?;
         if execution_mutations::execution_resource_revision(
             &context.resource_set.resources,
             &snapshot,
@@ -388,7 +420,7 @@ fn execution_clock(uncertainty: u64) -> Result<access::Clock, MError> {
 
 // Other lifecycle operations may hold a machine while starting its gateway. Never
 // wait for a second resource while retaining a subset, even in stable ID order.
-async fn local_turns(
+pub(super) async fn local_turns(
     locks: &[Arc<tokio::sync::Mutex<()>>],
 ) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
     loop {

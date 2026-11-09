@@ -36,6 +36,7 @@ mod endpoints;
 mod exec;
 mod execution_fence;
 mod execution_mutations;
+mod execution_resources;
 mod gateway;
 mod idle_protection;
 mod launch_identity;
@@ -49,8 +50,12 @@ mod namespaces;
 mod network;
 mod observe;
 mod scoped_exec;
+pub use execution_resources::ExecutionResourceScope;
 use memory::host_memory;
-pub use scoped_exec::{ExecutionProtectionReceipt, ExecutionProtectionRequest, ScopedCredentials};
+pub use scoped_exec::{
+    ExecutionProtectionReceipt, ExecutionProtectionRequest, ScopedCredentials,
+    ScopedExecutionContext,
+};
 mod persist;
 mod probes;
 mod quotas;
