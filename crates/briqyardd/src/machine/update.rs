@@ -79,6 +79,30 @@ impl Manager {
             // The size it has: no change.
             req.spec.volume = None;
         }
+        let r = e.snapshot();
+        if r.state == state::STOPPED {
+            let next = pending_after(&r, req.spec.clone());
+            let before = r.pending.as_ref();
+            let after = next.as_ref();
+            let changes_backing = grow.is_some()
+                || before.and_then(|p| p.image.as_ref()) != after.and_then(|p| p.image.as_ref())
+                || before.and_then(|p| p.env.as_ref()) != after.and_then(|p| p.env.as_ref());
+            // STOPPED alone is not an exit receipt. Check before any part of the PATCH
+            // moves, under the transition lock; unchanged values need no new proof.
+            if changes_backing
+                && (r.pid != 0
+                    || e.live
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|vm| !*vm.exited.borrow())
+                    || self.inner.vmm.launch_settlement(id) != fc::LaunchSettlement::Settled)
+            {
+                return Err(MError::Conflict(
+                    "stopped image, env or volume update requires confirmed VMM exit".into(),
+                ));
+            }
+        }
         // Held until the record says `via: gateway`, as a start holds it.
         let mut gateway_turn = None;
         let reprobe;

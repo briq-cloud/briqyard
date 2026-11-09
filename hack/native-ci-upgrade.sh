@@ -49,6 +49,7 @@ vmm() {
   done | paste -sd, -
 }
 wait_running() { briqyard machine wait --for running "$1" >/dev/null; }
+daemon_version() { briqyardd --version | awk '{print $2}'; }
 ready() { for _ in $(seq 1 90); do briqyard machine exec "$1" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
 PROBES=()
 cleanup() {
@@ -218,6 +219,8 @@ curl -fsS $FLEET/v1/hosts | jq -e 'all(.state == "ready")' >/dev/null || die "th
 R=/var/lib/briqyard-fleet/release
 sudo rm -rf $R && sudo mkdir -p $R && sudo cp "$HEAD_DIR"/* $R/
 HEAD_VER=$(briqyard --version | awk '{print $2}')
+# The host bootstrap retains the previous daemon/configuration after the fleet-first step.
+sudo find /etc/briqyard -maxdepth 1 -type d -name 'rollback.*' | sort > "$WORK/rollback-before"
 t0=$SECONDS
 out=$(fleet host upgrade local --release "file://$R" 2>&1); urc=$?
 UPGRADE_SECONDS=$((SECONDS - t0))
@@ -288,6 +291,95 @@ a=0; for _ in $(seq 1 120); do [ "$(made)" = 0 ] && a=1 && break; sleep 1; done
 check "the idle cgroups were retired" '[ "$a" = 1 ]'
 echo "   cgroup leaves after: $(leaves)"
 check "a second backup works on the head" '[ -n "$(briqyard machine backup "$PG" | jq -r .id)" ]'
+
+echo "== rollback through the current bootstrap, with the retained set"
+[ "$urc" = 0 ] && [ "$fail" = 0 ] || die "forward qualification failed; no rollback attempted"
+sudo find /etc/briqyard -maxdepth 1 -type d -name 'rollback.*' | sort > "$WORK/rollback-after"
+comm -13 "$WORK/rollback-before" "$WORK/rollback-after" > "$WORK/rollback-new"
+[ "$(wc -l < "$WORK/rollback-new")" -eq 1 ] || die "expected one retained rollback set"
+RETAINED=$(cat "$WORK/rollback-new")
+sudo sh -c 'cd "$1" && sha256sum -c --quiet SHA256SUMS' sh "$RETAINED" || die "retained rollback checksum"
+# Keep the actual retained CLI/fleet (already upgraded before the host) beside the old daemon.
+ROLLBACK_RELEASE=$WORK/rollback-release
+mkdir "$ROLLBACK_RELEASE" || die "rollback release directory"
+for b in briqyardd briqyard briqyard-fleet; do
+  sudo cp "$RETAINED/$b" "$ROLLBACK_RELEASE/$b-linux-x86_64" || die "retained $b"
+done
+sudo python3 - "$RETAINED/config.yaml" "$ROLLBACK_RELEASE" "$WORK/prior-runtime.sums" <<'PY' || die "retained runtime inputs"
+import hashlib, shutil, sys
+from pathlib import Path
+import yaml
+config = yaml.safe_load(Path(sys.argv[1]).read_text())
+with Path(sys.argv[3]).open('w') as sums:
+    for key in ('firecracker', 'jailer', 'kernel', 'init'):
+        path = Path(config[key])
+        sums.write(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + str(path) + '\n')
+shutil.copyfile(config['init'], Path(sys.argv[2]) / 'briqyard-init-linux-x86_64')
+PY
+curl -fsSL "$REL_URL/firecracker-checked-linux-x86_64.tar.gz" -o "$ROLLBACK_RELEASE/firecracker-checked-linux-x86_64.tar.gz" || die "previous checked bundle"
+for asset in briqyardd-linux-x86_64 briqyard-init-linux-x86_64 firecracker-checked-linux-x86_64.tar.gz; do
+  sha=$(awk -v f="$asset" '$2 == f {print $1}' "$WORK/prev.sums")
+  [[ "$sha" =~ ^[a-f0-9]{64}$ ]] && echo "$sha  $ROLLBACK_RELEASE/$asset" | sudo sha256sum -c --quiet - || die "rollback asset differs from previous release: $asset"
+done
+(cd "$ROLLBACK_RELEASE" && sha256sum -- * > SHA256SUMS-x86_64) || die "rollback release checksums"
+# Current bootstrap stages the prior kernel by digest too; no old runtime input is overwritten.
+PRIOR_KERNEL=$(sudo python3 -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["kernel"])' "$RETAINED/config.yaml")
+PRIOR_KERNEL_SHA=$(sudo sha256sum "$PRIOR_KERNEL" | awk '{print $1}')
+sudo cp /etc/briqyard/config.yaml "$WORK/head-config.yaml" || die "head configuration capture"
+# The destination is runner-owned; only the executable reads require root.
+# shellcheck disable=SC2024
+sudo sha256sum /usr/local/bin/briqyard{,d,-fleet} > "$WORK/head-binaries.sums" || die "head binary capture"
+# Read by the checks evaluated below.
+# shellcheck disable=SC2034
+HEAD_PID=$(systemctl show -p MainPID --value briqyardd)
+probe rollback-endpoint "http://$WEBADDR/"
+probe rollback-api -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7420/v1/status
+timeout 900 sudo env BRIQYARD_RELEASE="file://$ROLLBACK_RELEASE" BRIQYARD_POOL_FILE_GB=40 BRIQYARD_ARC_GB=1 LISTEN=127.0.0.1:7420 \
+  KERNEL_URL="file://$PRIOR_KERNEL" KERNEL_SHA256="$PRIOR_KERNEL_SHA" \
+  bash "$HARNESS/bootstrap-host.sh" > "$WORK/rollback.log" 2>&1
+rrc=$?
+if [ "$rrc" = 0 ]; then
+  for _ in $(seq 1 90); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+  check "rollback installs the retained daemon" '[ "$(daemon_version)" = "$PREV_VER" ]'
+  check "rollback hands over to a new daemon" '[ "$(systemctl show -p MainPID --value briqyardd)" != "$HEAD_PID" ]'
+  # Paths may be canonicalized to immutable files; all other settings and input bytes must match.
+  check "rollback restores retained configuration and runtime identity" 'sudo python3 - "$RETAINED/config.yaml" /etc/briqyard/config.yaml <<'\''PY'\''
+import hashlib, sys
+from pathlib import Path
+import yaml
+old, new = [yaml.safe_load(Path(p).read_text()) for p in sys.argv[1:]]
+for key in ("firecracker", "jailer", "kernel", "init"):
+    assert hashlib.sha256(Path(old.pop(key)).read_bytes()).digest() == hashlib.sha256(Path(new.pop(key)).read_bytes()).digest(), key
+assert old == new
+PY'
+elif [ "$rrc" != 124 ] && grep -qF 'assignment state requires a compatible daemon: nothing activated' "$WORK/rollback.log"; then
+  check "incompatible rollback leaves the serving daemon unchanged" '[ "$(systemctl show -p MainPID --value briqyardd)" = "$HEAD_PID" ] && [ "$(daemon_version)" = "$HEAD_VER" ]'
+  check "incompatible rollback leaves binaries and configuration unchanged" 'sudo sha256sum -c --quiet "$WORK/head-binaries.sums" && sudo cmp -s "$WORK/head-config.yaml" /etc/briqyard/config.yaml'
+else
+  die "rollback neither succeeded nor refused incompatibility before activation (rc $rrc)"
+fi
+for id in $RUNNING; do
+  was=$(awk -v i="$id" '$1 == i {print $2}' "$WORK/before")
+  check "rollback preserves VMM process for $id" '[ "$(vmm "$id")" = "$was" ] && [ "$(briqyard machine get "$id" | jq -r .state)" = running ]'
+done
+check "rollback preserves postgres rows and volume data" '[ "$(briqyard machine exec "$PG" -- psql -U postgres -tAc "select sum(x) from t")" = 11325 ] && [ "$(briqyard machine exec "$VOL" -- cat /data/mark)" = volume-mark ]'
+check "rollback preserves the serving endpoint" '[ "$(curl -fsS -m 5 "http://$WEBADDR/")" = upgrade-ci-page ]'
+check "rollback preserves prior immutable runtime files" 'sudo sha256sum -c --quiet "$WORK/prior-runtime.sums"'
+if [ "$rrc" = 0 ]; then
+  timeout 900 sudo env BRIQYARD_RELEASE="file://$HEAD_DIR" BRIQYARD_POOL_FILE_GB=40 BRIQYARD_ARC_GB=1 LISTEN=127.0.0.1:7420 \
+    bash "$HARNESS/bootstrap-host.sh" > "$WORK/return-to-head.log" 2>&1 || die "return to head after supported rollback"
+  for _ in $(seq 1 90); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+  check "the candidate serves again after rollback" '[ "$(daemon_version)" = "$HEAD_VER" ] && briqyard status >/dev/null && sudo cmp -s "$WORK/head-config.yaml" /etc/briqyard/config.yaml && sudo sha256sum -c --quiet "$WORK/head-binaries.sums"'
+  for id in $RUNNING; do
+    was=$(awk -v i="$id" '$1 == i {print $2}' "$WORK/before")
+    check "return to candidate preserves VMM process for $id" '[ "$(vmm "$id")" = "$was" ] && [ "$(briqyard machine get "$id" | jq -r .state)" = running ]'
+  done
+  check "return to candidate preserves postgres rows and volume data" '[ "$(briqyard machine exec "$PG" -- psql -U postgres -tAc "select sum(x) from t")" = 11325 ] && [ "$(briqyard machine exec "$VOL" -- cat /data/mark)" = volume-mark ]'
+fi
+sleep 1
+for p in "${PROBES[@]}"; do kill "$p" 2>/dev/null; done; PROBES=()
+check "rollback API silence stays within the upgrade bound" 'awk -v g="$(gap rollback-api)" -v m="$API_DOWN_MAX" "BEGIN{exit !(g <= m)}"'
+check "rollback endpoint silence stays within the upgrade bound" 'awk -v g="$(gap rollback-endpoint)" -v m="$GAP_MAX" "BEGIN{exit !(g <= m)}"'
 
 for id in $(briqyard machine ls --namespace $NS 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1; done
 briqyard namespace rm $NS >/dev/null 2>&1

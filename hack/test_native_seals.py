@@ -58,9 +58,8 @@ class NativeSealConfig(unittest.TestCase):
             config = root / "config.yaml"
             installed = root / "briqyard-init"
             installed.write_bytes(b"installed source init")
-            config.write_text("token: ''\n")
+            config.write_text("token: ''\ninit: " + json.dumps(str(installed)) + "\n")
             fixture = fixture.replace("'/etc/briqyard/config.yaml'", repr(str(config)))
-            fixture = fixture.replace("'/usr/local/bin/briqyard-init'", repr(str(installed)))
             subprocess.run([sys.executable, "-c", fixture], check=True, cwd=root)
             c = yaml.safe_load(config.read_text())
             self.assertTrue(c["token"])
