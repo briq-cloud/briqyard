@@ -2,7 +2,7 @@
 use super::*;
 use terminal::Disposition;
 
-fn public_error(error: anyhow::Error) -> MError {
+pub(super) fn public_error(error: anyhow::Error) -> MError {
     match error.downcast::<MError>() {
         Ok(error) => error,
         Err(error) => MError::Other(error),

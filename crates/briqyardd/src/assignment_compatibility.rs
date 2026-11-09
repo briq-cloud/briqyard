@@ -6,6 +6,7 @@ use std::path::Path;
 
 pub const CAPABILITY: &[u8] = b"destination-assignment-v1\n";
 pub const RUN_CAPABILITY: &[u8] = b"assigned-run-v1\n";
+pub const UPDATE_CAPABILITY: &[u8] = b"assigned-update-v3\n";
 pub const LIFECYCLE_CAPABILITY: &[u8] = b"assigned-run-lifecycle-v1\n";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Requirement {
@@ -13,6 +14,7 @@ pub enum Requirement {
     Assignment,
     AssignedRun,
     AssignedRunLifecycle,
+    AssignedUpdates,
 }
 pub const RUN_COLLECTIONS: [&str; 3] = [
     "assigned-run-intents",
@@ -49,6 +51,7 @@ fn floor(root: &Path) -> Result<Requirement> {
         (1, "destination-assignment-v1") => Ok(Requirement::Assignment),
         (2, "assigned-run-v1") => Ok(Requirement::AssignedRun),
         (3, "assigned-run-lifecycle-v1") => Ok(Requirement::AssignedRunLifecycle),
+        (4, "assigned-update-v3") => Ok(Requirement::AssignedUpdates),
         _ => anyhow::bail!("unsupported assignment compatibility floor"),
     }
 }
@@ -68,6 +71,7 @@ pub fn requirement(root: &Path) -> Result<Requirement> {
     for kind in ["unbound-assignments", "unbound-requests", "machines"]
         .into_iter()
         .chain(RUN_COLLECTIONS)
+        .chain(["assigned-run-updates"])
     {
         let entries = match std::fs::read_dir(root.join(kind)) {
             Ok(entries) => entries,
@@ -116,6 +120,13 @@ pub fn record_requirement(kind: &str, value: &Value) -> Result<Requirement> {
             Requirement::None
         });
     }
+    if kind == "assigned-run-updates" {
+        return match value["schema"].as_u64() {
+            Some(1 | 2) => Ok(Requirement::AssignedRunLifecycle),
+            Some(3) => Ok(Requirement::AssignedUpdates),
+            _ => anyhow::bail!("unsupported assigned update evidence schema"),
+        };
+    }
     if RUN_COLLECTIONS.contains(&kind) {
         return run_schema(value);
     }
@@ -162,11 +173,13 @@ pub fn ensure_floor_at(root: &Path, minimum: Requirement) -> Result<()> {
             &meta.join(FLOOR),
             &serde_json::to_vec(&Floor {
                 schema: match minimum {
+                    Requirement::AssignedUpdates => 4,
                     Requirement::AssignedRunLifecycle => 3,
                     Requirement::AssignedRun => 2,
                     _ => 1,
                 },
                 protocol: match minimum {
+                    Requirement::AssignedUpdates => "assigned-update-v3",
                     Requirement::AssignedRunLifecycle => "assigned-run-lifecycle-v1",
                     Requirement::AssignedRun => "assigned-run-v1",
                     _ => "destination-assignment-v1",
@@ -207,6 +220,13 @@ pub async fn check_required_candidate(
         executable,
         "assigned-run-lifecycle-capabilities",
         LIFECYCLE_CAPABILITY,
+        deadline,
+    )
+    .await?;
+    probe(
+        executable,
+        "assigned-update-capabilities",
+        UPDATE_CAPABILITY,
         deadline,
     )
     .await?;
@@ -432,6 +452,35 @@ mod tests {
         }
     }
     #[test]
+    fn schema_three_update_floor_survives_journal_deletion_and_marker_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        store
+            .put_durable(
+                "assigned-run-updates",
+                "machine",
+                &serde_json::json!({"schema":3}),
+            )
+            .unwrap();
+        assert_eq!(
+            requirement(dir.path()).unwrap(),
+            Requirement::AssignedUpdates
+        );
+        std::fs::remove_file(dir.path().join("meta").join(FLOOR)).unwrap();
+        assert_eq!(
+            requirement(dir.path()).unwrap(),
+            Requirement::AssignedUpdates
+        );
+        store
+            .delete_durable("assigned-run-updates", "machine")
+            .unwrap();
+        assert_eq!(
+            requirement(dir.path()).unwrap(),
+            Requirement::AssignedUpdates
+        );
+    }
+
+    #[test]
     fn lifecycle_floor_failure_forbids_first_incompatible_intent() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path()).unwrap();
@@ -450,7 +499,7 @@ mod tests {
             .exists());
     }
     #[tokio::test]
-    async fn empty_state_requires_all_three_exact_successful_bounded_probes() {
+    async fn empty_state_requires_all_four_exact_successful_bounded_probes() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let executable = dir.path().join("candidate");
@@ -461,7 +510,7 @@ mod tests {
             ("sleep 2", false),
             ("printf 'assigned-run-lifecycle-v1\\n'", true),
         ] {
-            std::fs::write(&executable, format!("#!/bin/sh\ncase $1 in\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\nassigned-run-lifecycle-capabilities) {body};;\n*) exit 2;;\nesac\n")).unwrap();
+            std::fs::write(&executable, format!("#!/bin/sh\ncase $1 in\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\nassigned-run-lifecycle-capabilities) {body};;\nassigned-update-capabilities) printf 'assigned-update-v3\\n';;\n*) exit 2;;\nesac\n")).unwrap();
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
             let result = check_required_candidate(
                 dir.path(),

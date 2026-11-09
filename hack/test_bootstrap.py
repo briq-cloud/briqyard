@@ -33,6 +33,7 @@ CAPABILITIES = {
     "assignment-capabilities": "destination-assignment-v1",
     "assigned-run-capabilities": "assigned-run-v1",
     "assigned-run-lifecycle-capabilities": "assigned-run-lifecycle-v1",
+    "assigned-update-capabilities": "assigned-update-v3",
 }
 FULL_DAEMON = "#!/bin/sh\ncase $1 in\n" + "".join(
     command + ") printf '" + answer + "\\n';;\n" for command, answer in CAPABILITIES.items()
@@ -59,7 +60,7 @@ class BootstrapRelease(unittest.TestCase):
         daemon.write_text('''#!/usr/bin/env python3
 from pathlib import Path
 import os, sys, yaml
-protocols = {"assignment-capabilities": "destination-assignment-v1", "assigned-run-capabilities": "assigned-run-v1", "assigned-run-lifecycle-capabilities": "assigned-run-lifecycle-v1"}
+protocols = {"assignment-capabilities": "destination-assignment-v1", "assigned-run-capabilities": "assigned-run-v1", "assigned-run-lifecycle-capabilities": "assigned-run-lifecycle-v1", "assigned-update-capabilities": "assigned-update-v3"}
 if sys.argv[1] in protocols:
     print(protocols[sys.argv[1]])
     sys.exit(0)
@@ -613,7 +614,7 @@ class AssignmentCompatibility(unittest.TestCase):
                 for answer, accepted in (("printf 'assigned-run-lifecycle-v1\\n'", True),
                                          ("printf 'assigned-run-lifecycle-v1\\nextra'", False),
                                          ("printf 'assigned-run-lifecycle-v1\\n'; exit 1", False)):
-                    self.binary.write_text(old.replace("*) exit 2;;", "assigned-run-lifecycle-capabilities) " + answer + ";;\n*) exit 2;;"))
+                    self.binary.write_text(old.replace("*) exit 2;;", "assigned-run-lifecycle-capabilities) " + answer + ";;\nassigned-update-capabilities) printf 'assigned-update-v3\\n';;\n*) exit 2;;"))
                     self.assertEqual(self.check().returncode == 0, accepted)
                 if not collection.startswith("meta/"):
                     self.assertFalse((self.data / "state/meta").exists())
@@ -630,6 +631,18 @@ class AssignmentCompatibility(unittest.TestCase):
             self.binary.write_text(FULL_DAEMON.replace(branch, "assigned-run-lifecycle-capabilities) " + body + ";;"))
             self.assertNotEqual(self.check().returncode, 0)
         self.assertFalse(self.data.exists())
+
+    def test_update_floor_and_journal_require_exact_update_probe(self):
+        for collection, value in (("meta/required-assignment-protocol.json", {"schema": 4, "protocol": "assigned-update-v3"}),
+                                  ("assigned-run-updates/machine.json", {"schema": 3})):
+            with self.subTest(collection=collection):
+                shutil.rmtree(self.data, ignore_errors=True)
+                self.evidence(collection, value)
+                branch = "assigned-update-capabilities) printf 'assigned-update-v3\\n';;\n"
+                self.binary.write_text(FULL_DAEMON.replace(branch, ""))
+                self.assertNotEqual(self.check().returncode, 0)
+                self.binary.write_text(FULL_DAEMON)
+                self.assertEqual(self.check().returncode, 0)
 
     def test_unknown_assignment_floor_cannot_be_overridden_by_new_capability(self):
         self.evidence("meta/required-assignment-protocol.json", {"schema": 3, "protocol": "assigned-run-v1"})

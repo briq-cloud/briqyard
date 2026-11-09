@@ -116,7 +116,7 @@ impl Manager {
         if let Some(update) = run
             .consumed_update
             .as_ref()
-            .filter(|update| update.creation_source.is_some())
+            .filter(|update| update.creation_authority().is_some())
         {
             self.check_creation_update_authority(update)?;
         }

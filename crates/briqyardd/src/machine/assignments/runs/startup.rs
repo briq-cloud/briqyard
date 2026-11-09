@@ -41,9 +41,6 @@ impl Manager {
                 }
                 continue;
             }
-            if self.recover_creation_update_stopped(&entry).await? {
-                continue;
-            }
             let ended = record.boot_incarnation.as_ref().is_some_and(|old| {
                 fc::valid_host_boot_id(&old.host_boot_id) && old.host_boot_id != host
             });
@@ -51,6 +48,7 @@ impl Manager {
                 let _namespace = self.inner.namespace_lifecycle.read().await;
                 let _entry = entry.lock.lock().await;
                 self.check_assigned_bound_record(&record)?;
+                self.settle_creation_update(&entry).await?;
                 anyhow::ensure!(
                     self.reconcile_clone_exit(&entry).await?,
                     "creation exit unconfirmed"
