@@ -133,7 +133,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | imagePullSecrets per pod | ◐ registry credentials per host | per machine | yard, later |
 | Image pull, cache | ✓ a root disk per digest, the tag's digest cached | a registry mirror | yard |
 | Image garbage collection under disk pressure | ✓ unused images removed after `image_keep_days`, and oldest first while the pool is under `disk_free_pct` (ADR 0021) | | |
-| Container log rotation | ✓ the console rotated past `console_max_mb` while running, one previous file kept, `/logs` across both (ADR 0021) | | |
+| Container log rotation | ✓ the console rotated past `console_max_mb` while running, one previous file kept, `/logs` across both (ADR 0021), paged from the tail with cursors (ADR 0116), the program's output apart from the runtime's (`view=app|runtime`, ADR 0115) | | |
 
 ## Observability
 

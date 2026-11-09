@@ -70,8 +70,9 @@ impl Manager {
         );
         let inner = Arc::new(Inner {
             stats: Stats::default(),
-            warm_lock: tokio::sync::Mutex::new(()),
-            sandbox_create_lock: tokio::sync::Mutex::new(()),
+            warm_lock: tokio::sync::RwLock::new(()),
+            sandbox_create_lock: tokio::sync::RwLock::new(()),
+            sandbox_turns: Default::default(),
             warm_names: Mutex::new(HashMap::new()),
             assignments: Mutex::new(assignments::State::default()),
             warm_policy: Mutex::new(cfg.templates.warm_policy.clone()),
@@ -125,6 +126,8 @@ impl Manager {
             endpoint_events,
             policies: Mutex::new(HashMap::new()),
             namespace_create: tokio::sync::Mutex::new(()),
+            namespace_reserved: Mutex::new(HashMap::new()),
+            namespace_turns: Default::default(),
             namespace_lifecycle: tokio::sync::RwLock::new(()),
             backups,
             boot_gate: tokio::sync::Semaphore::new(boots_at_once as usize),

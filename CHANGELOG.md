@@ -1,5 +1,80 @@
 # Changelog
 
+## 0.1.33 — 2026-11-08
+
+### Upgrade notes
+
+- The init's digest is expected not to change with this release (ADR 0101): no init source or dependency it uses changed. Confirm it in the candidate's `SHA256SUMS`: seeds sealed under v0.1.28 stay valid.
+- The fleet forgets settled records (ADR 0119): accepted sandbox routes and settled admissions 24 hours after they settle, namespace versions once their namespace is pinned nowhere and nothing unsettled names it, pin times once their namespace is pinned nowhere. It prunes at start and on every heartbeat. Unaccepted routes and pending seed admissions are never pruned. A registry written by an earlier fleet has no times on these records: at the first start, the records of namespaces pinned nowhere go at once and the rest a day later, so the registry shrinks in two steps after the upgrade.
+- A save that finds nothing changed since the last write no longer encodes the registry, and callers that waited behind a write share the next one.
+
+### Performance
+
+- bound the registry and skip saves that find nothing new (#193) ([27717f51](https://github.com/briq-cloud/briqyard/commit/27717f51ed521c23ecd0f8f8df9294a6196ce7e5))
+
+## 0.1.32 — 2026-11-08
+
+### Upgrade notes
+
+- The init's digest is expected not to change with this release (ADR 0101): no init source or dependency it uses changed. Confirm it in the candidate's `SHA256SUMS`: seeds sealed under v0.1.28 stay valid.
+- Namespaces are made in parallel (ADR 0118): only the choice and reservation of a subnet index stay under `namespace_create`; the bridge, the DNS listener and the record are done outside it, once per namespace. No action is needed. A namespace rename still holds the lock while it waits for its machine to stop.
+- The fleet logs one `warn` line with the code and message of every 5xx it answers itself, and the host of every 5xx it relays.
+
+### Fixes
+
+- log the cause of every 5xx the fleet answers (#189) ([4763719b](https://github.com/briq-cloud/briqyard/commit/4763719bf6b82dd95e642a0541b796666fadc38e))
+
+
+### Performance
+
+- make namespaces in parallel (#190) ([6c20d10b](https://github.com/briq-cloud/briqyard/commit/6c20d10bb1e653c4bcd21f5a7192199ab40ab25c))
+
+## 0.1.31 — 2026-11-07
+
+### Upgrade notes
+
+- The init's digest is expected not to change with this release (ADR 0101): no init source or dependency it uses changed. Confirm it in the candidate's `SHA256SUMS`: seeds sealed under v0.1.28 stay valid.
+- Creates from a seed now overlap in their record step (ADR 0117): the warm and sandbox locks are shared unless a ready warm slot may serve the create. No action is needed. Under a continuous burst of seed creates, the warm refill tick skips and `fail_fast` claims answer pool-empty until there is a gap.
+
+### Documentation
+
+- cover a hung daemon and name the monitoring units (#186) ([acfe42ff](https://github.com/briq-cloud/briqyard/commit/acfe42ff6723aefd7208add7aed9d4ee2dce75c9))
+
+
+### Performance
+
+- seed creates record concurrently (#187) ([9a4ca9af](https://github.com/briq-cloud/briqyard/commit/9a4ca9afdd5cedb3cb81f61328a8b25f4a042e9c))
+
+## 0.1.30 — 2026-11-06
+
+### Upgrade notes
+
+- The init's digest is expected not to change with this release (ADR 0101): no init source or dependency it uses changed, and `briqyard-api` gained only console-log types the init does not use. Confirm it in the candidate's `SHA256SUMS` line for `briqyard-init-linux-<arch>` against v0.1.29's (`365e5d1b…` on x86_64); if it differs, seeds are sealed again as `docs/OPERATIONS.md` (Upgrade) says.
+- The console log API changes (ADR 0115, ADR 0116). `GET /v1/machines/{id}/logs` answers the newest lines of the app view by default: kernel and `[briqyard]` runtime lines leave it, and `view=runtime` returns them (`--view runtime` in the CLI). A page answers `{lines, before, after, hasOlder, hasNewer}`: the `next` field is replaced by the `before` and `after` cursors, and `limit` defaults to 200 (at most 1000). `since` now belongs to a follow only: on a page it is `400 invalid`. A caller that pages with `since`, reads `next`, expects the start of the console by default, or greps runtime lines in the default view must change. A machine booted by an older daemon keeps a mixed console until its next boot.
+- Cloning a named snapshot no longer holds the seed's lock for the clone: creates from one seed run their clones in parallel. No action is needed.
+- Sealed seeds stay usable after a reboot on the same kernel: recovery and start no longer compare the artifact's device number, which ZFS changes at each mount. Existing manifests are expected to verify at the next daemon start, with no reseal; the tests cover this with a changed device number, not yet a real host reboot. A reboot that changes the kernel release, the Firecracker or kernel binary, or the init digest still refuses the seed, by design: reseal after such an upgrade. A file-level restore (rsync, tar) changes the inode and is refused too (`zfs send/receive` keeps it), and a seed whose builder runs an older guest init still fails at restart (`template_builder_ready`).
+
+### Documentation
+
+- ADR 0113 assumes one host for the fleet and the edge (#183) ([fd628841](https://github.com/briq-cloud/briqyard/commit/fd6288412004c14c4cc3e25d481512775c1f94ea))
+
+
+### Features
+
+- page the console from the tail with before and after cursors (#182) ([ee4da888](https://github.com/briq-cloud/briqyard/commit/ee4da888a1d1e51730e51b3c86b92207147303a6))
+
+
+### Fixes
+
+- separate app and runtime console output at capture (#179) ([ce421728](https://github.com/briq-cloud/briqyard/commit/ce421728ecfbb0608d1e3c8a46ac7d643217494e))
+
+- keep sealed seeds usable after a reboot (#185) ([34d42fc2](https://github.com/briq-cloud/briqyard/commit/34d42fc2bbde7719ca79f852e5c5e5be7ebe9f36))
+
+
+### Performance
+
+- clone a named snapshot outside the seed's lock (#181) ([1989dbad](https://github.com/briq-cloud/briqyard/commit/1989dbad4a0ebb2a5d8ec1fef2300af7db7ab8e4))
+
 ## 0.1.29 — 2026-11-06
 
 ### Upgrade notes

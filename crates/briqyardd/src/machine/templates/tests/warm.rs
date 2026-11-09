@@ -150,7 +150,7 @@ async fn queued_demand_increase_observes_later_decrease_and_drain() {
             desired(&h, 0).await;
         }
         tokio::task::yield_now().await;
-        let _settled = h.m.inner.warm_lock.lock().await;
+        let _settled = h.m.inner.warm_lock.write().await;
         assert!(h.m.warm_pools("t1").unwrap()[0].slots.is_empty());
         assert_eq!(h.m.inner.machines.lock().unwrap().len(), 1);
         assert!(h.m.clone_readers().unwrap().is_empty());
@@ -166,7 +166,7 @@ async fn queued_increases_serialize_at_latest_demand_without_extra_slots() {
     desired(&h, 1).await;
     h.wait_warm_barrier().await;
     // Both queued passes see the final desired count and the same reservation.
-    let _settled = h.m.inner.warm_lock.lock().await;
+    let _settled = h.m.inner.warm_lock.write().await;
     let view = h.m.warm_pools("t1").unwrap().remove(0);
     assert_eq!((view.desired, view.slots.len()), (1, 1));
     assert_eq!(h.m.inner.machines.lock().unwrap().len(), 2);
@@ -187,7 +187,7 @@ async fn unchanged_demand_does_not_refill_after_claim() {
     let view = desired(&h, 1).await;
     assert_eq!((view.ready, view.claimed), (0, 1));
     tokio::task::yield_now().await;
-    let _settled = h.m.inner.warm_lock.lock().await;
+    let _settled = h.m.inner.warm_lock.write().await;
     assert_eq!(h.m.warm_pools("t1").unwrap()[0].slots.len(), 1);
     assert_eq!(h.m.inner.machines.lock().unwrap().len(), 2);
 }
@@ -349,7 +349,7 @@ async fn concurrent_identical_claims_and_busy_turn_retry_reach_the_same_vm() {
         h.m.claim_warm_pool("t1", "tools", claim("worker", "same-key"))
     );
     assert_eq!(first.unwrap().id, retry.unwrap().id);
-    let busy = h.m.inner.warm_lock.lock().await;
+    let busy = h.m.inner.warm_lock.write().await;
     assert_eq!(
         h.m.claim_warm_pool("t1", "tools", claim("worker", "same-key"))
             .await

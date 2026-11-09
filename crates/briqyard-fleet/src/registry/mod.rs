@@ -6,7 +6,9 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+mod shared;
 mod tokens;
+pub use shared::*;
 pub use tokens::*;
 
 /// What a registry or host record holds that this fleet does not know, kept as it was and
@@ -420,6 +422,10 @@ pub struct Registry {
     pub namespace_moves: HashMap<String, crate::moves::MoveFence>,
     #[serde(default)]
     pub namespace_versions: HashMap<String, u64>,
+    /// At least every version `prune` dropped: a namespace without an entry starts above it, so a
+    /// create never gets a version a stale answer once held (ADR 0119).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub namespace_version_floor: u64,
     /// machine id → host id, learned from creates and listings.
     pub machines: HashMap<String, String>,
     /// endpoint id → host id, learned the same way.
@@ -442,6 +448,13 @@ pub struct Registry {
     #[serde(skip)]
     last_hold: u64,
 }
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// How long a settled request's record is kept for a retry of the same request (ADR 0119).
+pub const REPLAY_WINDOW: Duration = Duration::hours(24);
 
 /// A forgotten host's pool key, kept for its backups.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -546,6 +559,44 @@ impl Registry {
         }
         self.pinned_at
             .retain(|t, _| self.namespaces.contains_key(t));
+        self.prune(now);
+    }
+
+    /// Forgets what nothing can ask for any more (ADR 0119): the records of requests settled
+    /// longer ago than `REPLAY_WINDOW`, and the placement version of a namespace pinned nowhere
+    /// that no unsettled request, move or admission names. Idempotent; the heartbeat runs it, and
+    /// so does the start, on the registry as loaded.
+    pub fn prune(&mut self, now: DateTime<Utc>) {
+        crate::create_replay::prune(self, now, REPLAY_WINDOW);
+        crate::sandbox_admissions::prune(self, now, REPLAY_WINDOW);
+        let named: std::collections::HashSet<&str> = self
+            .namespace_moves
+            .values()
+            .map(|m| m.namespace.as_str())
+            .chain(
+                self.sandbox_admissions
+                    .values()
+                    .filter(|a| a.pending_seed())
+                    .map(|a| a.namespace.as_str()),
+            )
+            .chain(
+                self.sandbox_requests
+                    .values()
+                    .filter(|r| !r.accepted)
+                    .map(|r| r.namespace.as_str()),
+            )
+            .collect();
+        let pinned = &self.namespaces;
+        let mut floor = self.namespace_version_floor;
+        self.namespace_versions.retain(|t, v| {
+            let kept = pinned.contains_key(t) || named.contains(t.as_str());
+            if !kept {
+                floor = floor.max(*v);
+            }
+            kept
+        });
+        self.namespace_version_floor = floor;
+        self.pinned_at.retain(|t, _| pinned.contains_key(t));
     }
 
     /// The pool key of a host, made now when it has none (`true` then): the caller writes the
@@ -773,11 +824,15 @@ impl Registry {
 
     /// Advance placement identity on every admitted create, including an existing network.
     pub fn note_namespace_create(&mut self, namespace: &str) {
+        let floor = self.namespace_version_floor;
         let version = self.namespace_versions.entry(namespace.into()).or_default();
-        *version = version.saturating_add(1);
+        *version = (*version).max(floor).saturating_add(1);
     }
     pub fn namespace_version(&self, namespace: &str) -> u64 {
-        *self.namespace_versions.get(namespace).unwrap_or(&0)
+        *self
+            .namespace_versions
+            .get(namespace)
+            .unwrap_or(&self.namespace_version_floor)
     }
     pub fn host_of_namespace(&self, namespace: &str) -> Option<&HostRec> {
         self.namespaces

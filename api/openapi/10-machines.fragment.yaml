@@ -295,8 +295,11 @@
     LogsResponse:
       type: object
       properties:
-        lines: { type: array, items: { $ref: "#/components/schemas/LogLine" } }
-        next: { type: string }
+        lines: { type: array, items: { $ref: "#/components/schemas/LogLine" }, description: "oldest first" }
+        before: { type: string, description: "give it as `before` for the page of lines older than this one; opaque, and it covers the other view's lines this page skipped" }
+        after: { type: string, description: "give it as `after` for the lines newer than this page, or `since` to follow from it; opaque. At the end it is where new lines will start" }
+        hasOlder: { type: boolean }
+        hasNewer: { type: boolean }
     UpdateMachineRequest:
       type: object
       properties:

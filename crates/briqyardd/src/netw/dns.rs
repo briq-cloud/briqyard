@@ -91,6 +91,13 @@ impl Resolver {
         }
     }
 
+    /// Counts `gateway` as served without a socket, for tests of code that plumbs namespaces.
+    #[cfg(test)]
+    pub fn assume_listening(&self, gateway: Ipv4Addr) {
+        let idle = tokio::spawn(async {});
+        self.listeners.write().unwrap().insert(gateway, idle);
+    }
+
     /// Serves DNS on the gateway address. Idempotent per address.
     pub async fn listen(&self, gateway: Ipv4Addr) -> Result<()> {
         if self.listeners.read().unwrap().contains_key(&gateway) {

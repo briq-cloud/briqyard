@@ -7,10 +7,17 @@ use super::*;
 
 #[test]
 fn log_lines() {
-    let l = parse_log_line("2026-10-18T22:00:00.123456Z hello world\n");
-    assert_eq!(l.line, "hello world");
+    let (view, l) = parse_log_line("2026-10-18T22:00:00.123456Z hello world\n");
+    assert_eq!((view, l.line.as_str()), (api::LogView::App, "hello world"));
     assert_eq!(l.ts.timestamp(), 1_792_360_800);
-    assert_eq!(parse_log_line("no timestamp\n").line, "no timestamp");
+    let (view, l) = parse_log_line("2026-10-18T22:00:00.123456Z! [briqyard] started\n");
+    assert_eq!(
+        (view, l.line.as_str()),
+        (api::LogView::Runtime, "[briqyard] started")
+    );
+    assert_eq!(l.ts.timestamp(), 1_792_360_800);
+    let (view, l) = parse_log_line("no timestamp\n");
+    assert_eq!((view, l.line.as_str()), (api::LogView::App, "no timestamp"));
 }
 
 #[test]
@@ -141,6 +148,8 @@ fn kernel_command_line() {
         "{a}"
     );
     assert!(a.contains(&format!("init={}", image::INIT_PATH)), "{a}");
+    // The kernel stamps its own lines, which is how the console tells them from the program's.
+    assert!(a.contains(" printk.time=1 "), "{a}");
     assert!(a.contains(" rootfstype=ext4 rootflags=discard "), "{a}");
     assert!(a.ends_with(" pci=off"), "{a}");
     let b = boot_args(true, "loglevel=7");

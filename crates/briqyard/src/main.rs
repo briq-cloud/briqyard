@@ -190,12 +190,23 @@ enum MachineCmd {
     },
     /// The serial console; with -f, stay connected and print each new line
     Logs {
-        #[arg(long)]
+        /// With -f, the cursor to follow from
+        #[arg(long, requires = "follow")]
         since: Option<String>,
-        #[arg(long, default_value_t = 500)]
-        limit: usize,
+        /// Lines per page, 1 to 1000 (200 by default); the newest ones unless --before or --after
+        #[arg(long, conflicts_with = "follow")]
+        limit: Option<usize>,
+        /// The page ending at this cursor, from a previous page
+        #[arg(long, conflicts_with_all = ["after", "follow"])]
+        before: Option<String>,
+        /// The page starting at this cursor, from a previous page
+        #[arg(long, conflicts_with = "follow")]
+        after: Option<String>,
         #[arg(short, long)]
         follow: bool,
+        /// app: what the program printed; runtime: what the runtime printed about the machine
+        #[arg(long, default_value = "app")]
+        view: briqyard_api::LogView,
         id: String,
     },
     /// A new machine from a snapshot of this one, taken now: briqyard machine fork ID [--name N] [--namespace T]

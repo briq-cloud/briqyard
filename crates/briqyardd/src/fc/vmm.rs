@@ -1048,10 +1048,21 @@ pub(super) fn place_file(
     Ok(PathBuf::from("/").join(name))
 }
 
-/// Copies console lines with a timestamp in front of each.
+/// Writes one line to the console, stamped with the time it arrived.
+pub(super) async fn stamp_line(
+    out: &tokio::sync::Mutex<crate::console::Writer>,
+    view: api::LogView,
+    line: &[u8],
+) {
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+    let _ = out.lock().await.line(&ts, view, line).await;
+}
+
+/// Copies console lines with a timestamp in front of each; `view_of` says whose each is.
 pub(super) async fn stamp<R: tokio::io::AsyncRead + Unpin>(
     r: R,
     out: std::sync::Arc<tokio::sync::Mutex<crate::console::Writer>>,
+    view_of: fn(&[u8]) -> api::LogView,
 ) {
     let mut lines = BufReader::new(r);
     let mut line = Vec::new();
@@ -1061,13 +1072,42 @@ pub(super) async fn stamp<R: tokio::io::AsyncRead + Unpin>(
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
-        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
-        let _ = out.lock().await.line(&ts, &line).await;
+        stamp_line(&out, view_of(&line), &line).await;
     }
     let _ = out.lock().await.flush().await;
 }
 
 impl Firecracker {
+    /// Reads the log pipe Firecracker was told at its boot into the console again: the
+    /// previous daemon's end went with it, and a pipe nobody reads loses the lines. A machine
+    /// booted by a daemon from before ADR 0115 has none; its logs went to the serial console.
+    async fn adopt_log(
+        &self,
+        id: &str,
+        dir: &Path,
+        chroot: Option<&Path>,
+        exited: watch::Receiver<bool>,
+    ) {
+        let pipe = outside_path(chroot, dir, LOG_FIFO);
+        if !pipe.exists() {
+            return;
+        }
+        let console = match crate::console::Writer::open(dir, self.console_max).await {
+            Ok(console) => console,
+            Err(err) => {
+                tracing::warn!(machine = id, err = %err, "runtime log not read");
+                return;
+            }
+        };
+        match open_fifo(&pipe) {
+            Ok(rx) => {
+                let out = Arc::new(tokio::sync::Mutex::new(console));
+                tokio::spawn(log_to_console(rx, out, exited));
+            }
+            Err(err) => tracing::warn!(machine = id, err = %err, "runtime log not read"),
+        }
+    }
+
     async fn adopt_state(
         &self,
         id: &str,
@@ -1110,6 +1150,8 @@ impl Firecracker {
         if let Err(err) = read_metrics(&pipe, disk_io, exited.clone()) {
             tracing::warn!(machine = id, err = %err, "disk metrics not read");
         }
+        self.adopt_log(id, dir, chroot.as_deref(), exited.clone())
+            .await;
         #[cfg(target_os = "linux")]
         let machine = id.to_string();
         #[cfg(target_os = "linux")]

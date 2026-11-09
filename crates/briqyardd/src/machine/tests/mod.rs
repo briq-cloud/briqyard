@@ -16,6 +16,7 @@ mod metering;
 mod mock;
 mod move_addresses;
 mod moves;
+mod namespace_create;
 mod namespace_lifecycle;
 mod network;
 mod observe;
@@ -235,8 +236,9 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
     let m = Manager {
         inner: Arc::new(Inner {
             stats: Stats::default(),
-            warm_lock: tokio::sync::Mutex::new(()),
-            sandbox_create_lock: tokio::sync::Mutex::new(()),
+            warm_lock: tokio::sync::RwLock::new(()),
+            sandbox_create_lock: tokio::sync::RwLock::new(()),
+            sandbox_turns: Default::default(),
             warm_names: Mutex::new(HashMap::new()),
             assignments: Mutex::new(assignments::State::default()),
             warm_policy: Mutex::new(cfg.templates.warm_policy.clone()),
@@ -264,6 +266,8 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             endpoint_events,
             policies: Mutex::new(HashMap::new()),
             namespace_create: tokio::sync::Mutex::new(()),
+            namespace_reserved: Mutex::new(HashMap::new()),
+            namespace_turns: Default::default(),
             namespace_lifecycle: tokio::sync::RwLock::new(()),
             backups,
             boot_gate: tokio::sync::Semaphore::new(2),
@@ -312,6 +316,15 @@ impl Harness {
         tokio::time::timeout(Duration::from_secs(3), self.host.network_started.notified())
             .await
             .unwrap();
+    }
+    /// How many callers reached the held phase so far.
+    pub(super) fn warm_barrier_arrivals(&self) -> usize {
+        self.host.network_arrived.load(Relaxed)
+    }
+    /// Frees the callers held at the phase, and holds no later one.
+    pub(super) fn end_warm_barrier(&self) {
+        *self.host.pause_network.lock().unwrap() = None;
+        self.release_warm_barriers();
     }
     pub(super) fn release_warm_barriers(&self) {
         self.host.network_release.notify_waiters();

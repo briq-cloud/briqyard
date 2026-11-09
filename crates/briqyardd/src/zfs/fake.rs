@@ -8,7 +8,7 @@ use super::*;
 /// `get` answers come from `answer.<property>` files when there is one, else `origin` and
 /// `clones` from the `.origin` files, and `list -p` (space) from `answer.space`; `busy` holds how many destroys still answer
 /// "dataset is busy"; a command waits while a `hold.<command>` file is there and its test
-/// process runs (a test binary that exits runs no destructor: the file stays); `hold.<command>.<last name of the dataset>` holds one disk's. A stream is
+/// process runs (a test binary that exits runs no destructor: the file stays); `hold.<command>.<last name of the dataset>` holds one disk's; while `barrier.clone` holds a count, a `clone` waits until that many are inside (10 s at most, then it fails). A stream is
 /// one line naming its snapshot and its base; a receive makes the dataset and the snapshot, and refuses
 /// an increment whose base the dataset lacks, as ZFS does; `load-key` takes the line on its
 /// stdin when it is the `key` file's and answers `keystatus` `available` from then on;
@@ -30,6 +30,15 @@ for a in "$@"; do last="$a"; done
 d="${last%@*}"; d="${d##*/}"
 while [ -f "$DEV/hold.$1.$d" ] && kill -0 "$PPID" 2>/dev/null; do sleep 0.02; done
 missing() { echo "cannot open '$1': dataset does not exist" >&2; exit 1; }
+# Waits until $1 commands have arrived (one file each, named by their pid $2); gives up after 10 s.
+meet() {
+  : > "$DEV/inside.$2"; tries=0
+  while [ "$(ls "$DEV" | grep -c '^inside\.')" -lt "$1" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -gt 500 ] && { echo "barrier: fewer than $1 commands arrived" >&2; exit 1; }
+    sleep 0.02
+  done
+}
 # Renames the entries of the creation order that start with $1 to start with $2.
 reorder() {
   [ -f "$DEV/snapshots.order" ] || return 0
@@ -87,6 +96,8 @@ case "$2" in volsize=*)
 esac; exit 0;;
   clone)
 [ -e "$DEV/$2" ] || missing "$2"
+# A meeting point: while `barrier.clone` holds a count, a clone waits until that many are inside.
+[ -f "$DEV/barrier.clone" ] && meet "$(cat "$DEV/barrier.clone")" "$$"
 mkdir -p "$(dirname "$DEV/$3")"; cat "$DEV/$2" > "$DEV/$3" 2>/dev/null || : > "$DEV/$3"
 echo "$2" > "$DEV/$3.origin"; exit 0;;
   snapshot)

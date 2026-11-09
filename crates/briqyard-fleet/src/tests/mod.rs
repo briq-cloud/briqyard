@@ -38,7 +38,7 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
             down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
         },
         cfg,
-        reg: Mutex::new(reg),
+        reg: RegLock::new(reg),
         // A stub daemon that never answers fails its test rather than holding it forever.
         http: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
@@ -52,6 +52,8 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
         restores: Default::default(),
         refusals: Default::default(),
         written: Default::default(),
+        written_rev: Default::default(),
+        encodes: Default::default(),
         durable_observed_valid: Default::default(),
     });
     Fleet { st, _dir: dir }
@@ -245,6 +247,7 @@ mod locate;
 mod metrics;
 mod placement;
 mod regions;
+mod retention;
 mod sessions;
 mod siblings;
 mod templates;

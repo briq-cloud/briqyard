@@ -33,8 +33,17 @@ pub struct CloneRecipe {
 pub struct ArtifactFile {
     pub bytes: u64,
     pub sha256: String,
+    /// `st_dev` at sealing, for diagnosis only: ZFS gives a dataset another device number
+    /// at each mount, so a reboot changes it. Kept so a rollback can still read the manifest.
     pub device: u64,
     pub inode: u64,
+}
+
+impl ArtifactFile {
+    /// Same file with the same bytes. The inode survives a remount; the device does not.
+    fn matches(&self, actual: &ArtifactFile) -> bool {
+        self.bytes == actual.bytes && self.sha256 == actual.sha256 && self.inode == actual.inode
+    }
 }
 
 /// Kept on the existing SnapshotRec, additive to the legacy memory-spec digest.
@@ -120,6 +129,34 @@ impl Manager {
                 "named memory snapshot still has clone readers".into(),
             ));
         }
+        Ok(())
+    }
+
+    /// What lets `make_disks` clone a named snapshot without the source's lock: the destination's
+    /// durable reader names this source, snapshot and generation. `reserve_named_clone` wrote
+    /// it under that lock, and every operation that could remove, roll back or replace the
+    /// snapshot checks it under that lock (`check_clone_readers`). Without it, refuse.
+    pub(super) fn check_clone_reader(
+        &self,
+        source: &str,
+        origin: &CloneOrigin,
+        destination: &str,
+    ) -> Result<()> {
+        let held = self
+            .inner
+            .store
+            .get::<CloneReader>(READERS, destination)?
+            .is_some_and(|r| {
+                r.source_machine == source
+                    && r.snapshot == origin.snapshot
+                    && r.generation == origin.artifact.generation
+                    && r.destination == destination
+            });
+        anyhow::ensure!(
+            held,
+            "clone {destination} holds no reader of {source}/{}",
+            origin.snapshot
+        );
         Ok(())
     }
 
@@ -291,11 +328,11 @@ impl Manager {
                 let checked = (|| -> Result<()> {
                     let files = self.artifact_files(&r.id, &s.id, &a.generation)?;
                     anyhow::ensure!(
-                        fingerprint(&files[0])? == a.state,
+                        a.state.matches(&fingerprint(&files[0])?),
                         "template state differs from manifest"
                     );
                     anyhow::ensure!(
-                        fingerprint(&files[1])? == a.memory,
+                        a.memory.matches(&fingerprint(&files[1])?),
                         "template memory differs from manifest"
                     );
                     Ok(())
@@ -341,7 +378,6 @@ fn check_inode(path: &Path, expected: &ArtifactFile) -> Result<()> {
     anyhow::ensure!(
         meta.is_file()
             && meta.len() == expected.bytes
-            && meta.dev() == expected.device
             && meta.ino() == expected.inode
             && meta.permissions().mode() & 0o222 == 0,
         "immutable memory artifact metadata changed"

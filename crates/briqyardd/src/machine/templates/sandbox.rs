@@ -5,7 +5,9 @@ mod disk;
 mod policy;
 mod receipt;
 mod start;
+mod turn;
 pub(in crate::machine) use receipt::{replay, request_digest, Binding};
+pub(in crate::machine) use turn::Turns;
 
 pub(in crate::machine) fn builder_config(device: Option<guest::SandboxDevice>) -> guest::Config {
     guest::Config {

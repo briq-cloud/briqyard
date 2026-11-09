@@ -1,7 +1,7 @@
 //! Factory-record and ordinary-create integration with existing mocked disks/lifecycle.
 use super::*;
 
-fn bounded<T>(
+pub(super) fn bounded<T>(
     future: impl std::future::Future<Output = T>,
 ) -> impl std::future::Future<Output = T> {
     let future = Box::pin(future);
@@ -12,7 +12,7 @@ fn bounded<T>(
     }
 }
 
-async fn pool() -> (Harness, api::SandboxSeed, Arc<Entry>) {
+pub(super) async fn pool() -> (Harness, api::SandboxSeed, Arc<Entry>) {
     pool_shaped(Some(2)).await
 }
 async fn pool_shaped(volume: Option<u32>) -> (Harness, api::SandboxSeed, Arc<Entry>) {
@@ -74,7 +74,7 @@ async fn pool_shaped(volume: Option<u32>) -> (Harness, api::SandboxSeed, Arc<Ent
     .unwrap();
     // PUT queues refill without yielding after releasing admission. Take that same lock
     // before yielding to its worker, so the fixture supplies the mocked disks first.
-    let turn = h.m.inner.warm_lock.lock().await;
+    let turn = h.m.inner.warm_lock.write().await;
     let pool =
         h.m.inner
             .store

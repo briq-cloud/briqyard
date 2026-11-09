@@ -341,7 +341,8 @@ removes unused images (no clone, no record naming them), oldest first, counting 
 as freed, until the pool is back over the threshold. The console is written by the daemon's
 `console::Writer`, line by line under one lock, each line flushed, and rotated past
 `console_max_mb` to `console.<offset>.log`, named after where it starts: a `/logs` cursor is an
-offset in the whole console and reads across both files. `?follow=true` keeps the read open
+(opaque) offset in the whole console and reads across both files; a page is the newest lines
+by default, read backward from the end in 64 KiB windows, at most 4 MiB per request (ADR 0116). Each line carries its view after the timestamp (`!` for the runtime's: kernel, init, Firecracker; no mark is the program's, so an older console is all program output), and `?view=app|runtime` serves one (ADR 0115). `?follow=true` keeps the read open
 (ADR 0025): the follower waits on the console's notifier (`console::grown`, one per run dir,
 woken by the writer after each line), reads from its cursor, and ends at the machine's
 `destroyed` event or the daemon's shutdown, with `{}` every 30 s meanwhile.

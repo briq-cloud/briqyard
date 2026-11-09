@@ -24,6 +24,7 @@ impl Manager {
                 .values()
                 .map(|i| i.subnet_index),
         );
+        used.extend(self.inner.namespace_reserved.lock().unwrap().values());
         used.extend(
             self.assignment_targets()
                 .iter()
@@ -33,20 +34,26 @@ impl Manager {
             .ok_or_else(|| anyhow!("no namespace subnet left"))
     }
 
+    /// The namespace `id`, made if it does not exist. Namespaces are made in parallel, one
+    /// namespace once: `namespace_create` is held only to choose and reserve the subnet index,
+    /// so two namespaces made together never read the same free index; the bridge and the
+    /// durable record are done outside it, under the namespace's own turn, so a second create of
+    /// the same namespace waits and then finds it made. A failure releases the reservation; the
+    /// namespace exists for others only once its record is written and it is in `namespaces`.
+    /// Callers hold `namespace_lifecycle` shared, so a delete never runs over a namespace being made.
     pub(super) async fn ensure_namespace(&self, id: &str) -> Result<Namespace> {
         if let Some(t) = self.inner.namespaces.lock().unwrap().get(id) {
             return Ok(t.clone());
         }
-        // One namespace is made at a time: two made together would read the same free subnet
-        // index before either had taken it, and share a bridge.
-        let _creating = self.inner.namespace_create.lock().await;
-        if let Some(t) = self.inner.namespaces.lock().unwrap().get(id) {
-            return Ok(t.clone());
-        }
-        let t = {
+        let _turn = self.inner.namespace_turns.take(id, "").await;
+        let (t, reserved) = {
+            let _picking = self.inner.namespace_create.lock().await;
+            if let Some(t) = self.inner.namespaces.lock().unwrap().get(id) {
+                return Ok(t.clone());
+            }
             let namespaces = self.inner.namespaces.lock().unwrap();
             let idx = self.free_namespace_subnet(&namespaces)?;
-            Namespace::new(
+            let t = Namespace::new(
                 NamespaceRec {
                     id: id.to_string(),
                     subnet_index: idx,
@@ -54,7 +61,9 @@ impl Manager {
                     quota: api::Quota::default(),
                 },
                 self.inner.range.subnet(idx)?,
-            )
+            );
+            let reserved = Reservation::take(&self.inner.namespace_reserved, id, idx);
+            (t, reserved)
         };
         self.plumb_namespace(&t).await?;
         self.inner.store.put(crate::store::NAMESPACES, id, &t.rec)?;
@@ -63,6 +72,8 @@ impl Manager {
             .lock()
             .unwrap()
             .insert(id.to_string(), t.clone());
+        // Only now: the index is never free between the reservation and the namespace.
+        drop(reserved);
         Ok(t)
     }
 
@@ -495,4 +506,26 @@ fn checked_via_target(
         )));
     }
     Ok(target)
+}
+
+/// A namespace's subnet index, held out of `free_namespace_subnet` until dropped.
+struct Reservation<'a> {
+    held: &'a Mutex<HashMap<String, u32>>,
+    id: String,
+}
+
+impl<'a> Reservation<'a> {
+    fn take(held: &'a Mutex<HashMap<String, u32>>, id: &str, index: u32) -> Self {
+        held.lock().unwrap().insert(id.to_string(), index);
+        Self {
+            held,
+            id: id.to_string(),
+        }
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        self.held.lock().unwrap().remove(&self.id);
+    }
 }

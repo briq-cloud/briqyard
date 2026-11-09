@@ -194,14 +194,19 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             MachineCmd::Logs {
                 since,
                 limit,
+                before,
+                after,
                 follow,
+                view,
                 id,
             } => {
                 let since = since.unwrap_or_default();
+                let view = view.as_str();
                 let print =
                     |l: &api::LogLine| println!("{} {}", l.ts.format("%H:%M:%S%.3f"), l.line);
                 if follow {
-                    let path = format!("/v1/machines/{id}/logs?since={since}&follow=true");
+                    let path =
+                        format!("/v1/machines/{id}/logs?since={since}&follow=true&view={view}");
                     c.stream(&path, |line| match follow_line(line)? {
                         ControlFlow::Continue(l) => {
                             l.iter().for_each(print);
@@ -214,17 +219,22 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     })
                     .await?;
                 } else {
-                    let res: api::LogsResponse = c
-                        .call(
-                            GET,
-                            &format!("/v1/machines/{id}/logs?since={since}&limit={limit}"),
-                            NONE,
-                        )
-                        .await?;
-                    res.lines.iter().for_each(print);
-                    if !res.next.is_empty() {
-                        eprintln!("(next: --since {})", res.next);
+                    let mut path = format!("/v1/machines/{id}/logs?view={view}");
+                    for (name, value) in [
+                        ("limit", limit.map(|l| l.to_string())),
+                        ("before", before),
+                        ("after", after),
+                    ] {
+                        if let Some(v) = value {
+                            path += &format!("&{name}={v}");
+                        }
                     }
+                    let res: api::LogsResponse = c.call(GET, &path, NONE).await?;
+                    res.lines.iter().for_each(print);
+                    if res.has_older {
+                        eprintln!("(older: --before {})", res.before);
+                    }
+                    eprintln!("(newer: --after {})", res.after);
                 }
             }
             MachineCmd::Move { namespace, id } => {

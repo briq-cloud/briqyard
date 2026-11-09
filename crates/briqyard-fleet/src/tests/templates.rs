@@ -67,7 +67,7 @@ async fn placement_only_selects_the_advertised_init_ready_profile() {
     );
 }
 
-fn sandbox_body() -> serde_json::Value {
+pub(super) fn sandbox_body() -> serde_json::Value {
     let mut body = create_body("destination", "sandbox", 256);
     body["sandbox_seed"] = serde_json::json!({"machine_id":"m_operator","snapshot":"s_one","generation":"g_one","request_id":"req_one"});
     body["start"] = true.into();

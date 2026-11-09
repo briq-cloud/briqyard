@@ -210,7 +210,7 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `firecracker`, `jailer`, `kernel`, `init` | `/usr/local/bin/...`, `/var/lib/briqyard/vmlinux` | The binaries and the guest kernel. No `jailer`: Firecracker runs as root (development only) |
 | `jail_dir`, `jail_uid_base` | `<data_dir>/jail`, `100000` | Where chroots and memory snapshots go: the daemon mounts `<pool>/jail` there, so they land on the pool, not on `/` (ADR 0014). Each machine gets a uid of its own from this base |
 | `runtime_classes` | none | Kernels served besides `kernel` (the `default` class), by name (ADR 0088); see [Runtime classes](#runtime-classes-adr-0088) |
-| `kernel_args` | none | Appended to the boot arguments, which start with `console=ttyS0 quiet`: the console carries the kernel's errors and panics only. `loglevel=7` brings every boot message back (ADR 0093) |
+| `kernel_args` | none | Appended to the boot arguments, which start with `console=ttyS0 quiet`: the console carries the kernel's errors and panics only, each line stamped (`printk.time=1`, which tells the kernel's lines from the program's, ADR 0115). `loglevel=7` brings every boot message back (ADR 0093) |
 | `pci` | `false` | Firecracker's PCI transport (needs a guest kernel with PCI) |
 | `root_disk_gb` | `8` | Size of every root disk (thin) |
 | `image_keep_days` | `14` | An image no machine uses is removed this long after it was built; under disk pressure, sooner (ADR 0021) |
@@ -312,7 +312,7 @@ A connection to a sleeping machine wakes it, and waits for its boot.
 | `<data_dir>/api-cert.pem`, `api-key.pem` | The API's certificate and key (`0600`). Both removed, a new pair is made at the next start: a new fingerprint to pin. The certificate without its key: the daemon refuses to start |
 | `<data_dir>/state/usage/<hour>.json` | Each machine's usage in that UTC hour (ADR 0017); the open hour is rewritten once a minute |
 | `<data_dir>/state/events/<hour>.ndjson` | The host's events of that hour, one JSON line each, appended and synced (ADR 0019) |
-| `<data_dir>/run/<machine>/` | On `byard/run`: `console.log` (the guest's serial console, timestamped), `console.<offset>.log` (the previous file, rotated at `console_max_mb`, named after where it starts in the console), `config.tar` (the config drive, `0600`), sockets when not jailed |
+| `<data_dir>/run/<machine>/` | On `byard/run`: `console.log` (the guest's serial console and Firecracker's log, timestamped; a runtime line has `!` after the timestamp, ADR 0115), `firecracker.fifo` (Firecracker's log, read into the console; in the jail's root when jailed), `console.<offset>.log` (the previous file, rotated at `console_max_mb`, named after where it starts in the console), `config.tar` (the config drive, `0600`), sockets when not jailed |
 | `<jail_dir>/firecracker/<machine>/root/` | The chroot, on `byard/jail`: kernel, config drive (`0400`, the jail's user), device nodes, sockets, `snap.state` and `snap.mem` while suspended |
 | `<jail_dir>/firecracker/<machine>/snapshots/` | `<snap>.state` and `<snap>.mem` of each snapshot taken with memory (ADR 0031); `<data_dir>/run/<machine>/snapshots/` without the jailer |
 | `<data_dir>/images/meta/*.json` | What each image is, on `byard/images`, with the extraction scratch (`extract-*`) |
@@ -690,7 +690,7 @@ registry backups, operator archives and local backing/reference scopes are exclu
 - Suspend timing: opt-in debug stages and offline analysis in [Suspend profiling](SUSPEND-PROFILING.md)
   (ADR 0063); snapshot syncing and stop deadlines are unchanged.
 - A machine: `briqyard machine get <id>` (state, why it stopped, its process's exit), `briqyard
-  machine logs <id>` (its console; `-f` streams each new line until the machine is destroyed).
+  machine logs <id>` (the program's output; `--view runtime` the kernel's, the init's and Firecracker's; `--limit N` lines per page, the newest by default; `--before`/`--after` take the cursors printed on stderr; `-f` streams each new line until the machine is destroyed).
   `briqyard machine ls -l app=web -l tier` selects by labels (its `metadata`; `run -l K=V` sets them).
 - Quotas (ADR 0025): `briqyard namespace quota <namespace>` shows a namespace's limits and use;
   `--machines N --memory-mb N --vcpus N --disk-gb N` puts exactly those (the control plane sets
@@ -748,7 +748,7 @@ registry backups, operator archives and local backing/reference scopes are exclu
 | A machine stays `creating` | Its image is being pulled (ADR 0048): `briqyard events --machine <id>` shows `pulling`; the host's `image_pulled` ends it. Pulls of four images run at once, the rest wait their turn; a registry silent for 15 minutes fails the pull |
 | A machine is `error (pull_failed)` | Its image could not be pulled: the reference, the registry's credentials (`registries:`), the registry or its mirror. `error` says which; nothing is tried again: destroy it and create again |
 | A machine is `error (create_failed)` | Its disks could not be made (`zfs` in `error` and the log, at `error`), its create's start was refused (its quota, its `via`), or the daemon restarted during a fork's or a restore's create (one from an image is taken up again). No disks: destroy it and create again |
-| A start or a create's `/wait` answers 409 `boot_failed` | The image's fault: the machine is kept in `state: error`, `error` holds the init's reason (`start "/run.sh": …`) or else the last console lines. `briqyard machine logs`, then destroy it |
+| A start or a create's `/wait` answers 409 `boot_failed` | The image's fault: the machine is kept in `state: error`, `error` holds the init's reason (`start "/run.sh": …`) or else the last console lines. `briqyard machine logs --view runtime`, then destroy it |
 | A start after `machine set --image` answers 409 `boot_failed`, `error: image …` | The new image could not be pulled or built; the change is still `pending`. `machine set` another image (or the one it runs, which drops the change) and start again |
 | A start after `machine set --memory` answers 503 `capacity` | The host has no room for the new size; the change is still `pending`. Through a fleet, the namespace stays on its host: move it (backups, `namespace unpin`, restores) |
 | A machine is `stopped (host)` | The daemon stopped it: its stop, or a crashed daemon's leftover. The next start boots it again unless its sleep window had run out; else the next use wakes it |
@@ -759,7 +759,7 @@ registry backups, operator archives and local backing/reference scopes are exclu
 | The process exits at once (`stopped`, `exit.code`) | `briqyard machine logs`: the image's own output. `restart.policy: on-failure` tries three times, 10 s, 20 s, 40 s apart (`restarting_at`); `crash_loop` events from the third |
 | `/wait` answers 409 `not_ready`, or the ingress 502 after a wait | The program runs but its readiness or startup probe does not pass: `briqyard machine describe` shows each probe's last result. A TCP or HTTP probe needs the program on the machine's address, not only `127.0.0.1` |
 | `startup_failed` then `error` | The startup probe did not pass within `failure_threshold` × `period_sec` of a start: the boot failed, as `boot_failed` does. On a restart it is a crash instead, restarted by the policy |
-| `the guest did not come up` | The kernel booted but the init did not answer on vsock within `boot_timeout_sec`: console log, then the kernel (`kernel`) and init (`init`) paths |
+| `the guest did not come up` | The kernel booted but the init did not answer on vsock within `boot_timeout_sec`: `machine logs --view runtime`, then the kernel (`kernel`) and init (`init`) paths |
 | `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk, conditions, and per region what ran out (`UNSCHEDULABLE`, ADR 0042). `used` counts the creates placement sent that the host has not reported yet (ADR 0044) |
 | `no host in region … has room` (fleet) | No ready host of that region under the ceiling: `briqyard host ls`, the `REGION` column; add one there |
 | `namespace … is in region …, not …` (fleet, 400) | The namespace lives on a host of another region. A team that changes region moves: backups, destroy, `namespace unpin`, restores with the new region |
@@ -787,7 +787,49 @@ registry backups, operator archives and local backing/reference scopes are exclu
 | `pool locked: its key could not be loaded` | The daemon waits for the pool's key (ADR 0026), `err` says why: the fleet unreachable or refusing (`unknown_host`, `unauthorized`: as for a heartbeat), the key file missing, `Incorrect key provided` (the fleet's registry lost or restored from before the host: the pool cannot be read with another key) |
 | `pool … is not encrypted` | A pool made before ADR 0026 or by hand: move what it holds, destroy it, run the bootstrap again |
 | `… holds files and byard/… is not mounted there` | The daemon's directories hold files on `/` (a host from before ADR 0026): stop the daemon, move the contents onto the dataset (mount it elsewhere, copy, empty the directory) |
-| A jail refuses to start | `<run>/<machine>/console.log` holds the jailer's own messages |
+| A jail refuses to start | `machine logs --view runtime` (`<run>/<machine>/console.log`) holds the jailer's own messages |
+| A host's URLs, TCP endpoints and API hang with no error, the machines run | Their listeners are the daemon's: a hung daemon leaves connections queued in the kernel. See [A hung daemon](#a-hung-daemon) |
+
+### A hung daemon
+
+`journalctl -u briqyardd`, then try the hand-over. It keeps the listeners and writes last uses and usage, but needs a daemon that still responds:
+
+```bash
+sudo systemctl kill --kill-whom=main -s SIGUSR2 briqyardd
+```
+
+A hand-over takes a few seconds, at most about 65 s, then the new daemon starts. Wait 90 s for `serving again` in the journal. `handover refused; daemon remains serving` means the daemon is up: read the reason first. Neither line:
+
+```bash
+sudo systemctl kill --kill-whom=main -s KILL briqyardd
+```
+
+The unit starts a new daemon, which adopts the machines. Connections in flight are lost, and so are the last uses and usage the daemon had not written. A running exec ends with its connection unless it detached (ADR 0029).
+
+Avoid `systemctl restart` and `stop`: a daemon that still responds suspends every machine, and `stop` also releases the listeners and leaves the daemon down. Never `systemctl kill` without `--kill-whom=main`: `KillMode=process` keeps the Firecracker processes in the unit's cgroup, so the signal would reach them too.
+
+### Test a hung daemon
+
+Freeze it with `SIGSTOP`. Schedule the `SIGCONT` first, so a lost SSH session cannot leave it frozen:
+
+```bash
+sudo systemd-run --on-active=4min systemctl kill --kill-whom=main -s CONT briqyardd
+sudo systemctl kill --kill-whom=main -s STOP briqyardd
+```
+
+During the freeze:
+
+- Nothing restarts the daemon: the unit has no watchdog.
+- After `placement.down_after_sec` the fleet reports the host `down` and answers 503 for its machines.
+- The "Not answering" alert fires after 2 minutes. Warn whoever receives it.
+- Requests and exec streams stall.
+- Uses are not recorded, so after `SIGCONT` a machine with a short sleep window can suspend (read in the code, not run).
+
+To kill one machine's VM during the test, list its processes by cgroup (jailed hosts), then `sudo kill -KILL <pid>`:
+
+```bash
+sudo cat /sys/fs/cgroup/firecracker/m-<id>/cgroup.procs   # m_abc123 is m-abc123
+```
 
 ## A fleet
 
@@ -872,7 +914,8 @@ rm /root/grafana-password
 | `PROMETHEUS_LISTEN`, `GRAFANA_LISTEN` | `127.0.0.1:9090`, `127.0.0.1:3000` | loopback only |
 | `LARGEST_SLOT_MB` | `16384` | the alert when a region's largest slot is under it: the largest size you offer |
 
-It takes about 1.5 GB of disk and 700 MB of memory with a few hosts: Grafana 600 MB, Prometheus
+Prometheus and Grafana run as the systemd units `briqyard-prometheus` and `briqyard-grafana`, not as containers.
+Monitoring takes about 1.5 GB of disk and 700 MB of memory with a few hosts: Grafana 600 MB, Prometheus
 70 MB, growing with series (about 12 per machine). On a server that also runs machines, add the
 memory to `capacity.reserved_memory_mb`.
 

@@ -78,7 +78,10 @@ async fn a_gateway_is_a_machine_of_the_daemon_not_of_the_namespace() {
     // Not one of the namespace's machines: not listed, not counted, its console readable.
     assert!(h.m.list(None, &[]).is_empty() && h.m.list(Some("t1"), &[]).is_empty());
     assert_eq!(h.m.usage().2, 0);
-    assert!(h.m.logs(&gw.machine_id, "", 10).is_ok());
+    assert!(h
+        .m
+        .logs(&gw.machine_id, LogAt::After(0), 10, api::LogView::App)
+        .is_ok());
     // The name is taken in the namespace, like any machine's.
     assert!(matches!(
         h.m.create_made(h.request("gateway")).await,
@@ -537,7 +540,10 @@ async fn the_gateway_is_read_only_through_the_machine_routes() {
     let gw = h.with_gateway().await;
     // Read: the machine, its console, its use.
     assert_eq!(h.m.get(&gw).unwrap().name, "gateway");
-    assert!(h.m.logs(&gw, "", 10).is_ok());
+    assert!(h
+        .m
+        .logs(&gw, LogAt::After(0), 10, api::LogView::App)
+        .is_ok());
     assert!(h.m.stats(&gw).await.is_ok());
     h.pool.calls();
     // Everything that changes or runs something in it is the namespace route's.

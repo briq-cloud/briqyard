@@ -341,15 +341,31 @@ fn files() {
 }
 
 #[test]
+fn log_views() {
+    assert_eq!(LogView::default(), LogView::App);
+    for (text, view) in [("app", LogView::App), ("runtime", LogView::Runtime)] {
+        assert_eq!(text.parse::<LogView>(), Ok(view));
+        assert_eq!(view.as_str(), text);
+        assert_eq!(serde_json::to_value(view).unwrap(), json!(text));
+    }
+    let err = "all".parse::<LogView>().unwrap_err();
+    assert!(err.contains("app or runtime"), "{err}");
+}
+
+#[test]
 fn logs() {
+    let line = json!({"ts": "2026-01-02T03:04:05Z", "line": "[briqyard] started pid=1"});
     let l: LogsResponse = round_trip(
-        json!({"lines": [{"ts": "2026-01-02T03:04:05Z", "line": "[briqyard] started pid=1"}]}),
-        json!({"lines": [{"ts": "2026-01-02T03:04:05Z", "line": "[briqyard] started pid=1"}]}),
+        json!({"lines": [line]}),
+        json!({"lines": [line], "before": "", "after": "", "hasOlder": false, "hasNewer": false}),
     );
-    assert_eq!(l.next, "");
     assert_eq!(l.lines[0].ts, ts());
-    let l: LogsResponse = same(json!({"lines": [], "next": "42"}));
-    assert_eq!(l.next, "42");
+    assert!(!l.has_older && !l.has_newer);
+    let page =
+        json!({"lines": [], "before": "40", "after": "42", "hasOlder": true, "hasNewer": true});
+    let l: LogsResponse = same(page);
+    assert_eq!((l.before.as_str(), l.after.as_str()), ("40", "42"));
+    assert!(l.has_older && l.has_newer);
 }
 
 #[test]

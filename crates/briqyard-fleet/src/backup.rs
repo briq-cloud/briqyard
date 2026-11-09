@@ -4,7 +4,7 @@
 //! whose identity is kept off the fleet's host, once a minute when it changed and before a host
 //! is handed a key the store does not hold yet. `briqyard-fleet restore` brings it back.
 
-use crate::registry::{PoolKey, Registry};
+use crate::registry::{PoolKey, RegLock, Registry};
 use anyhow::{anyhow, bail, Context, Result};
 use briqyard_objstore::ObjectStore;
 use sha2::{Digest, Sha256};
@@ -350,7 +350,7 @@ impl Backup {
 
     /// Snapshot after admission, then publish daily and LATEST as one owned transaction.
     /// Caller cancellation or timeout never drops the worker's PUT future or lease.
-    pub async fn push(&self, reg: &Mutex<Registry>) -> Result<bool> {
+    pub async fn push(&self, reg: &RegLock) -> Result<bool> {
         let store = self.store.clone();
         self.push_with(reg, move |object, sealed| {
             let store = store.clone();
@@ -359,7 +359,7 @@ impl Backup {
         .await
     }
 
-    async fn push_with<P, F>(&self, reg: &Mutex<Registry>, put: P) -> Result<bool>
+    async fn push_with<P, F>(&self, reg: &RegLock, put: P) -> Result<bool>
     where
         P: FnMut(String, Arc<[u8]>) -> F + Send + 'static,
         F: std::future::Future<Output = Result<()>> + Send + 'static,
@@ -370,7 +370,7 @@ impl Backup {
 
     async fn push_with_deadlines<P, F, D, T>(
         &self,
-        reg: &Mutex<Registry>,
+        reg: &RegLock,
         put: P,
         deadline: D,
     ) -> Result<bool>
@@ -386,7 +386,7 @@ impl Backup {
 
     async fn push_with_clock<P, F, D, T, C>(
         &self,
-        reg: &Mutex<Registry>,
+        reg: &RegLock,
         mut put: P,
         mut deadline: D,
         clock: C,
@@ -862,7 +862,7 @@ pub(super) mod tests {
             .unwrap();
     }
 
-    pub(crate) async fn refuse_busy(b: &Backup, reg: &Mutex<Registry>) -> Result<bool> {
+    pub(crate) async fn refuse_busy(b: &Backup, reg: &RegLock) -> Result<bool> {
         b.push_with_deadlines(
             reg,
             |_, _| async { panic!("publication admitted while blocking writer was active") },
@@ -887,7 +887,7 @@ pub(super) mod tests {
             ),
         );
         initial.pool_key("h1").unwrap();
-        let reg = Mutex::new(initial);
+        let reg = RegLock::new(initial);
         reg.lock()
             .unwrap()
             .namespaces
@@ -1305,7 +1305,7 @@ pub(super) mod tests {
         assert_eq!(observation.caller_outcomes, [0, 0, 0, 1]);
     }
 
-    fn fixture() -> (tempfile::TempDir, Backup, Mutex<Registry>) {
+    fn fixture() -> (tempfile::TempDir, Backup, RegLock) {
         let dir = tempfile::tempdir().unwrap();
         let identity = age::x25519::Identity::generate();
         let b = backup(dir.path(), &identity.to_public().to_string());
@@ -1321,7 +1321,7 @@ pub(super) mod tests {
             ),
         );
         reg.pool_key("h1").unwrap();
-        (dir, b, Mutex::new(reg))
+        (dir, b, RegLock::new(reg))
     }
 
     #[tokio::test]
@@ -1708,7 +1708,7 @@ pub(super) mod tests {
         );
         reg.namespaces
             .insert("multipart-snapshot".into(), "h1".into());
-        let reg = Mutex::new(reg);
+        let reg = RegLock::new(reg);
         assert!(b.push(&reg).await.unwrap());
         let latest = b.fetch(LATEST, &identity).await.unwrap();
         assert!(latest.namespaces.contains_key("multipart-snapshot"));
@@ -1726,7 +1726,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("backup.key");
         let b = std::sync::Arc::new(backup(&dir.path().join("store"), &keygen(&key).unwrap()));
-        let reg = std::sync::Arc::new(std::sync::Mutex::new(Registry::default()));
+        let reg = std::sync::Arc::new(RegLock::new(Registry::default()));
         let turn = b.turn.lock().await;
         let mut waiting = Box::pin(b.push(&reg));
         assert!(futures::poll!(&mut waiting).is_pending());
@@ -1782,7 +1782,7 @@ pub(super) mod tests {
         h.note = "the first".into();
         reg.hosts.insert("h1".into(), h);
         let (k, _) = reg.pool_key("h1").unwrap();
-        let reg = std::sync::Mutex::new(reg);
+        let reg = RegLock::new(reg);
         assert!(!b.holds("h1", &k).await);
         assert!(b.push(&reg).await.unwrap());
         assert!(b.holds("h1", &k).await);
@@ -1816,7 +1816,7 @@ pub(super) mod tests {
         assert!(identity(&other).is_err());
     }
 
-    fn registry_with_key(host: &str) -> (std::sync::Mutex<Registry>, PoolKey) {
+    fn registry_with_key(host: &str) -> (RegLock, PoolKey) {
         let mut reg = Registry::default();
         let h = crate::static_host(
             &crate::config::StaticHost {
@@ -1829,7 +1829,7 @@ pub(super) mod tests {
         );
         reg.hosts.insert(host.into(), h);
         let (k, _) = reg.pool_key(host).unwrap();
-        (std::sync::Mutex::new(reg), k)
+        (RegLock::new(reg), k)
     }
 
     /// A key the store acknowledged is still served after a restart, with the store out of

@@ -254,7 +254,8 @@ for id in $RUNNING; do
   was=$(awk -v i="$id" '$1 == i {print $2}' "$WORK/before")
   check "the VMM of $id is the same process (pid:start $was)" '[ "$(vmm "$id")" = "$was" ] && [ "$(briqyard machine get "$id" | jq -r .state)" = running ]'
 done
-boots() { briqyard machine logs "$1" --limit 5000 | grep -c "\[briqyard\] started"; }
+# A boot by the daemon from before the views is in the app view, one after it in the runtime view (ADR 0115).
+boots() { { briqyard machine logs "$1" --limit 1000; briqyard machine logs "$1" --limit 1000 --view runtime; } | grep -c "\[briqyard\] started"; }
 check "never booted again" '[ "$(boots "$PG")" = 1 ] && [ "$(boots "$WEB")" = 1 ] && [ "$(boots "$VOL")" = 1 ]'
 check "data: postgres has its rows" '[ "$(briqyard machine exec "$PG" -- psql -U postgres -tAc "select sum(x) from t")" = 11325 ]'
 check "data: through the postgres endpoint" '[ "$(PGPASSWORD=secret psql -h ${PGADDR%:*} -p ${PGADDR#*:} -U postgres -tAc "select count(*) from t")" = 150 ]'

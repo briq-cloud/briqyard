@@ -1,6 +1,7 @@
 //! A Firecracker process: its jail, cgroup, disk rates and paths.
 
 use super::*;
+use api::LogView;
 
 /// How to run Firecracker under its jailer: a chroot per machine under `base`, as `uid`.
 #[derive(Clone, Debug)]
@@ -76,14 +77,24 @@ impl DiskIo {
 /// The metrics pipe, next to the API socket.
 pub(super) const METRICS_FIFO: &str = "metrics.fifo";
 
-/// Reads Firecracker's metrics lines from the pipe at `path` into `io` until `done`. Opened
-/// for reading and writing, it never reads an end of file while no writer has it open.
-/// Firecracker opens it non-blocking: a full pipe loses a line, never stalls the VMM (ADR 0030).
-pub(super) fn read_metrics(
-    path: &Path,
-    io: Arc<DiskIo>,
-    mut done: watch::Receiver<bool>,
-) -> Result<()> {
+/// Firecracker's log pipe, next to the API socket: what it logs at `Warning` and above.
+pub(super) const LOG_FIFO: &str = "firecracker.fifo";
+
+/// Makes a pipe at `path` for the jail's user to write to; an earlier one is replaced.
+pub(super) fn make_fifo(path: &Path, owner: Option<(u32, u32)>) -> Result<()> {
+    let _ = std::fs::remove_file(path);
+    nix::unistd::mkfifo(path, nix::sys::stat::Mode::from_bits_truncate(0o600))
+        .with_context(|| format!("mkfifo {}", path.display()))?;
+    if let Some((uid, gid)) = owner {
+        std::os::unix::fs::chown(path, Some(uid), Some(gid))?;
+    }
+    Ok(())
+}
+
+/// The read end of the pipe at `path`. Opened for reading and writing, it never reads an end
+/// of file while no writer has it open. Firecracker opens its end non-blocking: a full pipe
+/// loses a line, never stalls the VMM (ADR 0030), and it can only open it once a reader has.
+pub(super) fn open_fifo(path: &Path) -> Result<tokio::net::unix::pipe::Receiver> {
     use std::os::unix::fs::OpenOptionsExt;
     let f = std::fs::OpenOptions::new()
         .read(true)
@@ -91,8 +102,17 @@ pub(super) fn read_metrics(
         .custom_flags(libc::O_NONBLOCK)
         .open(path)
         .with_context(|| format!("open {}", path.display()))?;
-    let rx = tokio::net::unix::pipe::Receiver::from_file(f)
-        .with_context(|| format!("metrics pipe {}", path.display()))?;
+    tokio::net::unix::pipe::Receiver::from_file(f)
+        .with_context(|| format!("pipe {}", path.display()))
+}
+
+/// Reads Firecracker's metrics lines from the pipe at `path` into `io` until `done`.
+pub(super) fn read_metrics(
+    path: &Path,
+    io: Arc<DiskIo>,
+    mut done: watch::Receiver<bool>,
+) -> Result<()> {
+    let rx = open_fifo(path)?;
     tokio::spawn(async move {
         let mut lines = BufReader::new(rx).lines();
         loop {
@@ -106,6 +126,48 @@ pub(super) fn read_metrics(
         }
     });
     Ok(())
+}
+
+/// Copies Firecracker's log pipe into the console as the runtime's lines until `done`, then
+/// what the process left in it (the pipe never ends while this holds it open). The last is read
+/// straight from the descriptor: the reactor may not have heard of bytes that are there.
+pub(super) async fn log_to_console(
+    rx: tokio::net::unix::pipe::Receiver,
+    out: Arc<tokio::sync::Mutex<crate::console::Writer>>,
+    mut done: watch::Receiver<bool>,
+) {
+    let mut pending = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        tokio::select! {
+            ready = rx.readable() => if ready.is_err() { break },
+            _ = done.wait_for(|d| *d) => break,
+        }
+        match rx.try_read(&mut buf) {
+            Ok(n) if n > 0 => stamp_chunk(&out, &mut pending, &buf[..n]).await,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            _ => break,
+        }
+    }
+    while let Ok(n @ 1..) = nix::unistd::read(std::os::fd::AsRawFd::as_raw_fd(&rx), &mut buf) {
+        stamp_chunk(&out, &mut pending, &buf[..n]).await;
+    }
+    if !pending.is_empty() {
+        stamp_line(&out, LogView::Runtime, &pending).await;
+    }
+}
+
+/// Stamps each whole line in `pending` followed by `chunk`; the rest waits for its end.
+async fn stamp_chunk(
+    out: &tokio::sync::Mutex<crate::console::Writer>,
+    pending: &mut Vec<u8>,
+    chunk: &[u8],
+) {
+    pending.extend_from_slice(chunk);
+    while let Some(end) = pending.iter().position(|&b| b == b'\n') {
+        let line: Vec<u8> = pending.drain(..=end).collect();
+        stamp_line(out, LogView::Runtime, &line).await;
+    }
 }
 
 /// One running Firecracker.
@@ -232,6 +294,22 @@ pub(super) fn jailer_args(j: &Jail, id: &str, binary: &Path) -> Vec<std::ffi::Os
     args
 }
 
+/// Firecracker's logger flags (and `--enable-pci`): its own pipe, and `Warning` and above. At
+/// `Info` it logs every API request it takes, with the kernel and drive paths, boot arguments
+/// and network settings in them. Its levels are Error, Warning, Info, Debug, Trace.
+pub(super) fn firecracker_log_args(log: &Path, pci: bool) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "--log-path".into(),
+        log.into(),
+        "--level".into(),
+        "Warning".into(),
+    ];
+    if pci {
+        args.push("--enable-pci".into());
+    }
+    args
+}
+
 /// The pid the jailer wrote for Firecracker: with a new pid namespace the jailer forks, the
 /// process we spawned writes its child's pid to this file and exits, and the child is the one
 /// to kill or adopt.
@@ -251,13 +329,14 @@ pub(super) fn jailed_pid(root: &Path) -> Result<u32> {
         .with_context(|| format!("{}: {text:?}", path.display()))
 }
 
-/// The runtime files of a machine: the API and vsock sockets depend on whether it is jailed.
+/// The runtime files of a machine: the API and vsock sockets and the log pipe depend on
+/// whether it is jailed.
 pub fn paths_for(
     dir: &Path,
     jail: Option<&Jail>,
     id: &str,
 ) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
-    let (api, vsock, console, fclog) = paths(dir);
+    let (api, vsock, console, log) = paths(dir);
     match jail {
         Some(j) => {
             let root = jail_root(&j.base, id);
@@ -265,20 +344,20 @@ pub fn paths_for(
                 root.join("run/firecracker.socket"),
                 root.join("vsock.sock"),
                 console,
-                fclog,
+                root.join(LOG_FIFO),
             )
         }
-        None => (api, vsock, console, fclog),
+        None => (api, vsock, console, log),
     }
 }
 
-/// A machine's runtime files inside its run dir.
+/// A machine's runtime files inside its run dir: API socket, vsock socket, console, log pipe.
 pub fn paths(dir: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     (
         dir.join("api.sock"),
         dir.join("vsock.sock"),
         dir.join("console.log"),
-        dir.join("firecracker.log"),
+        dir.join(LOG_FIFO),
     )
 }
 
@@ -304,12 +383,15 @@ impl Process {
         let expected_mb =
             api::vmm_memory_mb(boot.memory_mb).context("VMM memory ceiling overflow")?;
         tokio::fs::create_dir_all(dir).await?;
-        let (api, vsock, console, fclog) = paths_for(dir, jail, id);
+        let (api, vsock, console, log) = paths_for(dir, jail, id);
         let _ = tokio::fs::remove_file(&api).await;
         let _ = tokio::fs::remove_file(&vsock).await;
         // The console holds what the guest prints, the jailer's errors included: ours alone.
         let out = crate::console::Writer::open(dir, console_max).await?;
-        // Firecracker's log levels are Error, Warning, Info, Debug, Trace.
+        // Firecracker logs to a pipe of its own (`LOG_FIFO`), read before it starts: it
+        // cannot open a pipe nobody reads. The jailed one is made once the root is clean.
+        let chroot = jail.map(|j| jail_root(&j.base, id));
+        let log_inside = inside_path(chroot.as_deref(), dir, LOG_FIFO);
         let (mut cmd, chroot, uid, gid) = match jail {
             Some(j) => {
                 // The jailer makes the chroot and drops to uid:gid; the files Firecracker opens
@@ -337,6 +419,7 @@ impl Process {
                 for d in [&root, &root.join("run")] {
                     std::os::unix::fs::chown(d, Some(j.uid), Some(j.gid))?;
                 }
+                make_fifo(&log, Some((j.uid, j.gid)))?;
                 #[cfg(target_os = "linux")]
                 let program = settlement.jailer_program(&j.jailer)?;
                 #[cfg(not(target_os = "linux"))]
@@ -348,35 +431,22 @@ impl Process {
                     cmd.as_std_mut().arg0(&j.jailer);
                 }
                 cmd.args(jailer_args(j, id, binary));
-                cmd.arg("--").arg("--").arg("--level").arg("Warning");
-                if pci {
-                    cmd.arg("--enable-pci");
-                }
+                cmd.arg("--").args(firecracker_log_args(&log_inside, pci));
                 (cmd, Some(root), j.uid, j.gid)
             }
             None => {
-                let _ = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .mode(0o600)
-                    .open(&fclog)
-                    .await?;
+                make_fifo(&log, None)?;
                 let mut cmd =
                     Command::from(briqyard_api::host_process::command_for(oom_class, binary));
                 cmd.arg("--api-sock")
                     .arg(&api)
                     .arg("--id")
                     .arg(fc_id(id))
-                    .arg("--log-path")
-                    .arg(&fclog)
-                    .arg("--level")
-                    .arg("Warning");
-                if pci {
-                    cmd.arg("--enable-pci");
-                }
+                    .args(firecracker_log_args(&log_inside, pci));
                 (cmd, None, 0, 0)
             }
         };
+        let log_rx = open_fifo(&log)?;
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -393,9 +463,10 @@ impl Process {
         let stderr = child.stderr.take().unwrap();
         let (tx, rx) = tokio::sync::watch::channel(false);
         let out = std::sync::Arc::new(tokio::sync::Mutex::new(out));
-        let o1 = out.clone();
-        let t1 = tokio::spawn(stamp(stdout, o1));
-        let t2 = tokio::spawn(stamp(stderr, out));
+        // The serial console is the guest's; the process's own stderr is the runtime's.
+        let t1 = tokio::spawn(stamp(stdout, out.clone(), crate::console::serial_view));
+        let t2 = tokio::spawn(stamp(stderr, out.clone(), |_| LogView::Runtime));
+        tokio::spawn(log_to_console(log_rx, out, rx.clone()));
         tokio::spawn(async move {
             let _ = t1.await;
             let _ = t2.await;
@@ -522,10 +593,7 @@ impl Process {
     /// `io` while the process runs, and tells Firecracker to write there.
     pub async fn metrics_to(&self, io: Arc<DiskIo>) -> Result<()> {
         let path = self.outside(METRICS_FIFO);
-        let _ = std::fs::remove_file(&path);
-        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o600))
-            .with_context(|| format!("mkfifo {}", path.display()))?;
-        std::os::unix::fs::chown(&path, Some(self.uid), Some(self.gid))?;
+        make_fifo(&path, Some((self.uid, self.gid)))?;
         read_metrics(&path, io, self.done())?;
         self.client.metrics(&self.inside(METRICS_FIFO)).await
     }

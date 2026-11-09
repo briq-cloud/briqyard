@@ -413,7 +413,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   next boot (env and a boot file set on a running Python server: pending, still the old values; `machine restart`: the new values and `applied`; a
   new image: Python 3.13, the volume's file kept), labels, a quota and a follow (`ls -l` selecting one machine, a
   refused selector, a second create refused 403 `quota` with its use and event, `logs -f`
-  receiving a line printed after it began and ending at the destroy), disk limits (a machine's
+  receiving a line printed after it began and ending at the destroy; the app and runtime views, ADR 0115, and a page of the newest lines with its cursor to the one before, ADR 0116: 6 checks), disk limits (a machine's
   own over the host's for 2 vCPUs; at 4 MB/s, 32 MiB written to the volume in 5 s or more and
   16 MiB read from the root disk in 2 s or more, with O_DIRECT; `cpu.weight` 200; lifted live;
   set while suspended and in force after the resume; throttling on `/metrics`), host ports (on

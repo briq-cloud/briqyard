@@ -33,7 +33,7 @@ use axum::{Json, Router};
 use briqyard_api as api;
 use chrono::{Duration, Utc};
 use clap::{Parser, Subcommand};
-use registry::{url_host, HostRec, Policy, Registry, Resource};
+use registry::{url_host, HostRec, Policy, RegLock, Registry, Resource};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -78,7 +78,7 @@ enum Cmd {
 
 struct AppState {
     cfg: config::Config,
-    reg: Mutex<Registry>,
+    reg: RegLock,
     policy: Policy,
     /// The client to hosts on plain HTTP.
     http: reqwest::Client,
@@ -101,6 +101,11 @@ struct AppState {
     refusals: signals::Refusals,
     /// The registry file's writes take turns (ADR 0043); the digest of what the last one wrote.
     written: Arc<tokio::sync::Mutex<Option<[u8; 32]>>>,
+    /// The registry's change count when the last write was encoded (ADR 0119). Read and set only
+    /// while holding the turn in `written`.
+    written_rev: Arc<std::sync::atomic::AtomicU64>,
+    /// How many times a write encoded the registry (ADR 0119).
+    encodes: std::sync::atomic::AtomicU64,
     durable_observed_valid: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -165,10 +170,13 @@ impl AppState {
         Ok(c)
     }
 
-    /// Writes the registry (ADR 0043). Writes take turns, and each encodes the registry when
-    /// its turn comes: what it writes holds every change made before it was called, so a
-    /// later write never lands an older registry. A turn that finds the registry as the last
-    /// write left it writes nothing. The turn is held until the file and its directory are
+    /// Writes the registry (ADR 0043, 0119). Writes take turns, and each encodes the registry
+    /// when its turn comes: what it writes holds every change made before it was called, so a
+    /// later write never lands an older registry. A caller returns `Ok` only with its change
+    /// on disk: written by its own turn, or by an earlier turn that encoded the registry after
+    /// the caller came (one write then serves every caller that waited for it). A turn that
+    /// finds the registry as the last write left it, by the change count or else by the
+    /// encoded bytes, writes nothing. The turn is held until the file and its directory are
     /// synced, even when the caller has gone. A failure is logged at `error` and returned.
     async fn save(&self) -> Result<()> {
         self.save_with(write_registry).await
@@ -197,18 +205,32 @@ impl AppState {
         W: FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()> + Send + 'static,
     {
         use sha2::{Digest, Sha256};
+        use std::sync::atomic::Ordering::{Acquire, Release};
+        // The caller's changes are in the registry now: any write that encoded this count or a
+        // later one holds them.
+        let wanted = self.reg.lock().unwrap().rev();
         let mut turn = self.written.clone().lock_owned().await;
-        let data = backup::encode(&self.reg.lock().unwrap());
+        if self.written_rev.load(Acquire) >= wanted {
+            return None;
+        }
+        let (rev, data) = {
+            let reg = self.reg.lock().unwrap();
+            (reg.rev(), backup::encode(&reg))
+        };
+        self.encodes.fetch_add(1, Release);
         let digest: [u8; 32] = Sha256::digest(&data).into();
         if *turn == Some(digest) {
+            self.written_rev.store(rev, Release);
             return None;
         }
         let path = self.state_path.clone();
         let durable_valid = self.durable_observed_valid.clone();
+        let written_rev = self.written_rev.clone();
         Some(tokio::task::spawn_blocking(move || {
             durable_valid.store(false, std::sync::atomic::Ordering::Release);
             write(&path, &data)?;
             *turn = Some(digest);
+            written_rev.store(rev, Release);
             durable_valid.store(true, std::sync::atomic::Ordering::Release);
             Ok::<(), std::io::Error>(())
         }))
@@ -326,6 +348,8 @@ async fn run(args: Args) -> Result<()> {
         reg.heartbeat(static_host(h, now), now);
     }
     upgrade::interrupted(&mut reg);
+    // What an earlier fleet kept past its use (ADR 0119) goes before the first request.
+    reg.prune(now);
     let policy = Policy {
         require_egress_siblings: false,
         require_named_memory: false,
@@ -341,7 +365,7 @@ async fn run(args: Args) -> Result<()> {
     }
     let state = Arc::new(AppState {
         cfg: cfg.clone(),
-        reg: Mutex::new(reg),
+        reg: RegLock::new(reg),
         policy,
         // A host that does not even accept the connection is given five seconds; each call
         // has its own deadline (`FORWARD_TIMEOUT`, none for a watch).
@@ -355,8 +379,12 @@ async fn run(args: Args) -> Result<()> {
         restores: Default::default(),
         refusals: Default::default(),
         written: Default::default(),
+        written_rev: Default::default(),
+        encodes: Default::default(),
         durable_observed_valid: Default::default(),
     });
+    // The registry as pruned reaches the disk now, not with the first heartbeat's write.
+    state.save_after_host().await;
     tokio::spawn(backup::run(state.clone()));
     tokio::spawn(poll_static_hosts(state.clone()));
     tokio::spawn(forget_retired(state.clone()));
@@ -592,9 +620,21 @@ struct Refusal {
     error: String,
 }
 
+/// What a response the fleet made itself says of its failure, kept in the response for the
+/// request log to read: the code and message of the body, which holds no secret.
+#[derive(Clone)]
+struct Refused {
+    code: &'static str,
+    error: String,
+}
+
 impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
-        (
+        let refused = Refused {
+            code: self.code,
+            error: self.error.clone(),
+        };
+        let mut resp = (
             self.status,
             Json(api::ApiError {
                 error: self.error,
@@ -604,7 +644,9 @@ impl IntoResponse for Refusal {
                 oldest: None,
             }),
         )
-            .into_response()
+            .into_response();
+        resp.extensions_mut().insert(refused);
+        resp
     }
 }
 
@@ -675,7 +717,30 @@ async fn auth(State(st): S, req: Request, next: axum::middleware::Next) -> Respo
     if !open {
         tracing::info!(%method, path, status = resp.status().as_u16(), ms = start.elapsed().as_millis() as u64, "request");
     }
+    log_server_error(&method, &path, &resp);
     resp
+}
+
+/// A 5xx is said once more with its cause, so it is never a bare status line: the code and
+/// message of one the fleet made itself, the host whose answer it relays, or neither (a layer
+/// or extractor answered before any handler).
+fn log_server_error(method: &Method, path: &str, resp: &Response) {
+    let status = resp.status();
+    if !status.is_server_error() {
+        return;
+    }
+    let status = status.as_u16();
+    let host = resp
+        .headers()
+        .get("x-briqyard-host")
+        .and_then(|v| v.to_str().ok());
+    match (resp.extensions().get::<Refused>(), host) {
+        (Some(r), _) => {
+            tracing::warn!(%method, path, status, code = r.code, err = %r.error, "answered an error")
+        }
+        (None, Some(host)) => tracing::warn!(%method, path, status, host, "relayed an error"),
+        (None, None) => tracing::warn!(%method, path, status, "answered an error with no cause"),
+    }
 }
 
 #[cfg(test)]

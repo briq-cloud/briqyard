@@ -291,7 +291,14 @@ impl Manager {
 
     pub(super) fn last_console_lines(&self, r: &Record, n: usize) -> String {
         let text = self.console_since(r, 64 << 10);
-        let lines: Vec<&str> = text.lines().collect();
+        // Without the view's mark: `error` is read by people, not by the log view.
+        let lines: Vec<String> = text
+            .lines()
+            .map(|l| match console::unstamp(l) {
+                Some((_, ts, line)) => format!("{ts} {line}"),
+                None => l.to_string(),
+            })
+            .collect();
         let start = lines.len().saturating_sub(n);
         lines[start..].join(" | ")
     }

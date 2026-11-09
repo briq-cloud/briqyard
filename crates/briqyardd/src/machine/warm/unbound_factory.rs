@@ -52,7 +52,7 @@ impl Manager {
             ..Default::default()
         };
         let _namespace = self.inner.namespace_lifecycle.read().await;
-        self.record_with_warm_slot(request, None, Some(slot), true)
+        self.record_with_warm_slot(request, None, Some(slot), true, false)
             .await
     }
 

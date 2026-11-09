@@ -48,7 +48,7 @@ impl Manager {
             .warm_test_barrier("warm_claim_lock", "*")
             .await;
         let turn = if request.fail_fast {
-            match self.inner.warm_lock.try_lock() {
+            match self.inner.warm_lock.try_write() {
                 Ok(turn) => turn,
                 Err(_) => {
                     let pool = self.pool(namespace, name)?;
@@ -70,7 +70,7 @@ impl Manager {
                 }
             }
         } else {
-            self.inner.warm_lock.lock().await
+            self.inner.warm_lock.write().await
         };
         // Refill uses warm -> namespace -> entry; claims follow the same order.
         let _admission = if request.fail_fast {

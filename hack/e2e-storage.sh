@@ -207,7 +207,7 @@ on 'rm /data/f; sync' >/dev/null
 t0=$(date +%s.%N)
 briqyard machine snapshot restore "$CK" before >/dev/null
 took=$(echo "$(date +%s.%N) - $t0" | bc)
-check "restore of a running machine boots it again (${took}s)" '[ "$(briqyard machine get "$CK" | jq -r .state)" = running ] && [ "$(briqyard machine logs "$CK" --limit 5000 | grep -c "\[briqyard\] started")" = 2 ]'
+check "restore of a running machine boots it again (${took}s)" '[ "$(briqyard machine get "$CK" | jq -r .state)" = running ] && [ "$(briqyard machine logs "$CK" --limit 1000 --view runtime | grep -c "\[briqyard\] started")" = 2 ]'
 check "the volume's file back, its content too" '[ "$(on "cat /data/f")" = v1 ]'
 check "the root disk's file back"     '[ "$(on "cat /root/r")" = r1 ]'
 check "the restored event"            'briqyard events --machine "$CK" | awk "\$4 == \"restored\"" | grep -q .'
@@ -236,7 +236,7 @@ on 'echo m2 > /tmp/mark; echo v5 > /data/f; sync' >/dev/null
 t0=$(date +%s.%N)
 briqyard machine snapshot restore "$CK" warm >/dev/null
 took=$(echo "$(date +%s.%N) - $t0" | bc)
-check "restored with memory (${took}s): resumed, not booted" '[ "$(briqyard events --machine "$CK" | awk "{print \$4}" | tail -1)" = resumed ] && [ "$(briqyard machine logs "$CK" --limit 5000 | grep -c "\[briqyard\] started")" = 3 ]'
+check "restored with memory (${took}s): resumed, not booted" '[ "$(briqyard events --machine "$CK" | awk "{print \$4}" | tail -1)" = resumed ] && [ "$(briqyard machine logs "$CK" --limit 1000 --view runtime | grep -c "\[briqyard\] started")" = 3 ]'
 check "memory and disks as they were"  '[ "$(on "cat /tmp/mark /data/f" | paste -sd, -)" = m1,v4 ] && [ "$(on "cut -d. -f1 /proc/uptime")" -ge "$up" ]'
 # Those reads may come from the memory's page cache: a cold boot reads the disk.
 briqyard machine restart "$CK" >/dev/null
@@ -272,7 +272,7 @@ check "resumed ($resume s)" '[ "$(briqyard machine get "$C" | jq -r .state)" = r
 check "uptime kept"      '[ "$(briqyard machine exec "$C" -- cut -d. -f1 /proc/uptime)" -ge "$up_before" ]'
 for i in $(seq 1 30); do after=$(briqyard machine exec "$C" -- cat /tmp/c) && [ "$after" -gt "$before" ] && break; sleep 1; done
 check "process went on ($before -> $after)" '[ "$after" -gt "$before" ]'
-check "one boot in the log" '[ "$(briqyard machine logs "$C" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
+check "one boot in the log" '[ "$(briqyard machine logs "$C" --limit 1000 --view runtime | grep -c "\[briqyard\] started")" = 1 ]'
 
 echo "== http ingress: host routing, wake on request"
 W=$(briqyard machine run --image nginx:alpine --name web --namespace "$T" --memory 256 --port 80 --sleep 20s | jq -r .id)
@@ -400,7 +400,7 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
   check "still running"    '[ "$(briqyard machine get "$K" | jq -r .state)" = running ]'
   check "exec after crash" '[ "$(briqyard machine exec "$K" -- hostname)" = survivor ]'
-  check "one boot"         '[ "$(briqyard machine logs "$K" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
+  check "one boot"         '[ "$(briqyard machine logs "$K" --limit 1000 --view runtime | grep -c "\[briqyard\] started")" = 1 ]'
   briqyard machine stop "$K" >/dev/null
   check "stop after crash" '[ "$(briqyard machine get "$K" | jq -r .state)" = stopped ]'
 
@@ -414,7 +414,7 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   check "handed over: still running" '[ "$(briqyard machine get "$V" | jq -r .state)" = running ]'
   check "the new daemon adopted it"  'briqyard status | jq -e ".started.adopted >= 1 and .started.stopped == 0" >/dev/null'
   check "exec after the hand-over"   '[ "$(briqyard machine exec "$V" -- hostname)" = handover ]'
-  check "never booted again"         '[ "$(briqyard machine logs "$V" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
+  check "never booted again"         '[ "$(briqyard machine logs "$V" --limit 1000 --view runtime | grep -c "\[briqyard\] started")" = 1 ]'
   # The listeners in systemd's store (ADR 0051): a connection open across a hand-over ends
   # whole within the drain, and the ones made during it wait for the next daemon.
   if [ "$(systemctl show -p FileDescriptorStoreMax --value briqyardd)" -gt 0 ] 2>/dev/null && command -v python3 >/dev/null; then
@@ -469,7 +469,7 @@ PY
   sudo systemctl start briqyardd
   for i in $(seq 1 60); do [ "$(briqyard machine get "$V" 2>/dev/null | jq -r .state)" = running ] && break; sleep 1; done
   check "running again after a stop and a start" '[ "$(briqyard machine get "$V" | jq -r .state)" = running ]'
-  check "resumed, not booted"        '[ "$(briqyard machine logs "$V" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
+  check "resumed, not booted"        '[ "$(briqyard machine logs "$V" --limit 1000 --view runtime | grep -c "\[briqyard\] started")" = 1 ]'
   briqyard machine rm "$V" >/dev/null
   echo "== encryption at rest: the pool, the daemon's files on it, its key loaded at start"
   cfg() { sudo sed -n "s/^$1//p" /etc/briqyard/config.yaml; }

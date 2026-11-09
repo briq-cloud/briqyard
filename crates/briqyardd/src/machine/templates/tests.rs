@@ -125,6 +125,65 @@ async fn exact_shared_inode_and_durable_reader_fence_deletion_until_confirmed_ex
     h.m.delete_snapshot("m_template", &snapshot).await.unwrap();
 }
 
+/// A reboot mounts the dataset under another device number: the seed must stay usable.
+#[tokio::test]
+async fn a_new_device_number_keeps_the_template_and_other_changes_do_not() {
+    let (h, e, snapshot, a) = source().await;
+    let rewrite = |change: &dyn Fn(&mut CloneArtifact)| {
+        let mut r = e.rec.lock().unwrap();
+        let s = r.snapshots.iter_mut().find(|s| s.id == snapshot).unwrap();
+        let mut artifact = a.clone();
+        change(&mut artifact);
+        s.clone_artifact = Some(artifact);
+    };
+    let verified = || {
+        h.m.inner.verified_templates.lock().unwrap().clear();
+        h.m.verify_clone_artifacts();
+        !h.m.inner.verified_templates.lock().unwrap().is_empty()
+    };
+    let moved = |file: &ArtifactFile| ArtifactFile {
+        device: file.device + 1,
+        ..file.clone()
+    };
+
+    rewrite(&|x| {
+        x.state = moved(&a.state);
+        x.memory = moved(&a.memory);
+    });
+    assert!(verified());
+    let files =
+        h.m.artifact_files("m_template", &snapshot, "g_one")
+            .unwrap();
+    check_inode(&files[0], &moved(&a.state)).unwrap();
+    check_inode(&files[1], &moved(&a.memory)).unwrap();
+    let namespace = e.snapshot().namespace;
+    h.m.reserve_named_clone("m_template", &snapshot, "m_clone", &namespace)
+        .await
+        .unwrap();
+
+    let other_inode = ArtifactFile {
+        inode: a.memory.inode + 1,
+        ..a.memory.clone()
+    };
+    assert!(check_inode(&files[1], &other_inode).is_err());
+    rewrite(&|x| x.memory = other_inode.clone());
+    assert!(!verified());
+    rewrite(&|x| {
+        x.memory = ArtifactFile {
+            sha256: "0".repeat(64),
+            ..a.memory.clone()
+        }
+    });
+    assert!(!verified());
+    rewrite(&|x| {
+        x.memory = ArtifactFile {
+            bytes: a.memory.bytes + 1,
+            ..a.memory.clone()
+        }
+    });
+    assert!(!verified());
+}
+
 #[tokio::test]
 async fn changed_inode_and_foreign_namespace_are_refused_without_new_reference() {
     let (h, e, snapshot, _) = source().await;
@@ -426,6 +485,8 @@ async fn index_and_config_digest_levels_are_not_interchangeable_at_seal() {
 }
 
 mod recovery;
+
+mod seed_lock;
 
 mod warm;
 

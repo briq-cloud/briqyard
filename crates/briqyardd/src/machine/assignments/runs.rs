@@ -402,9 +402,9 @@ impl Manager {
         at: Option<u64>,
     ) -> Result<RunRef> {
         self.ensure_entry_assigned_update_backing(entry).await?;
-        let _warm = self.inner.warm_lock.lock().await;
+        let _warm = self.inner.warm_lock.write().await;
         let _namespace = self.inner.namespace_lifecycle.read().await;
-        let _sandbox = self.inner.sandbox_create_lock.lock().await;
+        let _sandbox = self.inner.sandbox_create_lock.write().await;
         let _entry = entry.lock.lock().await;
         self.check_version(entry, at)?;
         if let Some(update) = self

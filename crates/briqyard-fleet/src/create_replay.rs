@@ -11,8 +11,12 @@ pub(super) struct SandboxRoute {
     /// Missing state is conservatively unresolved, including after upgrade/restart.
     #[serde(default)]
     pub accepted: bool,
+    /// When acceptance was recorded; the replay window (ADR 0119) counts from here. Absent in a
+    /// route accepted before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<chrono::DateTime<chrono::Utc>>,
 }
-fn key(namespace: &str, request_id: &str) -> String {
+pub(super) fn key(namespace: &str, request_id: &str) -> String {
     serde_json::to_string(&(namespace, request_id)).expect("tuple serializes")
 }
 pub(super) fn request_route(
@@ -29,6 +33,7 @@ pub(super) fn request_route(
             .clone(),
         host,
         accepted: false,
+        settled_at: None,
         create_sha256: format!(
             "{:x}",
             Sha256::digest(req.sandbox_create_bytes().map_err(|_| err(
@@ -86,9 +91,32 @@ pub(super) fn accept_route(reg: &mut Registry, route: &SandboxRoute) {
         .get_mut(&key(&route.namespace, &route.request_id))
     {
         if stored.host == route.host && stored.create_sha256 == route.create_sha256 {
+            if !stored.accepted {
+                stored.settled_at = Some(chrono::Utc::now());
+            }
             stored.accepted = true;
         }
     }
+}
+/// Forgets the routes of requests accepted longer ago than `window` (ADR 0119). A route not yet
+/// accepted is never forgotten: it fences its namespace and host until an operator reconciles it
+/// (ADR 0076). One accepted before the time was kept has no age: it goes when its namespace is
+/// no longer pinned, else it starts its window now.
+pub(super) fn prune(reg: &mut Registry, now: chrono::DateTime<chrono::Utc>, window: Duration) {
+    let pinned = &reg.namespaces;
+    reg.sandbox_requests.retain(|_, route| {
+        if !route.accepted {
+            return true;
+        }
+        match route.settled_at {
+            Some(at) => now - at < window,
+            None if pinned.contains_key(&route.namespace) => {
+                route.settled_at = Some(now);
+                true
+            }
+            None => false,
+        }
+    });
 }
 pub(super) fn namespace_unresolved(reg: &Registry, namespace: &str) -> bool {
     reg.namespace_moves

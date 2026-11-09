@@ -285,11 +285,14 @@ paths:
   /v1/machines/{id}/logs:
     parameters:
       - { $ref: "#/components/parameters/id" }
-      - { name: since, in: query, schema: { type: string }, description: "the `next` cursor of a previous page: an offset in the whole console, its rotated file included (ADR 0021); one rotated away reads on from the oldest line kept" }
-      - { name: limit, in: query, schema: { type: integer, default: 500, maximum: 5000 } }
+      - { name: since, in: query, schema: { type: string }, description: "with `follow` only: where it starts, an `after` cursor of a page (empty: the start of the console). A page takes `before` or `after`, and `since` there is 400 `invalid`" }
+      - { name: before, in: query, schema: { type: string }, description: "the page of lines ending at this cursor, the `before` of a page. Opaque: only give back what a page returned. A cursor rotated away reads from the oldest line kept; one past the end is the end. Not with `after`" }
+      - { name: after, in: query, schema: { type: string }, description: "the page of lines starting at this cursor, the `after` of a page; empty is the start of the console. Not with `before`. With neither, the page is the newest lines" }
+      - { name: limit, in: query, schema: { type: integer, default: 200 }, description: "lines of the view in a page, at most; clamped to 1–1000, never refused. Not with `follow`" }
       - { name: follow, in: query, schema: { type: boolean, default: false }, description: "keep it open (ADR 0025): the lines after `since`, then each new one, as NDJSON" }
+      - { name: view, in: query, schema: { type: string, enum: [app, runtime], default: app }, description: "`app`: what the machine's program printed. `runtime`: what the runtime printed about the machine (the guest kernel, the guest's init with the command it started, Firecracker and its jailer). A line is in one view; the cursors cover the lines of the other view a page skipped (ADR 0115, 0116). Another value is 400 `invalid`" }
     get:
-      summary: "The serial console, paged. With `follow=true`, NDJSON kept open: one `LogLine` per line, across a rotation, `{}` every 30 s, and a last line `{code, error}` when it ends (`destroyed`: the machine was; `shutdown`: the daemon goes down, follow again from the `since` in `error`). Through the fleet a follow is streamed through"
+      summary: "A page of the serial console (ADR 0116): lines of one view, oldest first, the newest unless `before` or `after` is given; a request reads at most 4 MiB, so a page can be short or empty and still have more (`hasOlder`, `hasNewer`). With `follow=true`, NDJSON kept open: one `LogLine` per line, across a rotation, `{}` every 30 s, and a last line `{code, error}` when it ends (`destroyed`: the machine was; `shutdown`: the daemon goes down, follow again from the `since` in `error`). Through the fleet a follow is streamed through"
       responses:
         "200":
           description: a page, or with `follow` a stream

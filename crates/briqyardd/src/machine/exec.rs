@@ -295,23 +295,46 @@ impl Manager {
 
     // --- logs ---
 
-    /// Pages the console. `since` is an offset in the whole console, the rotated file
-    /// included (ADR 0021); `limit` caps lines.
-    pub fn logs(&self, id: &str, since: &str, limit: usize) -> Result<api::LogsResponse, MError> {
+    /// A page of the console's `view` (ADR 0116): `limit` lines, oldest first, from `at`. The
+    /// cursors in the answer are offsets in the whole console, the rotated file included
+    /// (ADR 0021), and cover the other view's lines the page skipped.
+    pub fn logs(
+        &self,
+        id: &str,
+        at: LogAt,
+        limit: usize,
+        view: api::LogView,
+    ) -> Result<api::LogsResponse, MError> {
         self.entry(id)?;
-        let limit = if limit == 0 || limit > 5000 {
-            500
-        } else {
-            limit
-        };
+        let limit = limit.clamp(1, logpage::MAX_LIMIT);
         let dir = self.inner.cfg.run_dir().join(id);
-        match console_page(&dir, log_cursor(since)?, limit).map_err(|e| MError::Other(e.into()))? {
-            None => Ok(api::LogsResponse::default()),
-            Some((lines, next)) => Ok(api::LogsResponse {
-                lines,
-                next: next.to_string(),
-            }),
-        }
+        let io = |e: std::io::Error| MError::Other(e.into());
+        let (page, has_older) = match at {
+            LogAt::After(from) => {
+                match logpage::forward(&dir, from, limit, logpage::SCAN_MAX, view).map_err(io)? {
+                    None => return Ok(api::LogsResponse::default()),
+                    Some(p) => {
+                        let older = p.from > console::oldest(&dir).map_err(io)?;
+                        (p, older)
+                    }
+                }
+            }
+            LogAt::Before(to) => match logpage::backward(&dir, to, limit, view).map_err(io)? {
+                None => return Ok(api::LogsResponse::default()),
+                Some(p) => p,
+            },
+            LogAt::Tail => match logpage::backward(&dir, u64::MAX, limit, view).map_err(io)? {
+                None => return Ok(api::LogsResponse::default()),
+                Some(p) => p,
+            },
+        };
+        Ok(api::LogsResponse {
+            lines: page.lines,
+            before: page.from.to_string(),
+            after: page.to.to_string(),
+            has_older,
+            has_newer: page.more,
+        })
     }
 
     /// Follows the console from `since` (ADR 0025): the lines after it, then each new one,
@@ -322,6 +345,7 @@ impl Manager {
         &self,
         id: &str,
         since: &str,
+        view: api::LogView,
         tx: tokio::sync::mpsc::Sender<String>,
     ) -> Result<(), MError> {
         // Subscribed before the machine is looked up: a destroy in between is seen.
@@ -330,7 +354,7 @@ impl Manager {
         let cursor = log_cursor(since)?;
         let me = self.clone();
         let id = id.to_string();
-        tokio::spawn(async move { me.follow(id, cursor, logged, closing, tx).await });
+        tokio::spawn(async move { me.follow(id, cursor, view, logged, closing, tx).await });
         Ok(())
     }
 
@@ -338,6 +362,7 @@ impl Manager {
         &self,
         id: String,
         mut cursor: u64,
+        view: api::LogView,
         mut logged: broadcast::Receiver<api::Event>,
         mut closing: tokio::sync::watch::Receiver<bool>,
         tx: tokio::sync::mpsc::Sender<String>,
@@ -352,7 +377,7 @@ impl Manager {
             tokio::pin!(woken);
             woken.as_mut().enable();
             loop {
-                let (lines, next) = match console_page(&dir, cursor, FOLLOW_PAGE) {
+                let page = match logpage::forward(&dir, cursor, FOLLOW_PAGE, u64::MAX, view) {
                     Ok(Some(page)) => page,
                     Ok(None) => break,
                     Err(err) => {
@@ -361,9 +386,9 @@ impl Manager {
                         return;
                     }
                 };
-                cursor = next;
-                let full = lines.len() == FOLLOW_PAGE;
-                for l in lines {
+                cursor = page.to;
+                let full = page.lines.len() == FOLLOW_PAGE;
+                for l in page.lines {
                     let line = serde_json::to_string(&l).unwrap_or_default() + "\n";
                     if !events::send(&tx, &mut closing, line).await {
                         return;
@@ -460,42 +485,25 @@ fn log_cursor(since: &str) -> Result<u64, MError> {
     }
 }
 
-/// Up to `limit` whole lines of the console in `dir` from `from`, and the cursor after the
-/// last; `None` when the machine has no console yet.
-fn console_page(
-    dir: &Path,
-    from: u64,
-    limit: usize,
-) -> std::io::Result<Option<(Vec<api::LogLine>, u64)>> {
-    use std::io::BufRead;
-    let Some((mut pos, mut r)) = console::read_from(dir, from)? else {
-        return Ok(None);
-    };
-    let mut lines = Vec::new();
-    while lines.len() < limit {
-        let mut line = String::new();
-        let n = r.read_line(&mut line)?;
-        if n == 0 || !line.ends_with('\n') {
-            break;
-        }
-        pos += n as u64;
-        lines.push(parse_log_line(&line));
-    }
-    Ok(Some((lines, pos)))
-}
-
-pub(super) fn parse_log_line(line: &str) -> api::LogLine {
+/// The view a stored console line belongs to, and the line.
+pub(super) fn parse_log_line(line: &str) -> (api::LogView, api::LogLine) {
     let line = line.trim_end_matches(['\r', '\n']);
-    if let Some((ts, rest)) = line.split_once(' ') {
+    if let Some((of, ts, rest)) = console::unstamp(line) {
         if let Ok(t) = DateTime::parse_from_rfc3339(ts) {
-            return api::LogLine {
-                ts: t.with_timezone(&Utc),
-                line: rest.to_string(),
-            };
+            return (
+                of,
+                api::LogLine {
+                    ts: t.with_timezone(&Utc),
+                    line: rest.to_string(),
+                },
+            );
         }
     }
-    api::LogLine {
-        ts: Utc::now(),
-        line: line.to_string(),
-    }
+    (
+        api::LogView::App,
+        api::LogLine {
+            ts: Utc::now(),
+            line: line.to_string(),
+        },
+    )
 }

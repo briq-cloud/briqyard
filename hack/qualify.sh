@@ -343,7 +343,7 @@ ev0=$(sudo cat "$(leaf "$G")/memory.events.local")
 set +e; on "$G" "$hog" >"$LOGS/hog.out" 2>&1; rc=$?; set -e
 echo "   the hog: exit $rc, said: $(head -c 150 "$LOGS/hog.out")"
 check "guest OOM: the hog was killed in the guest (exit $rc)" '[ "$rc" = 137 ] || grep -qF Killed "$LOGS/hog.out"'
-check "guest OOM: the kernel says so on the console" 'briqyard machine logs "$G" --limit 5000 | grep -qiE "out of memory|oom-kill"'
+check "guest OOM: the kernel says so on the console" 'briqyard machine logs "$G" --limit 1000 --view runtime | grep -qiE "out of memory|oom-kill"'
 check "guest OOM: the machine runs on, same VMM, exec answers" '[ "$(mstate "$G")" = running ] && [ "$(fc_pid "$G")" = "$gpid" ] && [ "$(on "$G" hostname)" = oom-g ]'
 check "guest OOM: it was not the VMM's cgroup (no local oom_kill)" '[ "$(sudo cat "$(leaf "$G")/memory.events.local")" = "$ev0" ]'
 check "guest OOM: the sibling and the daemon are untouched" '[ "$(on "$S" "cat /root/s")" = alive ] && [ "$(fc_pid "$S")" = "$spid" ] && [ "$(daemon_pid)" = "$dpid" ]'

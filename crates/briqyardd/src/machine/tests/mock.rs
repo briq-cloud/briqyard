@@ -70,6 +70,8 @@ pub(super) struct Mock {
     pub(super) pause_network: Mutex<Option<(&'static str, String)>>,
     pub(super) network_started: tokio::sync::Notify,
     pub(super) network_release: tokio::sync::Notify,
+    /// Callers that reached the paused phase so far (`network_started` coalesces them).
+    pub(super) network_arrived: std::sync::atomic::AtomicUsize,
     pub(super) cleared_ips: Mutex<Vec<String>>,
     pub(super) attachments: Mutex<HashMap<String, Attachment>>,
     /// No guest port accepts: `wait_port` answers only at its deadline.
@@ -136,6 +138,8 @@ pub(super) struct Mock {
     pub(super) refuse_disk_rate: AtomicBool,
     pub(super) refuse_balloon_stats: AtomicBool,
     pub(super) pause_bridge_delete: AtomicBool,
+    /// Bridges that `ensure_bridge` refuses, by name.
+    pub(super) refuse_bridge: Mutex<Vec<String>>,
     pub(super) bridge_delete_started: tokio::sync::Notify,
     pub(super) bridge_delete_release: tokio::sync::Notify,
 }
@@ -149,6 +153,7 @@ impl Mock {
             .as_ref()
             .is_some_and(|(op, address)| *op == operation && (address == "*" || address == ip));
         if paused {
+            self.network_arrived.fetch_add(1, Relaxed);
             self.network_started.notify_one();
             self.network_release.notified().await;
         }
@@ -171,6 +176,7 @@ impl Mock {
             pause_network: Mutex::new(None),
             network_started: tokio::sync::Notify::new(),
             network_release: tokio::sync::Notify::new(),
+            network_arrived: std::sync::atomic::AtomicUsize::new(0),
             cleared_ips: Mutex::new(Vec::new()),
             attachments: Mutex::new(HashMap::new()),
             silent_ports: AtomicBool::new(false),
@@ -219,6 +225,7 @@ impl Mock {
             refuse_disk_rate: AtomicBool::new(false),
             refuse_balloon_stats: AtomicBool::new(false),
             pause_bridge_delete: AtomicBool::new(false),
+            refuse_bridge: Mutex::new(Vec::new()),
             bridge_delete_started: tokio::sync::Notify::new(),
             bridge_delete_release: tokio::sync::Notify::new(),
         })
@@ -939,7 +946,11 @@ impl host::Net for Mock {
     }
     async fn ensure_bridge(&self, s: &Subnet) -> Result<String> {
         let name = netw::bridge_name(s.index);
+        self.wait_network("ensure_bridge", &name).await;
         self.record(format!("ensure_bridge {name} {}", s.cidr()));
+        if self.refuse_bridge.lock().unwrap().contains(&name) {
+            anyhow::bail!("synthetic bridge refusal");
+        }
         Ok(name)
     }
 

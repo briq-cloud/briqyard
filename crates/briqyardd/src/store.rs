@@ -36,8 +36,10 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
         .mode(0o600)
         .open(&tmp)
         .with_context(|| format!("write {}", tmp.display()))?;
-    f.write_all(data)?;
-    f.sync_all()?;
+    f.write_all(data)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    f.sync_all()
+        .with_context(|| format!("sync {}", tmp.display()))?;
     drop(f);
     std::fs::rename(&tmp, path).with_context(|| format!("rename {}", path.display()))?;
     Ok(())
@@ -125,27 +127,33 @@ impl Store {
         crate::assignment_compatibility::ensure_assigned_run_lifecycle_floor(&self.root)
     }
 
+    fn sync_dir(&self, kind: &str) -> Result<()> {
+        let dir = self.dir(kind);
+        std::fs::File::open(&dir)
+            .and_then(|d| d.sync_all())
+            .with_context(|| format!("sync {}", dir.display()))
+    }
+
     /// Crash-durable record boundary for immutable snapshot publication and read intents.
     pub fn put_durable<T: Serialize>(&self, kind: &str, key: &str, v: &T) -> Result<()> {
         self.put(kind, key, v)?;
-        std::fs::File::open(self.dir(kind))?.sync_all()?;
-        Ok(())
+        self.sync_dir(kind)
     }
 
     pub fn delete_durable(&self, kind: &str, key: &str) -> Result<()> {
         self.delete(kind, key)?;
-        std::fs::File::open(self.dir(kind))?.sync_all()?;
-        Ok(())
+        self.sync_dir(kind)
     }
 
     #[allow(dead_code)]
     pub fn get<T: DeserializeOwned>(&self, kind: &str, key: &str) -> Result<Option<T>> {
-        match std::fs::read(self.path(kind, key)?) {
+        let path = self.path(kind, key)?;
+        match std::fs::read(&path) {
             Ok(data) => Ok(Some(
                 serde_json::from_slice(&data).with_context(|| format!("{kind}/{key}"))?,
             )),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
         }
     }
 
@@ -166,22 +174,42 @@ impl Store {
                 }
             }
         }
-        match std::fs::remove_file(self.path(kind, key)?) {
+        let path = self.path(kind, key)?;
+        match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(e).with_context(|| format!("remove {}", path.display())),
         }
     }
 
+    /// Every record of a kind. A record deleted while the directory is being read (a clone's
+    /// reader released, a hold dropped by another request) is gone, not an error: it is left out.
     pub fn list<T: DeserializeOwned>(&self, kind: &str) -> Result<Vec<T>> {
+        self.list_with(kind, |_| {})
+    }
+
+    /// [`Self::list`], with `between` called on each record's path after the directory entry
+    /// is read and before the file is, where a concurrent delete lands.
+    fn list_with<T: DeserializeOwned>(
+        &self,
+        kind: &str,
+        between: impl Fn(&Path),
+    ) -> Result<Vec<T>> {
         let mut out = Vec::new();
-        for entry in std::fs::read_dir(self.root.join(kind))? {
-            let entry = entry?;
+        let dir = self.root.join(kind);
+        for entry in std::fs::read_dir(&dir).with_context(|| format!("list {}", dir.display()))? {
+            let entry = entry.with_context(|| format!("list {}", dir.display()))?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if !name.ends_with(".json") {
                 continue;
             }
-            let data = std::fs::read(entry.path())?;
+            let path = entry.path();
+            between(&path);
+            let data = match std::fs::read(&path) {
+                Ok(data) => data,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+            };
             out.push(serde_json::from_slice(&data).with_context(|| format!("{kind}/{name}"))?);
         }
         Ok(out)
@@ -190,8 +218,13 @@ impl Store {
     /// The keys of a kind, sorted.
     pub fn keys(&self, kind: &str) -> Result<Vec<String>> {
         let mut keys = Vec::new();
-        for entry in std::fs::read_dir(self.root.join(kind))? {
-            let name = entry?.file_name().to_string_lossy().into_owned();
+        let dir = self.root.join(kind);
+        for entry in std::fs::read_dir(&dir).with_context(|| format!("list {}", dir.display()))? {
+            let name = entry
+                .with_context(|| format!("list {}", dir.display()))?
+                .file_name()
+                .to_string_lossy()
+                .into_owned();
             if let Some(k) = name.strip_suffix(".json") {
                 keys.push(k.to_string());
             }
@@ -201,10 +234,11 @@ impl Store {
     }
 
     pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
-        match std::fs::read_to_string(self.path("meta", key)?) {
+        let path = self.path("meta", key)?;
+        match std::fs::read_to_string(&path) {
             Ok(s) => Ok(Some(s)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
         }
     }
 
@@ -409,6 +443,40 @@ mod tests {
         // Keys too, sorted.
         store.put("machines", "m_0", &r).unwrap();
         assert_eq!(store.keys("machines").unwrap(), ["m_0", "m_a"]);
+    }
+
+    #[test]
+    fn list_skips_a_record_deleted_while_it_is_read() {
+        let (_dir, store) = open();
+        for (id, n) in [("m_a", 1), ("m_b", 2), ("m_c", 3)] {
+            store.put("machines", id, &rec(id, n)).unwrap();
+        }
+        // Another request deletes m_b after the directory entry is read, before the file is.
+        let all: Vec<Rec> = store
+            .list_with("machines", |path| {
+                if path.ends_with("m_b.json") {
+                    std::fs::remove_file(path).unwrap();
+                }
+            })
+            .unwrap();
+        let mut ids: Vec<_> = all.iter().map(|r| r.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["m_a", "m_c"]);
+    }
+
+    #[test]
+    fn io_errors_name_the_operation_and_path() {
+        let (dir, store) = open();
+        // A directory where a record file should be: the read fails, not with NotFound.
+        std::fs::create_dir(dir.path().join("state/machines/m_dir.json")).unwrap();
+        let err = store.list::<Rec>("machines").unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("read ") && text.contains("m_dir.json"),
+            "{text}"
+        );
+        let err = store.keys("nope").unwrap_err();
+        assert!(format!("{err:#}").contains("list "), "{err:#}");
     }
 
     #[test]

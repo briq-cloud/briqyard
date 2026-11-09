@@ -2,6 +2,20 @@
 
 use super::*;
 
+/// One of the two locks of a seed create: shared or exclusive.
+type SeedHold<'a> = (
+    Option<tokio::sync::RwLockReadGuard<'a, ()>>,
+    Option<tokio::sync::RwLockWriteGuard<'a, ()>>,
+);
+
+async fn seed_hold(lock: &tokio::sync::RwLock<()>, exclusive: bool) -> SeedHold<'_> {
+    if exclusive {
+        (None, Some(lock.write().await))
+    } else {
+        (Some(lock.read().await), None)
+    }
+}
+
 impl Manager {
     // --- create ---
 
@@ -80,13 +94,36 @@ impl Manager {
         req: api::CreateMachineRequest,
         role: Option<Role>,
     ) -> Result<(Arc<Entry>, Make), MError> {
-        let _warm = if req.sandbox_seed.is_some() {
-            Some(self.inner.warm_lock.lock().await)
+        let (exclusive, _warm) = match &req.sandbox_seed {
+            Some(seed) => {
+                let (exclusive, held) = self.seed_warm_admission(seed).await;
+                (exclusive, Some(held))
+            }
+            None => (false, None),
+        };
+        let _admission = self.inner.namespace_lifecycle.read().await;
+        // The second hold agrees with the first: one decision per create.
+        let _sandbox = if req.sandbox_seed.is_some() {
+            Some(seed_hold(&self.inner.sandbox_create_lock, exclusive).await)
         } else {
             None
         };
-        let _admission = self.inner.namespace_lifecycle.read().await;
-        self.record_with_warm_slot(req, role, None, false).await
+        self.record_with_warm_slot(req, role, None, false, exclusive)
+            .await
+    }
+
+    /// A seed create's hold on `warm_lock` (ADR 0117), and whether both its holds are exclusive.
+    /// Shared with other seed creates, which record independently, unless a ready unbound slot
+    /// may serve it: the selector reserves that slot's assignment, one create at a time, so the
+    /// create waits for every holder and takes both locks exclusively. The decision is made once,
+    /// under the shared hold; a slot that turns ready after it is a missed accelerator.
+    async fn seed_warm_admission(&self, seed: &api::SandboxSeed) -> (bool, SeedHold<'_>) {
+        let shared = self.inner.warm_lock.read().await;
+        if !self.unbound_slot_may_serve(seed) {
+            return (false, (Some(shared), None));
+        }
+        drop(shared);
+        (true, (None, Some(self.inner.warm_lock.write().await)))
     }
 
     /// The caller already holds namespace admission (a gateway put keeps it through boot).
@@ -100,7 +137,8 @@ impl Manager {
                 "sandbox create requires warm admission before namespace admission",
             ));
         }
-        self.record_with_warm_slot(req, role, None, false).await
+        self.record_with_warm_slot(req, role, None, false, false)
+            .await
     }
 
     pub(super) async fn record_warm_slot(
@@ -114,7 +152,7 @@ impl Manager {
             .warm_test_barrier("warm_admission", "*")
             .await;
         let _admission = self.inner.namespace_lifecycle.read().await;
-        self.record_with_warm_slot(req, None, Some(slot), false)
+        self.record_with_warm_slot(req, None, Some(slot), false, false)
             .await
     }
 
@@ -124,13 +162,21 @@ impl Manager {
         role: Option<Role>,
         warm_slot: Option<warm::Slot>,
         unbound_factory: bool,
+        // A seed create holds both locks exclusively and may take an unbound slot.
+        exclusive: bool,
     ) -> Result<(Arc<Entry>, Make), MError> {
-        let _sandbox_turn = if req.sandbox_seed.is_some() {
-            Some(self.inner.sandbox_create_lock.lock().await)
-        } else {
-            None
-        };
         req.check_sandbox_seed().map_err(invalid)?;
+        // The request's turn, to the end of the record: a retry waits for the durable writes,
+        // then replays the machine they made.
+        let _turn = match &req.sandbox_seed {
+            Some(seed) => Some(
+                self.inner
+                    .sandbox_turns
+                    .take(&req.namespace, &seed.request_id)
+                    .await,
+            ),
+            None => None,
+        };
         if let Some(previous) = templates::sandbox::replay(self, &req)? {
             return Ok((previous, Make::Existing));
         }
@@ -410,8 +456,11 @@ impl Manager {
         if req.sandbox_seed.is_some() {
             self.ensure_namespace(&req.namespace).await?;
             // Keep the optional assignment journal future off every create/fill caller's stack.
-            if let Some(entry) = Box::pin(self.select_unbound_assignment(&req)).await? {
-                return Ok((entry, Make::Assigned));
+            // Only an exclusive create may take a slot; the others restore the seed.
+            if exclusive {
+                if let Some(entry) = Box::pin(self.select_unbound_assignment(&req)).await? {
+                    return Ok((entry, Make::Assigned));
+                }
             }
         }
         if rec.root_key.is_empty() {
@@ -848,10 +897,22 @@ impl Manager {
                 .map(|f| f.copy.is_empty() || f.copy == "disk")
                 .unwrap_or(false);
         if copy_disks {
-            // Under the source's lock: a restore swaps its disks under that lock (ADR 0031),
-            // and a tidy removes a fork snapshot nothing clones yet.
+            // The source's lock (`Entry.lock` of the seed or fork source) protects what is read
+            // here and, for a disk fork, the clone itself: a restore swaps the source's disks
+            // under it (ADR 0031) and a tidy removes a fork snapshot nothing clones yet.
+            //
+            // A named memory clone is the exception. Its snapshot is held by a durable reader
+            // (`READERS`), written by `reserve_named_clone` under this same lock before the
+            // create was answered. While it exists, `destroy`, `restore_snapshot`,
+            // `delete_snapshot`, `remake_root` and `tidy` refuse, each checking it under the
+            // source's lock (`check_clone_readers`), and nothing else removes, rolls back or
+            // renames the snapshot. So the lock is held only to validate and read the source,
+            // then released before the `zfs clone`: creates from one seed clone in parallel.
+            // Rule: take the lock to read or decide, never across a `zfs` command that the
+            // reader already makes safe. Lock order is unchanged: the new machine's lock, then
+            // the source's, and no other lock is taken under the source's.
             let src = src.unwrap();
-            let _src_lock = src.lock.lock().await;
+            let src_lock = src.lock.lock().await;
             let s = src.snapshot();
             if s.state == state::DESTROYING {
                 return Err(anyhow!("fork source {} is being destroyed", s.id));
@@ -873,6 +934,7 @@ impl Manager {
                     a.generation == origin.artifact.generation,
                     "named memory artifact generation changed"
                 );
+                self.check_clone_reader(&s.id, origin, &r.id)?;
                 e.rec.lock().unwrap().fork = Some(api::ForkOrigin {
                     machine_id: s.id.clone(),
                     copy_consistency: s
@@ -882,6 +944,7 @@ impl Manager {
                         .map(|snap| snap.copy_consistency.clone())
                         .unwrap_or_default(),
                 });
+                drop(src_lock);
                 let started = std::time::Instant::now();
                 z.clone_snapshot(&s.root_dataset(), &origin.snapshot, &r.root_dataset())
                     .await?;

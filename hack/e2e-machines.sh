@@ -30,7 +30,7 @@ check "raw file: parent symlink refused" '! briqyard machine put "$A" "$STREAM_F
 check "raw file: traversal refused" '! briqyard machine put "$A" "$STREAM_FILES/empty" /root/../escape 2>/dev/null'
 check "own name"     'briqyard machine exec "$A" -- nslookup alp.internal 2>&1 | grep -q "10\.6[4-9]\."'
 check "egress"       'briqyard machine exec "$A" -- wget -qO- -T 10 https://example.com | grep -qi "example domain"'
-check "logs"         'briqyard machine logs "$A" --limit 5000 | grep -q "\[briqyard\] started"'
+check "logs"         'briqyard machine logs "$A" --limit 1000 --view runtime | grep -q "\[briqyard\] started"'
 
 echo "== a create answers once recorded; the pull and the boot follow (ADR 0048)"
 IMG2=busybox:1.36.1-musl
@@ -293,7 +293,7 @@ check "gateway: CPU quota enforced" '[ "$(sudo -n cat /sys/fs/cgroup/firecracker
 check "gateway: CPU reservation"    '[ "$(( $(briqyard status | jq .used.cpu_millis) - GWCPU_BEFORE ))" = 1250 ]'
 
 check "gateway not in machine ls"   '! briqyard machine ls | grep -q "$GW" && [ "$(briqyard namespace get "$GT" | jq .machines)" = 1 ]'
-check "gateway console readable"    'briqyard machine logs "$GW" --limit 5000 | grep -q "\[briqyard\] started"'
+check "gateway console readable"    'briqyard machine logs "$GW" --limit 1000 --view runtime | grep -q "\[briqyard\] started"'
 # busybox wget sends a proxy a plain GET, not CONNECT: Python's client does what any SDK does.
 fetch='import urllib.request; print(urllib.request.urlopen("https://example.com", timeout=10).read().decode())'
 check "https through the gateway"   'briqyard machine exec "$C" -- env https_proxy=http://gateway.internal:3128 python3 -c "$fetch" | grep -qi "example domain"'
@@ -458,11 +458,21 @@ check "quota: the refusal is an event" 'briqyard events --namespace "$Q" | awk "
 FL=$(briqyard machine run --image alpine:3.20 --name follow --namespace "$T" --memory 128 -- sleep 3600 | jq -r .id)
 timeout 60 briqyard machine logs -f "$FL" > /tmp/by-e2e-follow.txt 2>&1 &
 FOLLOW=$!
-# Connected once it printed the boot's lines; the next line is printed after that.
-for i in $(seq 1 30); do grep -q "\[briqyard\] started" /tmp/by-e2e-follow.txt && break; sleep 1; done
+# Connected once it printed a line the program wrote before; the next line is printed after that.
+briqyard machine exec "$FL" -- sh -c 'echo e2e-ready > /dev/console'
+for i in $(seq 1 30); do grep -q e2e-ready /tmp/by-e2e-follow.txt && break; sleep 1; done
 briqyard machine exec "$FL" -- sh -c 'echo e2e-followed > /dev/console'
 for i in $(seq 1 30); do grep -q e2e-followed /tmp/by-e2e-follow.txt && break; sleep 1; done
 check "logs -f gets a line printed after it began" 'grep -q e2e-followed /tmp/by-e2e-follow.txt'
+check "logs: a line the program printed is in the app view only" 'briqyard machine logs "$FL" | grep -q e2e-followed && ! briqyard machine logs "$FL" --view runtime | grep -q e2e-followed'
+check "logs: the init and kernel lines are in the runtime view only" '! briqyard machine logs "$FL" --limit 1000 | grep -qE "\[briqyard\]|\[ *[0-9]+\.[0-9]{6}\] " && briqyard machine logs "$FL" --limit 1000 --view runtime | grep -q "\[briqyard\] started"'
+check "logs: Firecracker logs no request body" '! briqyard machine logs "$FL" --limit 1000 --view runtime | grep -qE "boot_args|kernel_image_path"'
+# A page is the newest lines, oldest first; its stderr says where the older ones are (ADR 0116).
+text_of() { sed 's/^[^ ]* //'; }
+older_of() { sed -n 's/^(older: --before \(.*\))$/\1/p'; }
+check "logs: a page is the newest lines, oldest first" '[ "$(briqyard machine logs "$FL" --limit 2 2>/dev/null | text_of | tr "\n" ,)" = "e2e-ready,e2e-followed," ]'
+check "logs: the cursor of a page gives the one before it" 'b=$(briqyard machine logs "$FL" --limit 1 2>&1 >/dev/null | older_of); [ -n "$b" ] && [ "$(briqyard machine logs "$FL" --limit 1 --before "$b" 2>/dev/null | text_of)" = e2e-ready ]'
+check "logs: before and after together are refused" '! briqyard machine logs "$FL" --before 1 --after 2 >/dev/null 2>&1'
 briqyard machine rm "$FL" >/dev/null
 for i in $(seq 1 10); do kill -0 "$FOLLOW" 2>/dev/null || break; sleep 1; done
 check "logs -f ends at the destroy"  '! kill -0 "$FOLLOW" 2>/dev/null && grep -q "was destroyed" /tmp/by-e2e-follow.txt'
@@ -508,10 +518,10 @@ check "a smaller size is refused"        'out=$(briqyard machine set "$VG" --vol
 briqyard machine stop --suspend "$VG" >/dev/null
 check "suspended with the growth pending" '[ "$(briqyard machine get "$VG" | jq -r "[.suspended, .pending.fields[0]] | join(\" \")")" = "true volume" ]'
 briqyard machine start "$VG" >/dev/null
-check "the start boots it cold"          '[ "$(briqyard machine logs "$VG" --limit 5000 | grep -c "\[briqyard\] started")" = 2 ] && [ "$(briqyard machine get "$VG" | jq -r .pending)" = null ]'
+check "the start boots it cold"          '[ "$(briqyard machine logs "$VG" --limit 1000 --view runtime | grep -c "\[briqyard\] started")" = 2 ] && [ "$(briqyard machine get "$VG" | jq -r .pending)" = null ]'
 grown=$(fs_mb "$VG")
 check "its filesystem fills the disk ($small -> $grown MB)" '[ "$grown" -gt $((small * 2)) ]'
-check "the init says it grew it"         'briqyard machine logs "$VG" --limit 5000 | grep -q "volume /data: grown from"'
+check "the init says it grew it"         'briqyard machine logs "$VG" --limit 1000 --view runtime | grep -q "volume /data: grown from"'
 check "the data kept"                    '[ "$(briqyard machine exec "$VG" -- cat /data/mark)" = kept ]'
 VB2=$(briqyard machine backup "$VG" | jq -r .id)
 check "the next backup continues the chain" '[ "$(briqyard machine backups "$VG" | jq -r ".[] | select(.id == \"$VB2\") | .disks[] | select(.disk == \"data\") | .from")" = "$VB1" ]'

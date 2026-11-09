@@ -39,6 +39,10 @@ pub(super) struct Admission {
     pub mode: Mode,
     pub host: Option<String>,
     phase: Phase,
+    /// When it was made or last changed phase; the replay window (ADR 0119) counts from here.
+    /// Absent in an admission made before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    at: Option<chrono::DateTime<chrono::Utc>>,
 }
 impl Admission {
     pub fn pending_seed(&self) -> bool {
@@ -167,6 +171,7 @@ pub(super) async fn admit(
                     mode,
                     host: (mode == Mode::SandboxSeed).then_some(host),
                     phase: Phase::Pending,
+                    at: Some(chrono::Utc::now()),
                 },
             );
             mode
@@ -194,11 +199,13 @@ pub(super) async fn cancel(
                 mode: Mode::Cold,
                 host: None,
                 phase: Phase::Cancelled,
+                at: None,
             });
         if a.phase == Phase::Dispatched {
             return Err(conflict("admission already dispatched"));
         }
         a.phase = Phase::Cancelled;
+        a.at = Some(chrono::Utc::now());
         // Keep both tombstone and namespace pin: a gateway or another member may use it.
     }
     st.save().await.map_err(registry_error)?;
@@ -297,5 +304,29 @@ pub(super) fn check_dispatch(
 pub(super) fn dispatched(reg: &mut Registry, namespace: &str, id: Option<&str>) {
     if let Some(a) = id.and_then(|id| reg.sandbox_admissions.get_mut(&key(namespace, id))) {
         a.phase = Phase::Dispatched;
+        a.at = Some(chrono::Utc::now());
     }
+}
+/// Forgets the admissions that fence nothing and were last changed longer ago than `window`
+/// (ADR 0119): dispatched, cancelled, or pending without a seed. A pending seed admission fences
+/// its namespace and is never forgotten here, nor is one whose route is still kept: a retry of
+/// that create replays through both, so the admission goes with its route, never before it. One made before the time was kept has no age: it goes when
+/// its namespace is no longer pinned, else it starts its window now.
+pub(super) fn prune(reg: &mut Registry, now: chrono::DateTime<chrono::Utc>, window: Duration) {
+    let pinned = &reg.namespaces;
+    let routes = &reg.sandbox_requests;
+    reg.sandbox_admissions.retain(|_, a| {
+        if a.pending_seed() {
+            return true;
+        }
+        let routed = routes.contains_key(&crate::create_replay::key(&a.namespace, &a.request_id));
+        match a.at {
+            Some(at) => routed || now - at < window,
+            None if pinned.contains_key(&a.namespace) => {
+                a.at = Some(now);
+                true
+            }
+            None => routed,
+        }
+    });
 }
