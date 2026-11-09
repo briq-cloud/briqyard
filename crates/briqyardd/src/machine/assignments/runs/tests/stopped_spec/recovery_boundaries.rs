@@ -117,10 +117,6 @@ async fn creation_image_swap_full_startup_recovers_each_durable_boundary() {
             assert!(!h.pool.zfs.exists(&next).await.unwrap());
         }
         full_startup(&h).await.unwrap();
-        // The reboot override above qualifies startup's no-adoption fence. Mock's
-        // newly booted processes use its fixed original incarnation boot ID, so
-        // restore that host identity for the independent explicit-start check.
-        h.set_host_boot_id(Some("11111111-1111-4111-8111-111111111111"));
         tokio::time::timeout(Duration::from_secs(60), h.m.start(&id, None))
             .await
             .unwrap()
@@ -129,6 +125,43 @@ async fn creation_image_swap_full_startup_recovers_each_durable_boundary() {
         current.check().unwrap();
         assert_eq!(current.reference.sequence, 1);
         assert!(current.previous_run_sha256.is_none());
+        assert_eq!(
+            before.boot_incarnation.as_ref().unwrap().host_boot_id,
+            "11111111-1111-4111-8111-111111111111"
+        );
+        assert_eq!(
+            h.m.entry(&id)
+                .unwrap()
+                .live
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .incarnation
+                .as_ref()
+                .unwrap()
+                .host_boot_id,
+            "22222222-2222-4222-8222-222222222222"
+        );
+        assert_eq!(current.host_boot_id, "22222222-2222-4222-8222-222222222222");
+        assert_eq!(
+            current
+                .target
+                .boot_incarnation
+                .as_ref()
+                .unwrap()
+                .host_boot_id,
+            current.host_boot_id
+        );
+        assert_eq!(
+            current
+                .consumed_update
+                .as_ref()
+                .unwrap()
+                .source_record
+                .boot_incarnation,
+            before.boot_incarnation
+        );
         assert_eq!(h.m.entry(&id).unwrap().snapshot().env, env);
         assert_eq!(
             h.pool.zfs.guid(&before.data_dataset()).await.unwrap(),

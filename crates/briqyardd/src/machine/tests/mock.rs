@@ -29,6 +29,8 @@ pub(super) enum Boots {
 /// answers, and the `exited` watch the manager waits on.
 pub(super) struct Proc {
     pub(super) pid: u32,
+    /// Captured at launch; a later host reboot must not rewrite old process evidence.
+    pub(super) incarnation: fc::Incarnation,
     pub(super) id: String,
     pub(super) uid: u32,
     pub(super) gid: u32,
@@ -286,6 +288,14 @@ impl Mock {
         std::mem::take(&mut *self.calls.lock().unwrap())
     }
 
+    fn process_incarnation(&self, pid: u32) -> fc::Incarnation {
+        let mut incarnation = mock_incarnation(pid);
+        if let Some(host) = self.host_boot_id.lock().unwrap().as_ref() {
+            incarnation.host_boot_id.clone_from(host);
+        }
+        incarnation
+    }
+
     /// The pids whose process has not exited.
     pub(super) fn alive(&self) -> Vec<u32> {
         self.procs
@@ -303,8 +313,10 @@ impl Mock {
         let pid = self
             .next_pid
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let incarnation = self.process_incarnation(pid);
         self.procs.lock().unwrap().push(Proc {
             pid,
+            incarnation: incarnation.clone(),
             id: id.into(),
             uid: 0,
             gid: 0,
@@ -417,14 +429,14 @@ impl Mock {
 #[async_trait::async_trait]
 impl fc::Vmm for Mock {
     fn verify_process(&self, id: &str, saved: &fc::Incarnation, uid: u32, gid: u32) -> bool {
-        saved == &mock_incarnation(saved.pid)
-            && self.procs.lock().unwrap().iter().any(|process| {
-                process.id == id
-                    && process.pid == saved.pid
-                    && process.uid == uid
-                    && process.gid == gid
-                    && !*process.exited.borrow()
-            })
+        self.procs.lock().unwrap().iter().any(|process| {
+            process.incarnation == *saved
+                && process.id == id
+                && process.pid == saved.pid
+                && process.uid == uid
+                && process.gid == gid
+                && !*process.exited.borrow()
+        })
     }
 
     async fn warm_test_barrier(&self, phase: &str, id: &str) {
@@ -672,8 +684,10 @@ impl fc::Vmm for Mock {
         let (exited, rx) = tokio::sync::watch::channel(false);
         let (exit_tx, exit) = tokio::sync::watch::channel(None);
         let vmm_oom = fc::VmmOom::default();
+        let incarnation = self.process_incarnation(pid);
         self.procs.lock().unwrap().push(Proc {
             pid,
+            incarnation: incarnation.clone(),
             id: b.id.clone(),
             uid: b.jail.as_ref().map_or(0, |jail| jail.uid),
             gid: b.jail.as_ref().map_or(0, |jail| jail.gid),
@@ -709,7 +723,7 @@ impl fc::Vmm for Mock {
             chroot,
             resumed,
             boot_identity: b.boot_identity.clone(),
-            incarnation: Some(mock_incarnation(pid)),
+            incarnation: Some(incarnation),
             exited: rx,
             exit,
             vmm_oom,
