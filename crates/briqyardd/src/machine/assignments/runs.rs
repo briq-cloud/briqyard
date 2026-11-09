@@ -20,6 +20,90 @@ const RUNS: &str = "assigned-runs";
 const READERS: &str = "assigned-run-readers";
 const UPDATES: &str = "assigned-run-updates";
 
+impl Manager {
+    pub(in crate::machine) fn maintenance_runs(
+        &self,
+        budget: &mut crate::store::InspectionBudget,
+        machines: &BTreeMap<String, Record>,
+        live: &BTreeMap<String, Record>,
+    ) -> Result<usize> {
+        let runs = self.inner.store.inspect::<Current>(RUNS, budget)?;
+        let intents = self.inner.store.inspect::<Intent>(INTENTS, budget)?;
+        let readers = self.inner.store.inspect::<Reader>(READERS, budget)?;
+        let updates = self.inner.store.inspect::<UpdateIntent>(UPDATES, budget)?;
+        let mut pending = std::collections::HashSet::new();
+        for (id, current) in &runs {
+            current.check()?;
+            anyhow::ensure!(id == &current.machine, "maintenance run key differs");
+            let machine = machines
+                .get(id)
+                .context("maintenance run machine missing")?;
+            let matches = |machine: &Record| -> Result<bool> {
+                let target_matches = match updates.get(id) {
+                    Some(update) => {
+                        update.check(current)?;
+                        updates::matches_authorized_update_target(machine, current, update)?
+                    }
+                    None => {
+                        current.record_fingerprint(machine)?
+                            == current.record_fingerprint(&current.target)?
+                    }
+                };
+                Ok(machine.assigned_run.as_ref() == Some(&current.reference) && target_matches)
+            };
+            anyhow::ensure!(
+                matches(machine)? && live.get(id).map(&matches).transpose()?.unwrap_or(true),
+                "maintenance machine/current link differs"
+            );
+            let reader = readers.get(id).context("maintenance run reader missing")?;
+            anyhow::ensure!(
+                serde_json::to_value(reader)? == serde_json::to_value(current.reader()?)?,
+                "maintenance current run reader differs"
+            );
+            if current.reference.phase != Phase::Settled {
+                pending.insert(id.clone());
+            }
+        }
+        for (id, machine) in machines.iter().chain(live) {
+            anyhow::ensure!(
+                machine.assigned_run.is_none() || runs.contains_key(id),
+                "maintenance machine run authority missing"
+            );
+        }
+        for (id, intent) in &intents {
+            intent.check()?;
+            anyhow::ensure!(
+                id == &intent.current.machine,
+                "maintenance run intent key differs"
+            );
+            pending.insert(id.clone());
+        }
+        for (id, reader) in readers {
+            let expected = match intents.get(&id) {
+                Some(intent) => intent.current.reader()?,
+                None => runs
+                    .get(&id)
+                    .context("maintenance reader has no run")?
+                    .reader()?,
+            };
+            let settled = expected.reference.phase == Phase::Settled;
+            anyhow::ensure!(
+                serde_json::to_value(reader)? == serde_json::to_value(expected)?,
+                "maintenance run reader differs"
+            );
+            if !settled {
+                pending.insert(id);
+            }
+        }
+        for (id, update) in updates {
+            update.check_shape()?;
+            anyhow::ensure!(id == update.machine, "maintenance update key differs");
+            pending.insert(id);
+        }
+        Ok(pending.len())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRef {

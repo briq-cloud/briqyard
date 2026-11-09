@@ -1,6 +1,52 @@
 use super::*;
 
 #[tokio::test]
+async fn maintenance_zero_pool_allows_observation_but_later_desired_change_blocks_handover() {
+    let (h, _, seed) = source_with_unbound(true).await;
+    h.m.put_warm_pool(
+        "operator",
+        "owned",
+        api::PutWarmPoolRequest {
+            source_machine: seed.machine_id,
+            snapshot: seed.snapshot,
+            desired: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let first = h.m.warm_catalog_eligibility().await;
+    assert!(first.eligible, "{:?}", first.reason);
+    assert_eq!(first.counts.unwrap().pools, 1);
+    let mut pool: serde_json::Value =
+        h.m.inner
+            .store
+            .list::<serde_json::Value>("warm-pools")
+            .unwrap()
+            .pop()
+            .unwrap();
+    pool["desired"] = 1.into();
+    let key = h.m.inner.store.keys("warm-pools").unwrap().pop().unwrap();
+    // Store drift is unknown and cannot be repaired by a GET.
+    h.m.inner
+        .store
+        .put_durable("warm-pools", &key, &pool)
+        .unwrap();
+    assert_eq!(
+        h.m.warm_catalog_eligibility().await.reason,
+        api::WarmMaintenanceReason::StateUnknown
+    );
+    assert!(h
+        .m
+        .handover_admission(Path::new("/usr/bin/true"))
+        .await
+        .is_err());
+    h.m.recover_warm_names().unwrap();
+    let changed = h.m.warm_catalog_eligibility().await;
+    assert_eq!(changed.counts.unwrap().desired_slots, 1);
+    assert!(!changed.eligible);
+}
+
+#[tokio::test]
 async fn sealed_recipe_observation_uses_the_validated_artifact_without_creating_authority() {
     let (h, source, seed) = source().await;
     let before = source.snapshot();

@@ -101,6 +101,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/openapi.yaml", get(openapi))
         .route("/metrics", get(metrics))
         .route("/v1/status", get(status))
+        .route(
+            "/v1/maintenance/warm-catalog",
+            get(warm_catalog_eligibility),
+        )
         .route("/v1/machines", get(list_machines).post(create_machine))
         .route("/v1/sandbox-requests/lookup", post(sandbox_request_lookup))
         .route(

@@ -24,6 +24,40 @@ pub struct RuntimeObservation {
     pub config: LoadedConfigIdentity,
 }
 
+/// A diagnostic snapshot. Handover reacquires admission and evaluates it again.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WarmCatalogEligibility {
+    pub observation: RuntimeObservation,
+    pub eligible: bool,
+    pub reason: WarmMaintenanceReason,
+    /// Absent when inspection or admission could not establish a complete snapshot.
+    pub counts: Option<WarmMaintenanceCounts>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmMaintenanceReason {
+    Eligible,
+    Busy,
+    RecoveryUnresolved,
+    StateUnknown,
+    OutstandingWarmState,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct WarmMaintenanceCounts {
+    pub pools: usize,
+    pub desired_slots: usize,
+    /// Claim receipts whose destination still exists; validated history is excluded.
+    pub pool_claims: usize,
+    pub warm_machines: usize,
+    pub launch_holds: usize,
+    pub launch_transitions: usize,
+    pub warm_names: usize,
+    pub pending_assignments: usize,
+    pub run_authorities: usize,
+}
+
 /// A validated sandbox template recipe, with no guest configuration or credentials.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SealedSandboxRecipe {

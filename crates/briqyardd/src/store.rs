@@ -15,6 +15,31 @@ pub struct Store {
     root: PathBuf,
 }
 
+/// A shared limit for a read-only inspection, not an I/O cancellation guarantee.
+pub(crate) struct InspectionBudget {
+    entries: usize,
+    bytes: usize,
+    deadline: tokio::time::Instant,
+}
+
+impl InspectionBudget {
+    pub(crate) fn new(deadline: tokio::time::Instant) -> Self {
+        Self {
+            entries: 4096,
+            bytes: 32 * 1024 * 1024,
+            deadline,
+        }
+    }
+
+    fn check(&self) -> Result<()> {
+        anyhow::ensure!(
+            tokio::time::Instant::now() < self.deadline,
+            "state inspection deadline"
+        );
+        Ok(())
+    }
+}
+
 /// Makes a directory the daemon's user alone can enter (0700), existing or not.
 pub fn private_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path).with_context(|| format!("make {}", path.display()))?;
@@ -188,6 +213,59 @@ impl Store {
         self.list_with(kind, |_| {})
     }
 
+    /// Inspect complete keyed records within one shared budget. Unlike a normal live
+    /// listing, disappearance is unknown, not absence. Never follows record symlinks.
+    pub(crate) fn inspect<T: DeserializeOwned>(
+        &self,
+        kind: &str,
+        budget: &mut InspectionBudget,
+    ) -> Result<std::collections::BTreeMap<String, T>> {
+        use std::io::Read;
+        budget.check()?;
+        anyhow::ensure!(
+            std::fs::symlink_metadata(self.dir(kind))?
+                .file_type()
+                .is_dir(),
+            "state inspection requires a directory"
+        );
+        let mut out = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(self.dir(kind))? {
+            budget.check()?;
+            budget.entries = budget
+                .entries
+                .checked_sub(1)
+                .context("state inspection entry limit")?;
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_str().context("state inspection filename")?;
+            let Some(key) = name.strip_suffix(".json") else {
+                continue;
+            };
+            anyhow::ensure!(
+                entry.file_type()?.is_file(),
+                "state inspection requires regular files"
+            );
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(self.path(kind, key)?)?;
+            anyhow::ensure!(
+                file.metadata()?.is_file(),
+                "state inspection requires regular files"
+            );
+            let mut data = Vec::new();
+            file.take(budget.bytes as u64 + 1).read_to_end(&mut data)?;
+            budget.bytes = budget
+                .bytes
+                .checked_sub(data.len())
+                .context("state inspection byte limit")?;
+            budget.check()?;
+            out.insert(key.into(), serde_json::from_slice(&data)?);
+        }
+        budget.check()?;
+        Ok(out)
+    }
+
     /// [`Self::list`], with `between` called on each record's path after the directory entry
     /// is read and before the file is, where a concurrent delete lands.
     fn list_with<T: DeserializeOwned>(
@@ -270,6 +348,44 @@ mod tests {
 
     fn rec(id: &str, n: u32) -> Rec {
         Rec { id: id.into(), n }
+    }
+
+    #[test]
+    fn maintenance_inspection_limits_are_shared_and_expiry_never_means_empty() {
+        let (_dir, store) = open();
+        store.put("machines", "one", &rec("one", 1)).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut budget = InspectionBudget::new(deadline);
+        budget.entries = 1;
+        assert_eq!(
+            store.inspect::<Rec>("machines", &mut budget).unwrap().len(),
+            1
+        );
+        assert!(store.inspect::<Rec>("machines", &mut budget).is_err());
+        let mut budget = InspectionBudget::new(deadline);
+        budget.bytes = 1;
+        assert!(store.inspect::<Rec>("machines", &mut budget).is_err());
+        let mut budget = InspectionBudget::new(tokio::time::Instant::now());
+        assert!(store.inspect::<Rec>("warm-pools", &mut budget).is_err());
+    }
+
+    #[test]
+    fn maintenance_inspection_refuses_symlinks_and_malformed_records_without_changes() {
+        let (_dir, store) = open();
+        store.put("machines", "one", &rec("one", 1)).unwrap();
+        let link = store.dir("warm-pools").join("link.json");
+        std::os::unix::fs::symlink(store.dir("machines").join("one.json"), &link).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        assert!(store
+            .inspect::<Rec>("warm-pools", &mut InspectionBudget::new(deadline))
+            .is_err());
+        std::fs::remove_file(link).unwrap();
+        let bad = store.dir("warm-pools").join("bad.json");
+        std::fs::write(&bad, b"invalid").unwrap();
+        assert!(store
+            .inspect::<Rec>("warm-pools", &mut InspectionBudget::new(deadline))
+            .is_err());
+        assert_eq!(std::fs::read(bad).unwrap(), b"invalid");
     }
 
     fn mode(p: &Path) -> u32 {

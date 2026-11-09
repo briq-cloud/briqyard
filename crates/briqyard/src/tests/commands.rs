@@ -3,6 +3,14 @@
 use super::*;
 
 #[test]
+fn warm_maintenance_command() {
+    assert!(matches!(
+        parse(&["warm-maintenance"]).cmd,
+        Cmd::WarmMaintenance
+    ));
+}
+
+#[test]
 fn machine_lifecycle_commands() {
     match machine(parse(&["machine", "stop", "--suspend", "m1"])) {
         MachineCmd::Stop { suspend, id } => assert!(suspend && id == "m1"),

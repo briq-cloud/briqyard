@@ -1,3 +1,25 @@
+    WarmCatalogEligibility:
+      type: object
+      required: [observation, eligible, reason, counts]
+      properties:
+        observation: { $ref: "#/components/schemas/RuntimeObservation" }
+        eligible: { type: boolean }
+        reason: { type: string, enum: [eligible, busy, recovery_unresolved, state_unknown, outstanding_warm_state] }
+        counts:
+          type: object
+          nullable: true
+          description: "Complete fixed counts; null if admission or inspection is incomplete. Warm machine and authority counts include live or durable ownership; no cleanup authority."
+          required: [pools, desired_slots, pool_claims, warm_machines, launch_holds, launch_transitions, warm_names, pending_assignments, run_authorities]
+          properties:
+            pools: { type: integer, minimum: 0 }
+            desired_slots: { type: integer, minimum: 0 }
+            pool_claims: { type: integer, minimum: 0, description: "Outstanding claim receipts with a live or durable destination; validated historical receipts excluded" }
+            warm_machines: { type: integer, minimum: 0 }
+            launch_holds: { type: integer, minimum: 0 }
+            launch_transitions: { type: integer, minimum: 0 }
+            warm_names: { type: integer, minimum: 0 }
+            pending_assignments: { type: integer, minimum: 0 }
+            run_authorities: { type: integer, minimum: 0 }
     Namespace:
       type: object
       properties:

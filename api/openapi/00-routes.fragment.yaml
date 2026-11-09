@@ -370,6 +370,15 @@ paths:
         "204": { description: deleted }
         "404": { description: no such machine }
         "409": { description: "`bad_state`: a restore unfinished" }
+  /v1/maintenance/warm-catalog:
+    get:
+      summary: "Observe conservative warm-catalog maintenance eligibility on this daemon"
+      description: "Configured API bearer authentication required. Takes warm then namespace admission, with one five-second acquisition/inspection deadline and a shared 4096-entry/32-MiB inspection budget. Local filesystem calls are not preemptible. Returns fixed categories/counts, never tenant records. This snapshot is not a permit: SIGUSR2 reacquires both gates and checks again."
+      responses:
+        "200": { description: eligible, outstanding, busy or unknown observation, content: { application/json: { schema: { $ref: "#/components/schemas/WarmCatalogEligibility" } } } }
+        "401": { description: API authentication required }
+        "409": { description: API authentication not configured }
+        "503": { description: "`capacity`: startup recovery is unresolved" }
   /v1/machines/{id}/snapshots/{snap}/sandbox-recipe:
     parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/snap" }]
     get:

@@ -166,7 +166,7 @@ async fn legacy_records_need_no_launch_holds() {
 #[tokio::test]
 async fn compatible_handover_fences_new_admission_through_target_check() {
     use std::os::unix::fs::PermissionsExt;
-    let (h, _, _) = held().await;
+    let (h, record, _) = held().await;
     let dir = tempfile::tempdir().unwrap();
     let executable = dir.path().join("replacement");
     std::fs::write(
@@ -175,10 +175,14 @@ async fn compatible_handover_fences_new_admission_through_target_check() {
     )
     .unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // A compatible binary cannot override outstanding warm ownership.
+    assert!(h.m.handover_admission(&executable).await.is_err());
+    h.m.release_launch_hold(&record.id).unwrap();
     let admission = h.m.handover_admission(&executable).await.unwrap();
     assert!(h.m.inner.namespace_lifecycle.try_read().is_err());
-    assert!(h.m.held_addresses(1).contains(&2));
+    assert!(h.m.inner.warm_lock.try_read().is_err());
     drop(admission);
+    assert!(h.m.inner.warm_lock.try_write().is_ok());
     assert!(h.m.inner.namespace_lifecycle.try_read().is_ok());
 }
 
@@ -222,6 +226,7 @@ async fn handover_admission_deadline_and_cancellation_release_queued_writer() {
     ));
     // A stop signal/server completion drops the pending acquisition in main's select.
     drop(pending);
+    assert!(h.m.inner.warm_lock.try_write().is_ok());
     assert!(h.m.inner.namespace_lifecycle.try_read().is_ok());
     drop(reader);
     assert!(h.m.inner.namespace_lifecycle.try_write().is_ok());

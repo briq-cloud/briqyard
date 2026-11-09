@@ -54,6 +54,8 @@ enum Cmd {
     WarmPool(warm::WarmCmd),
     /// The host's status
     Status,
+    /// Observe host-local warm-catalog maintenance eligibility (daemon only).
+    WarmMaintenance,
     /// The API description
     Openapi,
     /// Machines
