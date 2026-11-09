@@ -3,6 +3,21 @@ use super::*;
 #[tokio::test]
 async fn maintenance_zero_pool_allows_observation_but_later_desired_change_blocks_handover() {
     let (h, _, seed) = source_with_unbound(true).await;
+    h.m.inner
+        .warm_policy
+        .lock()
+        .unwrap()
+        .catalog
+        .push(api::WarmCatalogEntry {
+            id: "owned-small".into(),
+            namespace: "operator".into(),
+            kind: "sandbox".into(),
+            source_machine: seed.machine_id.clone(),
+            snapshot: seed.snapshot.clone(),
+            generation: seed.generation.clone(),
+            size: image_size(),
+            max_ready: 1,
+        });
     h.m.put_warm_pool(
         "operator",
         "owned",
