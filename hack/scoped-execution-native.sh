@@ -17,6 +17,9 @@ T=scoped-native-$$
 D=$(sudo mktemp -d /var/lib/briqyard/scoped-native.XXXXXX)
 AUTHORITY_PID=
 CONFIG_SAVED=0
+PHASE=save_config
+# Report only a fixed phase, never the command or its expanded credentials.
+trap 'printf "scoped native: failed phase=%s\n" "$PHASE" >&2' ERR
 cleanup() {
   local rc=$?
   set +e
@@ -45,8 +48,11 @@ trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 sudo cp /etc/briqyard/config.yaml "$D/host-original.yaml"
 CONFIG_SAVED=1
+PHASE=provision_keys
 sudo "$DRIVER" provision "$D"
+PHASE=certificate
 sudo openssl req -x509 -newkey ed25519 -nodes -keyout "$D/key.pem" -out "$D/cert.pem" -days 1 -subj /CN=scoped-native >/dev/null 2>&1
+PHASE=configure
 sudo python3 - "$D" <<'PY'
 import json, os, secrets, sys
 from pathlib import Path
@@ -76,13 +82,21 @@ for file in p.iterdir():
     os.chmod(file,0o600)
 PY
 # CLI setup and cleanup use the ordinary local API; guest commands below use only scoped TLS.
-export BRIQYARD_TOKEN=$(sudo cat "$D/host-admin")
+PHASE=host_start
+BRIQYARD_TOKEN=$(sudo cat "$D/host-admin")
+export BRIQYARD_TOKEN
 sudo systemctl restart briqyardd
+PHASE=authority_start
 sudo bash -c 'echo "$$" > "$1/authority.pid"; exec /usr/local/bin/briqyard-fleet --config "$1/authority.yaml" authority' _ "$D" > /dev/null 2>&1 &
 AUTHORITY_PID=$!
 # A single bounded startup observation; no exec request is retried.
+PHASE=host_ready
 timeout 75 bash -c 'until briqyard status >/dev/null 2>&1; do sleep 1; done'
+PHASE=gateway
 briqyard namespace gateway set "$T" --image alpine:3.20 --memory 128 --port 3128 -- httpd -f -p 3128 >/dev/null
+PHASE=primary
 M=$(briqyard machine run --namespace "$T" --name primary --image alpine:3.20 --memory 128 --egress via:gateway+siblings -l briq_id=native-primary -l "team=$T" -- sleep 3600 | jq -er .id)
+PHASE=sibling
 S=$(briqyard machine run --namespace "$T" --name sibling --image alpine:3.20 --memory 128 -l briq_id=native-sibling -l "team=$T" -- sleep 3600 | jq -er .id)
+PHASE=scoped_dispatch
 sudo "$DRIVER" run "$D" "$T" "$M" "$S"
