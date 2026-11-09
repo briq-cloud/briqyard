@@ -266,7 +266,7 @@ impl UpdateIntent {
                         && self.change.restart.is_none())
             });
         anyhow::ensure!(
-            matches!(self.schema, 1 | 2 | 3)
+            matches!(self.schema, 1..=3)
                 && self.machine == self.source_record.id
                 && self.machine == self.target.id
                 && self.source_record.assigned_run == self.target.assigned_run

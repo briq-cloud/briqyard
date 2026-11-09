@@ -304,3 +304,33 @@ async fn creation_settlement_uncertain_machine_write_repairs_before_retry_public
     full_startup(&h).await.unwrap();
     Box::pin(h.m.start(&id, None)).await.unwrap();
 }
+
+#[tokio::test]
+async fn initial_growth_uncertain_intent_write_retains_quota_without_growing_backing() {
+    let (h, entry) = Box::pin(running()).await;
+    let before = entry.snapshot();
+    let held = h.m.quota("destination").unwrap().used.disk_gb;
+    let directory = h.m.inner.store.dir(UPDATES);
+    std::fs::create_dir_all(&directory).unwrap();
+    let blocked = directory.join(format!("{}.json.tmp", before.id));
+    std::fs::create_dir(&blocked).unwrap();
+    assert!(Box::pin(h.m.update(&before.id, grow(3), None))
+        .await
+        .is_err());
+    assert_eq!(h.m.quota("destination").unwrap().used.disk_gb, held + 1);
+    assert_eq!(
+        h.pool.zfs.volsize(&before.data_dataset()).await.unwrap(),
+        2 << 30
+    );
+    assert!(h
+        .m
+        .inner
+        .store
+        .get::<UpdateIntent>(UPDATES, &before.id)
+        .unwrap()
+        .is_none());
+    assert!(h.m.ordinary_operation(&entry.snapshot()).is_err());
+    std::fs::remove_dir(blocked).unwrap();
+    full_startup(&h).await.unwrap();
+    assert_eq!(h.m.quota("destination").unwrap().used.disk_gb, held);
+}

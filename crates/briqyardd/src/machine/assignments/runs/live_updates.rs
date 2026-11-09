@@ -76,6 +76,10 @@ impl Manager {
         record: &Record,
     ) -> Result<Option<Record>> {
         let Some(update) = self.inner.store.get::<UpdateIntent>(UPDATES, &record.id)? else {
+            anyhow::ensure!(
+                record.assigned_run.is_some() || record.pending.is_none(),
+                "initial assigned pending change lacks durable update authority"
+            );
             return Ok(None);
         };
         if update.creation_authority().is_none() {
@@ -264,7 +268,7 @@ impl Manager {
         );
         self.repair_outstanding_update_record(&record.id)?;
         update.predecessor_target = Some(update.target.clone());
-        update.target = Box::new(stopped_projection(&update.target));
+        *update.target = stopped_projection(&update.target);
         update.target.state = state::STOPPED.into();
         update.creation_settlement = Some(CreationSettlement {
             incarnation: incarnation.clone(),
