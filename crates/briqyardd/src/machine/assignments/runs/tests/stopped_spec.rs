@@ -1,6 +1,33 @@
 //! Stopped workload updates reuse the assigned run's durable authority and backing.
 use super::*;
 
+// The initial destination assignment predates the continuation journal. Establish a
+// public continuation and its settled Current, as the existing resize fixtures do.
+async fn settled_run(checkpoint: bool) -> (crate::machine::tests::Harness, Arc<Entry>) {
+    let (h, entry) = stopped(false).await;
+    let id = entry.snapshot().id;
+    tokio::time::timeout(Duration::from_secs(60), h.m.start(&id, None))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        h.m.stop(&id, Duration::from_secs(1), checkpoint, None),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let current: Current =
+        h.m.inner
+            .store
+            .get(RUNS, &id)
+            .unwrap()
+            .expect("settled continuation journal");
+    assert_eq!(current.reference.phase, Phase::Settled);
+    assert_eq!(entry.snapshot().state, state::STOPPED);
+    (h, entry)
+}
+
 fn patch(
     image: Option<String>,
     env: BTreeMap<String, String>,
@@ -65,7 +92,7 @@ fn assert_endpoint_retained(h: &crate::machine::tests::Harness, expected: &Endpo
 #[tokio::test]
 async fn stopped_image_env_replacement_keeps_identity_volume_and_waits_for_start() {
     for resource in 0..3 {
-        let (h, entry) = stopped(true).await;
+        let (h, entry) = settled_run(true).await;
         let before = entry.snapshot();
         let endpoint = seed_endpoint(&h, &before);
         let id = before.id.clone();
@@ -161,7 +188,7 @@ async fn stopped_image_env_replacement_keeps_identity_volume_and_waits_for_start
 
 #[tokio::test]
 async fn stopped_env_coalescing_clear_cancel_and_uncertain_write_recover() {
-    let (h, entry) = stopped(false).await;
+    let (h, entry) = settled_run(false).await;
     let before = entry.snapshot();
     let id = before.id.clone();
     let replacement = BTreeMap::from([("NEW".into(), "value".into())]);
@@ -216,7 +243,7 @@ async fn stopped_env_coalescing_clear_cancel_and_uncertain_write_recover() {
 
 #[tokio::test]
 async fn stopped_env_update_refuses_missing_creation_authority() {
-    let (h, entry) = stopped(false).await;
+    let (h, entry) = settled_run(false).await;
     let id = entry.snapshot().id;
     let before = serde_json::to_value(entry.snapshot()).unwrap();
     let run: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
@@ -255,7 +282,7 @@ async fn stopped_env_only_replacement_starts_cold_with_fresh_config_and_same_dis
         BTreeMap::from([("REPLACEMENT".into(), "fresh".into())]),
         BTreeMap::new(),
     ] {
-        let (h, entry) = stopped(true).await;
+        let (h, entry) = settled_run(true).await;
         let before = entry.snapshot();
         assert!(before.suspended);
         let id = before.id.clone();
