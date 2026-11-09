@@ -388,3 +388,25 @@ pub fn check_snapshot_name(name: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Atomically records a cold next-start target after proving the old VMM exited.
+/// The environment is a complete replacement, including an explicitly empty map.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoppedUpdateRequest {
+    pub claim_nonce: String,
+    pub image: String,
+    pub env: BTreeMap<String, String>,
+}
+
+/// Current durable acceptance receipt. It contains no environment or request fingerprint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoppedUpdateReceipt {
+    pub claim_nonce: String,
+    pub machine_id: String,
+    pub namespace: String,
+    pub version: u64,
+    pub host_id: String,
+    pub host_boot_id: String,
+}

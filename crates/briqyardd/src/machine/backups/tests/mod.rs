@@ -104,3 +104,41 @@ mod restore;
 mod schedule;
 
 mod ownership;
+
+#[tokio::test]
+async fn stopped_update_sync_failure_fences_scheduler_record_writes() {
+    let h = harness(|_| {}).await;
+    let m = h.machine("scheduled", every("1h", 2), true).await;
+    let stopped =
+        h.m.stop(&m.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+    let e = h.m.own_entry(&m.id).unwrap();
+    let r = e.snapshot();
+    let req = api::StoppedUpdateRequest {
+        claim_nonce: "n_scheduler".into(),
+        image: r.image,
+        env: r.env,
+    };
+    h.m.inner.store.fail_next_sync.store(true, Relaxed);
+    assert!(h
+        .m
+        .stopped_update(&m.id, req, stopped.version)
+        .await
+        .is_err());
+    let accepted = h.stored(&m.id).unwrap();
+    let err = MError::Other(anyhow!("synthetic scheduled backup failure"));
+    h.m.inner.store.fail_next_sync.store(true, Relaxed);
+    h.m.backup_failed(&e, &err, Utc::now()).await;
+    let stored = h.stored(&m.id).unwrap();
+    assert_eq!(stored.version, accepted.version);
+    assert_eq!(stored.pending, accepted.pending);
+    assert!(stored.stopped_updates.contains_key("n_scheduler"));
+    assert!(e.stopped_update_unsynced.load(Relaxed));
+    h.m.save(&e).unwrap();
+    let stored = h.stored(&m.id).unwrap();
+    assert!(stored.stopped_updates.contains_key("n_scheduler"));
+    assert_eq!(stored.pending, accepted.pending);
+    assert!(stored.backup.next_at.is_some());
+    assert!(!e.stopped_update_unsynced.load(Relaxed));
+}

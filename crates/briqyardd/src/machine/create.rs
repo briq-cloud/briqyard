@@ -308,6 +308,7 @@ impl Manager {
             warm_slot,
             launch_identity: None,
             assigned_run: None,
+            stopped_updates: BTreeMap::new(),
             rest: Default::default(),
             snapshots: Vec::new(),
             restoring: None,
@@ -1055,6 +1056,7 @@ impl Manager {
     /// `If-Match` (ADR 0019): the version the caller read, compared under the machine's lock,
     /// so nothing moves it between the check and the change. None: no condition.
     pub(super) fn check_version(&self, e: &Entry, at: Option<u64>) -> Result<(), MError> {
+        self.settle_stopped_update(e)?;
         match at {
             Some(v) if v != e.snapshot().version => Err(MError::Moved(Box::new(self.view(e)))),
             _ => Ok(()),

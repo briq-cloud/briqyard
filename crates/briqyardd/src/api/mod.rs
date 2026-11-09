@@ -113,6 +113,11 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .patch(update_machine)
                 .delete(destroy_machine),
         )
+        .route("/v1/machines/:id/stopped-update", post(stopped_update))
+        .route(
+            "/v1/machines/:id/stopped-update/:nonce",
+            get(stopped_update_receipt),
+        )
         .route("/v1/machines/:id/start", post(start_machine))
         .route("/v1/machines/:id/wake", post(wake_machine))
         .route("/v1/machines/:id/stop", post(stop_machine))

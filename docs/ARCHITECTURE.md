@@ -500,3 +500,10 @@ after a reboot, the number is someone else's. What it writes is its own: umask `
 in the jail `0400` for the jail's user, so no other local uid (another machine's Firecracker
 included) reads a namespace's secrets (ADR 0014). A state key is a file name: `Store::path`
 refuses a key that would leave its directory, behind the API's own validation of ids.
+
+An ordinary stopped machine can record a nonce-bound cold target through
+`POST /v1/machines/:id/stopped-update` with mandatory `If-Match`, image and full env.
+The daemon checks native exit under the transition lock and atomically persists the
+pending target, current suspend invalidation and a receipt. Recover uncertain HTTP
+responses by exact nonce GET on `/v1/machines/:id/stopped-update/:nonce`; a later
+version or changed namespace, host or host boot invalidates it (ADR 0126).

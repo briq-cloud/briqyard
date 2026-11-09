@@ -69,6 +69,7 @@ impl Manager {
         // Its turn and its lock once no stop is under way; a start that slipped in between is
         // the caller's to repeat.
         let _turns = e.lock_once_stopped(true).await;
+        self.settle_stopped_update(&e)?;
         // A refusal from here to the new address leaves the machine as it was: a running one
         // runs again.
         let joined: Result<(String, String), MError> = async {
@@ -290,6 +291,7 @@ impl Manager {
     async fn rename_namespace(&self, e: &Arc<Entry>, namespace: &str) -> Result<bool, MError> {
         let _creating = self.inner.namespace_create.lock().await;
         let _turns = e.lock_once_stopped(true).await;
+        self.settle_stopped_update(e)?;
         let r = e.snapshot();
         self.check_movable(&r, namespace)?;
         let from = r.namespace.clone();

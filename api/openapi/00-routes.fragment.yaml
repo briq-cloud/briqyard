@@ -106,6 +106,34 @@ paths:
       responses:
         "204": { description: destroyed (or already gone) }
         "409": { $ref: "#/components/responses/Moved" }
+  /v1/machines/{id}/stopped-update:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Record an ordinary stopped machine's next cold target with a durable nonce receipt
+      description: Requires native confirmed VMM exit even for an unchanged target. Preserves the data disk and invalidates current memory resume eligibility. Assigned and source-created machines are refused. Recover an uncertain response with the exact receipt GET; never substitute PATCH or replay an uncertain request.
+      parameters:
+        - { name: If-Match, in: header, required: true, schema: { type: integer, minimum: 0 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StoppedUpdateRequest" }
+      responses:
+        "200": { description: durable current acceptance, content: { application/json: { schema: { $ref: "#/components/schemas/StoppedUpdateReceipt" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Moved" }
+  /v1/machines/{id}/stopped-update/{nonce}:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: nonce, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Recover a current durable stopped-update receipt by exact nonce
+      description: A changed machine version, namespace, host or host boot invalidates the receipt. Unknown or stale receipts answer 404; unavailable native exit authority answers 409. No mutation is replayed.
+      responses:
+        "200": { description: durable current acceptance, content: { application/json: { schema: { $ref: "#/components/schemas/StoppedUpdateReceipt" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /v1/machines/{id}/start:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
