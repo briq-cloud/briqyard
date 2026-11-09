@@ -3,33 +3,35 @@ use super::*;
 
 // The initial destination assignment predates the continuation journal. Establish a
 // public continuation and its settled Current, as the existing resize fixtures do.
-async fn settled_run(checkpoint: bool) -> (crate::machine::tests::Harness, Arc<Entry>) {
-    eprintln!("stopped-fixture stage=settled-enter");
-    let (h, entry) = stopped(false).await;
-    eprintln!("stopped-fixture stage=initial-stop-ready");
-    let id = entry.snapshot().id;
-    tokio::time::timeout(Duration::from_secs(60), h.m.start(&id, None))
+// Keep the fixture's construction and poll temporaries out of each test frame,
+// as the public lifecycle fixtures do for their multi-operation futures.
+fn settled_run(
+    checkpoint: bool,
+) -> impl std::future::Future<Output = (crate::machine::tests::Harness, Arc<Entry>)> {
+    Box::pin(async move {
+        let (h, entry) = Box::pin(stopped(false)).await;
+        let id = entry.snapshot().id;
+        tokio::time::timeout(Duration::from_secs(60), Box::pin(h.m.start(&id, None)))
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            h.m.stop(&id, Duration::from_secs(1), checkpoint, None),
+        )
         .await
         .unwrap()
         .unwrap();
-    eprintln!("stopped-fixture stage=continuation-start-ready");
-    tokio::time::timeout(
-        Duration::from_secs(60),
-        h.m.stop(&id, Duration::from_secs(1), checkpoint, None),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    eprintln!("stopped-fixture stage=continuation-stop-ready");
-    let current: Current =
-        h.m.inner
-            .store
-            .get(RUNS, &id)
-            .unwrap()
-            .expect("settled continuation journal");
-    assert_eq!(current.reference.phase, Phase::Settled);
-    assert_eq!(entry.snapshot().state, state::STOPPED);
-    (h, entry)
+        let current: Current =
+            h.m.inner
+                .store
+                .get(RUNS, &id)
+                .unwrap()
+                .expect("settled continuation journal");
+        assert_eq!(current.reference.phase, Phase::Settled);
+        assert_eq!(entry.snapshot().state, state::STOPPED);
+        (h, entry)
+    })
 }
 
 fn patch(
@@ -192,24 +194,13 @@ async fn stopped_image_env_replacement_keeps_identity_volume_and_waits_for_start
 
 #[tokio::test]
 async fn stopped_env_coalescing_clear_cancel_and_uncertain_write_recover() {
-    eprintln!(
-        "stopped-coalescing future-bytes={}",
-        std::mem::size_of_val(&stopped_env_coalescing_body())
-    );
-    stopped_env_coalescing_body().await;
-}
-
-async fn stopped_env_coalescing_body() {
-    eprintln!("stopped-coalescing stage=fixture-enter");
     let (h, entry) = settled_run(false).await;
-    eprintln!("stopped-coalescing stage=fixture-ready");
     let before = entry.snapshot();
     let id = before.id.clone();
     let replacement = BTreeMap::from([("NEW".into(), "value".into())]);
     h.m.update(&id, patch(None, replacement, None), None)
         .await
         .unwrap();
-    eprintln!("stopped-coalescing stage=first-update-ready");
     let blocked =
         h.m.inner
             .store
@@ -221,20 +212,16 @@ async fn stopped_env_coalescing_body() {
         .update(&id, patch(None, BTreeMap::new(), None), None)
         .await
         .is_err());
-    eprintln!("stopped-coalescing stage=uncertain-clear-ready");
     let outstanding: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
     assert!(h
         .m
         .update(&id, patch(None, before.env.clone(), None), None)
         .await
         .is_err());
-    eprintln!("stopped-coalescing stage=uncertain-cancel-ready");
     let retained: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
     assert_eq!(outstanding.digest().unwrap(), retained.digest().unwrap());
     std::fs::remove_dir(blocked).unwrap();
-    eprintln!("stopped-coalescing stage=restart-enter");
     restart(&h).unwrap();
-    eprintln!("stopped-coalescing stage=restart-ready");
     assert_eq!(
         h.m.entry(&id)
             .unwrap()
@@ -249,13 +236,9 @@ async fn stopped_env_coalescing_body() {
     h.m.update(&id, patch(None, before.env.clone(), None), None)
         .await
         .unwrap();
-    eprintln!("stopped-coalescing stage=restart-enter");
     restart(&h).unwrap();
-    eprintln!("stopped-coalescing stage=restart-ready");
     assert!(h.m.entry(&id).unwrap().snapshot().pending.is_none());
-    eprintln!("stopped-coalescing stage=start-enter");
     h.m.start(&id, None).await.unwrap();
-    eprintln!("stopped-coalescing stage=start-ready");
     assert_eq!(h.m.entry(&id).unwrap().snapshot().env, before.env);
     assert!(h
         .m
@@ -692,21 +675,3 @@ async fn legacy_settled_update_keeps_exact_field_order_bytes_and_digest() {
 }
 
 mod recovery_boundaries;
-
-// The factories are never invoked: measure generated state without allocating the
-// futures or running a machine. Useful when an inline test frame cannot be entered.
-#[test]
-fn stopped_spec_future_layout_diagnostic() {
-    fn bytes<F: std::future::Future>(_: impl FnOnce() -> F) -> usize {
-        std::mem::size_of::<F>()
-    }
-    let manager: Option<&Manager> = None;
-    let update = bytes(|| {
-        manager
-            .unwrap()
-            .update("diagnostic", Default::default(), None)
-    });
-    let start = bytes(|| manager.unwrap().start("diagnostic", None));
-    let fixture = bytes(|| settled_run(false));
-    eprintln!("future-layout bytes: update={update} start={start} settled_fixture={fixture}");
-}

@@ -26,18 +26,14 @@ async fn stopped_with(
     checkpoint: bool,
     volume: Option<u32>,
 ) -> (crate::machine::tests::Harness, Arc<Entry>) {
-    eprintln!("stopped-fixture stage=initial-enter");
     let (h, entry, request) = super::super::tests::fixture_with(volume).await;
-    eprintln!("stopped-fixture stage=prepared-ready");
     let digest = templates::sandbox::request_digest(&request).unwrap();
     h.m.stage_destination_assignment(request, &entry, 2)
         .await
         .unwrap();
-    eprintln!("stopped-fixture stage=assignment-staged");
     h.m.start_destination_assignment("destination", "assignment-one", &digest)
         .await
         .unwrap();
-    eprintln!("stopped-fixture stage=assignment-started");
     entry.rec.lock().unwrap().vmm_version = h.m.inner.vmm.version();
     h.m.save(&entry).unwrap();
     h.m.stop(

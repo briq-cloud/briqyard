@@ -6,9 +6,7 @@ pub(in crate::machine) async fn reserved() -> (Harness, Arc<Entry>) {
 }
 /// A reserved unbound slot whose sealed topology has this `/work` volume (none: two drives).
 pub(in crate::machine) async fn reserved_with(volume: Option<u32>) -> (Harness, Arc<Entry>) {
-    eprintln!("stopped-fixture stage=reserved-enter");
     let (h, source, snapshot, _) = source().await;
-    eprintln!("stopped-fixture stage=source-ready");
     h.namespace("t1");
     let mut record = crate::machine::tests::record();
     record.id = "m_unbound".into();
@@ -161,16 +159,13 @@ async fn settled_paused_exit_can_finish_cleanup_but_unknown_exit_cannot() {
 }
 
 pub(in crate::machine) async fn prepared_with(volume: Option<u32>) -> (Harness, Arc<Entry>) {
-    eprintln!("stopped-fixture stage=prepared-enter");
     let (h, entry) = reserved_with(volume).await;
-    eprintln!("stopped-fixture stage=reserved-ready");
     h.m.inner
         .machines
         .lock()
         .unwrap()
         .insert(entry.snapshot().id, entry.clone());
     h.disks(&entry).await;
-    eprintln!("stopped-fixture stage=disks-ready");
     {
         let _turn = entry.lock.lock().await;
         h.m.start_entry(&entry, true).await.unwrap();
