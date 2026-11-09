@@ -10,6 +10,7 @@ mod model;
 mod projection;
 mod publication;
 mod recovery;
+mod root_updates;
 mod startup;
 mod terminal;
 #[cfg(test)]
