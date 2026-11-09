@@ -88,12 +88,14 @@ pub(super) fn router(
     host: HostTransport,
     host_id: String,
     credentials: Credentials,
+    fleet_config: &crate::config::Config,
     trust: TrustConfig,
     clock: Arc<dyn ClockSource>,
 ) -> Result<Router, &'static str> {
     if host_id.is_empty()
         || host_id != host.host_id()
         || credentials.host_administrator != host.administrator_token()
+        || credentials.administrator != fleet_config.token
         || !valid_credentials(&credentials)
         || trust.keys.is_empty()
         || trust.central_issuer.is_empty()
@@ -681,6 +683,10 @@ mod tests {
             transport,
             host_id,
             credentials,
+            &crate::config::Config {
+                token: "fleet-admin".into(),
+                ..Default::default()
+            },
             TrustConfig {
                 keys: vec![VerificationKey {
                     kid: "central".into(),
@@ -698,8 +704,8 @@ mod tests {
         (app, dir, epoch)
     }
     #[test]
-    fn constructor_checks_the_actual_transport_identity_and_administrator() {
-        for change in 0..3 {
+    fn constructor_checks_actual_host_and_fleet_administrator_credentials() {
+        for change in 0..5 {
             let host = HostRec {
                 id: "host".into(),
                 url: "https://127.0.0.1:1".into(),
@@ -711,12 +717,19 @@ mod tests {
                 configured_fixture(Arc::new(FixedClock(None)), host, |host_id, credentials| {
                     if change == 0 {
                         *host_id = "another-host".into();
-                    } else {
+                    } else if change < 3 {
                         credentials.host_administrator = "unrelated-placeholder".into();
                         if change == 1 {
                             credentials.installer = "host-admin".into();
                         } else {
                             credentials.gateway = "host-admin".into();
+                        }
+                    } else {
+                        credentials.administrator = "unrelated-placeholder".into();
+                        if change == 3 {
+                            credentials.installer = "fleet-admin".into();
+                        } else {
+                            credentials.gateway = "fleet-admin".into();
                         }
                     }
                 });

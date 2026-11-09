@@ -388,6 +388,9 @@ live `DurableIssuer`, one fixed pinned host transport, distinct central-installe
 gateway-only bearers, trusted verification keys and an injectable qualified-clock source.
 Neither role accepts the fleet or host administrator credential. Authentication applies on
 loopback. The router has no listener, config field or production credential/clock provisioner.
+Construction checks the fleet administrator against the fleet configuration and the host
+identity and administrator against the fixed transport. Caller-supplied comparison values
+alone do not establish credential separation.
 A clock observation includes a monotonic expiry and maximum five-second uncertainty;
 missing or expired evidence refuses mutation. Ordinary `SystemTime` is not a clock
 qualifier. The issuer journal remains the single writer across all handlers; an async
