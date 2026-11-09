@@ -618,7 +618,12 @@ claim. These added native gates require a native run; offline fixture tests do n
 Restoration failures print only fixed categories for configuration validation/copy,
 previous incarnation, PID queries/change, signal, start, readiness and the outer timeout.
 Readiness exhaustion distinguishes query failure, query timeout and identity mismatch. The
-90-second ownership drain, 10-second file restore and 70-second handover bounds remain.
+90-second ownership drain and 10-second file restore bounds remain. Handover has one
+128-second budget: 22 seconds for bounded preflight calls, the runtime's five-second admission
+and 60-second shutdown, five seconds for PID observation, seven for start, 25 for readiness
+and four for failure evidence. Command allowances include kill grace. Calls consume the
+remaining phase budget; PID polling reserves restoration time and readiness never resets the
+shared deadline.
 After an attempted SIGUSR2, a failure also projects journal evidence from the recorded daemon
 PID since that attempt. Only disposable CI reads it: at most 129 entries to detect a 128-entry
 limit, 128 KiB and a three-second reader deadline (one-second kill grace). Exact structured
@@ -627,7 +632,10 @@ and completion remain separate. Missing, malformed, mismatched, conflicting or o
 evidence is unknown. Raw journal messages and errors are suppressed. Only the recorded PID is
 signaled; these diagnostics never retry handover or relax restoration identity checks.
 `python3 -m unittest hack/test_native_seals.py` exercises the exported Bash caller with offline,
-authentication-aware command fakes; it does not establish the cause of a native failure.
+authentication-aware command fakes. A fake clock covers accepted shutdown beyond 15 seconds,
+including full preflight/admission/shutdown allowances, then restored readiness. Refusal,
+expiry and configuration/incarnation mismatches still fail. These tests do not establish the
+cause of a native failure or qualify native handover.
 
 The init root-only `--ignored run_as` filter includes loopback ext4 sync, freeze rollback, thaw, deadline and connection-close tests (ADR 0092).
 

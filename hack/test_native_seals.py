@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -198,9 +199,20 @@ briqyard() { if [ "$3" = m_zero ]; then echo native-zero; else echo native-first
             self.assertEqual(result.stdout, "")
             self.assertEqual(result.stderr.strip(), "native unbound process/disk proof unavailable or inconsistent")
 
+    def test_handover_budget_covers_runtime_admission_and_shutdown(self):
+        source = (HACK / "e2e-seals.sh").read_text()
+        daemon = HACK.parent / "crates/briqyardd/src"
+        shutdown = int(re.search(r"const SHUTDOWN:.*from_secs\((\d+)\)", (daemon / "main.rs").read_text())[1])
+        admission_source = (daemon / "machine/launch_identity.rs").read_text().split("pub async fn handover_admission(", 1)[1]
+        admission = int(re.search(r"Duration::from_secs\((\d+)\)", admission_source)[1])
+        budget = int(re.search(r"^seal_handover_seconds=(\d+)$", source, re.M)[1])
+        self.assertEqual(budget, 22 + admission + shutdown + 5 + 7 + 25 + 4)
+        self.assertIn('timeout --kill-after=2 "${seal_handover_seconds}s" bash', source)
+
     def test_restore_handover_requires_signal_incarnation_readiness_and_config(self):
         source = (HACK / "e2e-seals.sh").read_text()
         function = "seal_restore_handover() {" + source.split("seal_restore_handover() {", 1)[1].split("\n}\n", 1)[0] + "\n}"
+        function = next(line for line in source.splitlines() if line.startswith("seal_handover_seconds=")) + "\n" + function
         prelude = r"""
 set -u
 RUNNER_ENVIRONMENT=offline-fixture
@@ -237,6 +249,7 @@ briqyard() {
         functions = ""
         for name in ["seal_restore_handover", "seal_cleanup"]:
             functions += name + "() {" + source.split(name + "() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+        functions = next(line for line in source.splitlines() if line.startswith("seal_handover_seconds=")) + "\n" + functions
         functions = functions.replace('sudo cp "$seal_config" /etc/briqyard/config.yaml', 'sudo cp "$seal_config" "$events/restored"')
         prelude = r"""
 set -euo pipefail
@@ -274,19 +287,30 @@ timeout() {
   fi
   "$@"
 }
-sleep() { SECONDS=$((SECONDS+30)); }
+sleep() {
+  if [[ "$scenario" = accepted_* ]]; then
+    local tick=0
+    [ ! -e "$events/clock" ] || read -r tick < "$events/clock"
+    SECONDS=$((tick+1)); echo "$SECONDS" > "$events/clock"
+  else SECONDS=$((SECONDS+30)); fi
+}
 ok() { pass=$((pass+1)); }
 sudo() {
   if [ "$1" = briqyardd ]; then echo '{"source":"file","sha256":"original"}'; elif [ "$1" = kill ]; then
     [ "$2 $3" = '-USR2 11' ] || return 99
+    [ ! -e "$events/signaled" ] || return 99
     echo signal > "$events/signaled"
+    # Spend every preflight allowance before a full admission/shutdown interval.
+    if [ "$scenario" = accepted_caps ]; then SECONDS=22; echo 22 > "$events/clock"; fi
   else "$@"; fi
 }
 systemctl() {
   case "$1" in
     show)
+      local changed_at=64
+      [ "$scenario" != accepted_caps ] || changed_at=87
       if [ -e "$events/signaled" ]; then
-        if [ "$scenario" = pid_change_exhausted ]; then echo 11; else echo 22; fi
+        if [ "$scenario" = pid_change_exhausted ] || [ "$scenario" = accepted_expired ] || { [[ "$scenario" = accepted_* ]] && [ "$(cat "$events/clock" 2>/dev/null || echo 0)" -lt "$changed_at" ]; }; then echo 11; else echo 22; fi
       elif [ "$scenario" = old_pid_invalid ]; then echo 0; else echo 11; fi;;
     kill) echo signal > "$events/signaled";;
     start) :;;
@@ -297,10 +321,13 @@ briqyard() {
   if [ "$1" = warm-maintenance ]; then
     if [ -e "$events/signaled" ]; then
       [ "${BRIQYARD_TOKEN-}" = "${seal_expected_token-}" ] || return 22
+      local ready_at=84
+      [ "$scenario" != accepted_caps ] || ready_at=107
+      if [[ "$scenario" = accepted_* ]] && [ "$(cat "$events/clock")" -lt "$ready_at" ]; then return 1; fi
       echo new >> "$events/queries"
       local incarnation=new digest=original
       [ "$scenario" != sameincarnation ] || incarnation=old
-      [ "$scenario" != wrongconfig ] || digest=fixture
+      case "$scenario" in wrongconfig|accepted_slow_wrongconfig) digest=fixture;; accepted_slow_sameincarnation) incarnation=old;; esac
       if [ "$scenario" = malformed ]; then echo '{'; else
         printf '{"observation":{"incarnation":"%s","config":{"source":"file","sha256":"%s"}}}\n' "$incarnation" "$digest"
       fi
@@ -317,7 +344,10 @@ seal_api() { echo '{"eligible":true,"reason":"eligible","counts":{"desired_slots
 export seal_expected_token=$seal_original_token
 export -f timeout sleep sudo systemctl briqyard
 """
-        scenarios = {"success": None, "missingincarnation": "previous_incarnation_invalid",
+        scenarios = {"success": None, "accepted_slow": None, "accepted_caps": None,
+                     "accepted_expired": "pid_change_exhausted",
+                     "accepted_slow_wrongconfig": "readiness_exhausted_identity_mismatch",
+                     "accepted_slow_sameincarnation": "readiness_exhausted_identity_mismatch", "missingincarnation": "previous_incarnation_invalid",
                      "previous_incarnation": "previous_incarnation_query", "previous_incarnation_timeout": "previous_incarnation_timeout",
                      "copy": "config_restore", "copy_timeout": "config_restore_timeout",
                      "old_pid_invalid": "old_pid_invalid", "pid_change_exhausted": "pid_change_exhausted",
@@ -369,6 +399,7 @@ export -f timeout sleep sudo systemctl briqyard
     def test_failure_journal_projection_uses_recorded_signal_attempt_and_no_raw_output(self):
         source = (HACK / "e2e-seals.sh").read_text()
         function = "seal_restore_handover() {" + source.split("seal_restore_handover() {", 1)[1].split("\n}\n", 1)[0] + "\n}"
+        function = next(line for line in source.splitlines() if line.startswith("seal_handover_seconds=")) + "\n" + function
         projection_path = HACK / "e2e-handover-evidence.py"
         spec = importlib.util.spec_from_file_location("handover_evidence", projection_path)
         projection = importlib.util.module_from_spec(spec)
@@ -457,7 +488,7 @@ journalctl() {
                     fake.write_text("#!/bin/sh\necho offline_guard >&2\nexit 99\n")
                     fake.chmod(0o700)
                 setup = 'export PATH="$1/bin:$PATH"\nevents=$1/events; fixture=$1/fixture; scenario=$2; seal_handover_projection=$3\n'
-                caller = "\nexport RUNNER_ENVIRONMENT events fixture scenario seal_handover_projection\nexport -f timeout sleep date sudo systemctl journalctl seal_restore_handover\nbash -c 'seal_restore_handover old'"
+                caller = "\nexport RUNNER_ENVIRONMENT events fixture scenario seal_handover_projection seal_handover_seconds\nexport -f timeout sleep date sudo systemctl journalctl seal_restore_handover\nbash -c 'seal_restore_handover old'"
                 result = subprocess.run(["bash", "-c", setup + prelude + function + caller,
                                          "fixture", directory, scenario, str(projection_path.resolve())], capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, 1)
@@ -470,6 +501,7 @@ journalctl() {
     def test_cleanup_refuses_handover_when_authority_is_outstanding(self):
         source = (HACK / "e2e-seals.sh").read_text()
         cleanup = "seal_cleanup() {" + source.split("seal_cleanup() {", 1)[1].split("\n}\n", 1)[0] + "\n}"
+        cleanup = next(line for line in source.splitlines() if line.startswith("seal_handover_seconds=")) + "\n" + cleanup
         for eligible in [True, False, None]:
             with self.subTest(eligible=eligible), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)

@@ -26,7 +26,7 @@ The sealed acceptance cleanup records fixed restoration failure categories at ev
 boundary, including command and overall timeouts. It suppresses command diagnostics and
 prints no configuration, credentials, paths or command arguments. Readiness still requires a
 new serving incarnation and the exact restored configuration identity after signal and PID
-change; no fallback or longer deadline is introduced. Offline exported-function caller tests
+change; no fallback is introduced. Offline exported-function caller tests
 cover success, refusal and exhaustion. These diagnostics do not establish a native root cause.
 
 On failure after a signal attempt, disposable CI projects a bounded journal selection for the
@@ -34,6 +34,16 @@ recorded daemon PID and attempt timestamp. Journal-owned unit, executable, trans
 metadata must match; exact structured daemon messages distinguish refusal from accepted
 shutdown or completion. Only allowlisted reason categories leave the projection. Missing,
 malformed, ambiguous or over-budget evidence stays unknown. No raw error or journal message
-is printed. The signal targets the recorded PID, and the existing deadlines and restoration
-predicates remain unchanged. Offline Bash fixtures exercise this boundary without a journal,
-systemd or network; native root-cause evidence still requires a new native run.
+is printed. The signal targets the recorded PID; restoration predicates remain unchanged.
+Offline Bash fixtures exercise this boundary without a journal, systemd or network.
+
+The fixture's former 15-second PID wait could expire during a legal shutdown. Its shared
+handover budget is now 128 seconds: 22 for existing preflight calls, five for admission
+(`machine/launch_identity.rs`), 60 for shutdown (`main.rs`, including connection drain),
+five for a PID query, seven for start, 25 for readiness and four for failure evidence.
+Command bounds include kill grace. Calls fit the remaining phase deadline; PID polling
+reserves start/readiness/evidence time. Fake-clock regressions spend the full preflight,
+admission and shutdown allowances before PID change and exact restored readiness. Expiry,
+refusal and identity mismatch still fail. Accepted-shutdown evidence alone does not prove
+why shutdown was delayed. Runtime bounds and behavior are unchanged; native qualification
+still requires a new native run.
