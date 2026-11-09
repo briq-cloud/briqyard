@@ -2,6 +2,36 @@
 
 use super::*;
 
+#[tokio::test]
+async fn gateway_idle_stop_respects_protection_and_user_stop() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let gw = h.with_gateway().await;
+    let mut spec = gateway_spec(3128);
+    spec.start = true;
+    h.m.set_gateway("t1", spec).await.unwrap();
+    let entry = h.m.entry(&gw).unwrap();
+    let target = api::execution::Target {
+        host: "h_test".into(),
+        machine: gw.clone(),
+        namespace: "t1".into(),
+        run: "run_test".into(),
+        placement: "placement_test".into(),
+    };
+    let expiry = (Utc::now().timestamp() as u64 + 30) * 1000;
+    h.m.inner
+        .idle_protection
+        .lock()
+        .unwrap()
+        .accept(&h.m.inner.store, "gateway_admission", &[target], expiry)
+        .unwrap();
+    h.m.sleep_gateway(&entry).await;
+    assert_eq!(entry.snapshot().state, state::RUNNING);
+    h.m.stop_entry(&entry, stop::USER, Duration::from_secs(1), false, None)
+        .await
+        .unwrap();
+    assert_eq!(entry.snapshot().state, state::STOPPED);
+}
+
 // --- the namespace's gateway (ADR 0016) ---
 
 pub(super) const IMAGE2: &str =

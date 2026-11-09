@@ -87,6 +87,35 @@ The host holds its journal fence through the initial guest write. Stop/move/rest
 the same lifecycle locks. After the write, explicit lifecycle operations may terminate an
 accepted command; its receipt remains consumed regardless of the resulting connection error.
 
+### Native idle protection before permit issuance
+
+`Manager::protect_execution_resources` accepts the authenticated installer's exact
+pre-grant request under all local resource lifecycle locks. It checks every current
+VMM incarnation, namespace, placement and primary subject, then fsyncs one immutable receipt
+containing the admission ID, ordered target vector and expiry in milliseconds. A
+second call with the same ID must match exactly. The host rechecks every identity
+before acknowledging. This receipt does not authorize dispatch or freeze membership.
+Allocation installation remains a separate pre-permit step.
+The host accepts at most 60 seconds from its current clock and at most five seconds of
+declared uncertainty. A skewed deadline outside that bound is refused before ACK.
+
+Receipts live outside machine records so assignment recovery and ownership transfer
+cannot erase them. Startup reads the whole private collection with a bounded strict
+inspection before network setup or ticks and derives each machine's maximum expiry.
+Idle sleep uses the later of actual last use and that expiry, plus the sleep window;
+it never changes actual use or the record version. Tick is preliminary: both ordinary
+and assigned idle stops recheck under the lifecycle lock immediately before `stopping`.
+Gateway idle stop checks the same bound. A protected deadline is released only when
+the lower clock bound has passed it. Explicit stops still take precedence.
+
+One receipt write makes multi-target protection atomic. Uncertain persistence gives
+no acknowledgement and disables idle stops until a clean restart inspects disk state.
+The strict inspection admits at most 4,096 receipt files and 32 MiB in all; reaching
+that cap refuses new protection. Receipts are not pruned, since the expiry plus sleep
+window can outlive the grant. Long-running service activation needs a safe retention
+scheme and a release compatibility barrier: an older daemon that ignores this new
+collection must not run accepted protected admissions.
+
 Request commitment v1 is SHA-256, unpadded base64url, over these bytes:
 
 1. UTF-8 `briqyard-exec-request-v1` followed by one zero byte.

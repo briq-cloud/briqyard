@@ -33,7 +33,7 @@ impl Manager {
         let published = self.assignment_publication_allowed(&r, e.identity_trusted.load(Relaxed));
         let running = r.state == state::RUNNING && published;
         let sleeps_at = if running && e.in_flight.load(Relaxed) == 0 {
-            sleeps_at(r.last_used_at, r.sleep_window())
+            self.protected_sleeps_at(&r)
         } else {
             None
         };

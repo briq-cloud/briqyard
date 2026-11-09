@@ -178,6 +178,34 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
             )
             .unwrap();
     }
+    let expiry_ms = grant.idle.expires_at * 1000 + 123;
+    let protection = || ExecutionProtectionRequest {
+        admission: &grant.idle.admission,
+        expires_at_ms: expiry_ms,
+        target: &grant.target,
+        subject: &grant.subject,
+        resources: &grant.resource_set.resources,
+    };
+    let version = entry.snapshot().version;
+    let receipt =
+        h.m.protect_execution_resources(protection(), &journal, 0)
+            .await
+            .unwrap();
+    assert_eq!(receipt.expires_at_ms, expiry_ms);
+    assert_eq!(receipt.targets, grant.resource_set.resources);
+    assert_eq!(
+        h.m.protect_execution_resources(protection(), &journal, 0)
+            .await
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(entry.snapshot().version, version);
+    assert_eq!(entry.snapshot().last_used_at, machine.last_used_at);
+    entry.rec.lock().unwrap().last_used_at = Some(Utc::now() - chrono::Duration::hours(1));
+    h.m.stop_entry(&entry, stop::IDLE, Duration::from_secs(1), false, None)
+        .await
+        .unwrap();
+    assert_eq!(entry.snapshot().state, state::RUNNING);
     let before_consume = std::fs::read(path.join("journal.json")).unwrap();
     let call = || ScopedCredentials {
         grant: &grant_token,

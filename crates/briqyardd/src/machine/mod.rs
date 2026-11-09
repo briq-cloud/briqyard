@@ -35,6 +35,7 @@ mod create;
 mod endpoints;
 mod exec;
 mod gateway;
+mod idle_protection;
 mod launch_identity;
 mod leaves;
 mod logpage;
@@ -47,7 +48,7 @@ mod network;
 mod observe;
 mod scoped_exec;
 use memory::host_memory;
-pub use scoped_exec::ScopedCredentials;
+pub use scoped_exec::{ExecutionProtectionReceipt, ExecutionProtectionRequest, ScopedCredentials};
 mod persist;
 mod probes;
 mod quotas;
@@ -848,6 +849,7 @@ struct Inner {
     verified_templates: Mutex<std::collections::HashSet<(String, String, String)>>,
     cfg: Config,
     store: Store,
+    idle_protection: Mutex<idle_protection::Protection>,
     zfs: Zfs,
     images: Builder,
     dns: Resolver,

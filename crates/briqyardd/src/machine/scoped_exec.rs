@@ -6,6 +6,23 @@ use api::execution::{
     self as access, admission::Journal, DispatchContext, Operation, Target, Trust,
 };
 
+/// Exact request from the authenticated ownership installer, before a grant or
+/// operation permit exists. The installer keeps its revision fence until ACK.
+pub struct ExecutionProtectionRequest<'a> {
+    pub admission: &'a str,
+    pub expires_at_ms: u64,
+    pub target: &'a Target,
+    pub subject: &'a str,
+    pub resources: &'a [Target],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionProtectionReceipt {
+    pub admission: String,
+    pub expires_at_ms: u64,
+    pub targets: Vec<Target>,
+}
+
 pub struct ScopedCredentials<'a> {
     pub grant: &'a str,
     pub permit: &'a str,
@@ -13,6 +30,92 @@ pub struct ScopedCredentials<'a> {
 }
 
 impl Manager {
+    /// Install a pre-permit idle bound on every exact local run. The trusted caller
+    /// retains its ownership revision fence across this call. This receipt alone
+    /// does not freeze membership or authorize descriptor issuance.
+    pub async fn protect_execution_resources(
+        &self,
+        request: ExecutionProtectionRequest<'_>,
+        journal: &tokio::sync::Mutex<Journal>,
+        clock_uncertainty_seconds: u64,
+    ) -> Result<ExecutionProtectionReceipt, MError> {
+        let targets = request.resources;
+        if targets.is_empty() || targets.len() > access::MAX_RESOURCES {
+            return Err(invalid("invalid execution protection resources"));
+        }
+        let mut ordered = targets.iter().collect::<Vec<_>>();
+        ordered.sort_by(|a, b| a.machine.cmp(&b.machine));
+        if ordered
+            .windows(2)
+            .any(|pair| pair[0].machine == pair[1].machine)
+            || ordered.iter().any(|t| t.host != self.inner.host_id)
+        {
+            return Err(MError::Conflict(
+                "execution protection requires distinct local runs".into(),
+            ));
+        }
+        let entries = ordered
+            .iter()
+            .map(|t| self.entry(&t.machine))
+            .collect::<Result<Vec<_>, _>>()?;
+        let locks = entries.iter().map(|e| e.lock.clone()).collect::<Vec<_>>();
+        let _turns = tokio::time::timeout(Duration::from_secs(10), local_turns(&locks))
+            .await
+            .map_err(|_| MError::Conflict("execution resources remain busy".into()))?;
+        let ledger = journal.lock().await;
+        self.scoped_journal(&ledger)?;
+        for (target, entry) in ordered.iter().zip(&entries) {
+            if self.scoped_target(entry, ledger.instance())? != **target {
+                return Err(MError::Conflict("execution target changed".into()));
+            }
+        }
+        let entry = entries
+            .iter()
+            .find(|e| e.snapshot().id == request.target.machine)
+            .ok_or_else(|| invalid("execution target missing from resources"))?;
+        if !targets.contains(request.target) {
+            return Err(invalid("execution primary target missing from resources"));
+        }
+        if entry.snapshot().metadata.get("briq_id").map(String::as_str) != Some(request.subject) {
+            return Err(MError::Conflict("execution subject changed".into()));
+        }
+        execution_clock(clock_uncertainty_seconds)?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| invalid("execution clock unavailable"))?
+            .as_millis();
+        let expires_at_ms = request.expires_at_ms;
+        if u128::from(expires_at_ms) <= now_ms + u128::from(clock_uncertainty_seconds) * 1000
+            || u128::from(expires_at_ms) > now_ms + 60_000
+        {
+            return Err(invalid("execution protection interval exceeds policy"));
+        }
+        self.inner
+            .idle_protection
+            .lock()
+            .unwrap()
+            .accept(&self.inner.store, request.admission, targets, expires_at_ms)
+            .map_err(|_| MError::Conflict("execution protection persistence unresolved".into()))?;
+        // A successful fsync is followed by a final live identity check while every
+        // lifecycle turn remains held. No ACK can refer to a replaced run.
+        for (target, entry) in ordered.iter().zip(&entries) {
+            if self.scoped_target(entry, ledger.instance())? != **target {
+                return Err(MError::Conflict(
+                    "execution target changed after protection".into(),
+                ));
+            }
+        }
+        if entry.snapshot().metadata.get("briq_id").map(String::as_str) != Some(request.subject) {
+            return Err(MError::Conflict(
+                "execution subject changed after protection".into(),
+            ));
+        }
+        Ok(ExecutionProtectionReceipt {
+            admission: request.admission.into(),
+            expires_at_ms,
+            targets: targets.to_vec(),
+        })
+    }
     /// Read-only discovery of one actual run. Lifecycle callers must hold the same
     /// machine lock while using this value for admission. Events invalidate placement
     /// conservatively; it is never inferred from a reusable logical machine ID.

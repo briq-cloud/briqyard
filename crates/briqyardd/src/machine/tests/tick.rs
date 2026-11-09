@@ -3,6 +3,68 @@
 use super::*;
 
 #[tokio::test]
+async fn queued_idle_stop_rechecks_new_protection_and_explicit_stop_wins() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    let machine = h.m.create_made(h.request("protected")).await.unwrap();
+    let entry = h.m.entry(&machine.id).unwrap();
+    let old_use = Utc::now() - chrono::Duration::hours(1);
+    entry.rec.lock().unwrap().last_used_at = Some(old_use);
+    let held = entry.lock.lock().await;
+    let m = h.m.clone();
+    let queued = entry.clone();
+    let stop = tokio::spawn(async move {
+        m.stop_entry(&queued, stop::IDLE, Duration::from_secs(1), false, None)
+            .await
+    });
+    tokio::task::yield_now().await;
+    let target = api::execution::Target {
+        host: "h_test".into(),
+        machine: machine.id.clone(),
+        namespace: machine.namespace.clone(),
+        run: "run_test".into(),
+        placement: "placement_test".into(),
+    };
+    let expiry = (Utc::now().timestamp() as u64 + 30) * 1000;
+    h.m.inner
+        .idle_protection
+        .lock()
+        .unwrap()
+        .accept(&h.m.inner.store, "admission_test", &[target], expiry)
+        .unwrap();
+    drop(held);
+    stop.await.unwrap().unwrap();
+    assert_eq!(entry.snapshot().state, state::RUNNING);
+    assert_eq!(entry.snapshot().last_used_at, Some(old_use));
+    assert!(h.m.get(&machine.id).unwrap().sleeps_at.unwrap() > Utc::now());
+    h.m.stop_entry(&entry, stop::USER, Duration::from_secs(1), false, None)
+        .await
+        .unwrap();
+    assert_eq!(entry.snapshot().state, state::STOPPED);
+}
+
+#[tokio::test]
+async fn queued_idle_stop_rechecks_recent_activity() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    let machine = h.m.create_made(h.request("used-again")).await.unwrap();
+    let entry = h.m.entry(&machine.id).unwrap();
+    entry.rec.lock().unwrap().last_used_at = Some(Utc::now() - chrono::Duration::hours(1));
+    let held = entry.lock.lock().await;
+    let m = h.m.clone();
+    let queued = entry.clone();
+    let stop = tokio::spawn(async move {
+        m.stop_entry(&queued, stop::IDLE, Duration::from_secs(1), false, None)
+            .await
+    });
+    tokio::task::yield_now().await;
+    entry.rec.lock().unwrap().last_used_at = Some(Utc::now());
+    drop(held);
+    stop.await.unwrap().unwrap();
+    assert_eq!(entry.snapshot().state, state::RUNNING);
+}
+
+#[tokio::test]
 async fn the_tick_sleeps_idle_machines_and_resumes_destroys() {
     let h = harness("10.64.0.0/22", 4096).await;
     h.ready().await;

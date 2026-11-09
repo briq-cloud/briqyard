@@ -533,6 +533,7 @@ async fn a_wake_during_a_sleep_waits_for_the_stop_then_starts() {
     h.ready().await;
     let m = h.m.create_made(h.request("db")).await.unwrap();
     let e = h.m.entry(&m.id).unwrap();
+    e.rec.lock().unwrap().last_used_at = Some(Utc::now() - chrono::Duration::hours(1));
     h.host.stops_take(Duration::from_millis(300));
     let (m2, e2) = (h.m.clone(), e.clone());
     let sleep = tokio::spawn(async move {

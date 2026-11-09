@@ -86,7 +86,7 @@ impl Manager {
                     let r = e.rec.lock().unwrap();
                     r.state == state::RUNNING
                         && e.in_flight.load(Relaxed) == 0
-                        && idle_past(r.last_used_at, r.sleep_window(), now)
+                        && self.idle_due(&r, now)
                 })
                 .cloned()
                 .collect();

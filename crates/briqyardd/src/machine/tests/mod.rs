@@ -251,6 +251,7 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             verified_templates: Mutex::new(std::collections::HashSet::new()),
             range: Range::parse(&cfg.network.range).unwrap(),
             cfg,
+            idle_protection: Mutex::new(idle_protection::Protection::load(&store).unwrap()),
             store,
             zfs,
             images,

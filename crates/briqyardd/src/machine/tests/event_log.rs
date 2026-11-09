@@ -200,6 +200,7 @@ async fn a_suspend_and_its_resume_are_events() {
     // A sleeping machine stopped on request: that changes it, so it is an event.
     let m = h.m.create_made(h.request("nap")).await.unwrap();
     let e = h.m.entry(&m.id).unwrap();
+    e.rec.lock().unwrap().last_used_at = Some(Utc::now() - chrono::Duration::hours(1));
     h.m.stop_entry(&e, stop::IDLE, Duration::from_secs(1), false, None)
         .await
         .unwrap();

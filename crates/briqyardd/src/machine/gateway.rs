@@ -317,6 +317,9 @@ impl Manager {
         if gateway_needed(&self.inner.machines.lock().unwrap(), &r.namespace) {
             return;
         }
+        if !self.idle_stop_allowed(&r, Utc::now()) {
+            return;
+        }
         tracing::info!(
             machine = r.id,
             namespace = r.namespace,

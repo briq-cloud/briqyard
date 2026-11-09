@@ -431,7 +431,12 @@ impl Manager {
             let pid = e.rec.lock().unwrap().pid;
             stage(operation, "lock", &machine, pid, started, true);
             self.check_version(e, at)?;
+            // InUse::drop touches the record before decrementing in_flight.
+            let in_flight = e.in_flight.load(Relaxed);
             let r = e.snapshot();
+            if why == stop::IDLE && (in_flight != 0 || !self.idle_stop_allowed(&r, Utc::now())) {
+                return Ok(());
+            }
             match r.state.as_str() {
                 state::STOPPED | state::CREATED | state::ERROR => {
                     if r.state == state::STOPPED

@@ -57,6 +57,8 @@ impl Manager {
         let backups = Backups::open(&cfg.backup, &store)?;
         let (endpoint_events, _) = broadcast::channel(64);
         let ledger = Ledger::load(&store, Utc::now()).context("usage")?;
+        let idle_protection =
+            idle_protection::Protection::load(&store).context("execution idle protection")?;
         let events = Events::open(&store.dir("events")).context("events")?;
         images.events = Some(events.clone());
         let advertise = advertise_address(
@@ -112,6 +114,7 @@ impl Manager {
             }),
             cfg,
             store,
+            idle_protection: Mutex::new(idle_protection),
             zfs,
             images,
             dns,
@@ -820,7 +823,7 @@ impl Manager {
                             .is_none_or(|run| run.phase == assignments::runs::Phase::Settled)))
                     && !pending_creation.contains(&r.id)
                     && stopped_by_host(&r)
-                    && !idle_past(r.last_used_at, r.sleep_window(), now)
+                    && !self.idle_due(&r, now)
             })
             .cloned()
             .collect();

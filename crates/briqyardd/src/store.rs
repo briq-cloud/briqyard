@@ -94,6 +94,7 @@ impl Store {
             "assigned-runs",
             "assigned-run-readers",
             "assigned-run-updates",
+            "execution-idle-protection",
         ] {
             private_dir(&root.join(d))?;
         }
