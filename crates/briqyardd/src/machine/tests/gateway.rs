@@ -2,6 +2,65 @@
 
 use super::*;
 
+#[tokio::test]
+async fn protected_namespace_refuses_gateway_replacement_before_stopping() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let gw = h.with_gateway().await;
+    let mut spec = gateway_spec(3128);
+    spec.start = true;
+    h.m.set_gateway("t1", spec.clone()).await.unwrap();
+    let before = h.m.entry(&gw).unwrap().snapshot();
+    let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+    {
+        let mut fence = h.m.inner.execution_fence.lock().unwrap();
+        let generations = fence
+            .snapshot(&h.m.inner.store, &["t1".into()], now)
+            .unwrap();
+        fence
+            .protect(&h.m.inner.store, &generations, now + 30_000, now)
+            .unwrap();
+    }
+    h.host.calls();
+    // Repeating the same spec is a read-only no-op under protection.
+    h.m.set_gateway("t1", spec.clone()).await.unwrap();
+    spec.env.insert("CHANGED".into(), "yes".into());
+    assert!(h.m.set_gateway("t1", spec).await.is_err());
+    let after = h.m.entry(&gw).unwrap().snapshot();
+    assert_eq!(after.state, state::RUNNING);
+    assert_eq!(after.env, before.env);
+    assert!(!h.host.calls().iter().any(|call| call.starts_with("kill ")));
+}
+
+#[tokio::test]
+async fn gateway_idle_stop_respects_protection_and_user_stop() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let gw = h.with_gateway().await;
+    let mut spec = gateway_spec(3128);
+    spec.start = true;
+    h.m.set_gateway("t1", spec).await.unwrap();
+    let entry = h.m.entry(&gw).unwrap();
+    let target = api::execution::Target {
+        host: "h_test".into(),
+        machine: gw.clone(),
+        namespace: "t1".into(),
+        run: "run_test".into(),
+        placement: "placement_test".into(),
+    };
+    let expiry = (Utc::now().timestamp() as u64 + 30) * 1000;
+    h.m.inner
+        .idle_protection
+        .lock()
+        .unwrap()
+        .accept(&h.m.inner.store, "gateway_admission", &[target], expiry)
+        .unwrap();
+    h.m.sleep_gateway(&entry).await;
+    assert_eq!(entry.snapshot().state, state::RUNNING);
+    h.m.stop_entry(&entry, stop::USER, Duration::from_secs(1), false, None)
+        .await
+        .unwrap();
+    assert_eq!(entry.snapshot().state, state::STOPPED);
+}
+
 // --- the namespace's gateway (ADR 0016) ---
 
 pub(super) const IMAGE2: &str =

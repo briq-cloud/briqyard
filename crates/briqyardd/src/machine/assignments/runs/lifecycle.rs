@@ -165,7 +165,12 @@ impl Manager {
             let _namespace = self.inner.namespace_lifecycle.read().await;
             let _entry = entry.lock.lock().await;
             self.check_version(entry, at)?;
+            let in_flight = entry.in_flight.load(Relaxed);
             let record = entry.snapshot();
+            if why == stop::IDLE && (in_flight != 0 || !self.idle_stop_allowed(&record, Utc::now()))
+            {
+                return Ok(());
+            }
             self.validate_current_run_record(&record)
                 .map_err(public_error)?;
             if record
@@ -181,12 +186,14 @@ impl Manager {
                     "unverified current run preserved; stop cannot infer ownership".into(),
                 ));
             }
-            *entry.stop_req.lock().unwrap() = Some(why.into());
-            *entry.stop_deadline.lock().unwrap() =
-                Some(tokio::time::Instant::now() + grace + Duration::from_secs(20));
-            entry.set_state(state::STOPPING, |_| {
-                Some(Ev::normal(reason::STOPPING, format!("stopping ({why})")))
-            });
+            if !self.admit_stop(
+                entry,
+                why,
+                tokio::time::Instant::now() + grace + Duration::from_secs(20),
+                Ev::normal(reason::STOPPING, format!("stopping ({why})")),
+            ) {
+                return Ok(());
+            }
             self.save(entry)?;
             if suspend {
                 self.settle_assigned_run_locked(entry, Disposition::CheckpointAvailable)

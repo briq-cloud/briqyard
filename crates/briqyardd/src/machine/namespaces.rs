@@ -96,10 +96,19 @@ impl Manager {
                 self.destroy_machine(&gw.snapshot().id, None).await?;
             }
         }
+        // Gateway destruction revokes access. Removing the empty namespace's network can
+        // make its address range available again, so fence that separately before teardown.
+        let ticket = self
+            .begin_execution_mutation(&[id.to_owned()], execution_fence::MutationMode::Broaden)?;
         self.inner.dns.unset(t.subnet.gateway());
         self.inner.net.delete_bridge(t.rec.subnet_index).await?;
+        // The durable record is the subnet reservation across restart. Keep the map until
+        // its removal is synced, including when bridge deletion or storage fails.
+        self.inner
+            .store
+            .delete_durable(crate::store::NAMESPACES, id)?;
         self.inner.namespaces.lock().unwrap().remove(id);
-        self.inner.store.delete(crate::store::NAMESPACES, id)?;
+        self.finish_execution_mutation(&ticket)?;
         Ok(())
     }
 }

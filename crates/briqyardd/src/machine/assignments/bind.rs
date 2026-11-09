@@ -284,8 +284,12 @@ impl Manager {
                 .is_some_and(|origin| origin.stage == templates::CloneStage::Active)
         {
             self.check_assigned_activation(&entry, &live)?;
+            let ticket = self.begin_execution_mutation(
+                std::slice::from_ref(&record.namespace),
+                crate::machine::execution_fence::MutationMode::Broaden,
+            )?;
             // A previous final save may have failed after Active became durable.
-            self.save(&entry)?;
+            self.save_execution_publication(&entry)?;
             if entry.prober.lock().unwrap().is_none() && !record.probes.is_empty() {
                 let (_, _, generation) = self.reset_probes(&entry);
                 self.spawn_probes(&entry, &live, generation, true);
@@ -293,9 +297,15 @@ impl Manager {
             if let Some(namespace) = self.namespace_of(namespace) {
                 self.refresh_dns(&namespace);
             }
+            self.finish_execution_mutation(&ticket)?;
             return Ok(self.view(&entry));
         }
         self.configure_assigned_destination(&entry, &live).await?;
+        self.check_assigned_activation(&entry, &live)?;
+        let ticket = self.begin_execution_mutation(
+            std::slice::from_ref(&record.namespace),
+            crate::machine::execution_fence::MutationMode::Broaden,
+        )?;
         let version = if entry.snapshot().clone_origin.as_ref().unwrap().stage
             == templates::CloneStage::Active
         {
@@ -319,11 +329,12 @@ impl Manager {
             record.last_used_at = record.started_at;
             None
         });
-        self.save(&entry)?;
+        self.save_execution_publication(&entry)?;
         self.spawn_probes(&entry, &live, generation, true);
         if let Some(namespace) = self.namespace_of(namespace) {
             self.refresh_dns(&namespace);
         }
+        self.finish_execution_mutation(&ticket)?;
         Ok(self.view(&entry))
     }
 }

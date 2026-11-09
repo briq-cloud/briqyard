@@ -11,6 +11,8 @@ pub use verify::*;
 #[cfg(feature = "execution-admission")]
 pub mod admission;
 #[cfg(feature = "execution-admission")]
+pub mod channel;
+#[cfg(feature = "execution-admission")]
 mod issuer;
 #[cfg(feature = "execution-admission")]
 pub use issuer::*;
@@ -23,6 +25,9 @@ pub const GRANT_TYPE: &str = "briqyard-execution-grant+jwt";
 pub const ALLOCATION_TYPE: &str = "briqyard-execution-allocation+jwt";
 pub const PERMIT_TYPE: &str = "briqyard-execution-permit+jwt";
 pub const MAX_TOKEN_BYTES: usize = 16_384;
+/// JSON can expand each control byte to six bytes. The initial 1 MiB input/output
+/// allowance needs room for that encoding and the signed credential envelope.
+pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_ALLOCATIONS: usize = 16;
 pub const MAX_RESOURCES: usize = 64;
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -162,6 +167,43 @@ pub struct Permit {
     pub request_digest: String,
     pub metadata_revision: String,
     pub limits: Limits,
+}
+
+/// Logical public seeds on the authenticated installer channel. The host resolves
+/// actual run and placement; callers never manufacture those identities.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PublicSeed {
+    pub id: String,
+    pub machine: String,
+    pub namespace: String,
+    pub team: String,
+    pub expected_version: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PublicResource {
+    pub id: String,
+    pub target: Target,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryRequest {
+    pub host_instance: String,
+    pub primary_id: String,
+    pub seeds: Vec<PublicSeed>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryReceipt {
+    pub host_instance: String,
+    pub primary: Target,
+    pub public_seeds: Vec<Target>,
+    pub public_resources: Vec<PublicResource>,
+    pub resource_set: ResourceSet,
 }
 
 #[cfg(all(test, feature = "execution-verifier"))]

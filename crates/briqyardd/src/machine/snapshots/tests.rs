@@ -563,6 +563,7 @@ async fn a_restore_during_a_stop_waits_for_it() {
             .await
             .unwrap();
     let e = h.m.entry(&m.id).unwrap();
+    e.rec.lock().unwrap().last_used_at = Some(Utc::now() - chrono::Duration::hours(1));
     h.stops_take(Duration::from_millis(300));
     let (m2, e2) = (h.m.clone(), e.clone());
     let sleep = tokio::spawn(async move {

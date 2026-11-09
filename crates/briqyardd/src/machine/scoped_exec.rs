@@ -1,10 +1,32 @@
 //! Scoped execution never takes the administrator route or wakes a machine. The
 //! caller supplies an installed trusted ownership snapshot and the regional key set.
 //! No HTTP route calls this boundary until authenticated snapshot installation exists.
+use super::execution_resources::ExecutionResourceScope;
 use super::*;
 use api::execution::{
-    self as access, admission::Journal, DispatchContext, Operation, Target, Trust,
+    self as access,
+    admission::{HostOwnership, Journal},
+    DispatchContext, Operation, Target, Trust,
 };
+
+/// Exact request from the authenticated ownership installer, before a grant or
+/// operation permit exists. The installer keeps its revision fence until ACK.
+pub struct ExecutionProtectionRequest<'a> {
+    pub admission: &'a str,
+    pub expires_at_ms: u64,
+    pub scope: ExecutionResourceScope<'a>,
+    pub subject: &'a str,
+    pub resources: &'a [Target],
+    pub resource_revision: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionProtectionReceipt {
+    pub admission: String,
+    pub expires_at_ms: u64,
+    pub targets: Vec<Target>,
+    pub resource_revision: String,
+}
 
 pub struct ScopedCredentials<'a> {
     pub grant: &'a str,
@@ -12,7 +34,270 @@ pub struct ScopedCredentials<'a> {
     pub allocations: &'a [&'a str],
 }
 
+/// Independently installed binding and discovery seeds. Submitted credentials must
+/// never supply either part of this trusted context.
+pub struct ScopedExecutionContext<'a> {
+    pub binding: &'a DispatchContext<'a>,
+    pub scope: ExecutionResourceScope<'a>,
+}
+
 impl Manager {
+    pub async fn execution_public_members(
+        &self,
+        resources: &access::ResourceSet,
+        team: &str,
+        journal: &tokio::sync::Mutex<Journal>,
+    ) -> Result<Vec<access::PublicResource>, MError> {
+        let mut public = Vec::new();
+        let mut ids = std::collections::BTreeSet::new();
+        for target in &resources.resources {
+            let e = self.entry(&target.machine)?;
+            let record = {
+                let _turn = e.lock.lock().await;
+                let ledger = journal.lock().await;
+                if self.scoped_target(&e, ledger.instance())? != *target {
+                    return Err(MError::Conflict("execution closure member changed".into()));
+                }
+                e.snapshot()
+            };
+            if let Some(id) = record.metadata.get("briq_id") {
+                if record.metadata.get("team").map(String::as_str) != Some(team)
+                    || !ids.insert(id.clone())
+                {
+                    return Err(MError::Conflict(
+                        "public execution ownership changed".into(),
+                    ));
+                }
+                public.push(access::PublicResource {
+                    id: id.clone(),
+                    target: target.clone(),
+                });
+            } else if self
+                .gateway_of(&target.namespace)
+                .as_ref()
+                .map(|g| g.snapshot().id)
+                != Some(target.machine.clone())
+            {
+                return Err(MError::Conflict("unclassified execution dependency".into()));
+            }
+        }
+        Ok(public)
+    }
+    pub async fn resolve_execution_public_seed(
+        &self,
+        seed: &access::PublicSeed,
+        journal: &tokio::sync::Mutex<Journal>,
+    ) -> Result<Target, MError> {
+        let e = self.entry(&seed.machine)?;
+        let _turn = e.lock.lock().await;
+        let ledger = journal.lock().await;
+        self.scoped_journal(&ledger)?;
+        let target = self.scoped_target(&e, ledger.instance())?;
+        let record = e.snapshot();
+        if record.metadata.get("briq_id") != Some(&seed.id)
+            || record.metadata.get("team") != Some(&seed.team)
+            || record.namespace != seed.namespace
+            || seed
+                .expected_version
+                .is_some_and(|v| target.placement != format!("version-{v}"))
+        {
+            return Err(MError::Conflict("public execution seed changed".into()));
+        }
+        Ok(target)
+    }
+    /// Resolve the complete closure from installed seeds, then classify every member.
+    /// A missing public identity does not make a machine native: only the host's
+    /// registered namespace gateway is a supported native dependency.
+    pub async fn verify_execution_ownership(
+        &self,
+        owner: &HostOwnership,
+        journal: &tokio::sync::Mutex<Journal>,
+    ) -> Result<access::ResourceSet, MError> {
+        if owner.public_seeds.is_empty()
+            || !owner.public_seeds.contains(&owner.primary)
+            || owner.public_resources.len() > access::MAX_RESOURCES
+        {
+            return Err(invalid("invalid installed public execution scope"));
+        }
+        let scope = ExecutionResourceScope {
+            primary: &owner.primary,
+            required: &owner.public_seeds,
+        };
+        let discovered = self.execution_resources(scope, journal).await?;
+        if discovered != owner.resource_set {
+            return Err(MError::Conflict(
+                "execution ownership closure changed".into(),
+            ));
+        }
+        let mut mapped = std::collections::BTreeSet::new();
+        let mut public_ids = std::collections::BTreeSet::new();
+        for public in &owner.public_resources {
+            if !mapped.insert(public.target.machine.clone())
+                || !public_ids.insert(public.id.clone())
+                || public.id.is_empty()
+                || !discovered.resources.contains(&public.target)
+            {
+                return Err(invalid("invalid installed public execution mapping"));
+            }
+            let e = self.entry(&public.target.machine)?;
+            let _turn = e.lock.lock().await;
+            let ledger = journal.lock().await;
+            if self.scoped_target(&e, ledger.instance())? != public.target {
+                return Err(MError::Conflict("public execution run changed".into()));
+            }
+            let record = e.snapshot();
+            if record.metadata.get("briq_id") != Some(&public.id)
+                || record.metadata.get("team") != Some(&owner.team)
+                || record.namespace != public.target.namespace
+                || (public.target == owner.primary && public.id != owner.subject)
+            {
+                return Err(MError::Conflict(
+                    "public execution ownership changed".into(),
+                ));
+            }
+        }
+        for resource in &discovered.resources {
+            if mapped.contains(&resource.machine) {
+                continue;
+            }
+            let gateway = self
+                .gateway_of(&resource.namespace)
+                .ok_or_else(|| MError::Conflict("unclassified execution dependency".into()))?;
+            if gateway.snapshot().id != resource.machine {
+                return Err(MError::Conflict("unclassified execution dependency".into()));
+            }
+            if gateway.snapshot().metadata.contains_key("briq_id") {
+                return Err(MError::Conflict(
+                    "public execution dependency omitted".into(),
+                ));
+            }
+        }
+        for seed in &owner.public_seeds {
+            if !mapped.contains(&seed.machine) {
+                return Err(invalid("unmapped public execution seed"));
+            }
+        }
+        if self
+            .execution_public_members(&discovered, &owner.team, journal)
+            .await?
+            != owner.public_resources
+        {
+            return Err(MError::Conflict("public execution mapping changed".into()));
+        }
+        Ok(discovered)
+    }
+    /// Install a pre-permit idle bound on every exact local run. The trusted caller
+    /// retains its ownership revision fence across this call. This receipt alone
+    /// does not freeze membership or authorize descriptor issuance.
+    pub async fn protect_execution_resources(
+        &self,
+        request: ExecutionProtectionRequest<'_>,
+        journal: &tokio::sync::Mutex<Journal>,
+        clock_uncertainty_seconds: u64,
+    ) -> Result<ExecutionProtectionReceipt, MError> {
+        self.validate_execution_scope(request.scope)?;
+        let targets = request.resources;
+        if targets.is_empty() || targets.len() > access::MAX_RESOURCES {
+            return Err(invalid("invalid execution protection resources"));
+        }
+        let mut ordered = targets.iter().collect::<Vec<_>>();
+        ordered.sort_by(|a, b| a.machine.cmp(&b.machine));
+        if ordered
+            .windows(2)
+            .any(|pair| pair[0].machine == pair[1].machine)
+            || ordered.iter().any(|t| t.host != self.inner.host_id)
+        {
+            return Err(MError::Conflict(
+                "execution protection requires distinct local runs".into(),
+            ));
+        }
+        let entries = ordered
+            .iter()
+            .map(|t| self.entry(&t.machine))
+            .collect::<Result<Vec<_>, _>>()?;
+        let locks = entries.iter().map(|e| e.lock.clone()).collect::<Vec<_>>();
+        let _turns = tokio::time::timeout(Duration::from_secs(10), local_turns(&locks))
+            .await
+            .map_err(|_| MError::Conflict("execution resources remain busy".into()))?;
+        let ledger = journal.lock().await;
+        self.scoped_journal(&ledger)?;
+        for (target, entry) in ordered.iter().zip(&entries) {
+            if self.scoped_target(entry, ledger.instance())? != **target {
+                return Err(MError::Conflict("execution target changed".into()));
+            }
+        }
+        let entry = entries
+            .iter()
+            .find(|e| e.snapshot().id == request.scope.primary.machine)
+            .ok_or_else(|| invalid("execution target missing from resources"))?;
+        if !targets.contains(request.scope.primary) {
+            return Err(invalid("execution primary target missing from resources"));
+        }
+        if entry.snapshot().metadata.get("briq_id").map(String::as_str) != Some(request.subject) {
+            return Err(MError::Conflict("execution subject changed".into()));
+        }
+        execution_clock(clock_uncertainty_seconds)?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| invalid("execution clock unavailable"))?
+            .as_millis();
+        let expires_at_ms = request.expires_at_ms;
+        if u128::from(expires_at_ms) <= now_ms + u128::from(clock_uncertainty_seconds) * 1000
+            || u128::from(expires_at_ms) > now_ms + 60_000
+        {
+            return Err(invalid("execution protection interval exceeds policy"));
+        }
+        let snapshot = self.execution_namespace_snapshot(targets)?;
+        self.validate_execution_set_locked(
+            request.scope,
+            targets,
+            request.resource_revision,
+            ledger.instance(),
+        )?;
+        self.inner
+            .execution_fence
+            .lock()
+            .unwrap()
+            .protect(
+                &self.inner.store,
+                &snapshot,
+                expires_at_ms,
+                execution_mutations::execution_now_ms()?,
+            )
+            .map_err(|_| MError::Conflict("execution namespace protection unresolved".into()))?;
+        self.inner
+            .idle_protection
+            .lock()
+            .unwrap()
+            .accept(&self.inner.store, request.admission, targets, expires_at_ms)
+            .map_err(|_| MError::Conflict("execution protection persistence unresolved".into()))?;
+        // A successful fsync is followed by a final live identity check while every
+        // lifecycle turn remains held. No ACK can refer to a replaced run.
+        for (target, entry) in ordered.iter().zip(&entries) {
+            if self.scoped_target(entry, ledger.instance())? != **target {
+                return Err(MError::Conflict(
+                    "execution target changed after protection".into(),
+                ));
+            }
+        }
+        if entry.snapshot().metadata.get("briq_id").map(String::as_str) != Some(request.subject) {
+            return Err(MError::Conflict(
+                "execution subject changed after protection".into(),
+            ));
+        }
+        self.validate_execution_set_locked(
+            request.scope,
+            targets,
+            request.resource_revision,
+            ledger.instance(),
+        )?;
+        Ok(ExecutionProtectionReceipt {
+            admission: request.admission.into(),
+            expires_at_ms,
+            targets: targets.to_vec(),
+            resource_revision: request.resource_revision.into(),
+        })
+    }
     /// Read-only discovery of one actual run. Lifecycle callers must hold the same
     /// machine lock while using this value for admission. Events invalidate placement
     /// conservatively; it is never inferred from a reusable logical machine ID.
@@ -28,14 +313,18 @@ impl Manager {
         self.scoped_target(&e, ledger.instance())
     }
 
-    fn scoped_journal(&self, journal: &Journal) -> Result<(), MError> {
+    pub(super) fn scoped_journal(&self, journal: &Journal) -> Result<(), MError> {
         if journal.role() != &access::admission::Role::Host(self.inner.host_id.clone()) {
             return Err(invalid("execution journal belongs to another host"));
         }
         Ok(())
     }
 
-    fn scoped_target(&self, e: &Entry, admission_instance: &str) -> Result<Target, MError> {
+    pub(super) fn scoped_target(
+        &self,
+        e: &Entry,
+        admission_instance: &str,
+    ) -> Result<Target, MError> {
         let record = e.snapshot();
         self.ordinary_operation(&record)?;
         if record.state != state::RUNNING || *e.removed.lock().unwrap() {
@@ -84,16 +373,24 @@ impl Manager {
         request: api::ExecRequest,
         credentials: ScopedCredentials<'_>,
         trust: &Trust<'_>,
-        context: &DispatchContext<'_>,
+        installed: ScopedExecutionContext<'_>,
         journal: &tokio::sync::Mutex<Journal>,
         clock_uncertainty_seconds: u64,
     ) -> Result<api::ExecResult, MError> {
+        let ScopedExecutionContext {
+            binding: context,
+            scope,
+        } = installed;
         if context.operation != Operation::Exec
             || context.resource_set.resources.is_empty()
             || context.resource_set.resources.len() > access::MAX_RESOURCES
         {
             return Err(invalid("unsupported scoped operation"));
         }
+        if context.target != scope.primary {
+            return Err(invalid("installed execution primary changed"));
+        }
+        self.validate_execution_scope(scope)?;
         self.own_entry(&context.target.machine)?;
         // Stable order is shared by every scoped operation. Stop/move/restore already
         // use these lifecycle locks. Remote frozen members need a distributed fence;
@@ -147,6 +444,37 @@ impl Manager {
         }
         let deadline = guestc::CommandDeadline::new(bundle.permit().exp, clock.uncertainty)
             .map_err(not_running_if_unreachable)?;
+        let snapshot = self.execution_namespace_snapshot(&context.resource_set.resources)?;
+        self.validate_execution_set_locked(
+            scope,
+            &context.resource_set.resources,
+            &context.resource_set.revision,
+            ledger.instance(),
+        )?;
+        if execution_mutations::execution_resource_revision(
+            &context.resource_set.resources,
+            &snapshot,
+        )? != context.resource_set.revision
+            || !self
+                .inner
+                .execution_fence
+                .lock()
+                .unwrap()
+                .check_protected(
+                    &snapshot,
+                    bundle
+                        .permit()
+                        .exp
+                        .checked_mul(1000)
+                        .ok_or_else(|| invalid("execution deadline exceeds range"))?,
+                    execution_mutations::execution_now_ms()?,
+                )
+                .map_err(|_| MError::Conflict("execution namespace protection unresolved".into()))?
+        {
+            return Err(MError::Conflict(
+                "execution namespace generation or protection changed".into(),
+            ));
+        }
         // This fsync is the final no-replay boundary. Every subsequent failure is an
         // uncertain consumed outcome, including cancellation before any guest frame.
         ledger
@@ -238,7 +566,7 @@ fn execution_clock(uncertainty: u64) -> Result<access::Clock, MError> {
 
 // Other lifecycle operations may hold a machine while starting its gateway. Never
 // wait for a second resource while retaining a subset, even in stable ID order.
-async fn local_turns(
+pub(super) async fn local_turns(
     locks: &[Arc<tokio::sync::Mutex<()>>],
 ) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
     loop {

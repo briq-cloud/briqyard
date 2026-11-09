@@ -126,7 +126,7 @@ impl Manager {
         self.assigned_process_proof(&entry.snapshot())?;
         self.check_assigned_continuity(&entry.snapshot(), &origin, &pong)?;
         self.verify_live_launch(entry, &vm)?;
-        if origin.stage == templates::CloneStage::Active {
+        let publication = if origin.stage == templates::CloneStage::Active {
             // Dependencies share the startup publication fence: source continuity cannot
             // authorize a via policy that exposes another unverified assigned target.
             let approved: Vec<_> = self
@@ -145,6 +145,14 @@ impl Manager {
                 })
                 .collect();
             self.policy_for_records(&entry.snapshot(), &approved)?;
+            Some(self.begin_execution_mutation(
+                std::slice::from_ref(&record.namespace),
+                crate::machine::execution_fence::MutationMode::Broaden,
+            )?)
+        } else {
+            None
+        };
+        if origin.stage == templates::CloneStage::Active {
             // Fresh continuity precedes rebuilding any destination network/readiness.
             self.inner.net.count(&record.ip).await?;
             self.activate_clone_network(&entry.snapshot()).await?;
@@ -159,7 +167,7 @@ impl Manager {
                 record.init_version = pong.version;
                 None
             });
-            if let Err(error) = self.save(entry) {
+            if let Err(error) = self.save_execution_publication(entry) {
                 entry.identity_trusted.store(false, Relaxed);
                 *entry.live.lock().unwrap() = None;
                 let _ = self.inner.net.quarantine(&record.id).await;
@@ -172,6 +180,9 @@ impl Manager {
             }
         }
         self.watch(entry, &vm);
+        if let Some(ticket) = publication.as_ref() {
+            self.finish_execution_mutation(ticket)?;
+        }
         Ok(())
     }
 

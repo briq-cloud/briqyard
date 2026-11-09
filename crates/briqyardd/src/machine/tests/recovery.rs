@@ -3,6 +3,73 @@
 use super::*;
 
 #[tokio::test]
+async fn protected_namespace_defers_adoption_without_stopping_the_process() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.namespace("t1");
+    let entry = h.add("m_kept", state::RUNNING, 256);
+    let pid = h
+        .host
+        .left_running("m_kept", &h.m.inner.cfg.run_dir().join("m_kept"));
+    entry.rec.lock().unwrap().pid = pid;
+    let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+    {
+        let mut fence = h.m.inner.execution_fence.lock().unwrap();
+        let snapshot = fence
+            .snapshot(&h.m.inner.store, &["t1".into()], now)
+            .unwrap();
+        fence
+            .protect(&h.m.inner.store, &snapshot, now + 30_000, now)
+            .unwrap();
+    }
+    h.host.calls();
+    assert!(h.m.recover().await.is_err());
+    assert_eq!(entry.snapshot().pid, pid);
+    assert_eq!(entry.snapshot().state, state::RUNNING);
+    assert!(entry.live.lock().unwrap().is_none());
+    assert!(!entry.identity_trusted.load(Relaxed));
+    assert!(!h
+        .host
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("kill ") || call.starts_with("recover-stopped ")));
+}
+
+#[tokio::test]
+async fn failed_adoption_publication_keeps_process_and_pending_evidence() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.namespace("t1");
+    let entry = h.add("m_kept", state::RUNNING, 256);
+    let pid = h
+        .host
+        .left_running("m_kept", &h.m.inner.cfg.run_dir().join("m_kept"));
+    entry.rec.lock().unwrap().pid = pid;
+    std::fs::create_dir(h.m.inner.store.dir("machines").join("m_kept.json")).unwrap();
+    h.host.calls();
+    h.m.recover_and_sweep_at_start().await.unwrap();
+    assert!(h.m.recovery_fault().is_some());
+    assert_eq!(entry.snapshot().pid, pid);
+    assert_eq!(entry.snapshot().state, state::RUNNING);
+    assert!(entry.live.lock().unwrap().is_some());
+    assert!(!h
+        .host
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("kill ") || call.starts_with("recover-stopped ")));
+    assert!(h
+        .m
+        .inner
+        .execution_fence
+        .lock()
+        .unwrap()
+        .snapshot(
+            &h.m.inner.store,
+            &["t1".into()],
+            crate::machine::execution_mutations::execution_now_ms().unwrap(),
+        )
+        .is_err());
+}
+
+#[tokio::test]
 async fn a_namespace_outside_the_range_is_refused_at_load() {
     let h = harness("10.64.0.0/22", 4096).await;
     let t = NamespaceRec {

@@ -62,6 +62,11 @@ impl Manager {
             &t,
             was_running,
         )?;
+        let mut namespaces = vec![first.namespace.clone(), namespace.to_owned()];
+        namespaces.sort();
+        namespaces.dedup();
+        let publication =
+            self.begin_execution_mutation(&namespaces, execution_fence::MutationMode::Broaden)?;
         if was_running {
             self.stop_entry(&e, stop::USER, Duration::ZERO, false, at)
                 .await?;
@@ -74,6 +79,9 @@ impl Manager {
         // runs again.
         let joined: Result<(String, String), MError> = async {
             let rec = e.snapshot();
+            if rec.namespace != first.namespace {
+                return Err(MError::Conflict("move source namespace changed".into()));
+            }
             if !matches!(rec.state.as_str(), state::STOPPED | state::CREATED) {
                 return Err(MError::BadState(rec.state));
             }
@@ -147,6 +155,8 @@ impl Manager {
         if was_running {
             self.start_entry(&e, true).await?;
         }
+        self.save_execution_publication(&e)?;
+        self.finish_execution_mutation(&publication)?;
         Ok(self.moved(&e, &first, was_running))
     }
 
@@ -327,39 +337,49 @@ impl Manager {
             let mut namespaces = self.inner.namespaces.lock().unwrap();
             match namespaces.get(&from).cloned() {
                 Some(t) if alone && !making && !namespaces.contains_key(namespace) => {
+                    let mut names = vec![from.clone(), namespace.to_owned()];
+                    names.sort();
+                    names.dedup();
+                    let publication = self
+                        .begin_execution_mutation(&names, execution_fence::MutationMode::Broaden)?;
                     // Both names resolve at every instant of the swap.
                     let mut renamed = t;
                     renamed.rec.id = namespace.into();
                     namespaces.insert(namespace.into(), renamed.clone());
                     e.rec.lock().unwrap().namespace = namespace.into();
                     namespaces.remove(&from);
-                    Some(renamed)
+                    Some((renamed, publication))
                 }
                 _ => None,
             }
         };
-        let Some(t) = renamed else {
+        let Some((t, publication)) = renamed else {
             return Ok(false);
         };
         // The new record first, the old one last: a crash between leaves both, and the next
         // start keeps the one a machine names (`drop_renamed_leftovers`).
         self.inner
             .store
-            .put(crate::store::NAMESPACES, namespace, &t.rec)?;
+            .put_durable(crate::store::NAMESPACES, namespace, &t.rec)?;
         self.rehome_records(e)?;
-        self.inner.store.delete(crate::store::NAMESPACES, &from)?;
+        self.inner
+            .store
+            .delete_durable(crate::store::NAMESPACES, &from)?;
         self.after_move(e, &from, &r.ip, false);
+        self.refresh_dns(&t);
+        self.save_execution_publication(e)?;
+        self.finish_execution_mutation(&publication)?;
         Ok(true)
     }
 
     /// Writes the machine's record and its endpoints' under its new namespace.
     fn rehome_records(&self, e: &Entry) -> Result<()> {
         let r = e.snapshot();
-        self.save(e)?;
+        self.save_execution_publication(e)?;
         let mut endpoints = self.inner.endpoints.lock().unwrap();
         for ep in endpoints.values_mut().filter(|x| x.machine_id == r.id) {
             ep.namespace.clone_from(&r.namespace);
-            self.inner.store.put("endpoints", &ep.id, ep)?;
+            self.inner.store.put_durable("endpoints", &ep.id, ep)?;
         }
         Ok(())
     }

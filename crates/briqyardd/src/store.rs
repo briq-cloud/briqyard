@@ -96,6 +96,8 @@ impl Store {
             "assigned-runs",
             "assigned-run-readers",
             "assigned-run-updates",
+            "execution-idle-protection",
+            "execution-namespace-fence",
         ] {
             private_dir(&root.join(d))?;
         }

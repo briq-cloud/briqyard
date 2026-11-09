@@ -158,7 +158,15 @@ impl Manager {
             .context("owned paused process missing")?;
         self.verify_assignment_process(&intent, &live)?;
         self.meter(std::slice::from_ref(&entry), Utc::now()).await;
-        {
+        // Ownership, namespace and the destination's policy become durable in the
+        // same transition. Fence both names before either record can be published.
+        let mut namespaces = vec![
+            intent.source.namespace.clone(),
+            intent.target.namespace.clone(),
+        ];
+        namespaces.sort();
+        namespaces.dedup();
+        let ticket = {
             let machines = self.inner.machines.lock().unwrap();
             anyhow::ensure!(
                 machines
@@ -172,6 +180,10 @@ impl Manager {
             anyhow::ensure!(!*removed, "assignment entry was removed");
             self.verify_assignment_process(&intent, &live)?;
             let records = self.assignment_records(&machines)?;
+            let ticket = self.begin_execution_mutation(
+                &namespaces,
+                crate::machine::execution_fence::MutationMode::Broaden,
+            )?;
             self.write_destination_intent(&intent, &records, |current| {
                 // Holding machines + rec makes quota/name/address transfer one admission
                 // step. Publish before reader I/O so a failed reader write cannot let a
@@ -193,7 +205,9 @@ impl Manager {
             })?;
             // Delete last: failures leave the same Entry/intent reserved for exact retry.
             self.finish_destination_intent(&intent)?;
-        }
+            ticket
+        };
+        self.finish_execution_mutation(&ticket)?;
         entry.changed.notify_waiters();
         drop(_entry);
         Ok(entry)

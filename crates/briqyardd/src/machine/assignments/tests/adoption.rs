@@ -45,6 +45,33 @@ fn no_cleanup_or_cold_launch(calls: &[String]) {
 }
 
 #[tokio::test]
+async fn protected_destination_refuses_assigned_adoption_before_trust() {
+    let (h, id, _) = staged(3).await;
+    restart_load(&h.m).unwrap();
+    h.m.inner.policies.lock().unwrap().clear();
+    let destination = "destination".to_owned();
+    let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+    {
+        let mut fence = h.m.inner.execution_fence.lock().unwrap();
+        let generations = fence
+            .snapshot(&h.m.inner.store, std::slice::from_ref(&destination), now)
+            .unwrap();
+        fence
+            .protect(&h.m.inner.store, &generations, now + 30_000, now)
+            .unwrap();
+    }
+    let entry = h.m.entry(&id).unwrap();
+    h.host_calls();
+    assert!(!h.m.recover_assigned_launch(&entry).await);
+    assert!(!entry.identity_trusted.load(Relaxed));
+    assert!(entry.live.lock().unwrap().is_none());
+    assert!(!h
+        .host_calls()
+        .iter()
+        .any(|call| call.starts_with("activate_quarantined ")));
+}
+
+#[tokio::test]
 async fn assigned_stage_adoption_proves_continuity_before_trust_or_active_publication() {
     for phase in 0..4 {
         let (h, id, request) = staged(phase).await;

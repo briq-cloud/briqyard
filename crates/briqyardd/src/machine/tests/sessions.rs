@@ -264,6 +264,7 @@ async fn a_session_wakes_a_sleeping_machine_or_says_why_not() {
     h.ready().await;
     let m = h.m.create_made(h.request("sbx")).await.unwrap();
     let e = h.m.entry(&m.id).unwrap();
+    e.rec.lock().unwrap().last_used_at = Some(Utc::now() - chrono::Duration::hours(1));
     h.m.stop_entry(&e, stop::IDLE, Duration::from_secs(1), false, None)
         .await
         .unwrap();
@@ -354,6 +355,7 @@ async fn the_ingress_waits_for_a_woken_machine_to_be_ready() {
             .unwrap();
     eventually("ready", || h.m.get(&m.id).unwrap().ready).await;
     let e = h.m.entry(&m.id).unwrap();
+    e.rec.lock().unwrap().last_used_at = Some(Utc::now() - chrono::Duration::hours(1));
     h.m.stop_entry(&e, stop::IDLE, Duration::from_secs(1), false, None)
         .await
         .unwrap();
@@ -388,6 +390,7 @@ async fn an_exec_that_wakes_a_machine_runs_once_it_is_ready() {
             .unwrap();
     eventually("ready", || h.m.get(&m.id).unwrap().ready).await;
     let e = h.m.entry(&m.id).unwrap();
+    e.rec.lock().unwrap().last_used_at = Some(Utc::now() - chrono::Duration::hours(1));
     h.m.stop_entry(&e, stop::IDLE, Duration::from_secs(1), false, None)
         .await
         .unwrap();

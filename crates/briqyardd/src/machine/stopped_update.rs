@@ -107,36 +107,37 @@ impl Manager {
             .map(|_| next.pending_since.unwrap_or_else(Utc::now));
         next.suspended = false;
         next.suspend_synced = false;
-        e.note_locked(
-            &mut next,
-            Ev::normal(reason::UPDATED, "stopped target accepted"),
-        );
-        let receipt = api::StoppedUpdateReceipt {
-            claim_nonce: req.claim_nonce.clone(),
-            machine_id: id.into(),
-            namespace: next.namespace.clone(),
-            version: next.version,
-            host_id: self.inner.host_id.clone(),
-            host_boot_id,
-        };
-        next.stopped_updates.insert(
-            req.claim_nonce,
-            Accepted {
-                commitment,
-                receipt: receipt.clone(),
-            },
-        );
-        next.updated_at = Utc::now();
-        // `removed` serializes this write with every ordinary persistence snapshot.
-        // Once renamed, retain the complete target even when directory sync fails:
-        // subsequent writers and starts must never see the pre-acceptance record.
-        self.inner
-            .store
-            .put_durable_published("machines", id, &next, || {
-                *r = next.clone();
-                e.stopped_update_unsynced.store(true, Relaxed);
-            })?;
-        e.stopped_update_unsynced.store(false, Relaxed);
+        let event = Ev::normal(reason::UPDATED, "stopped target accepted").of(id, &next.namespace);
+        let receipt = e.events.commit_then_emit(event, |version| {
+            next.version = version;
+            let receipt = api::StoppedUpdateReceipt {
+                claim_nonce: req.claim_nonce.clone(),
+                machine_id: id.into(),
+                namespace: next.namespace.clone(),
+                version: next.version,
+                host_id: self.inner.host_id.clone(),
+                host_boot_id,
+            };
+            next.stopped_updates.insert(
+                req.claim_nonce,
+                Accepted {
+                    commitment,
+                    receipt: receipt.clone(),
+                },
+            );
+            next.updated_at = Utc::now();
+            // `removed` serializes this write with every ordinary persistence snapshot.
+            // Once renamed, retain the complete target even when directory sync fails:
+            // subsequent writers and starts must never see the pre-acceptance record.
+            self.inner
+                .store
+                .put_durable_published("machines", id, &next, || {
+                    *r = next.clone();
+                    e.stopped_update_unsynced.store(true, Relaxed);
+                })?;
+            e.stopped_update_unsynced.store(false, Relaxed);
+            Ok(receipt)
+        })?;
         Ok(receipt)
     }
 

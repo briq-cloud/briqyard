@@ -2,6 +2,38 @@
 
 use super::*;
 
+#[tokio::test]
+async fn protected_source_or_destination_refuses_move_before_effects() {
+    for destination_exists in [false, true] {
+        for protected in ["t1", "t2"] {
+            let h = harness("10.64.0.0/22", 4096).await;
+            h.ready().await;
+            let machine = h.m.create_made(h.request("moving")).await.unwrap();
+            if destination_exists {
+                h.namespace("t2");
+            }
+            let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+            {
+                let mut fence = h.m.inner.execution_fence.lock().unwrap();
+                let generations = fence
+                    .snapshot(&h.m.inner.store, &[protected.into()], now)
+                    .unwrap();
+                fence
+                    .protect(&h.m.inner.store, &generations, now + 30_000, now)
+                    .unwrap();
+            }
+            h.host.calls();
+            assert!(h.m.move_machine(&machine.id, "t2", None).await.is_err());
+            let after = h.m.get(&machine.id).unwrap();
+            assert_eq!(after.namespace, "t1");
+            assert_eq!(after.ip, machine.ip);
+            assert_eq!(after.state, state::RUNNING);
+            assert!(h.host.calls().is_empty());
+            assert_eq!(h.stored(&machine.id).unwrap().namespace, "t1");
+        }
+    }
+}
+
 fn tcp(port: u16) -> api::CreateEndpointRequest {
     api::CreateEndpointRequest {
         port,

@@ -253,11 +253,11 @@ async fn adoption_keeps_known_identity_and_missing_provenance_never_becomes_lega
     let machine = h.m.create_made(h.request("reporting")).await.unwrap();
     let e = h.m.entry(&machine.id).unwrap();
     let before = e.snapshot();
-    assert!(h.m.adopt(&e, before.pid, true).await);
+    assert!(h.m.adopt(&e, before.pid, true).await.unwrap());
     assert_eq!(e.snapshot().boot_identity, before.boot_identity);
     e.rec.lock().unwrap().boot_identity = None;
     h.host.calls();
-    assert!(h.m.adopt(&e, before.pid, true).await);
+    assert!(h.m.adopt(&e, before.pid, true).await.unwrap());
     let observed = e.snapshot().boot_identity.unwrap();
     assert_eq!(observed.device_profile, fc::REPORTING_PROFILE);
     assert_eq!(
@@ -292,7 +292,7 @@ async fn adoption_detects_stale_reporting_metadata_from_an_older_cold_boot() {
         .unwrap()
         .boot_identity = None;
     h.host.calls();
-    assert!(h.m.adopt(&e, pid, true).await);
+    assert!(h.m.adopt(&e, pid, true).await.unwrap());
     let identity = h.stored(&machine.id).unwrap().boot_identity.unwrap();
     assert_eq!(
         (identity.schema, identity.device_profile.as_str()),
@@ -327,7 +327,7 @@ async fn adoption_missing_or_changed_binding_cannot_recertify_matching_devices()
                     rec.boot_incarnation.as_mut().unwrap().start_ticks += 1;
                 }
             }
-            assert!(h.m.adopt(&e, pid, true).await);
+            assert!(h.m.adopt(&e, pid, true).await.unwrap());
             let identity = h.stored(&machine.id).unwrap().boot_identity.unwrap();
             assert_eq!(identity.schema, 0);
             assert_eq!(identity.device_profile, original.device_profile);
@@ -352,7 +352,7 @@ async fn failed_observation_retains_metadata_but_unbound_memory_is_ambiguous_and
         .find(|p| p.pid == pid)
         .unwrap()
         .boot_identity = Some(fc::BootIdentity::ambiguous(fc::UNAVAILABLE_PROFILE));
-    assert!(h.m.adopt(&e, pid, true).await);
+    assert!(h.m.adopt(&e, pid, true).await.unwrap());
     assert_eq!(e.snapshot().boot_identity, original);
     assert!(!e.identity_trusted.load(Relaxed));
     let snapshot =

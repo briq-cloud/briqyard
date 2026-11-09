@@ -21,6 +21,7 @@ mod backups;
 mod endpoints;
 mod errors;
 mod exec;
+pub mod execution;
 mod files;
 mod images;
 mod machines;

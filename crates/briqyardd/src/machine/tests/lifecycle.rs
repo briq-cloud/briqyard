@@ -3,6 +3,31 @@
 use super::*;
 
 #[tokio::test]
+async fn protected_namespace_refuses_cold_start_before_publication() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    let mut request = h.request("stopped");
+    request.start = Some(false);
+    let machine = h.m.create_made(request).await.unwrap();
+    let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+    {
+        let mut fence = h.m.inner.execution_fence.lock().unwrap();
+        let generations = fence
+            .snapshot(&h.m.inner.store, &["t1".into()], now)
+            .unwrap();
+        fence
+            .protect(&h.m.inner.store, &generations, now + 30_000, now)
+            .unwrap();
+    }
+    h.host.calls();
+    assert!(h.m.start(&machine.id, None).await.is_err());
+    let entry = h.m.entry(&machine.id).unwrap();
+    assert!(entry.live.lock().unwrap().is_none());
+    assert_eq!(entry.snapshot().state, state::CREATED);
+    assert!(h.host.calls().is_empty());
+}
+
+#[tokio::test]
 async fn replayed_make_settles_its_admission_before_handover() {
     let h = harness("10.64.0.0/22", 4096).await;
     let e = h.add("replayed", state::STOPPED, 256);
@@ -567,6 +592,7 @@ async fn a_wake_during_a_sleep_waits_for_the_stop_then_starts() {
     h.ready().await;
     let m = h.m.create_made(h.request("db")).await.unwrap();
     let e = h.m.entry(&m.id).unwrap();
+    e.rec.lock().unwrap().last_used_at = Some(Utc::now() - chrono::Duration::hours(1));
     h.host.stops_take(Duration::from_millis(300));
     let (m2, e2) = (h.m.clone(), e.clone());
     let sleep = tokio::spawn(async move {

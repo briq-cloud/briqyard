@@ -34,7 +34,11 @@ mod consistency;
 mod create;
 mod endpoints;
 mod exec;
+mod execution_fence;
+mod execution_mutations;
+mod execution_resources;
 mod gateway;
+mod idle_protection;
 mod launch_identity;
 mod leaves;
 mod logpage;
@@ -46,8 +50,12 @@ mod namespaces;
 mod network;
 mod observe;
 mod scoped_exec;
+pub use execution_resources::ExecutionResourceScope;
 use memory::host_memory;
-pub use scoped_exec::ScopedCredentials;
+pub use scoped_exec::{
+    ExecutionProtectionReceipt, ExecutionProtectionRequest, ScopedCredentials,
+    ScopedExecutionContext,
+};
 mod persist;
 mod probes;
 mod quotas;
@@ -758,8 +766,22 @@ impl Entry {
     /// rest of the record under the same lock and says what happened: that event is logged
     /// and becomes the machine's version (ADR 0019).
     fn set_state(&self, state: &str, f: impl FnOnce(&mut Record) -> Option<Ev>) {
+        self.set_state_when(state, |_| true, f);
+    }
+
+    /// Evaluate admission and commit the state under the same record lock. Activity
+    /// fast paths take this lock too, without acquiring the lifecycle turn.
+    fn set_state_when(
+        &self,
+        state: &str,
+        admit: impl FnOnce(&Record) -> bool,
+        f: impl FnOnce(&mut Record) -> Option<Ev>,
+    ) -> bool {
         {
             let mut r = self.rec.lock().unwrap();
+            if !admit(&r) {
+                return false;
+            }
             if r.state != state {
                 let now = Utc::now();
                 let mut m = self.meter.lock().unwrap();
@@ -777,6 +799,7 @@ impl Entry {
             }
         }
         self.changed.notify_waiters();
+        true
     }
 
     /// Logs an event about the machine, which becomes its version. The caller writes the record.
@@ -858,6 +881,8 @@ struct Inner {
     verified_templates: Mutex<std::collections::HashSet<(String, String, String)>>,
     cfg: Config,
     store: Store,
+    idle_protection: Mutex<idle_protection::Protection>,
+    execution_fence: Mutex<execution_fence::ExecutionFence>,
     zfs: Zfs,
     images: Builder,
     dns: Resolver,

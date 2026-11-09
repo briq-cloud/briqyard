@@ -157,6 +157,12 @@ impl Manager {
         };
         // Resolved before anything moves: a `via` whose machine is gone refuses the start.
         let policy = self.policy_for(&rec)?;
+        // Cover the whole boot publication, not only its network attachment. A scoped
+        // resource snapshot must not observe a trusted run before its record is durable.
+        let publication = self.begin_execution_mutation(
+            std::slice::from_ref(&rec.namespace),
+            execution_fence::MutationMode::Broaden,
+        )?;
         // Through the namespace's gateway: it runs first, and the namespace's lock is kept until
         // this machine is `starting`, which is what the sleeper looks for.
         let gateway_turn = match rec.egress.via_gateway() {
@@ -416,6 +422,7 @@ impl Manager {
             self.inner
                 .store
                 .put_durable("machines", &e.snapshot().id, &e.snapshot())?;
+            self.finish_execution_mutation(&publication)?;
             return Ok(());
         }
         let (_, _, generation) = self.reset_probes(e);
@@ -437,7 +444,7 @@ impl Manager {
         if rec.template_birth.is_none() {
             self.spawn_probes(e, &live, generation, asked);
         }
-        let _ = self.save(e);
+        self.save_execution_publication(e)?;
         tracing::info!(
             machine = rec.id,
             namespace = rec.namespace,
@@ -453,6 +460,7 @@ impl Manager {
         } else {
             self.inner.stats.boots.fetch_add(1, Relaxed);
         }
+        self.finish_execution_mutation(&publication)?;
         Ok(())
     }
 

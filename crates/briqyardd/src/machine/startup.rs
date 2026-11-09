@@ -57,6 +57,13 @@ impl Manager {
         let backups = Backups::open(&cfg.backup, &store)?;
         let (endpoint_events, _) = broadcast::channel(64);
         let ledger = Ledger::load(&store, Utc::now()).context("usage")?;
+        let idle_protection =
+            idle_protection::Protection::load(&store).context("execution idle protection")?;
+        let execution_fence =
+            execution_fence::ExecutionFence::load(&store).context("execution namespace fences")?;
+        // Keep native startup ownership, existing VMMs and kernel networking intact.
+        // Backing recovery can reconcile processes, so the barrier precedes it too.
+        execution_fence.drain_at_start().await?;
         let events = Events::open(&store.dir("events")).context("events")?;
         images.events = Some(events.clone());
         let advertise = advertise_address(
@@ -112,6 +119,8 @@ impl Manager {
             }),
             cfg,
             store,
+            idle_protection: Mutex::new(idle_protection),
+            execution_fence: Mutex::new(execution_fence),
             zfs,
             images,
             dns,
@@ -164,7 +173,6 @@ impl Manager {
             return Ok(m);
         }
         let phase = std::time::Instant::now();
-        host::enable_forwarding()?;
         let namespaces: Vec<Namespace> = m
             .inner
             .namespaces
@@ -173,11 +181,22 @@ impl Manager {
             .values()
             .cloned()
             .collect();
+        let mut names: Vec<_> = namespaces.iter().map(|t| t.rec.id.clone()).collect();
+        names.sort();
+        let mut publications = Vec::new();
+        for chunk in names.chunks(api::execution::MAX_RESOURCES) {
+            publications
+                .push(m.begin_execution_mutation(chunk, execution_fence::MutationMode::Broaden)?);
+        }
+        host::enable_forwarding()?;
         for t in &namespaces {
             m.plumb_namespace(t).await?;
             m.refresh_dns(t);
         }
         m.apply_rules().await?;
+        for publication in publications {
+            m.finish_execution_mutation(&publication)?;
+        }
         tracing::info!(
             phase = "network recovery",
             elapsed_ms = phase.elapsed().as_millis() as u64,
@@ -479,7 +498,7 @@ impl Manager {
             }
             if rec.state == state::RUNNING
                 && rec.pid > 0
-                && self.adopt(&e, rec.pid, ready.contains(&rec.id)).await
+                && self.adopt(&e, rec.pid, ready.contains(&rec.id)).await?
             {
                 adopted += 1;
                 continue;
@@ -724,7 +743,7 @@ impl Manager {
     ///
     /// `ready`: the previous daemon handed it over ready (ADR 0051). Its probes still start
     /// over, and failing them as often as a failure threshold takes that back.
-    pub(super) async fn adopt(&self, e: &Arc<Entry>, pid: u32, ready: bool) -> bool {
+    pub(super) async fn adopt(&self, e: &Arc<Entry>, pid: u32, ready: bool) -> Result<bool> {
         let rec = e.snapshot();
         let dir = self.inner.cfg.run_dir().join(&rec.id);
         let jail = self.jail_for(&rec);
@@ -734,11 +753,15 @@ impl Manager {
             .adopt(&rec.id, &dir, jail.as_ref(), pid, e.disk_io.clone())
             .await
         else {
-            return false;
+            return Ok(false);
         };
         if self.verify_live_launch(e, &vm).is_err() {
-            return false;
+            return Ok(false);
         }
+        let publication = self.begin_execution_mutation(
+            std::slice::from_ref(&rec.namespace),
+            execution_fence::MutationMode::Broaden,
+        )?;
         let bound = rec
             .boot_incarnation
             .as_ref()
@@ -752,9 +775,6 @@ impl Manager {
         );
         if identity != rec.boot_identity {
             e.rec.lock().unwrap().boot_identity = identity;
-            if let Err(err) = self.save(e) {
-                tracing::warn!(machine = rec.id, err = %err, "adopted boot identity not saved");
-            }
         }
         *e.live.lock().unwrap() = Some(vm.clone());
         self.retain_memory_policy(e, &vm);
@@ -767,13 +787,16 @@ impl Manager {
             )
             .data(json!({"pid": pid})),
         );
-        let _ = self.save(e);
+        // Errors abort recovery, never fall through to the failed-adoption stop path.
+        // The factory and live entry retain ownership of this proven process.
+        self.save_execution_publication(e)?;
+        self.finish_execution_mutation(&publication)?;
         tracing::info!(
             machine = rec.id,
             pid,
             "adopted a machine left running by a previous daemon"
         );
-        true
+        Ok(true)
     }
 
     /// Settles the machine's state once its process is gone.
@@ -820,7 +843,7 @@ impl Manager {
                             .is_none_or(|run| run.phase == assignments::runs::Phase::Settled)))
                     && !pending_creation.contains(&r.id)
                     && stopped_by_host(&r)
-                    && !idle_past(r.last_used_at, r.sleep_window(), now)
+                    && !self.idle_due(&r, now)
             })
             .cloned()
             .collect();

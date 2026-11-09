@@ -8,6 +8,15 @@ mod bootstrap;
 mod config;
 mod create;
 mod create_replay;
+// Dormant until the trusted authority and internal listener are qualified.
+#[allow(dead_code)]
+mod execution_host;
+#[allow(dead_code)]
+mod execution_install;
+#[allow(dead_code)]
+mod execution_operation;
+#[allow(dead_code)]
+mod execution_service;
 mod forward;
 mod hosts;
 mod join;

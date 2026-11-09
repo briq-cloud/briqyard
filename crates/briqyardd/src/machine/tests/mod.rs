@@ -24,7 +24,6 @@ mod probing;
 mod quotas;
 mod recovery;
 mod retirement;
-#[cfg(target_os = "linux")]
 mod scoped_exec;
 mod sessions;
 mod siblings;
@@ -253,6 +252,8 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             verified_templates: Mutex::new(std::collections::HashSet::new()),
             range: Range::parse(&cfg.network.range).unwrap(),
             cfg,
+            idle_protection: Mutex::new(idle_protection::Protection::load(&store).unwrap()),
+            execution_fence: Mutex::new(execution_fence::ExecutionFence::load(&store).unwrap()),
             store,
             zfs,
             images,
