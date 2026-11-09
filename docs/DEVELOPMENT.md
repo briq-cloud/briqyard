@@ -603,7 +603,17 @@ cleanup, capability checks for inherited restores, and bounded conntrack diagnos
 kill/reap coverage. Each reviewed failure was reproduced before its fix; Linux network and
 microVM gates remain required before push.
 
-Native e2e additionally runs `hack/e2e-seals.sh` (4 checks): both sandbox seed disk shapes seal, create and execute their first command. The init root-only `--ignored run_as` filter includes loopback ext4 sync, freeze rollback, thaw, deadline and connection-close tests (ADR 0092).
+Native e2e additionally runs `hack/e2e-seals.sh` (18 checks, disposable CI host only): both sandbox seed disk shapes seal,
+create and execute their first command. The positive-DATA source supplies an observed recipe
+for a test-only unbound catalog, validated by the installed configuration parser. Desired zero
+restores the selected seed; warm acceptance requires the actual paused slot ID, unchanged
+kernel process incarnation, credentials, boot identity and open root/DATA devices. It checks
+the physical VMM memory ceiling, independent root and DATA budget refusal, exact replay, changed-body
+conflict and bounded refill with independent DATA. Destination environment and boot files must
+be visible to the first command exactly once. Cleanup drains the pool and destroys owned
+namespaces before the conservative maintenance observation permits configuration restoration
+and handover. A missing process/device observation fails; cold restore cannot pass a warm
+claim. These added native gates require a native run; offline fixture tests do not qualify them. The init root-only `--ignored run_as` filter includes loopback ext4 sync, freeze rollback, thaw, deadline and connection-close tests (ADR 0092).
 
 ADR 0092 checks achieved consistency and two timed unsynced 27-byte regressions
 (snapshot restore and running-source disk fork), plus up to five crash opt-out controls.
