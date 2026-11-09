@@ -145,9 +145,9 @@ impl Manager {
     pub async fn stopped_update_receipt(
         &self,
         id: &str,
-        nonce: &str,
+        claim_nonce: &str,
     ) -> Result<api::StoppedUpdateReceipt, MError> {
-        if !api::valid_id(nonce) {
+        if !api::valid_id(claim_nonce) {
             return Err(MError::Invalid("claim_nonce must be a runtime id".into()));
         }
         let e = self.own_entry(id)?;
@@ -165,7 +165,10 @@ impl Manager {
             .store
             .get::<Record>("machines", id)?
             .ok_or(MError::NotFound)?;
-        let accepted = stored.stopped_updates.get(nonce).ok_or(MError::NotFound)?;
+        let accepted = stored
+            .stopped_updates
+            .get(claim_nonce)
+            .ok_or(MError::NotFound)?;
         let receipt = &accepted.receipt;
         let host_boot_id = self.stopped_update_authority(&e, &current)?;
         self.stopped_update_authority(&e, &stored)?;

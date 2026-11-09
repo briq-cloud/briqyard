@@ -1,8 +1,8 @@
 use super::*;
 
-fn request(nonce: &str) -> api::StoppedUpdateRequest {
+fn request(claim_nonce: &str) -> api::StoppedUpdateRequest {
     api::StoppedUpdateRequest {
-        claim_nonce: nonce.into(),
+        claim_nonce: claim_nonce.into(),
         image: "alpine:3".into(),
         env: BTreeMap::new(),
     }
