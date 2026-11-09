@@ -217,7 +217,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
             .unwrap();
     let clock = Clock {
         now: 1010,
-        uncertainty: 0,
+        uncertainty: 1,
     };
     let registration = HostRegistration {
         authority: "region".into(),

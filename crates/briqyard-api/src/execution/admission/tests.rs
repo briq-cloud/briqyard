@@ -380,16 +380,34 @@ fn issuer_releases_only_after_durable_full_reservation_and_retry_is_status_only(
     )
     .unwrap();
     let allocations = f.allocations.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut preflight_token = String::new();
     let token = issuer
-        .issue(
-            &f.grant_token,
-            &allocations,
+        .issue_with_preflight(
+            IssueCredentials {
+                grant: &f.grant_token,
+                allocations: &allocations,
+            },
             f.permit.clone(),
             &f.trust(),
             clock(),
             &f.context(),
+            |placeholder| {
+                preflight_token = placeholder.to_owned();
+                assert!(verify_bundle(
+                    &f.grant_token,
+                    placeholder,
+                    &allocations,
+                    &f.trust(),
+                    clock(),
+                    &f.context()
+                )
+                .is_err());
+                Ok(())
+            },
         )
         .unwrap();
+    assert_eq!(preflight_token.len(), token.len());
+    assert_ne!(preflight_token, token);
     verify_bundle(
         &f.grant_token,
         &token,

@@ -72,7 +72,8 @@ impl DurableIssuer {
     }
 
     /// The trusted coordinator checks the complete serialized host envelope before
-    /// either quota debit or permit release. The key and unsigned token stay here.
+    /// either quota debit or permit release. It receives only an inert signature
+    /// placeholder of the exact encoded length; no usable signature leaves here.
     pub fn issue_with_preflight(
         &mut self,
         credentials: IssueCredentials<'_>,
@@ -95,6 +96,8 @@ impl DurableIssuer {
             URL_SAFE_NO_PAD.encode(head),
             URL_SAFE_NO_PAD.encode(body)
         );
+        let placeholder = format!("{}.{}", signed, URL_SAFE_NO_PAD.encode([0_u8; 64]));
+        preflight(&placeholder)?;
         let token = format!(
             "{}.{}",
             signed,
@@ -108,7 +111,6 @@ impl DurableIssuer {
             clock,
             context,
         )?;
-        preflight(&token)?;
         let instance = self.journal.instance().to_string();
         self.journal.install(&bundle, &instance, clock)?;
         self.journal.reserve(&bundle, clock)?;

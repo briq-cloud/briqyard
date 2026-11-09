@@ -248,12 +248,18 @@ impl Coordinator<'_> {
         {
             return Err(Error::Binding);
         }
+        // Choose the qualified interval's lower bound, after credential lower
+        // bounds have been verified against that same interval.
+        let issued_at = clock
+            .now
+            .checked_sub(clock.uncertainty)
+            .ok_or(Error::Binding)?;
         let permit = Permit {
             v: 1,
             iss: trust.authority_issuer.into(),
             aud: trust.audience.into(),
-            iat: clock.now,
-            nbf: clock.now,
+            iat: issued_at,
+            nbf: issued_at,
             exp,
             admission: control.id.clone(),
             authority: reg.authority.clone(),

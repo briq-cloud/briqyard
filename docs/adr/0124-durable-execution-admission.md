@@ -375,3 +375,8 @@ instance invalidates old credentials, but does not prove a previously accepted g
 has stopped. These gates are not implemented by allocation installation. The end-to-end caller must recover uncertain receipts by
 status without replay. Files, sessions, streams and multi-host frozen resources remain
 unavailable through scoped access until their own commitments and fences are implemented.
+
+Permit envelope preflight receives an inert, equal-length signature placeholder.
+The issuer retains the usable signature until the complete durable reservation
+succeeds. Permit issue and not-before times use the qualified clock interval's
+lower bound; verified grant and allocation lower bounds still apply.
