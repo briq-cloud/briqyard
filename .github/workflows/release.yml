@@ -72,6 +72,9 @@ jobs:
   # history (ADR 0107). A draft release is not created without it.
   upgrade:
     needs: build
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/native-upgrade.yml
     with:
       candidate: true

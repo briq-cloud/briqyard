@@ -603,8 +603,9 @@ cleanup, capability checks for inherited restores, and bounded conntrack diagnos
 kill/reap coverage. Each reviewed failure was reproduced before its fix; Linux network and
 microVM gates remain required before push.
 
-Native e2e additionally runs `hack/e2e-seals.sh` (18 checks, disposable CI host only): both sandbox seed disk shapes seal,
-create and execute their first command. The positive-DATA source supplies an observed recipe
+Native e2e additionally runs `hack/e2e-seals.sh` (32 checks, disposable CI host only): both sandbox seed disk shapes seal,
+create siblings with distinct network identities and vsock nonces, execute their first commands,
+check restored wall clocks and retain the source exec barrier. The positive-DATA source supplies an observed recipe
 for a test-only unbound catalog, validated by the installed configuration parser. Desired zero
 restores the selected seed; warm acceptance requires the actual paused slot ID, unchanged
 kernel process incarnation, credentials, boot identity and open root/DATA devices. It checks

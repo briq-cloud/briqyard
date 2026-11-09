@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.1 — 2026-11-09
+
+### Upgrade notes
+
+- Initial assigned machines accept live volume growth and stopped complete boot-file replacements (ADR 0125). Schema 3 update journals require `assigned-update-v3` and permanent protocol floor 4; rollback must support retained authority.
+- The init's digest is expected not to change (ADR 0101): no init source or dependency changed. Confirm the exact candidate's init digests in `SHA256SUMS` before reusing sealed seeds.
+
+### Fixes
+
+- Ordinary stopped image, environment and volume changes require positive VMM exit before any part of the update moves. Missing or unsettled launch proof, a nonzero pid or an unexited live handle refuses the update; effective no-ops remain no-ops. Snapshot-affecting changes boot fresh at the next start (ADR 0024).
+
+### Tests
+
+- Extend artifact-backed upgrade qualification with retained-set rollback refusal and candidate restoration, plus aged template siblings checked for guest clock, network identity and separate vsock execution. Native qualification remains pending execution.
+
 ## 0.2.0 — 2026-11-09
 
 ### Upgrade notes

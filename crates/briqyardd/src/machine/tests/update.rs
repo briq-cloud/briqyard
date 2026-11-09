@@ -150,6 +150,7 @@ async fn a_new_image_makes_the_root_disk_again_and_keeps_the_volume() {
             .await
             .unwrap();
     let e = h.add("m_x", state::STOPPED, 256);
+    e.rec.lock().unwrap().suspended = true;
     h.disks(&e).await;
     let dev = h.pool.dev();
     std::fs::write(dev.join("byard/m/m_x/data"), b"the database").unwrap();
@@ -163,7 +164,10 @@ async fn a_new_image_makes_the_root_disk_again_and_keeps_the_volume() {
         .await
         .unwrap();
     h.pool.calls();
-    h.m.start("m_x", None).await.unwrap();
+    h.host.calls();
+    let started = h.m.start("m_x", None).await.unwrap();
+    assert!(started.pending.is_none() && !started.suspended);
+    assert!(h.host.calls().iter().any(|c| c.ends_with(" resume=false")));
     let r = h.stored("m_x").unwrap();
     assert_eq!(
         (r.image.as_str(), r.image_key.as_str(), r.root_key.as_str()),
@@ -343,7 +347,12 @@ async fn a_change_to_what_a_memory_snapshot_holds_makes_the_next_start_cold() {
         "{calls:?}"
     );
     // The env is in the guest's memory: the snapshot is dropped, the boot is cold.
+    let e = h.m.own_entry(&m.id).unwrap();
+    let exited = e.live.lock().unwrap().clone().unwrap();
     assert!(suspend().await.unwrap().suspended);
+    assert!(*exited.exited.borrow());
+    // An exited handle is allowed when the factory has settled the same launch.
+    *e.live.lock().unwrap() = Some(exited);
     h.m.update(&m.id, spec(|s| s.env = Some(env("V", "2"))), None)
         .await
         .unwrap();
@@ -720,4 +729,110 @@ async fn pending_cpu_size_is_admitted_at_start_without_losing_it_on_refusal() {
     assert_eq!(started.size, larger);
     assert!(started.pending.is_none());
     assert_eq!(h.m.usage().0.cpu_millis(), 500);
+}
+
+#[tokio::test]
+async fn stopped_updates_require_positive_exit_before_any_mutation() {
+    for (hazard, field) in [
+        "missing proof",
+        "unsettled launch",
+        "record pid",
+        "live handle",
+    ]
+    .into_iter()
+    .flat_map(|hazard| ["image", "env", "volume"].map(|field| (hazard, field)))
+    {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create_made(h.request("web")).await.unwrap();
+        let e = h.m.own_entry(&m.id).unwrap();
+        let mut live = e.live.lock().unwrap().clone().unwrap();
+        h.m.stop(&m.id, Duration::from_secs(1), true, None)
+            .await
+            .unwrap();
+        // Add the fake data device without invoking the host formatter.
+        e.rec.lock().unwrap().volume = record().volume;
+        e.rec.lock().unwrap().volume.as_mut().unwrap().size_gb = 2;
+        h.pool
+            .zfs
+            .create(&e.snapshot().data_dataset(), 2 << 30)
+            .await
+            .unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        match hazard {
+            "missing proof" => {
+                h.host
+                    .unproven_launches
+                    .lock()
+                    .unwrap()
+                    .insert(m.id.clone());
+            }
+            "unsettled launch" => {
+                h.host
+                    .left_running(&m.id, &h.m.inner.cfg.run_dir().join(&m.id));
+            }
+            "record pid" => e.rec.lock().unwrap().pid = 123,
+            "live handle" => {
+                live.exited = rx;
+                *e.live.lock().unwrap() = Some(live);
+            }
+            _ => unreachable!(),
+        }
+        h.m.save(&e).unwrap();
+        let before = serde_json::to_value(e.snapshot()).unwrap();
+        let stored = serde_json::to_value(h.stored(&m.id)).unwrap();
+        h.host_calls();
+        h.pool.calls();
+        let mut change = spec(|s| match field {
+            "image" => s.image = Some(IMAGE2.into()),
+            "env" => s.env = Some(env("V", "2")),
+            "volume" => s.volume = Some(api::VolumeSize { size_gb: 5 }),
+            _ => unreachable!(),
+        });
+        change.metadata = Some(BTreeMap::from([("changed".into(), "yes".into())]));
+        let result = h.m.update(&m.id, change, None).await;
+        assert!(
+            matches!(result, Err(MError::Conflict(_))),
+            "{hazard}, {field}: {result:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(e.snapshot()).unwrap(),
+            before,
+            "{hazard}, {field}"
+        );
+        assert_eq!(
+            serde_json::to_value(h.stored(&m.id)).unwrap(),
+            stored,
+            "{hazard}, {field}"
+        );
+        assert!(h.host_calls().is_empty(), "{hazard}, {field}");
+        assert!(h.pool.calls().is_empty(), "{hazard}, {field}");
+    }
+}
+
+#[tokio::test]
+async fn stopped_same_values_need_no_exit_proof_but_pending_cancellation_does() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    let e = with_volume(&h, "m_same", state::STOPPED, 2).await;
+    let r = e.snapshot();
+    h.host
+        .unproven_launches
+        .lock()
+        .unwrap()
+        .insert(r.id.clone());
+    let same = spec(|s| {
+        s.image = Some(r.image.clone());
+        s.env = Some(r.env.clone());
+        s.volume = Some(api::VolumeSize { size_gb: 2 });
+    });
+    let unchanged = h.m.update(&r.id, same.clone(), None).await.unwrap();
+    assert_eq!(unchanged.version, r.version);
+    assert!(unchanged.pending.is_none());
+    assert!(h.pool.calls().is_empty());
+    e.rec.lock().unwrap().pending = pending_after(&r, spec(|s| s.image = Some(IMAGE2.into())).spec);
+    let before = serde_json::to_value(e.snapshot()).unwrap();
+    let result = h.m.update(&r.id, same, None).await;
+    assert!(matches!(result, Err(MError::Conflict(_))), "{result:?}");
+    assert_eq!(serde_json::to_value(e.snapshot()).unwrap(), before);
 }
