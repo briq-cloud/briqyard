@@ -28,6 +28,40 @@ async fn protected_namespace_refuses_cold_start_before_publication() {
 }
 
 #[tokio::test]
+async fn replayed_make_settles_its_admission_before_handover() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let e = h.add("replayed", state::STOPPED, 256);
+    let before = serde_json::to_value(e.snapshot()).unwrap();
+    let calls = h.host_calls();
+    for _ in 0..2 {
+        let scope = h.m.inner.zfs.io_scope().unwrap();
+        h.m.spawn_make_admitted(scope, e.clone(), Make::Existing);
+    }
+    // Maintenance can be eligible after fixture cleanup even when a replay leaked
+    // its I/O owner. Exercise the shutdown drain with both admission gates held.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("replacement");
+    std::fs::write(
+        &executable,
+        b"#!/bin/sh\ncase $1 in\nstate-capabilities) printf 'launch-identity-v1\\n';;\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\nassigned-run-lifecycle-capabilities) printf 'assigned-run-lifecycle-v1\\n';;\nassigned-update-capabilities) printf 'assigned-update-v3\\n';;\n*) exit 1;;\nesac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _admission = h.m.handover_admission(&executable).await.unwrap();
+    let held = tokio::time::timeout(Duration::from_secs(1), h.m.hand_over())
+        .await
+        .expect("replayed creates must not fence the shutdown drain");
+    assert_eq!(held.len(), 1);
+    assert_eq!(serde_json::to_value(e.snapshot()).unwrap(), before);
+    assert_eq!(
+        h.host_calls(),
+        calls,
+        "replay must dispatch no machine work"
+    );
+}
+
+#[tokio::test]
 async fn a_reservation_is_one_step() {
     // Eight starts race for the memory of two: never more than two may take it,
     // however they interleave.

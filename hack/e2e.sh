@@ -68,7 +68,14 @@ cleanup() {
   done
   [ -z "${STREAM_FILES:-}" ] || rm -rf "$STREAM_FILES"
   [ -z "${seal_counts:-}" ] || rm -f "$seal_counts"
+  # A seals-only qualification must fail if its owned namespaces survived cleanup.
+  if [ "${BRIQYARD_TEST_SEALS_ONLY:-}" = 1 ]; then
+    local remaining
+    remaining=$(briqyard namespace ls | jq -r --arg t "$T" '.[].id | select(. == $t or startswith($t + "-"))') || rc=1
+    if [ -n "$remaining" ]; then echo "seals cleanup left owned namespaces" >&2; rc=1; fi
+  fi
   suite_early_end "$rc"
+  exit "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
@@ -85,10 +92,12 @@ handover() {
 }
 
 
-. "$(dirname "${BASH_SOURCE[0]}")/e2e-machines.sh"
-. "$(dirname "${BASH_SOURCE[0]}")/e2e-classes.sh"
-. "$(dirname "${BASH_SOURCE[0]}")/e2e-siblings.sh"
-. "$(dirname "${BASH_SOURCE[0]}")/e2e-storage.sh"
-if [ "${BRIQYARD_TEST_SEALS:-}" = 1 ]; then . "$(dirname "${BASH_SOURCE[0]}")/e2e-seals.sh"; fi
+if [ "${BRIQYARD_TEST_SEALS_ONLY:-}" != 1 ]; then
+  . "$(dirname "${BASH_SOURCE[0]}")/e2e-machines.sh"
+  . "$(dirname "${BASH_SOURCE[0]}")/e2e-classes.sh"
+  . "$(dirname "${BASH_SOURCE[0]}")/e2e-siblings.sh"
+  . "$(dirname "${BASH_SOURCE[0]}")/e2e-storage.sh"
+fi
+if [ "${BRIQYARD_TEST_SEALS:-}" = 1 ] || [ "${BRIQYARD_TEST_SEALS_ONLY:-}" = 1 ]; then . "$(dirname "${BASH_SOURCE[0]}")/e2e-seals.sh"; fi
 
 suite_summary

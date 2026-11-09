@@ -66,6 +66,10 @@ impl Manager {
                 );
                 return;
             }
+            if let Err(error) = self.settle_creation_update(e).await {
+                tracing::error!(machine, %error, "creation update settlement withheld");
+                return;
+            }
             e.rec
                 .lock()
                 .unwrap()
@@ -354,6 +358,7 @@ impl Manager {
                 );
                 return Err(anyhow!("clone VMM exit is unconfirmed"));
             }
+            self.settle_creation_update(e).await?;
             e.rec
                 .lock()
                 .unwrap()

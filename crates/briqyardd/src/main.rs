@@ -57,6 +57,8 @@ enum Cmd {
     AssignedRunCapabilities,
     /// Print lifecycle support without reading configuration or host state.
     AssignedRunLifecycleCapabilities,
+    /// Print assigned update schema support without opening host state.
+    AssignedUpdateCapabilities,
 }
 
 fn main() {
@@ -135,6 +137,10 @@ async fn run(args: Args) -> Result<()> {
     }
     if matches!(args.cmd, Some(Cmd::AssignedRunLifecycleCapabilities)) {
         println!("assigned-run-lifecycle-v1");
+        return Ok(());
+    }
+    if matches!(args.cmd, Some(Cmd::AssignedUpdateCapabilities)) {
+        println!("assigned-update-v3");
         return Ok(());
     }
     // Capture before an installer replaces this path; /proc/self/exe later names old bytes.

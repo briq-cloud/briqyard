@@ -2,7 +2,7 @@
 use super::*;
 
 impl Manager {
-    fn assigned_process_proof(&self, record: &Record) -> Result<()> {
+    pub(super) fn assigned_process_proof(&self, record: &Record) -> Result<()> {
         self.validate_launch_record(record)?;
         let identity = record
             .launch_identity

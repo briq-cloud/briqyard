@@ -152,6 +152,9 @@
     Status:
       type: object
       properties:
+        observation:
+          allOf: [{ $ref: "#/components/schemas/RuntimeObservation" }]
+          description: "Serving runtime identity; absent on older daemons or unresolved recovery. Not a maintenance permit."
         egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
         named_memory_fork_v1: { type: boolean, default: false, description: "explicit availability of configured named memory cloning; supported profiles are listed separately; absent or stale reports are unsupported" }
         named_memory_profiles: { type: array, items: { type: string, enum: [init-ready-v1] }, description: "implemented configured profiles; init-ready does not clone already-running services" }

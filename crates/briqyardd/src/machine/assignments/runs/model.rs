@@ -294,7 +294,7 @@ impl Current {
             Some(update) => {
                 let direct_source = self.previous_run_sha256.is_some()
                     && self.previous_run_sha256 == update.source_current_sha256;
-                let creation_source = update.creation_source.as_ref().is_some_and(|creation| {
+                let creation_source = update.creation_authority().is_some_and(|creation| {
                     self.previous_run_sha256.is_none()
                         && self.prior.assigned_run.is_none()
                         && self.reference.sequence == 1

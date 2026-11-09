@@ -135,7 +135,10 @@ impl Store {
             &serde_json::from_slice(&bytes)?,
         )?;
         // Replacing the last machine link must not erase evidence after marker loss.
-        if kind == "machines" || crate::assignment_compatibility::RUN_COLLECTIONS.contains(&kind) {
+        if kind == "machines"
+            || kind == "assigned-run-updates"
+            || crate::assignment_compatibility::RUN_COLLECTIONS.contains(&kind)
+        {
             if let Some(previous) = self.get::<serde_json::Value>(kind, key)? {
                 minimum = minimum.max(crate::assignment_compatibility::record_requirement(
                     kind, &previous,
@@ -191,8 +194,10 @@ impl Store {
             "permanent assignment authority cannot be deleted"
         );
         // Preserve evidence before deleting its last surviving copy after marker loss.
-        if matches!(kind, "machines" | "unbound-assignments")
-            || crate::assignment_compatibility::RUN_COLLECTIONS.contains(&kind)
+        if matches!(
+            kind,
+            "machines" | "unbound-assignments" | "assigned-run-updates"
+        ) || crate::assignment_compatibility::RUN_COLLECTIONS.contains(&kind)
         {
             if let Some(value) = self.get::<serde_json::Value>(kind, key)? {
                 let required = crate::assignment_compatibility::record_requirement(kind, &value)?;

@@ -960,10 +960,12 @@ def required(config):
             needed = 2
         elif marker == {"schema": 3, "protocol": "assigned-run-lifecycle-v1"} and type(marker["schema"]) is int:
             needed = 3
+        elif marker == {"schema": 4, "protocol": "assigned-update-v3"} and type(marker["schema"]) is int:
+            needed = 4
         else:
             raise ValueError("invalid assignment protocol floor")
     runs = ("assigned-run-intents", "assigned-runs", "assigned-run-readers")
-    for kind in ("unbound-assignments", "unbound-requests", "machines") + runs:
+    for kind in ("unbound-assignments", "unbound-requests", "machines", "assigned-run-updates") + runs:
         try:
             entries = list((root / kind).iterdir())
         except FileNotFoundError:
@@ -976,7 +978,11 @@ def required(config):
             record = json.loads(entry.read_bytes())
             if not isinstance(record, dict):
                 raise ValueError("invalid assignment state record")
-            if kind in runs:
+            if kind == "assigned-run-updates":
+                if type(record.get("schema")) is not int or record["schema"] not in (1, 2, 3):
+                    raise ValueError("unsupported assigned update evidence schema")
+                needed = max(needed, 4 if record["schema"] == 3 else 3)
+            elif kind in runs:
                 if type(record.get("schema")) is not int or record["schema"] not in (1, 3):
                     raise ValueError("unsupported assigned run evidence schema")
                 needed = max(needed, 3 if record["schema"] == 3 else 2)
@@ -1035,6 +1041,7 @@ try:
     probe(sys.argv[1], "assignment-capabilities", b"destination-assignment-v1\n")
     probe(sys.argv[1], "assigned-run-capabilities", b"assigned-run-v1\n")
     probe(sys.argv[1], "assigned-run-lifecycle-capabilities", b"assigned-run-lifecycle-v1\n")
+    probe(sys.argv[1], "assigned-update-capabilities", b"assigned-update-v3\n")
 except Exception:
     print("assignment compatibility inspection/probe refused replacement", file=sys.stderr)
     sys.exit(1)

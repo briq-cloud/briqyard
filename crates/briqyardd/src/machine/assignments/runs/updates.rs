@@ -152,13 +152,15 @@ impl Manager {
         }
 
         // The map lock makes this durable target the quota reservation seen by every other
-        // create, start, or growth admission. Persist authority before exposing the new use.
+        // create, start, or growth admission. Durable authority still precedes backing changes.
         // Memory may hold the previous target after its machine write failed. Make that
         // target durable before discarding its predecessor, using startup's exact validation.
         // On any failure the old journal and its capacity reservation remain authoritative.
         self.repair_outstanding_update_record(&target.id)?;
-        self.inner.store.put_durable(UPDATES, &target.id, intent)?;
+        // Reserve the complete target before an uncertain intent write. Even a directory
+        // sync failure must not let a concurrent create consume the same disk allowance.
         *entry.rec.lock().unwrap() = target.clone();
+        self.inner.store.put_durable(UPDATES, &target.id, intent)?;
         self.inner
             .store
             .put_durable("machines", &target.id, target)?;
@@ -237,11 +239,13 @@ impl Manager {
                 "assigned volume update requires a running or stopped assigned machine".into(),
             ));
         }
-        let current: Current = self
-            .inner
-            .store
-            .get(RUNS, &record.id)?
-            .context("assigned current-run journal missing")?;
+        let current = self.inner.store.get::<Current>(RUNS, &record.id)?;
+        let Some(current) = current else {
+            return self
+                .update_live_creation_volume(entry, &record, volume.unwrap())
+                .await
+                .map_err(lifecycle::public_error);
+        };
         let phase_matches = match record.state.as_str() {
             state::RUNNING => current.reference.phase == Phase::Observed,
             state::STOPPED => current.reference.phase == Phase::Settled,
@@ -270,6 +274,13 @@ impl Manager {
                         .map_err(MError::Other)?;
                     return Ok(self.view(entry));
                 }
+            }
+            if current.record_fingerprint(&record)?
+                != current.record_fingerprint(&current.target)?
+            {
+                return Err(MError::Conflict(
+                    "assigned volume target lacks durable update authority".into(),
+                ));
             }
             return Ok(self.view(entry));
         };
@@ -335,6 +346,8 @@ impl Manager {
             resolved_image: None,
             root_swap: None,
             creation_source: None,
+            live_creation_source: None,
+            creation_settlement: None,
         };
         intent
             .check(&current)
@@ -357,12 +370,16 @@ impl Manager {
         let size = req.spec.size;
         let image = req.spec.image.clone();
         let env = req.spec.env.clone();
+        let files = req.spec.files.clone();
         let requested_volume = req.spec.volume;
         let disk_limits = req.disk_limits.clone();
-        if size.is_none() && image.is_none() && env.is_none() && requested_volume.is_none()
+        if size.is_none()
+            && image.is_none()
+            && env.is_none()
+            && files.is_none()
+            && requested_volume.is_none()
             || req.spec.entrypoint.is_some()
             || req.spec.cmd.is_some()
-            || req.spec.files.is_some()
             || req.spec.ports.is_some()
             || req.spec.restart.is_some()
             || req.sleep.is_some()
@@ -374,7 +391,7 @@ impl Manager {
             || req.probes.is_some()
         {
             return Err(MError::Conflict(
-                "assigned stopped updates accept image, env, size, volume and disk limits with size only".into(),
+                "assigned stopped updates accept image, env, files, size, volume and disk limits with size only".into(),
             ));
         }
         req.spec.check().map_err(invalid)?;
@@ -446,7 +463,12 @@ impl Manager {
             }
             let origin = self.settled_assigned_origin_durable(source)?;
             Self::check_assigned_binding(source, &origin)?;
-            if source.pid != 0 || !origin.mapping_exited || source.pending.is_some() {
+            if ((source.pid != 0 || !origin.mapping_exited)
+                && !existing
+                    .as_ref()
+                    .is_some_and(|update| update.creation_settlement.is_some()))
+                || (source.pending.is_some() && existing.is_none())
+            {
                 return Err(MError::Conflict(
                     "creation update lacks positive stopped process evidence".into(),
                 ));
@@ -454,7 +476,7 @@ impl Manager {
             creation_source = if let Some(existing) = &existing {
                 self.check_update_source(existing)?;
                 self.check_creation_update_backing(existing).await?;
-                existing.creation_source.clone()
+                existing.creation_authority().cloned()
             } else {
                 let binding = origin.sandbox.as_ref().unwrap();
                 let receipt = self
@@ -503,6 +525,8 @@ impl Manager {
                     "assigned pending update differs from its durable authority".into(),
                 ));
             }
+            self.check_creation_update_backing(update).await?;
+            self.ensure_assigned_volume_update(update).await?;
             if update.resolved_image.is_some() {
                 return Err(MError::Conflict(
                     "assigned image root update is already in recovery; start it before another resize".into(),
@@ -528,6 +552,9 @@ impl Manager {
             env: env
                 .clone()
                 .or_else(|| record.pending.as_ref().and_then(|p| p.env.clone())),
+            files: files
+                .clone()
+                .or_else(|| record.pending.as_ref().and_then(|p| p.files.clone())),
             size: size.or_else(|| record.pending.as_ref().and_then(|p| p.size)),
             volume: growth.map(|(_, to)| api::VolumeSize { size_gb: to }),
             ..Default::default()
@@ -543,6 +570,7 @@ impl Manager {
                 source_current_sha256 = existing.source_current_sha256.clone();
                 change.image = image.or(existing.change.image.clone());
                 change.env = env.or(existing.change.env.clone());
+                change.files = files.or(existing.change.files.clone());
                 change.size = size.or(existing.change.size);
                 change.volume = growth
                     .map(|(_, to)| api::VolumeSize { size_gb: to })
@@ -620,7 +648,13 @@ impl Manager {
             );
         }
         let intent = UpdateIntent {
-            schema: if creation_source.is_some() { 2 } else { 1 },
+            schema: if change.files.is_some() || existing.as_ref().is_some_and(|u| u.schema == 3) {
+                3
+            } else if creation_source.is_some() {
+                2
+            } else {
+                1
+            },
             machine: record.id.clone(),
             source_current_sha256,
             source_record: Box::new(source_record),
@@ -630,7 +664,20 @@ impl Manager {
             predecessor_target,
             resolved_image,
             root_swap,
-            creation_source,
+            creation_source: if existing
+                .as_ref()
+                .is_some_and(|u| u.live_creation_source.is_some())
+            {
+                None
+            } else {
+                creation_source.clone()
+            },
+            live_creation_source: existing
+                .as_ref()
+                .and_then(|u| u.live_creation_source.clone()),
+            creation_settlement: existing
+                .as_ref()
+                .and_then(|u| u.creation_settlement.clone()),
         };
         self.check_update_source(&intent)
             .map_err(|error| MError::Conflict(format!("assigned update intent: {error:#}")))?;
@@ -658,9 +705,11 @@ impl Manager {
         self.recover_assigned_update(&update)?;
         // Matching bytes can come from a rename whose directory sync failed. The
         // store syncs file contents before rename; complete that durable boundary too.
-        std::fs::File::open(self.inner.store.dir("machines"))
-            .and_then(|directory| directory.sync_all())
-            .context("sync reconciled assigned machine directory")?;
+        for collection in ["machines", UPDATES] {
+            std::fs::File::open(self.inner.store.dir(collection))
+                .and_then(|directory| directory.sync_all())
+                .context("sync reconciled assigned update directory")?;
+        }
         Ok(())
     }
 
@@ -727,7 +776,19 @@ impl Manager {
         let Some(volume) = update.change.volume.as_ref() else {
             return Ok(());
         };
+        self.repair_outstanding_update_record(&update.machine)?;
         let data = update.target.data_dataset();
+        let expected = match self.check_update_source(update)? {
+            Some(current) => current.data,
+            None => update
+                .creation_authority()
+                .and_then(|source| source.data.clone()),
+        }
+        .context("assigned volume update data identity missing")?;
+        anyhow::ensure!(
+            expected.dataset == data && self.inner.zfs.guid(&data).await? == expected.guid,
+            "assigned volume update data identity differs"
+        );
         let wanted = u64::from(volume.size_gb)
             .checked_mul(1 << 30)
             .context("assigned volume size overflow")?;
@@ -817,218 +878,5 @@ impl Manager {
             .into_iter()
             .filter_map(|update| update.resolved_image.map(|image| image.key))
             .collect())
-    }
-
-    pub(super) async fn ensure_assigned_root_update(&self, update: &UpdateIntent) -> Result<()> {
-        if update.change.image.is_none() {
-            anyhow::ensure!(
-                update.resolved_image.is_none() && update.root_swap.is_none(),
-                "image update authority exists without an image change"
-            );
-            return Ok(());
-        }
-        self.resolve_assigned_image_update(update).await?;
-        let resolved: UpdateIntent = self
-            .inner
-            .store
-            .get(UPDATES, &update.machine)?
-            .context("resolved assigned image update missing")?;
-        self.apply_assigned_root_update(resolved).await
-    }
-
-    async fn apply_assigned_root_update(&self, mut resolved: UpdateIntent) -> Result<()> {
-        let reference = resolved
-            .change
-            .image
-            .as_deref()
-            .context("assigned root update image missing")?;
-        let current = self.check_update_source(&resolved)?;
-        self.check_creation_update_backing(&resolved).await?;
-        anyhow::ensure!(
-            current
-                .as_ref()
-                .is_none_or(|current| current.reference.phase == Phase::Settled),
-            "assigned image update requires a settled source"
-        );
-
-        let image = resolved
-            .resolved_image
-            .as_ref()
-            .context("resolved assigned image missing")?;
-        let mut swap = resolved
-            .root_swap
-            .clone()
-            .context("resolved assigned root swap missing")?;
-        self.check_update_source(&resolved)?;
-        let base = image.dataset();
-        anyhow::ensure!(
-            image.r#ref == reference
-                && self.inner.zfs.exists(&base).await?
-                && self
-                    .inner
-                    .zfs
-                    .snapshots(&base)
-                    .await?
-                    .iter()
-                    .any(|snap| snap == crate::image::SNAP),
-            "assigned image root snapshot is unavailable"
-        );
-        self.check_clone_readers(&resolved.machine, None)?;
-
-        let zfs = &self.inner.zfs;
-        let live = resolved.target.root_dataset();
-        let next = format!("{live}.next");
-        if swap.target_guid.is_none() {
-            if zfs.exists(&next).await? {
-                anyhow::ensure!(
-                    zfs.origin(&next).await?.as_ref()
-                        == Some(&(base.clone(), crate::image::SNAP.to_string())),
-                    "assigned root .next belongs to another operation"
-                );
-                swap.target_guid = Some(zfs.guid(&next).await?);
-            } else {
-                anyhow::ensure!(
-                    zfs.exists(&live).await? && zfs.guid(&live).await? == swap.source_guid,
-                    "assigned root source changed before clone"
-                );
-                zfs.clone_snapshot(&base, crate::image::SNAP, &next).await?;
-                anyhow::ensure!(
-                    zfs.origin(&next).await?.as_ref()
-                        == Some(&(base.clone(), crate::image::SNAP.to_string())),
-                    "assigned root clone origin differs"
-                );
-                swap.target_guid = Some(zfs.guid(&next).await?);
-            }
-            resolved.root_swap = Some(swap.clone());
-            self.check_update_source(&resolved)?;
-            self.inner
-                .store
-                .put_durable(UPDATES, &resolved.machine, &resolved)?;
-        }
-        let target_guid = swap
-            .target_guid
-            .context("assigned root target GUID missing")?;
-        anyhow::ensure!(
-            target_guid != swap.source_guid,
-            "assigned root clone reused source GUID"
-        );
-
-        let live_exists = zfs.exists(&live).await?;
-        let next_exists = zfs.exists(&next).await?;
-        let retired_exists = zfs.exists(&swap.retired_dataset).await?;
-        let live_guid = if live_exists {
-            Some(zfs.guid(&live).await?)
-        } else {
-            None
-        };
-        let next_guid = if next_exists {
-            anyhow::ensure!(
-                zfs.origin(&next).await?.as_ref()
-                    == Some(&(base.clone(), crate::image::SNAP.to_string())),
-                "assigned root .next origin differs"
-            );
-            Some(zfs.guid(&next).await?)
-        } else {
-            None
-        };
-        let retired_guid = if retired_exists {
-            Some(zfs.guid(&swap.retired_dataset).await?)
-        } else {
-            None
-        };
-        if live_guid == Some(target_guid) {
-            anyhow::ensure!(
-                !next_exists
-                    && retired_guid == Some(swap.source_guid)
-                    && zfs.origin(&live).await?.as_ref()
-                        == Some(&(base.clone(), crate::image::SNAP.to_string())),
-                "installed assigned root conflicts with its durable update"
-            );
-            return Ok(());
-        }
-        anyhow::ensure!(
-            next_guid == Some(target_guid),
-            "assigned root target clone is missing or changed"
-        );
-        match live_guid {
-            Some(guid) if guid == swap.source_guid => {
-                anyhow::ensure!(
-                    retired_guid.is_none(),
-                    "assigned retired root conflicts with the live source"
-                );
-                zfs.rename(&live, &swap.retired_dataset).await?;
-                anyhow::ensure!(
-                    zfs.guid(&swap.retired_dataset).await? == swap.source_guid,
-                    "assigned retired root identity differs after rename"
-                );
-            }
-            None => anyhow::ensure!(
-                retired_guid == Some(swap.source_guid),
-                "assigned image update lost its source root"
-            ),
-            Some(_) => anyhow::bail!("assigned live root conflicts with update authority"),
-        }
-        anyhow::ensure!(
-            !zfs.exists(&live).await?,
-            "assigned root destination is unexpectedly occupied"
-        );
-        zfs.rename(&next, &live).await?;
-        anyhow::ensure!(
-            zfs.guid(&live).await? == target_guid
-                && zfs.origin(&live).await?.as_ref()
-                    == Some(&(base, crate::image::SNAP.to_string())),
-            "assigned root installation differs from durable target"
-        );
-        Ok(())
-    }
-
-    async fn resolve_assigned_image_update(&self, update: &UpdateIntent) -> Result<()> {
-        let Some(reference) = update.change.image.as_deref() else {
-            anyhow::ensure!(
-                update.resolved_image.is_none() && update.root_swap.is_none(),
-                "image update authority exists without an image change"
-            );
-            return Ok(());
-        };
-        if update.resolved_image.is_some() {
-            self.check_update_source(update)?;
-            return Ok(());
-        }
-        let current = self.check_update_source(update)?;
-        self.check_creation_update_backing(update).await?;
-        anyhow::ensure!(
-            current
-                .as_ref()
-                .is_none_or(|current| current.reference.phase == Phase::Settled),
-            "assigned image update requires a settled source"
-        );
-        let image = self.inner.images.ensure(reference).await?;
-        let source_guid = self.inner.zfs.guid(&update.target.root_dataset()).await?;
-        anyhow::ensure!(
-            source_guid
-                == current.as_ref().map_or_else(
-                    || update.creation_source.as_ref().unwrap().root.guid,
-                    |current| current.root.guid
-                ),
-            "assigned image update source root differs from settled backing"
-        );
-        let suffix =
-            sha(format!("{}:{}:{}", update.source_digest()?, image.key, source_guid).as_bytes());
-        let mut resolved = update.clone();
-        resolved.resolved_image = Some(image);
-        resolved.root_swap = Some(RootSwap {
-            source_guid,
-            target_guid: None,
-            retired_dataset: format!(
-                "{}/root.u_{}",
-                update.source_record.dataset(),
-                &suffix[..24]
-            ),
-        });
-        self.check_update_source(&resolved)?;
-        self.inner
-            .store
-            .put_durable(UPDATES, &resolved.machine, &resolved)?;
-        Ok(())
     }
 }

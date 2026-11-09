@@ -134,7 +134,7 @@ impl Manager {
         })
     }
 
-    pub(super) fn runtime_observation(&self) -> api::RuntimeObservation {
+    pub(crate) fn runtime_observation(&self) -> api::RuntimeObservation {
         api::RuntimeObservation {
             host_id: self.inner.host_id.clone(),
             version: briqyard_version::VERSION.into(),

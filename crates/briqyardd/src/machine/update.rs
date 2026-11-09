@@ -33,9 +33,7 @@ impl Manager {
                 "assigned spec updates require a stopped machine".into(),
             ));
         }
-        if e.snapshot().assigned_run.is_some()
-            || (self.assigned_lifecycle(&e.snapshot()) && e.snapshot().state == state::STOPPED)
-        {
+        if e.snapshot().assigned_run.is_some() || self.assigned_lifecycle(&e.snapshot()) {
             if self.assigned_lifecycle(&e.snapshot()) {
                 if req.spec.volume.is_some() && e.snapshot().state == state::RUNNING {
                     return self.update_assigned_volume(&e, req, at).await;
@@ -80,6 +78,30 @@ impl Manager {
         if grow.is_none() {
             // The size it has: no change.
             req.spec.volume = None;
+        }
+        let r = e.snapshot();
+        if r.state == state::STOPPED {
+            let next = pending_after(&r, req.spec.clone());
+            let before = r.pending.as_ref();
+            let after = next.as_ref();
+            let changes_backing = grow.is_some()
+                || before.and_then(|p| p.image.as_ref()) != after.and_then(|p| p.image.as_ref())
+                || before.and_then(|p| p.env.as_ref()) != after.and_then(|p| p.env.as_ref());
+            // STOPPED alone is not an exit receipt. Check before any part of the PATCH
+            // moves, under the transition lock; unchanged values need no new proof.
+            if changes_backing
+                && (r.pid != 0
+                    || e.live
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|vm| !*vm.exited.borrow())
+                    || self.inner.vmm.launch_settlement(id) != fc::LaunchSettlement::Settled)
+            {
+                return Err(MError::Conflict(
+                    "stopped image, env or volume update requires confirmed VMM exit".into(),
+                ));
+            }
         }
         if let Some(egress) = &req.egress {
             let record = e.snapshot();

@@ -11,10 +11,13 @@ fn settled_run(
     Box::pin(async move {
         let (h, entry) = Box::pin(stopped(false)).await;
         let id = entry.snapshot().id;
-        tokio::time::timeout(Duration::from_secs(60), Box::pin(h.m.start(&id, None)))
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            Box::pin(Box::pin(h.m.start(&id, None))),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         tokio::time::timeout(
             Duration::from_secs(60),
             h.m.stop(&id, Duration::from_secs(1), checkpoint, None),
@@ -176,7 +179,7 @@ async fn stopped_image_env_replacement_keeps_identity_volume_and_waits_for_start
         restart(&h).unwrap();
         let recovered = h.m.entry(&id).unwrap();
         assert_eq!(recovered.snapshot().state, state::STOPPED);
-        tokio::time::timeout(Duration::from_secs(60), h.m.start(&id, None))
+        tokio::time::timeout(Duration::from_secs(60), Box::pin(h.m.start(&id, None)))
             .await
             .unwrap()
             .unwrap();
@@ -309,7 +312,7 @@ async fn stopped_env_only_replacement_starts_cold_with_fresh_config_and_same_dis
         assert!(pending.size.is_none());
         assert_eq!(pending.env, Some(env.clone()));
         restart(&h).unwrap();
-        tokio::time::timeout(Duration::from_secs(60), h.m.start(&id, None))
+        tokio::time::timeout(Duration::from_secs(60), Box::pin(h.m.start(&id, None)))
             .await
             .unwrap()
             .unwrap();
@@ -334,6 +337,99 @@ async fn stopped_env_only_replacement_starts_cold_with_fresh_config_and_same_dis
         let (config, _) = model::parse_drive(&guest::base64_decode(drive_base64).unwrap()).unwrap();
         assert_eq!(config.env, env);
         assert!(!config.env.contains_key("DESTINATION_ONLY"));
+    }
+}
+
+#[tokio::test]
+async fn stopped_boot_files_replace_and_clear_through_recovery_and_cold_start() {
+    for initial in [true, false] {
+        let (h, entry) = if initial {
+            Box::pin(stopped(false)).await
+        } else {
+            settled_run(true).await
+        };
+        let before = entry.snapshot();
+        let id = before.id.clone();
+        let root_guid = h.pool.zfs.guid(&before.root_dataset()).await.unwrap();
+        let data_guid = h.pool.zfs.guid(&before.data_dataset()).await.unwrap();
+        let replacement = vec![api::File {
+            path: "/app/replacement".into(),
+            base64: "bmV3".into(),
+            mode: None,
+        }];
+        for files in [replacement, Vec::new()] {
+            let wire = serde_json::json!({ "files": files });
+            let previous = h.m.entry(&id).unwrap().snapshot();
+            let version = previous.version;
+            let updated =
+                h.m.update(
+                    &id,
+                    serde_json::from_value(wire.clone()).unwrap(),
+                    Some(version),
+                )
+                .await
+                .expect("stopped boot-file replacement");
+            assert_eq!(updated.state, state::STOPPED);
+            let pending_record = h.m.entry(&id).unwrap().snapshot();
+            assert_eq!(pending_record.files, previous.files);
+            assert_eq!(
+                pending_record.pending.as_ref().unwrap().files,
+                Some(files.clone())
+            );
+            let update: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
+            h.m.check_update_source(&update).unwrap();
+            let replay =
+                h.m.update(&id, serde_json::from_value(wire).unwrap(), None)
+                    .await
+                    .unwrap();
+            assert_eq!(replay.version, updated.version);
+            full_startup(&h).await.unwrap();
+            let recovered = h.m.entry(&id).unwrap();
+            assert_eq!(recovered.snapshot().state, state::STOPPED);
+            tokio::time::timeout(Duration::from_secs(60), Box::pin(h.m.start(&id, None)))
+                .await
+                .unwrap()
+                .unwrap();
+            let applied = recovered.snapshot();
+            assert_eq!(applied.files, files);
+            assert_eq!(applied.image, before.image);
+            assert_eq!(applied.env, before.env);
+            assert_eq!(applied.launch_identity, before.launch_identity);
+            assert_eq!(applied.volume, before.volume);
+            assert!(applied.pending.is_none());
+            assert!(!applied.suspended);
+            assert_eq!(
+                h.pool.zfs.guid(&before.root_dataset()).await.unwrap(),
+                root_guid
+            );
+            assert_eq!(
+                h.pool.zfs.guid(&before.data_dataset()).await.unwrap(),
+                data_guid
+            );
+            let current: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+            let Mode::Fresh { drive_base64, .. } = &current.mode else {
+                panic!("boot-file changes require a fresh boot")
+            };
+            let (config, contents) =
+                model::parse_drive(&guest::base64_decode(drive_base64).unwrap()).unwrap();
+            assert_eq!(config.files.len(), files.len());
+            if !files.is_empty() {
+                assert_eq!(config.files[0].path, "/app/replacement");
+                assert_eq!(
+                    contents,
+                    vec![("/app/replacement".into(), 0o644, b"new".to_vec())]
+                );
+            } else {
+                assert!(contents.is_empty());
+            }
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                h.m.stop(&id, Duration::from_secs(1), true, None),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
     }
 }
 
@@ -405,7 +501,7 @@ async fn initial_stopped_provider_image_env_replacement_preserves_creation_autho
         assert_eq!(recovered.snapshot().state, state::STOPPED);
         assert!(recovered.live.lock().unwrap().is_none());
         assert!(h.m.inner.store.get::<Current>(RUNS, &id).unwrap().is_none());
-        tokio::time::timeout(Duration::from_secs(60), h.m.start(&id, None))
+        tokio::time::timeout(Duration::from_secs(60), Box::pin(h.m.start(&id, None)))
             .await
             .unwrap()
             .unwrap();
@@ -589,7 +685,7 @@ async fn creation_env_only_suspension_consumes_fresh_without_changing_disks() {
             .await
             .unwrap();
         full_startup(&h).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(60), h.m.start(&id, None))
+        tokio::time::timeout(Duration::from_secs(60), Box::pin(h.m.start(&id, None)))
             .await
             .unwrap()
             .unwrap();
@@ -681,3 +777,54 @@ async fn legacy_settled_update_keeps_exact_field_order_bytes_and_digest() {
 }
 
 mod recovery_boundaries;
+
+#[tokio::test]
+async fn stopped_files_omission_and_explicit_current_cancel_pending_replacement() {
+    for initial in [true, false] {
+        let (h, entry) = if initial {
+            Box::pin(stopped(false)).await
+        } else {
+            settled_run(false).await
+        };
+        let before = entry.snapshot();
+        let replacement = vec![api::File {
+            path: "/app/pending".into(),
+            base64: "bmV3".into(),
+            mode: None,
+        }];
+        Box::pin(h.m.update(
+            &before.id,
+            serde_json::from_value(json!({"files": replacement})).unwrap(),
+            None,
+        ))
+        .await
+        .unwrap();
+        Box::pin(h.m.update(
+            &before.id,
+            serde_json::from_value(json!({"env": {"NEXT": "value"}})).unwrap(),
+            None,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            entry.snapshot().pending.as_ref().unwrap().files,
+            Some(replacement)
+        );
+        Box::pin(h.m.update(
+            &before.id,
+            serde_json::from_value(json!({"files": before.files})).unwrap(),
+            None,
+        ))
+        .await
+        .unwrap();
+        let pending = entry.snapshot().pending.unwrap();
+        assert!(pending.files.is_none());
+        assert_eq!(pending.env.unwrap().get("NEXT").unwrap(), "value");
+        full_startup(&h).await.unwrap();
+        Box::pin(h.m.start(&before.id, None)).await.unwrap();
+        assert_eq!(
+            h.m.entry(&before.id).unwrap().snapshot().files,
+            before.files
+        );
+    }
+}
