@@ -422,6 +422,10 @@ impl Manager {
                 continue;
             }
             if rec.launch_identity.is_some() {
+                if self.recover_creation_update_stopped(&e).await? {
+                    stopped += 1;
+                    continue;
+                }
                 if self.recover_assigned_launch(&e).await {
                     adopted += 1;
                 } else {
@@ -789,6 +793,13 @@ impl Manager {
     /// before the daemon went down runs once it is back, used or not (ADR 0027). Detached,
     /// through the boot gate; a gateway is started by what needs it.
     pub(super) fn start_stopped_by_host(&self) {
+        let pending_creation = match self.creation_update_machines() {
+            Ok(machines) => machines,
+            Err(error) => {
+                tracing::warn!(%error, "automatic host starts withheld: assigned update authority unreadable");
+                return;
+            }
+        };
         let now = Utc::now();
         let left: Vec<Arc<Entry>> = self
             .inner
@@ -803,6 +814,7 @@ impl Manager {
                         && r.assigned_run
                             .as_ref()
                             .is_none_or(|run| run.phase == assignments::runs::Phase::Settled)))
+                    && !pending_creation.contains(&r.id)
                     && stopped_by_host(&r)
                     && !idle_past(r.last_used_at, r.sleep_window(), now)
             })

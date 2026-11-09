@@ -170,14 +170,16 @@ impl Manager {
         let Some(update) = self.inner.store.get::<UpdateIntent>(UPDATES, &record.id)? else {
             return Ok(());
         };
-        let current: Current = self
-            .inner
-            .store
-            .get(RUNS, &record.id)?
-            .context("assigned update current run missing")?;
-        update.check(&current)?;
+        let current = self.check_update_source(&update)?;
+        self.check_creation_update_backing(&update).await?;
         anyhow::ensure!(
-            matches_authorized_update_target(&record, &current, &update)?,
+            matches_update_target(&record, &update.target)
+                || current
+                    .as_ref()
+                    .is_some_and(|current| matches_authorized_update_target(
+                        &record, current, &update
+                    )
+                    .unwrap_or(false)),
             "assigned update machine record differs from its target"
         );
         self.ensure_assigned_volume_update(&update).await?;
@@ -303,7 +305,7 @@ impl Manager {
                     api::SpecChange::default(),
                     None,
                     Box::new(record.clone()),
-                    current.authority_sha256()?,
+                    Some(current.authority_sha256()?),
                     None,
                 )
             };
@@ -332,6 +334,7 @@ impl Manager {
             predecessor_target,
             resolved_image: None,
             root_swap: None,
+            creation_source: None,
         };
         intent
             .check(&current)
@@ -385,39 +388,96 @@ impl Manager {
         let _entry = entry.lock.lock().await;
         self.check_version(entry, at)?;
         let record = entry.snapshot();
-        if !(self.assigned_lifecycle(&record)
-            && record.state == state::STOPPED
-            && record.assigned_run.is_some())
-        {
+        if !(self.assigned_lifecycle(&record) && record.state == state::STOPPED) {
             return Err(MError::BadState(
                 "assigned spec update requires a stopped assigned machine".into(),
             ));
         }
-        let current: Current = self
-            .inner
-            .store
-            .get(RUNS, &record.id)?
-            .context("assigned current-run journal missing")?;
+        let current = self.inner.store.get::<Current>(RUNS, &record.id)?;
         let existing = self.inner.store.get::<UpdateIntent>(UPDATES, &record.id)?;
         let existing_is_settlement = existing.as_ref().is_some_and(|update| {
             current
-                .settlement
-                .as_deref()
+                .as_ref()
+                .and_then(|current| current.settlement.as_deref())
                 .and_then(|settlement| settlement.update_sha256.as_deref())
                 == update.digest().ok().as_deref()
         });
-        if current.reference.phase != Phase::Settled
-            || (record.pending.is_none()
-                && current.record_fingerprint(&record)?
-                    != current.record_fingerprint(&current.target)?
-                && existing.is_none())
-        {
-            return Err(MError::Conflict(
-                "assigned spec update requires the exact settled run".into(),
-            ));
+        let mut creation_source = None;
+        if let Some(current) = &current {
+            if current.reference.phase != Phase::Settled
+                || (record.pending.is_none()
+                    && current.record_fingerprint(&record)?
+                        != current.record_fingerprint(&current.target)?
+                    && existing.is_none())
+            {
+                return Err(MError::Conflict(
+                    "assigned spec update requires the exact settled run".into(),
+                ));
+            }
+            self.check_run_creation_authority(current)
+                .map_err(|error| {
+                    MError::Conflict(format!("assigned update authority: {error:#}"))
+                })?;
+        } else {
+            let source = existing
+                .as_ref()
+                .map_or(&record, |update| update.source_record.as_ref());
+            if source.assigned_run.is_some()
+                || entry
+                    .live
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|live| !*live.exited.borrow())
+                || self
+                    .inner
+                    .store
+                    .get::<serde_json::Value>(INTENTS, &record.id)?
+                    .is_some()
+                || self
+                    .inner
+                    .store
+                    .get::<serde_json::Value>(READERS, &record.id)?
+                    .is_some()
+            {
+                return Err(MError::Conflict(
+                    "initial assigned update requires confirmed stopped creation authority".into(),
+                ));
+            }
+            let origin = self.settled_assigned_origin_durable(source)?;
+            Self::check_assigned_binding(source, &origin)?;
+            anyhow::ensure!(
+                source.pid == 0 && origin.mapping_exited && source.pending.is_none(),
+                "creation update lacks positive stopped process evidence"
+            );
+            creation_source = if let Some(existing) = &existing {
+                self.check_update_source(existing)?;
+                self.check_creation_update_backing(existing).await?;
+                existing.creation_source.clone()
+            } else {
+                let binding = origin.sandbox.as_ref().unwrap();
+                let receipt = self
+                    .inner
+                    .store
+                    .get(
+                        super::super::REQUESTS,
+                        &key(&source.namespace, &binding.request_id),
+                    )?
+                    .context("creation update receipt missing")?;
+                let reader = self
+                    .inner
+                    .store
+                    .get(templates::READERS, &source.id)?
+                    .context("creation update reader missing")?;
+                let (root, data) = self.current_run_disks(source).await?;
+                Some(update_authority::CreationSource {
+                    receipt,
+                    reader,
+                    root,
+                    data,
+                })
+            };
         }
-        self.check_run_creation_authority(&current)
-            .map_err(|error| MError::Conflict(format!("assigned update authority: {error:#}")))?;
 
         let growth = match requested_volume {
             Some(volume) => crate::machine::update::volume_growth(&record, volume.size_gb)?,
@@ -427,15 +487,16 @@ impl Manager {
             self.room_on_pool(to - from).await?;
         }
         let settlement_update = current
-            .settlement
-            .as_deref()
+            .as_ref()
+            .and_then(|current| current.settlement.as_deref())
             .and_then(|settlement| settlement.update.as_deref());
         if let Some(update) = &existing {
-            update
-                .check(&current)
+            self.check_update_source(update)
                 .map_err(|error| MError::Conflict(format!("assigned pending update: {error:#}")))?;
             let matches = matches_update_target(&record, &update.target)
-                || matches_current_target(&record, &current, update).map_err(MError::Other)?;
+                || current.as_ref().is_some_and(|current| {
+                    matches_current_target(&record, current, update).unwrap_or(false)
+                });
             if !matches {
                 return Err(MError::Conflict(
                     "assigned pending update differs from its durable authority".into(),
@@ -455,7 +516,10 @@ impl Manager {
         }
 
         let mut source_record = record.clone();
-        let mut source_current_sha256 = current.authority_sha256()?;
+        let mut source_current_sha256 = current
+            .as_ref()
+            .map(Current::authority_sha256)
+            .transpose()?;
         let mut change = api::SpecChange {
             image: image
                 .clone()
@@ -555,7 +619,7 @@ impl Manager {
             );
         }
         let intent = UpdateIntent {
-            schema: 1,
+            schema: if creation_source.is_some() { 2 } else { 1 },
             machine: record.id.clone(),
             source_current_sha256,
             source_record: Box::new(source_record),
@@ -565,9 +629,9 @@ impl Manager {
             predecessor_target,
             resolved_image,
             root_swap,
+            creation_source,
         };
-        intent
-            .check(&current)
+        self.check_update_source(&intent)
             .map_err(|error| MError::Conflict(format!("assigned update intent: {error:#}")))?;
         // Record the target volume in the quota map under the same lock as admission. The
         // intent still precedes this record transition so startup can finish an interrupted grow.
@@ -600,12 +664,12 @@ impl Manager {
     }
 
     pub(super) fn recover_assigned_update(&self, update: &UpdateIntent) -> Result<()> {
-        let current: Current = self
-            .inner
-            .store
-            .get(RUNS, &update.machine)?
-            .context("assigned update current run missing")?;
-        if let Some(settlement) = current.settlement.as_deref() {
+        let current = self.check_update_source(update)?;
+        if let Some(settlement) = current
+            .as_ref()
+            .and_then(|current| current.settlement.as_deref())
+        {
+            let current = current.as_ref().unwrap();
             if settlement.update_sha256.as_deref() == Some(update.digest()?.as_str()) {
                 anyhow::ensure!(
                     settlement.update.as_deref().is_some_and(|settled| {
@@ -627,7 +691,6 @@ impl Manager {
                 return Ok(());
             }
         }
-        update.check(&current)?;
         let machine: Record = self
             .inner
             .store
@@ -712,12 +775,8 @@ impl Manager {
 
     pub(in crate::machine) async fn recover_assigned_update_backing(&self) -> Result<()> {
         for update in self.inner.store.list::<UpdateIntent>(UPDATES)? {
-            let current: Current = self
-                .inner
-                .store
-                .get(RUNS, &update.machine)?
-                .context("assigned update current run missing")?;
-            update.check(&current)?;
+            self.check_update_source(&update)?;
+            self.check_creation_update_backing(&update).await?;
             self.ensure_assigned_volume_update(&update).await?;
             // Startup only completes an externally started swap with durable target identity.
             // Resolving an image or creating/adopting .next belongs to the next assigned start.
@@ -782,15 +841,13 @@ impl Manager {
             .image
             .as_deref()
             .context("assigned root update image missing")?;
-        let current: Current = self
-            .inner
-            .store
-            .get(RUNS, &resolved.machine)?
-            .context("assigned image update current run missing")?;
-        resolved.check(&current)?;
+        let current = self.check_update_source(&resolved)?;
+        self.check_creation_update_backing(&resolved).await?;
         anyhow::ensure!(
-            current.reference.phase == Phase::Settled,
-            "assigned image update requires a settled run"
+            current
+                .as_ref()
+                .is_none_or(|current| current.reference.phase == Phase::Settled),
+            "assigned image update requires a settled source"
         );
 
         let image = resolved
@@ -801,7 +858,7 @@ impl Manager {
             .root_swap
             .clone()
             .context("resolved assigned root swap missing")?;
-        resolved.check(&current)?;
+        self.check_update_source(&resolved)?;
         let base = image.dataset();
         anyhow::ensure!(
             image.r#ref == reference
@@ -842,7 +899,7 @@ impl Manager {
                 swap.target_guid = Some(zfs.guid(&next).await?);
             }
             resolved.root_swap = Some(swap.clone());
-            resolved.check(&current)?;
+            self.check_update_source(&resolved)?;
             self.inner
                 .store
                 .put_durable(UPDATES, &resolved.machine, &resolved)?;
@@ -933,34 +990,29 @@ impl Manager {
             return Ok(());
         };
         if update.resolved_image.is_some() {
-            let current: Current = self
-                .inner
-                .store
-                .get(RUNS, &update.machine)?
-                .context("assigned image update current run missing")?;
-            return update.check(&current);
+            self.check_update_source(update)?;
+            return Ok(());
         }
-        let current: Current = self
-            .inner
-            .store
-            .get(RUNS, &update.machine)?
-            .context("assigned image update current run missing")?;
-        update.check(&current)?;
+        let current = self.check_update_source(update)?;
+        self.check_creation_update_backing(update).await?;
         anyhow::ensure!(
-            current.reference.phase == Phase::Settled,
-            "assigned image update requires a settled run"
+            current
+                .as_ref()
+                .is_none_or(|current| current.reference.phase == Phase::Settled),
+            "assigned image update requires a settled source"
         );
         let image = self.inner.images.ensure(reference).await?;
         let source_guid = self.inner.zfs.guid(&update.target.root_dataset()).await?;
         anyhow::ensure!(
-            source_guid == current.root.guid,
+            source_guid
+                == current.as_ref().map_or_else(
+                    || update.creation_source.as_ref().unwrap().root.guid,
+                    |current| current.root.guid
+                ),
             "assigned image update source root differs from settled backing"
         );
-        let suffix = sha(format!(
-            "{}:{}:{}",
-            update.source_current_sha256, image.key, source_guid
-        )
-        .as_bytes());
+        let suffix =
+            sha(format!("{}:{}:{}", update.source_digest()?, image.key, source_guid).as_bytes());
         let mut resolved = update.clone();
         resolved.resolved_image = Some(image);
         resolved.root_swap = Some(RootSwap {
@@ -972,7 +1024,7 @@ impl Manager {
                 &suffix[..24]
             ),
         });
-        resolved.check(&current)?;
+        self.check_update_source(&resolved)?;
         self.inner
             .store
             .put_durable(UPDATES, &resolved.machine, &resolved)?;

@@ -57,19 +57,15 @@ impl Manager {
                 ));
             }
             if record.pending.is_some() {
-                let current: Current = self
-                    .inner
-                    .store
-                    .get(RUNS, &record.id)?
-                    .ok_or_else(|| MError::Conflict("assigned current run missing".into()))?;
                 let update: UpdateIntent =
                     self.inner.store.get(UPDATES, &record.id)?.ok_or_else(|| {
                         MError::Conflict("assigned pending update lacks durable intent".into())
                     })?;
-                update.check(&current).map_err(public_error)?;
+                let current = self.check_update_source(&update).map_err(public_error)?;
                 let matches = updates::matches_update_target(&record, &update.target)
-                    || updates::matches_current_target(&record, &current, &update)
-                        .map_err(public_error)?;
+                    || current.as_ref().is_some_and(|current| {
+                        updates::matches_current_target(&record, current, &update).unwrap_or(false)
+                    });
                 if !matches {
                     return Err(MError::Conflict(
                         "assigned pending update differs from its durable intent".into(),

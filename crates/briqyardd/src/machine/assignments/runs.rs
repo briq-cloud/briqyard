@@ -14,6 +14,7 @@ mod startup;
 mod terminal;
 #[cfg(test)]
 mod tests;
+mod update_authority;
 mod updates;
 const INTENTS: &str = "assigned-run-intents";
 const RUNS: &str = "assigned-runs";
@@ -126,7 +127,8 @@ struct Intent {
 struct UpdateIntent {
     schema: u8,
     machine: String,
-    source_current_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_current_sha256: Option<String>,
     source_record: Box<Record>,
     change: api::SpecChange,
     disk_limits: Option<api::DiskLimits>,
@@ -139,6 +141,8 @@ struct UpdateIntent {
     resolved_image: Option<crate::image::Image>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     root_swap: Option<RootSwap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    creation_source: Option<update_authority::CreationSource>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -155,22 +159,24 @@ impl UpdateIntent {
     }
 
     fn check_shape(&self) -> Result<()> {
+        self.check_source_shape()?;
         let source_run = self.source_record.assigned_run.as_ref();
-        let source_phase_allowed = source_run.is_some_and(|run| {
-            run.phase == Phase::Settled
-                || (run.phase == Phase::Observed
-                    && self.change.volume.is_some()
-                    && self.change.size.is_none()
-                    && self.change.image.is_none()
-                    && self.change.entrypoint.is_none()
-                    && self.change.cmd.is_none()
-                    && self.change.env.is_none()
-                    && self.change.files.is_none()
-                    && self.change.ports.is_none()
-                    && self.change.restart.is_none())
-        });
+        let source_phase_allowed = self.creation_source.is_some()
+            || source_run.is_some_and(|run| {
+                run.phase == Phase::Settled
+                    || (run.phase == Phase::Observed
+                        && self.change.volume.is_some()
+                        && self.change.size.is_none()
+                        && self.change.image.is_none()
+                        && self.change.entrypoint.is_none()
+                        && self.change.cmd.is_none()
+                        && self.change.env.is_none()
+                        && self.change.files.is_none()
+                        && self.change.ports.is_none()
+                        && self.change.restart.is_none())
+            });
         anyhow::ensure!(
-            self.schema == 1
+            matches!(self.schema, 1 | 2)
                 && self.machine == self.source_record.id
                 && self.machine == self.target.id
                 && self.source_record.assigned_run == self.target.assigned_run
@@ -244,7 +250,9 @@ impl UpdateIntent {
             (Some(image), Some(swap), Some(reference)) => {
                 let suffix = sha(format!(
                     "{}:{}:{}",
-                    self.source_current_sha256, image.key, swap.source_guid
+                    self.source_digest()?,
+                    image.key,
+                    swap.source_guid
                 )
                 .as_bytes());
                 anyhow::ensure!(
@@ -315,6 +323,10 @@ impl UpdateIntent {
     }
 
     pub(super) fn check(&self, current: &Current) -> Result<()> {
+        anyhow::ensure!(
+            self.creation_source.is_none() && self.schema == 1,
+            "creation update cannot claim current-run authority"
+        );
         current.check()?;
         let digest = self.digest()?;
         let settled_authority = current.settlement.as_deref().is_some_and(|settlement| {
@@ -331,8 +343,12 @@ impl UpdateIntent {
         anyhow::ensure!(
             self.machine == current.machine
                 && phase_allowed
-                && (self.source_current_sha256 == current.authority_sha256()? || settled_authority)
-                && hex_id(&self.source_current_sha256, 64)
+                && (self.source_current_sha256.as_ref() == Some(&current.authority_sha256()?)
+                    || settled_authority)
+                && self
+                    .source_current_sha256
+                    .as_deref()
+                    .is_some_and(|hash| hex_id(hash, 64))
                 && (settled_authority
                     || current.record_fingerprint(&self.source_record)?
                         == current.record_fingerprint(&current.target)?),

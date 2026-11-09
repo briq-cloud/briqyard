@@ -95,3 +95,26 @@ predecessor recovery. PATCH never starts the machine or changes its assignment, 
 identity, endpoints or data volume. The next explicit start consumes the environment
 through `apply_pending`, invalidating saved memory and booting cold. Running environment
 updates remain refused.
+
+## Updates before the first continuation
+
+An initial destination assignment can stop before it has a `Current` continuation.
+Its stopped PATCH uses schema 2 update authority: the exact permanent assignment
+receipt, immutable creation reader, original stopped record and captured root/data
+GUIDs. It has no current-run hash. Schema 1 retains its existing wire bytes and
+settled-run hash. Mixed source authorities are refused. Root-swap naming separates
+creation authority from settled-run authority with a digest domain.
+
+The original record must retain its full bind acknowledgment, immutable launch hold,
+positive process-exit evidence and original host ownership. Targets and predecessors
+permit only the existing bounded pending/resource projection. Recovery reads durable
+creation evidence before the launch-hold cache is populated; startup order stays the
+same. It repairs the record and any already authorized swap, without resolving an
+image, adopting a process or starting the machine. Automatic host-reboot starts skip
+pending creation updates.
+
+The first explicit start consumes the update while reserving ordinary sequence 1,
+with no previous-run hash. The new `Current` and run intent authenticate the original
+creation authority, complete pending target and exact resulting disk GUIDs. Normal
+run, machine and reader writes precede deletion of the update intent. No historical
+run or live observation is invented to authorize the PATCH.

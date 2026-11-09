@@ -47,28 +47,28 @@ impl Manager {
         let stored_update = self.inner.store.get::<UpdateIntent>(UPDATES, &prior.id)?;
         let consumed_update = match (&prior.pending, stored_update) {
             (Some(pending), Some(update)) => {
-                let current = previous
-                    .as_ref()
-                    .context("assigned pending update lacks settled run")?;
-                update.check(current)?;
+                self.check_update_source(&update)?;
                 anyhow::ensure!(
                     update.target.pending.as_ref() == Some(pending)
                         && (updates::matches_update_target(&prior, &update.target)
-                            || updates::matches_current_target(&prior, current, &update)?),
+                            || previous.as_ref().is_some_and(|current| {
+                                updates::matches_current_target(&prior, current, &update)
+                                    .unwrap_or(false)
+                            })),
                     "assigned pending update differs from its intent"
                 );
                 Some(update)
             }
             (Some(_), None) => anyhow::bail!("assigned pending update lacks durable intent"),
             (None, Some(update)) => {
-                let current = previous
-                    .as_ref()
-                    .context("assigned update lacks settled run")?;
-                update.check(current)?;
+                self.check_update_source(&update)?;
                 anyhow::ensure!(
                     update.target.pending.is_none()
                         && (updates::matches_update_target(&prior, &update.target)
-                            || updates::matches_current_target(&prior, current, &update)?),
+                            || previous.as_ref().is_some_and(|current| {
+                                updates::matches_current_target(&prior, current, &update)
+                                    .unwrap_or(false)
+                            })),
                     "assigned immediate update differs from its intent"
                 );
                 Some(update)
@@ -292,8 +292,23 @@ impl Current {
         self.receipt.check()?;
         let consumed_update_is_valid = match &self.consumed_update {
             Some(update) => {
-                let direct_source = self.previous_run_sha256.as_deref()
-                    == Some(update.source_current_sha256.as_str());
+                let direct_source = self.previous_run_sha256.is_some()
+                    && self.previous_run_sha256 == update.source_current_sha256;
+                let creation_source = update.creation_source.as_ref().is_some_and(|creation| {
+                    self.previous_run_sha256.is_none()
+                        && self.prior.assigned_run.is_none()
+                        && self.reference.sequence == 1
+                        && self.receipt == creation.receipt
+                        && self.creation_reader == creation.reader
+                        && self.data == creation.data
+                        && self.root.dataset == creation.root.dataset
+                        && self.root.guid
+                            == update
+                                .root_swap
+                                .as_ref()
+                                .and_then(|swap| swap.target_guid)
+                                .unwrap_or(creation.root.guid)
+                });
                 // A volume update can be acknowledged while Observed, then carried through
                 // a Settled predecessor. Intent::check authenticates that exact settlement
                 // before this consumed update becomes the next run's immutable prior.
@@ -305,8 +320,7 @@ impl Current {
                     updates::matches_update_target(&self.prior, &update.target) || settled_target;
                 update.check_shape().is_ok()
                     && update.machine == self.machine
-                    && hex_id(&update.source_current_sha256, 64)
-                    && (direct_source || settled_source)
+                    && (direct_source || settled_source || creation_source)
                     && target_matches
             }
             None => true,
@@ -698,7 +712,8 @@ impl Intent {
                     if let Some(settlement) = &self.current.settlement {
                         if let Some(update) = &settlement.update {
                             anyhow::ensure!(
-                                update.source_current_sha256 == prior.authority_sha256()?
+                                update.source_current_sha256.as_ref()
+                                    == Some(&prior.authority_sha256()?)
                                     && settlement.update_sha256.as_ref()
                                         == update.digest().ok().as_ref(),
                                 "settlement update is not bound to the observed run"

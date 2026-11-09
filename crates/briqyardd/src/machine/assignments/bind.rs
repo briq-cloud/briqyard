@@ -36,6 +36,14 @@ impl Manager {
         &self,
         record: &Record,
     ) -> Result<templates::CloneOrigin> {
+        self.validate_launch_record(record)?;
+        self.settled_assigned_origin_durable(record)
+    }
+
+    pub(in crate::machine) fn settled_assigned_origin_durable(
+        &self,
+        record: &Record,
+    ) -> Result<templates::CloneOrigin> {
         anyhow::ensure!(
             record.assigned_run.is_none(),
             "run continuation requires separate lifecycle/guest proof"
@@ -44,7 +52,12 @@ impl Manager {
             record.launch_identity.is_some(),
             "assigned launch identity missing"
         );
-        self.validate_launch_record(record)?;
+        self.check_durable_launch_hold(&record.id, record.launch_identity.as_ref().unwrap())?;
+        let reader = self
+            .inner
+            .store
+            .get::<templates::CloneReader>(templates::READERS, &record.id)?;
+        launch_identity::check_launch_pair(record, reader.as_ref())?;
         anyhow::ensure!(
             self.inner
                 .store
@@ -195,6 +208,13 @@ impl Manager {
 
     pub(in crate::machine) fn check_assigned_bound_record(&self, record: &Record) -> Result<()> {
         let origin = self.settled_assigned_origin(record)?;
+        Self::check_assigned_binding(record, &origin)
+    }
+
+    pub(in crate::machine) fn check_assigned_binding(
+        record: &Record,
+        origin: &templates::CloneOrigin,
+    ) -> Result<()> {
         anyhow::ensure!(
             matches!(
                 origin.stage,
