@@ -446,10 +446,11 @@ impl Manager {
             }
             let origin = self.settled_assigned_origin_durable(source)?;
             Self::check_assigned_binding(source, &origin)?;
-            anyhow::ensure!(
-                source.pid == 0 && origin.mapping_exited && source.pending.is_none(),
-                "creation update lacks positive stopped process evidence"
-            );
+            if source.pid != 0 || !origin.mapping_exited || source.pending.is_some() {
+                return Err(MError::Conflict(
+                    "creation update lacks positive stopped process evidence".into(),
+                ));
+            }
             creation_source = if let Some(existing) = &existing {
                 self.check_update_source(existing)?;
                 self.check_creation_update_backing(existing).await?;

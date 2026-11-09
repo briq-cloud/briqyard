@@ -667,3 +667,5 @@ async fn legacy_settled_update_keeps_exact_field_order_bytes_and_digest() {
     assert_eq!(serde_json::to_vec(&update).unwrap(), old);
     assert_eq!(update.digest().unwrap(), sha(&old));
 }
+
+mod recovery_boundaries;
