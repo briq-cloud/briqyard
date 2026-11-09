@@ -2,6 +2,7 @@
 //! (what `briqyardd` and `briqyard-init` agree on).
 
 pub mod auth;
+pub mod execution;
 pub mod files;
 pub mod guest;
 #[cfg(feature = "host-process")]
