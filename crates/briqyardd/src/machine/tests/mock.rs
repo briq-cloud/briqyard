@@ -60,6 +60,8 @@ pub(super) struct Mock {
     pub(super) stops: Mutex<Duration>,
     pub(super) next_pid: std::sync::atomic::AtomicU32,
     pub(super) procs: Mutex<Vec<Proc>>,
+    /// No factory-owned proof exists for these launches.
+    pub(super) unproven_launches: Mutex<std::collections::HashSet<String>>,
     pub(super) taps: Mutex<std::collections::BTreeSet<String>>,
     pub(super) calls: Mutex<Vec<String>>,
     /// Policy calls fail, as an `nft` that refuses its input.
@@ -167,6 +169,7 @@ impl Mock {
             stops: Mutex::new(Duration::ZERO),
             next_pid: std::sync::atomic::AtomicU32::new(1000),
             procs: Mutex::new(Vec::new()),
+            unproven_launches: Default::default(),
             taps: Mutex::new(Default::default()),
             calls: Mutex::new(Vec::new()),
             refuse_policies: AtomicBool::new(false),
@@ -530,7 +533,9 @@ impl fc::Vmm for Mock {
         })
     }
     fn launch_settlement(&self, id: &str) -> fc::LaunchSettlement {
-        if self.processes().iter().any(|(_, owner)| owner == id) {
+        if self.unproven_launches.lock().unwrap().contains(id)
+            || self.processes().iter().any(|(_, owner)| owner == id)
+        {
             fc::LaunchSettlement::Unresolved
         } else {
             fc::LaunchSettlement::Settled

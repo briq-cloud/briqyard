@@ -15,6 +15,10 @@ on:
         description: Source ref to build and upgrade to (empty uses the workflow ref)
         required: false
         type: string
+      candidate_run:
+        description: Successful release run whose existing dist-x86_64 artifacts to qualify (must match ref)
+        required: false
+        type: string
       runner:
         description: Runner label (ubuntu-26.04 or ubuntu-24.04)
         required: false
@@ -33,6 +37,7 @@ on:
         type: boolean
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: native-upgrade-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
@@ -98,21 +103,46 @@ jobs:
           [ -n "${prev:-}" ] || { echo 'no previous release found' >&2; exit 1; }
           echo "prev=$prev" >> "$GITHUB_OUTPUT"
           echo "Previous release: $prev" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Validate the selected release run
+        if: steps.gate.outputs.run == 'true' && inputs.candidate_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
+        run: |
+          [[ "$CANDIDATE_RUN" =~ ^[1-9][0-9]*$ ]] || { echo 'candidate_run must be a run ID' >&2; exit 1; }
+          [ "$GITHUB_REPOSITORY" = briq-cloud/briqyard ] || { echo 'candidate repository mismatch' >&2; exit 1; }
+          gh api "repos/briq-cloud/briqyard/actions/runs/$CANDIDATE_RUN" > "$RUNNER_TEMP/candidate-run.json"
+          python3 - "$RUNNER_TEMP/candidate-run.json" "$(git rev-parse HEAD)" <<'PY'
+          import json, os, sys, tomllib
+          from pathlib import Path
+          run = json.loads(Path(sys.argv[1]).read_text())
+          assert str(run['id']) == os.environ['CANDIDATE_RUN']
+          assert run['repository']['full_name'] == run['head_repository']['full_name'] == 'briq-cloud/briqyard'
+          assert run['head_sha'] == sys.argv[2]
+          assert run['path'] == '.github/workflows/release.yml' and run['event'] == 'push'
+          assert run['status'] == 'completed' and run['conclusion'] == 'success'
+          version = tomllib.loads(Path('Cargo.toml').read_text())['workspace']['package']['version']
+          assert run['head_branch'] == 'v' + version
+          print('Existing release artifacts match the checked-out candidate source')
+          PY
       - name: Download the candidate's artifacts
-        if: steps.gate.outputs.run == 'true' && inputs.candidate
+        if: steps.gate.outputs.run == 'true' && (inputs.candidate || inputs.candidate_run != '')
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: dist-x86_64
           path: native-release
+          repository: briq-cloud/briqyard
+          run-id: ${{ inputs.candidate_run || github.run_id }}
+          github-token: ${{ github.token }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        if: steps.gate.outputs.run == 'true' && !inputs.candidate
+        if: steps.gate.outputs.run == 'true' && !inputs.candidate && inputs.candidate_run == ''
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        if: steps.gate.outputs.run == 'true' && !inputs.candidate
+        if: steps.gate.outputs.run == 'true' && !inputs.candidate && inputs.candidate_run == ''
       - name: Build the head
-        if: steps.gate.outputs.run == 'true' && !inputs.candidate
+        if: steps.gate.outputs.run == 'true' && !inputs.candidate && inputs.candidate_run == ''
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y musl-tools pkg-config libssl-dev
@@ -136,14 +166,47 @@ jobs:
           mkdir -p native-logs
           set -o pipefail
           bash .native-harness/hack/native-ci-upgrade.sh "${{ steps.previous.outputs.prev }}" native-release 2>&1 | tee native-logs/upgrade.log
+      - name: Qualify sealed siblings on the unchanged candidate artifacts
+        if: steps.gate.outputs.run == 'true' && inputs.candidate_run != ''
+        run: |
+          # Check the actual installed init path too: bootstrap keeps runtime inputs immutable.
+          # Only the input reads need root; the checksum receipt is runner-owned.
+          # shellcheck disable=SC2024
+          sudo python3 - <<'PY' > "$RUNNER_TEMP/seal-candidate.sums"
+          import hashlib
+          from pathlib import Path
+          import yaml
+          sums = dict(line.split()[::-1] for line in Path('native-release/SHA256SUMS-x86_64').read_text().splitlines())
+          config = yaml.safe_load(Path('/etc/briqyard/config.yaml').read_text())
+          paths = {name: Path('/usr/local/bin') / name for name in ('briqyardd', 'briqyard', 'briqyard-fleet')}
+          paths['briqyard-init'] = Path(config['init'])
+          for name, path in paths.items():
+              digest = sums[name + '-linux-x86_64']
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == digest, name
+              print(digest + '  ' + str(path))
+          PY
+          sudo cp /etc/briqyard/config.yaml "$RUNNER_TEMP/seals-config.before"
+          set -o pipefail
+          seals_rc=0
+          BRIQYARD_TOKEN=upgrade-ci-token BRIQYARD_TEST_SEALS_ONLY=1 bash .native-harness/hack/e2e.sh 2>&1 | tee native-logs/seals.log || seals_rc=$?
+          sudo cmp -s "$RUNNER_TEMP/seals-config.before" /etc/briqyard/config.yaml
+          sudo sha256sum -c --quiet "$RUNNER_TEMP/seal-candidate.sums"
+          BRIQYARD_TOKEN=upgrade-ci-token briqyard status >/dev/null
+          exit "$seals_rc"
       - name: Result
         if: always() && steps.gate.outputs.run == 'true'
         run: |
           echo '### upgrade' >> "$GITHUB_STEP_SUMMARY"
           grep -E '^passed |^ENDED EARLY|^NOT A FULL RUN|^result:|^   (API|endpoint|host upgrade|init digest)' native-logs/upgrade.log >> "$GITHUB_STEP_SUMMARY" || echo 'No final summary' >> "$GITHUB_STEP_SUMMARY"
+          if [ -f native-logs/seals.log ]; then
+            echo '### sealed siblings' >> "$GITHUB_STEP_SUMMARY"
+            grep -E '^passed |^ENDED EARLY|^NOT A FULL RUN' native-logs/seals.log >> "$GITHUB_STEP_SUMMARY" || echo 'No final summary' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always() && steps.gate.outputs.run == 'true'
         with:
           name: native-upgrade-log
-          path: native-logs/upgrade.log
+          path: |
+            native-logs/upgrade.log
+            native-logs/seals.log
           if-no-files-found: ignore
