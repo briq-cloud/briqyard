@@ -46,6 +46,8 @@ struct Args {
 enum Cmd {
     /// Validate configuration and print only its loaded identity, without opening host state.
     CheckConfig,
+    /// Print retained scoped execution protection support without opening host state.
+    ScopedExecutionCapabilities,
     /// Print the SHA-256 of the API's certificate, making the certificate if there is none
     /// yet; nothing when the API is plain HTTP. What the fleet pins (ADR 0020).
     TlsFingerprint,
@@ -123,6 +125,10 @@ fn config_path(path: &std::path::Path) -> Result<Option<&std::path::Path>> {
 }
 
 async fn run(args: Args) -> Result<()> {
+    if matches!(args.cmd, Some(Cmd::ScopedExecutionCapabilities)) {
+        println!("scoped-execution-v1");
+        return Ok(());
+    }
     if matches!(args.cmd, Some(Cmd::StateCapabilities)) {
         println!("launch-identity-v1");
         return Ok(());
@@ -276,6 +282,45 @@ async fn run(args: Args) -> Result<()> {
         .tcp("api", addr)
         .with_context(|| format!("listen {}", cfg.listen))?;
     listener.set_nonblocking(true)?;
+    let execution = if let Some(execution) = &cfg.execution {
+        let (credentials, keys, tls) = execution.load().map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            credentials.host_administrator == cfg.token,
+            "execution administrator identity mismatch"
+        );
+        store::private_dir(
+            execution
+                .journal
+                .parent()
+                .context("execution journal parent")?,
+        )?;
+        // Permanent floor precedes opening a journal or publishing any scoped ACK.
+        briqyardd::assignment_compatibility::ensure_floor_at(
+            &cfg.state_dir(),
+            briqyardd::assignment_compatibility::Requirement::ScopedExecution,
+        )?;
+        let journal = briqyard_api::execution::admission::Journal::open(
+            &execution.journal,
+            briqyard_api::execution::admission::Role::Host(mgr.host_id().into()),
+        )?;
+        let channel = api::execution::HostExecutionChannel::new(
+            mgr.clone(),
+            journal,
+            credentials.host_installer,
+            credentials.host_execution,
+            keys,
+            execution.central_issuer.clone(),
+            execution.authority_issuer.clone(),
+            execution.audience.clone(),
+            5,
+        )
+        .map_err(|_| anyhow!("invalid execution channel"))?;
+        let listener = listeners.tcp("execution", execution.listen)?;
+        listener.set_nonblocking(true)?;
+        Some((listener, tls, api::execution::router(Arc::new(channel))))
+    } else {
+        None
+    };
     match listeners.release_unused() {
         Ok(gone) if !gone.is_empty() => tracing::info!(?gone, "listeners no longer used, closed"),
         Ok(_) => {}
@@ -314,21 +359,35 @@ async fn run(args: Args) -> Result<()> {
     let mut server = {
         let handle = handle.clone();
         tokio::spawn(async move {
-            match tls {
-                Some((_, server)) => {
-                    let config =
-                        axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server));
-                    axum_server::from_tcp_rustls(listener, config)
-                        .handle(handle)
-                        .serve(app)
-                        .await
+            let admin_handle = handle.clone();
+            let admin = async {
+                match tls {
+                    Some((_, server)) => {
+                        let config =
+                            axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server));
+                        axum_server::from_tcp_rustls(listener, config)
+                            .handle(admin_handle)
+                            .serve(app)
+                            .await
+                    }
+                    None => {
+                        axum_server::from_tcp(listener)
+                            .handle(admin_handle)
+                            .serve(app)
+                            .await
+                    }
                 }
-                None => {
-                    axum_server::from_tcp(listener)
-                        .handle(handle)
-                        .serve(app)
-                        .await
-                }
+            };
+            if let Some((listener, tls, router)) = execution {
+                let scoped = axum_server::from_tcp_rustls(
+                    listener,
+                    axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls)),
+                )
+                .handle(handle.clone())
+                .serve(router.into_make_service());
+                tokio::try_join!(admin, scoped).map(|_| ())
+            } else {
+                admin.await
             }
         })
     };

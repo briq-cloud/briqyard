@@ -1297,3 +1297,42 @@ interference can repeat this indefinitely; spawning remains closed each time.
    latched, run `sudo systemctl restart briqyardd`. Check `briqyard status`: `memory_protection`
    must clear, then verify a create. Never remove the domain lock, move unknown
    PIDs to another cgroup, or edit membership to force the barrier open.
+
+## Scoped execution listeners (ADR 0124)
+
+Default off. Enable only after native qualification. Both listeners require TLS even
+on loopback and a port separate from the administrator API. The daemon accepts:
+
+```yaml
+execution:
+  listen: 127.0.0.1:7441
+  cert: /etc/briqyard/execution-cert.pem
+  key: /etc/briqyard/execution-key.pem
+  journal: /var/lib/briqyard/state/scoped-host
+  credentials: /etc/briqyard/execution-credentials.json
+  verification_keys: /etc/briqyard/execution-keys.json
+  central_issuer: central
+  authority_issuer: authority
+  audience: runtime
+```
+
+The fleet's `execution` contains that object under `channel`, plus `host_id`,
+`host_url` (dedicated HTTPS endpoint), `authority`, `key_id` and `signing_key`
+(PKCS8 Ed25519 file). Its journal is a separate private directory with an existing
+private parent. The host must already be in the trusted registry with its certificate
+pin. The daemon endpoint uses a certificate matching that pin.
+
+Credentials JSON has `host_installer`, `host_execution`, `central_installer`, `gateway`,
+`host_administrator` and `fleet_administrator`. The four scoped values must be distinct
+from one another and both administrator values. Keep the file and private keys at
+0600, owned by the service user. Verification keys are a JSON array of objects with
+`kid`, `role` (`central` or `authority`), `issuer`, `authority` (null for central), and
+`public_key` (32 raw byte values). Files are bounded and read once at startup.
+
+A synchronised Linux kernel clock is required for scoped admission and release of
+protection. Clock loss refuses admission, protected broadening and idle stop;
+explicit removal and revocation remain possible. Retained protection adds at least
+60 seconds to recovery before a fresh qualified observation can release it. Removing
+execution configuration does not remove protection or the permanent compatibility
+floor. Do not prune or replace scoped journals to recover capacity. The fixed bounds
+and remaining qualification requirements are in ADR 0124.

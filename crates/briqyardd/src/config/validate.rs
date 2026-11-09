@@ -2,6 +2,11 @@ use super::*;
 
 impl Config {
     pub(super) fn validate(&self) -> Result<()> {
+        if let Some(execution) = &self.execution {
+            execution
+                .validate(&self.listen)
+                .map_err(anyhow::Error::msg)?;
+        }
         self.check_sandbox_recipes()?;
         self.templates
             .warm_policy

@@ -8,7 +8,7 @@ mod bootstrap;
 mod config;
 mod create;
 mod create_replay;
-// Dormant until the trusted authority and internal listener are qualified.
+// Only the explicitly configured execution listener mounts these internal services.
 #[allow(dead_code)]
 mod execution_host;
 #[allow(dead_code)]
@@ -399,6 +399,11 @@ async fn run(args: Args) -> Result<()> {
     tokio::spawn(forget_retired(state.clone()));
     tokio::spawn(bootstrap::run(state.clone()));
     // The peer address is what a host's own calls are checked against (`the_host`).
+    let execution = if let Some(execution) = &cfg.execution {
+        Some(provision_execution(&state, execution)?)
+    } else {
+        None
+    };
     let app = app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
     // Kept in systemd's store across a restart: calls made meanwhile wait (ADR 0051).
     let listeners = api::listeners::Listeners::from_env();
@@ -410,6 +415,20 @@ async fn run(args: Args) -> Result<()> {
         .tcp("api", addr)
         .with_context(|| format!("listen {}", cfg.listen))?;
     listener.set_nonblocking(true)?;
+    let execution = execution
+        .map(|(tls, router)| -> Result<_> {
+            let listener = listeners.tcp(
+                "execution",
+                cfg.execution
+                    .as_ref()
+                    .expect("configured execution")
+                    .channel
+                    .listen,
+            )?;
+            listener.set_nonblocking(true)?;
+            Ok((listener, tls, router))
+        })
+        .transpose()?;
     if let Err(e) = listeners.release_unused() {
         tracing::warn!(err = %e, "listeners no longer used left in the store");
     }
@@ -433,27 +452,114 @@ async fn run(args: Args) -> Result<()> {
         version = briqyard_version::VERSION,
         "briqyard-fleet listening"
     );
-    match &cfg.tls {
-        config::Tls::Files { cert, key } => {
-            let read = |p: &PathBuf| {
-                std::fs::read(p).with_context(|| format!("tls: read {}", p.display()))
-            };
-            let server = api::tls::server_config(&read(cert)?, &read(key)?)
-                .with_context(|| format!("tls: {} and {}", cert.display(), key.display()))?;
-            let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server));
-            axum_server::from_tcp_rustls(listener, config)
-                .handle(handle)
-                .serve(app)
-                .await?
+    let admin_handle = handle.clone();
+    let admin = async {
+        match &cfg.tls {
+            config::Tls::Files { cert, key } => {
+                let read = |p: &PathBuf| {
+                    std::fs::read(p).with_context(|| format!("tls: read {}", p.display()))
+                };
+                let server = api::tls::server_config(&read(cert)?, &read(key)?)
+                    .with_context(|| format!("tls: {} and {}", cert.display(), key.display()))?;
+                let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server));
+                axum_server::from_tcp_rustls(listener, config)
+                    .handle(admin_handle)
+                    .serve(app)
+                    .await?
+            }
+            config::Tls::Unset | config::Tls::Off => {
+                axum_server::from_tcp(listener)
+                    .handle(admin_handle)
+                    .serve(app)
+                    .await?
+            }
         }
-        config::Tls::Unset | config::Tls::Off => {
-            axum_server::from_tcp(listener)
+        Ok::<(), anyhow::Error>(())
+    };
+    if let Some((listener, tls, router)) = execution {
+        let scoped = async {
+            axum_server::from_tcp_rustls(listener, tls)
                 .handle(handle)
-                .serve(app)
-                .await?
-        }
+                .serve(router.into_make_service())
+                .await
+                .map_err(anyhow::Error::from)
+        };
+        tokio::try_join!(admin, scoped)?;
+    } else {
+        admin.await?;
     }
+
     Ok(())
+}
+
+fn provision_execution(
+    state: &Arc<AppState>,
+    execution: &config::Execution,
+) -> Result<(axum_server::tls_rustls::RustlsConfig, Router)> {
+    let channel = &execution.channel;
+    let (credentials, keys, tls) = channel.load().map_err(anyhow::Error::msg)?;
+    let host = state
+        .reg
+        .lock()
+        .unwrap()
+        .hosts
+        .get(&execution.host_id)
+        .cloned()
+        .context("execution host absent from registry")?;
+    anyhow::ensure!(
+        credentials.host_administrator == host.token
+            && credentials.fleet_administrator == state.cfg.token,
+        "execution administrator identity mismatch"
+    );
+    let transport = execution_host::HostTransport::with_endpoint(
+        &host,
+        &execution.host_url,
+        &credentials.host_installer,
+        &credentials.host_execution,
+        std::time::Duration::from_secs(75),
+    )
+    .map_err(|_| anyhow!("invalid execution host transport"))?;
+    let journal = api::execution::admission::Journal::open(
+        &channel.journal,
+        api::execution::admission::Role::Authority(execution.authority.clone()),
+    )?;
+    let key = api::execution::provision::read(&execution.signing_key, true, 16 * 1024)
+        .map_err(anyhow::Error::msg)?;
+    let issuer =
+        api::execution::DurableIssuer::from_pkcs8(journal, &key, execution.key_id.clone())?;
+    anyhow::ensure!(
+        keys.iter()
+            .any(|key| key.role == api::execution::KeyRole::Authority
+                && key.kid == execution.key_id
+                && key.issuer == channel.authority_issuer
+                && key.authority.as_deref() == Some(&execution.authority)
+                && key.public_key.as_slice() == issuer.public_key()),
+        "execution signing identity mismatch"
+    );
+    let router = execution_service::router(
+        issuer,
+        transport,
+        host.id,
+        execution_service::Credentials {
+            installer: credentials.central_installer,
+            gateway: credentials.gateway,
+            administrator: credentials.fleet_administrator,
+            host_administrator: credentials.host_administrator,
+        },
+        &state.cfg,
+        execution_service::TrustConfig {
+            keys,
+            central_issuer: channel.central_issuer.clone(),
+            authority_issuer: channel.authority_issuer.clone(),
+            audience: channel.audience.clone(),
+        },
+        Arc::new(api::execution::clock::KernelClock),
+    )
+    .map_err(anyhow::Error::msg)?;
+    Ok((
+        axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls)),
+        router,
+    ))
 }
 
 /// `briqyard-fleet restore`: the registry from its backup, written where the fleet keeps it,

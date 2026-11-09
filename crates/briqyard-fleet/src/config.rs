@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub execution: Option<Execution>,
     pub listen: String,
     /// The fleet's own listener: `{ cert, key }` serves TLS; without it, plain HTTP, refused
     /// off loopback unless `off` says something in front terminates TLS (ADR 0020).
@@ -27,6 +28,18 @@ pub struct Config {
     /// The registry's backup (ADR 0032): off until `store` is set.
     pub backup: Backup,
 }
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Execution {
+    pub channel: api_execution::Config,
+    pub host_id: String,
+    pub host_url: String,
+    pub authority: String,
+    pub key_id: String,
+    pub signing_key: PathBuf,
+}
+use briqyard_api::execution::provision as api_execution;
 
 /// Where the registry's backup goes, encrypted to whom (ADR 0032).
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -286,6 +299,7 @@ impl Default for Bootstrap {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            execution: None,
             listen: "127.0.0.1:7430".into(),
             tls: Tls::Unset,
             token: String::new(),
@@ -326,6 +340,12 @@ impl Config {
     }
 
     fn validate(&mut self) -> Result<()> {
+        if let Some(execution) = &self.execution {
+            execution
+                .channel
+                .validate(&self.listen)
+                .map_err(anyhow::Error::msg)?;
+        }
         match (
             self.backup.store.is_empty(),
             self.backup.recipient.is_empty(),

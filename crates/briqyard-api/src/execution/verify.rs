@@ -4,7 +4,8 @@ use ring::signature;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum KeyRole {
     Central,
     Authority,

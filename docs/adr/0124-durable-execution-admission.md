@@ -462,3 +462,75 @@ registration, ownership or admission. This response is neither installation
 readiness nor a trust bootstrap: authority verification keys and control generations
 must still arrive through independent trusted provisioning. A host restart or
 epoch change requires reconciliation and fencing before any installation is ready.
+
+## Explicit listener activation candidate
+
+The daemon and fleet now accept optional `execution` configuration. This supersedes
+this ADR's earlier statements that listener provisioning is missing. Configuration
+absence leaves the scoped router unmounted. Administrator routers remain separate.
+Activation still requires independent security review and native qualification.
+
+Each scoped listener requires explicit PEM certificate/key files and serves TLS,
+including on loopback. It uses a dedicated port and the existing systemd listener
+store and bounded shutdown. Both sockets are registered before unused sockets close.
+The fleet captures one configured HTTPS execution endpoint for a registered host;
+the registry's host identity, certificate pin and administrator token still govern it.
+The ordinary host URL is unchanged. Redirects, proxies and dispatch retries stay off.
+
+Credentials are a private JSON file read once at startup. Host installer, host
+execution, central installer and gateway credentials must all differ, and each must
+differ from both administrator credentials. Local administrator configuration and
+registry state independently verify the two administrator comparisons. TLS, key and
+credential reads have fixed byte bounds; symlinks and non-regular files refuse.
+The fleet validates its PKCS8 signing key against the configured authority identity,
+issuer, key ID and public key before mounting its listener.
+
+Host services share a clock qualifier. Linux `adjtimex` with modes zero observes the
+kernel clock without changing it. Non-TIME_OK, unsynchronised/error status, syscall
+failure, invalid fractions, negative error values and arithmetic overflow refuse.
+`maxerror` and `esterror` remain microseconds with `STA_NANO`; only offset and time
+fraction change units. Error adds maximum error, absolute offset, estimated error,
+monotonic syscall bracket, one second of freshness and outward quantization. The
+existing five-second ceiling applies after whole-second rounding. Unsupported
+systems have no production fallback. Fresh observations guard admission, protection,
+consumption, completion, protected broadening and the final idle stop decision.
+Explicit revocation and removal use retained ordering evidence without granting time
+based authority. Lost clock qualification cannot release retained protection.
+
+A command maps the qualified wall/monotonic sample to its original deadline.
+`MAX_COMMAND_SECONDS` (60) bounds both the host command deadline and protection
+interval; a longer remaining permit refuses even if its signed limit is larger.
+A refresh after durable consume may shorten that deadline; it never extends it.
+Guest I/O refuses after clock loss or expiry. Recovery retains a full 60-second
+monotonic maximum command lifetime before checking fresh qualified wall evidence.
+Thus a wall forward step at restart cannot release topology while a previously
+accepted bounded command retains access. This adds recovery latency after scoped
+protection has been used, including when execution configuration is removed.
+
+The existing permanent assignment floor gains schema 5, `scoped-execution-v1`.
+Previous readers reject this unknown schema instead of silently ignoring a separate
+marker. The floor is fsynced before the first scoped listener journal or durable
+protection/fence write. Surviving receipts or namespace fences reconstruct a missing
+floor at Store open. Candidate probes, bootstrap replacement and automatic rollback
+all require the exact new capability, even with empty sampled state or old config.
+Removing configuration does not erase receipts, startup drains or compatibility.
+
+The first finite activation retains journal admission receipts, installation and
+operation intents, immutable versions, high-water marks and tombstones. No listener
+runs pruning or journal replacement. Each journal is bounded to 16 MiB and 16,384
+records per bounded collection; host idle protection retains 4,096 receipts / 32 MiB,
+and namespace fences retain 16,384 namespaces / 4,096 pending tickets / 4 MiB.
+Capacity refuses before acknowledgement or dispatch; uncertain failures do not
+refund quota. Exhaustion needs explicit recovery design, not deletion of evidence.
+
+Remaining native proof: real guest dispatch through both authenticated TLS listeners;
+closure changes racing accepted commands; clock loss/steps with adopted guests;
+partition and process crash at every durable boundary; handover of both listeners;
+and downgrade/old-configuration rollback against the exact candidate binaries.
+Mac unit checks or a mock guest do not qualify these paths.
+
+The current fleet provisioner runs inside the normal fleet process. It does not
+provide an authority-only process or suppress that process's registry polling,
+placement API and background management. Independent authority placement requires
+a dedicated process mode with an immutable trusted host record; never share live
+registry or journal files between writers.

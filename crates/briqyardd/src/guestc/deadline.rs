@@ -11,11 +11,41 @@ pub struct CommandDeadline {
     pub(crate) instant: tokio::time::Instant,
 }
 impl CommandDeadline {
-    pub fn new(expires_at: u64, uncertainty: u64) -> Result<Self> {
-        let instant = tokio::time::Instant::now();
-        let wall = std::time::SystemTime::now();
-        Self::from_estimate(expires_at, uncertainty, wall, instant)
+    pub fn from_sample(
+        expires_at: u64,
+        sample: &briqyard_api::execution::clock::ClockSample,
+    ) -> Result<Self> {
+        let expires = Duration::from_secs(expires_at)
+            .checked_sub(sample.uncertainty)
+            .ok_or_else(|| anyhow!("invalid execution deadline"))?;
+        let remaining = expires
+            .checked_sub(sample.wall)
+            .ok_or_else(|| anyhow!("execution authorization expired"))?;
+        anyhow::ensure!(
+            !remaining.is_zero()
+                && remaining <= Duration::from_secs(briqyard_api::execution::MAX_COMMAND_SECONDS),
+            "execution authorization outside freshness interval"
+        );
+        Ok(Self {
+            expires: std::time::UNIX_EPOCH + expires,
+            instant: tokio::time::Instant::from_std(sample.monotonic) + remaining,
+        })
     }
+    /// A fresh observation may only shorten the original monotonic deadline.
+    pub fn refresh(&mut self) -> Result<()> {
+        let sample = briqyard_api::execution::clock::ClockSample::read()
+            .ok_or_else(|| anyhow!("qualified execution clock unavailable"))?;
+        let upper = std::time::UNIX_EPOCH + sample.wall + sample.uncertainty;
+        let remaining = self
+            .expires
+            .duration_since(upper)
+            .map_err(|_| anyhow!("execution authorization expired"))?;
+        self.instant = self
+            .instant
+            .min(tokio::time::Instant::from_std(sample.monotonic) + remaining);
+        Ok(self.check()?)
+    }
+    #[cfg(test)]
     fn from_estimate(
         expires_at: u64,
         uncertainty: u64,
@@ -29,7 +59,9 @@ impl CommandDeadline {
         let remaining = expires
             .duration_since(wall)
             .map_err(|_| anyhow!("execution authorization expired"))?;
-        if remaining.is_zero() || remaining > Duration::from_secs(60) {
+        if remaining.is_zero()
+            || remaining > Duration::from_secs(briqyard_api::execution::MAX_COMMAND_SECONDS)
+        {
             return Err(anyhow!(
                 "execution authorization outside freshness interval"
             ));
@@ -40,9 +72,12 @@ impl CommandDeadline {
         })
     }
     pub fn remaining(&self) -> Result<Duration> {
+        let sample = briqyard_api::execution::clock::ClockSample::read()
+            .ok_or_else(|| anyhow!("qualified execution clock unavailable"))?;
+        let upper = std::time::UNIX_EPOCH + sample.wall + sample.uncertainty;
         let wall = self
             .expires
-            .duration_since(std::time::SystemTime::now())
+            .duration_since(upper)
             .map_err(|_| anyhow!("execution authorization expired"))?;
         let monotonic = self
             .instant
@@ -113,6 +148,21 @@ mod tests {
     use crate::guestc::write_request;
     use briqyard_api::guest::Request;
     use tokio::io::AsyncReadExt;
+    #[test]
+    fn qualified_sample_anchors_both_clocks_and_keeps_fractional_deadline() {
+        let sample = briqyard_api::execution::clock::ClockSample {
+            wall: Duration::from_millis(1_010_900),
+            monotonic: std::time::Instant::now(),
+            uncertainty: Duration::from_millis(50),
+        };
+        let deadline = CommandDeadline::from_sample(1011, &sample).unwrap();
+        assert_eq!(
+            deadline.instant.into_std() - sample.monotonic,
+            Duration::from_millis(50)
+        );
+        assert!(CommandDeadline::from_sample(1010, &sample).is_err());
+        assert!(CommandDeadline::from_sample(1072, &sample).is_err());
+    }
     #[tokio::test]
     async fn scoped_fractional_expiry_and_expired_write_never_extend_authority() {
         let instant = tokio::time::Instant::now();

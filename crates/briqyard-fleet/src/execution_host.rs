@@ -72,6 +72,15 @@ impl HostTransport {
         execution: &str,
         timeout: Duration,
     ) -> Result<Self, Error> {
+        Self::with_endpoint(host, &host.url, installer, execution, timeout)
+    }
+    pub(super) fn with_endpoint(
+        host: &HostRec,
+        endpoint: &str,
+        installer: &str,
+        execution: &str,
+        timeout: Duration,
+    ) -> Result<Self, Error> {
         if host.id.is_empty()
             || installer.is_empty()
             || execution.is_empty()
@@ -83,7 +92,7 @@ impl HostTransport {
         {
             return Err(Error::Configuration);
         }
-        let origin = Url::parse(&host.url).map_err(|_| Error::Configuration)?;
+        let origin = Url::parse(endpoint).map_err(|_| Error::Configuration)?;
         if origin.scheme() != "https"
             || origin.host_str().is_none()
             || !origin.username().is_empty()
@@ -337,6 +346,32 @@ pub(super) mod tests {
         ));
     }
 
+    #[test]
+    fn dedicated_endpoint_preserves_registry_identity_pin_and_administrator() {
+        let registered = host("https://localhost:7420");
+        let channel = HostTransport::with_endpoint(
+            &registered,
+            "https://localhost:7441",
+            "installer",
+            "execution",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(channel.host_id(), registered.id);
+        assert_eq!(channel.administrator_token(), registered.token);
+        assert_eq!(channel.origin.port(), Some(7441));
+        assert_eq!(registered.url, "https://localhost:7420");
+        let mut unpinned = registered.clone();
+        unpinned.tls_fingerprint.clear();
+        assert!(HostTransport::with_endpoint(
+            &unpinned,
+            "https://localhost:7441",
+            "installer",
+            "execution",
+            Duration::from_secs(5)
+        )
+        .is_err());
+    }
     #[tokio::test]
     async fn pinned_requests_use_fixed_routes_and_only_their_role_credential() {
         let server = server();

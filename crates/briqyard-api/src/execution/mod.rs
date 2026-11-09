@@ -1,4 +1,4 @@
-//! Version-one scoped execution wire types. No route accepts these credentials yet.
+//! Version-one scoped execution wire types. Dedicated opt-in host-service routes accept these credentials.
 //! Verification is host-only and is insufficient without durable admission consumption,
 //! allocation fencing and lifecycle-serialized dispatch to the exact live run.
 
@@ -16,6 +16,10 @@ pub mod channel;
 mod issuer;
 #[cfg(feature = "execution-admission")]
 pub use issuer::*;
+#[cfg(feature = "execution-admission")]
+pub mod clock;
+#[cfg(all(feature = "execution-admission", feature = "tls"))]
+pub mod provision;
 #[cfg(feature = "execution-verifier")]
 mod request;
 #[cfg(feature = "execution-verifier")]
@@ -30,6 +34,8 @@ pub const MAX_TOKEN_BYTES: usize = 16_384;
 pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_ALLOCATIONS: usize = 16;
 pub const MAX_RESOURCES: usize = 64;
+/// Absolute host boundary, also retained monotonically during recovery.
+pub const MAX_COMMAND_SECONDS: u64 = 60;
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

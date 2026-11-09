@@ -10,12 +10,15 @@ impl Manager {
         namespaces: &[String],
         mode: MutationMode,
     ) -> Result<execution_fence::MutationTicket> {
-        self.inner.execution_fence.lock().unwrap().begin_mutation(
-            &self.inner.store,
-            namespaces,
-            mode,
-            execution_now_ms()?,
-        )
+        let mut fence = self.inner.execution_fence.lock().unwrap();
+        let now = if mode == MutationMode::Invalidate {
+            fence.last_observed_ms()
+        } else if fence.has_protection() {
+            execution_now_ms()?
+        } else {
+            fence.last_observed_ms()
+        };
+        fence.begin_mutation(&self.inner.store, namespaces, mode, now)
     }
 
     pub(super) fn finish_execution_mutation(
@@ -129,10 +132,7 @@ pub(super) fn execution_resource_revision(
 }
 
 pub(super) fn execution_now_ms() -> Result<u64> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .context("execution clock unavailable")?
-        .as_millis()
-        .try_into()
-        .context("execution clock exceeds range")
+    api::execution::clock::ClockSample::read()
+        .and_then(|sample| sample.lower_ms())
+        .context("qualified execution clock unavailable")
 }

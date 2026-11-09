@@ -1,6 +1,4 @@
-//! Dormant host installation and dispatch router. It is deliberately not merged into
-//! the administrator listener. A future internal listener must provision its two
-//! distinct credentials and pinned transport identity before mounting it.
+//! Host installation and dispatch on a dedicated opt-in authenticated TLS listener.
 use crate::machine::{
     ExecutionProtectionRequest, ExecutionResourceScope, Manager, ScopedCredentials,
     ScopedExecutionContext,
@@ -115,13 +113,9 @@ impl HostExecutionChannel {
     }
 
     fn clock(&self) -> Result<Clock, StatusCode> {
-        Ok(Clock {
-            now: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-                .as_secs(),
-            uncertainty: self.clock_uncertainty_seconds,
-        })
+        access::clock::ClockSample::read()
+            .and_then(|sample| sample.interval())
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)
     }
 
     fn authorize(&self, headers: &HeaderMap, installer: bool) -> Result<(), StatusCode> {
@@ -172,7 +166,7 @@ fn registered_keys(
     Ok(keys)
 }
 
-/// Dedicated router, unmounted. The future internal listener owns TLS and routing.
+/// Dedicated router. The execution listener owns TLS and never merges administrator routes.
 pub fn router(state: Arc<HostExecutionChannel>) -> Router {
     Router::new()
         .route("/internal/execution/v1/instance", get(instance))
@@ -481,8 +475,9 @@ async fn invalidate(
     st.authorize(&headers, true)?;
     let _write = st.admission.write().await;
     let mut journal = st.journal.lock().await;
+    let order = journal.revocation_order();
     journal
-        .invalidate_ownership(&req.installation, req.generation, st.clock()?)
+        .invalidate_ownership(&req.installation, req.generation, order)
         .map_err(|_| StatusCode::CONFLICT)?;
     Ok(Json(Instance {
         host_instance: journal.instance().into(),
@@ -497,8 +492,9 @@ async fn revoke(
     st.authorize(&headers, true)?;
     let _write = st.admission.write().await;
     let mut journal = st.journal.lock().await;
+    let order = journal.revocation_order();
     journal
-        .revoke_delegation(&req.id, req.version, st.clock()?)
+        .revoke_delegation(&req.id, req.version, order)
         .map_err(|_| StatusCode::CONFLICT)?;
     Ok(Json(Instance {
         host_instance: journal.instance().into(),

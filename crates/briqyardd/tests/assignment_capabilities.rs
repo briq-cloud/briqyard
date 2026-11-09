@@ -7,6 +7,10 @@ fn capability_commands_preserve_legacy_stdout_without_opening_state() {
     for path in [&config, &temp.path().join("missing.yaml")] {
         for (command, expected) in [
             (
+                "scoped-execution-capabilities",
+                b"scoped-execution-v1\n".as_slice(),
+            ),
+            (
                 "assigned-update-capabilities",
                 b"assigned-update-v3\n".as_slice(),
             ),

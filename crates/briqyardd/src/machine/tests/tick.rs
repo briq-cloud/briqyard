@@ -64,6 +64,11 @@ async fn queued_idle_stop_rechecks_new_protection_and_explicit_stop_wins() {
         .unwrap()
         .accept(&h.m.inner.store, "admission_test", &[target], expiry)
         .unwrap();
+    #[cfg(not(target_os = "linux"))]
+    assert!(
+        !h.m.idle_stop_allowed(&entry.snapshot(), Utc::now() + chrono::Duration::days(1)),
+        "an unqualified wall step cannot release ordinary idle protection"
+    );
     drop(held);
     stop.await.unwrap().unwrap();
     assert_eq!(entry.snapshot().state, state::RUNNING);

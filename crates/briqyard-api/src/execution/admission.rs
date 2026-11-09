@@ -198,6 +198,15 @@ pub struct Journal {
     poisoned: bool,
 }
 impl Journal {
+    /// Retained ordering evidence for explicit revocation/removal only. This is
+    /// never qualified time and must not authorize admission or release protection.
+    pub fn revocation_order(&self) -> Clock {
+        Clock {
+            now: self.state.clock_floor,
+            uncertainty: 0,
+        }
+    }
+
     pub fn open(root: &Path, role: Role) -> Result<Self, Error> {
         if !valid_id(match &role {
             Role::Authority(id) | Role::Host(id) => id,

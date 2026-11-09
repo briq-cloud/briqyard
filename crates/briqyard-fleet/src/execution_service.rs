@@ -1,5 +1,4 @@
-//! Dormant regional authority HTTP boundary. Constructed only by a qualified caller;
-//! the ordinary fleet router does not mount it or provision its credentials.
+//! Regional authority HTTP boundary on a dedicated opt-in authenticated TLS listener.
 use crate::{
     execution_host::HostTransport,
     execution_install::{CommittedIdle, DelegationControl, Installer, Outcome, SignedDelegation},
@@ -22,15 +21,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 
-/// The producer must independently qualify its wall-clock interval. An expired
-/// observation is never promoted into fresh evidence by reading SystemTime.
-pub(super) struct QualifiedClock {
-    pub interval: Clock,
-    pub valid_until: Instant,
-}
-pub(super) trait ClockSource: Send + Sync {
-    fn qualified(&self) -> Option<QualifiedClock>;
-}
+use briqyard_api::execution::clock::ClockSource;
+#[cfg(test)]
+use briqyard_api::execution::clock::QualifiedClock;
 
 pub(super) struct Credentials {
     pub installer: String,
@@ -427,7 +420,7 @@ async fn run(
         }
         "invalidate" => {
             let dto: Invalidation = parse(body)?;
-            let c = clock(service.clock.as_ref())?;
+            let c = installer.journal.revocation_order();
             let state = installer
                 .invalidate(&dto.id, &dto.host_instance, dto.request, c)
                 .await
@@ -436,7 +429,7 @@ async fn run(
         }
         "revoke" => {
             let dto: Revocation = parse(body)?;
-            let c = clock(service.clock.as_ref())?;
+            let c = installer.journal.revocation_order();
             let state = installer
                 .revoke(&dto.id, &dto.host_instance, dto.request, c)
                 .await
