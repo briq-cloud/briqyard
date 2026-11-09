@@ -120,3 +120,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0122](0122-sealed-sandbox-recipe-observation.md) | Observe one exact validated sandbox artifact under source lifecycle ownership, with config and serving incarnation identity |
 | [0123](0123-warm-catalog-maintenance-admission.md) | Observe and recheck empty-warm maintenance under warm then namespace admission; retain both guards through handover |
 | [0124](0124-durable-execution-admission.md) | Durable quota admission, one-shot host consumption and lifecycle-fenced synchronous dispatch; HTTP access remains unavailable |
+
+- [0125: Assigned creation updates retain original process authority](0125-assigned-creation-updates.md)

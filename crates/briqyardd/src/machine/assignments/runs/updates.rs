@@ -237,11 +237,13 @@ impl Manager {
                 "assigned volume update requires a running or stopped assigned machine".into(),
             ));
         }
-        let current: Current = self
-            .inner
-            .store
-            .get(RUNS, &record.id)?
-            .context("assigned current-run journal missing")?;
+        let current = self.inner.store.get::<Current>(RUNS, &record.id)?;
+        let Some(current) = current else {
+            return self
+                .update_live_creation_volume(entry, &record, volume.unwrap())
+                .await
+                .map_err(lifecycle::public_error);
+        };
         let phase_matches = match record.state.as_str() {
             state::RUNNING => current.reference.phase == Phase::Observed,
             state::STOPPED => current.reference.phase == Phase::Settled,
@@ -335,6 +337,8 @@ impl Manager {
             resolved_image: None,
             root_swap: None,
             creation_source: None,
+            live_creation_source: None,
+            creation_settlement: None,
         };
         intent
             .check(&current)
@@ -357,12 +361,16 @@ impl Manager {
         let size = req.spec.size;
         let image = req.spec.image.clone();
         let env = req.spec.env.clone();
+        let files = req.spec.files.clone();
         let requested_volume = req.spec.volume;
         let disk_limits = req.disk_limits.clone();
-        if size.is_none() && image.is_none() && env.is_none() && requested_volume.is_none()
+        if size.is_none()
+            && image.is_none()
+            && env.is_none()
+            && files.is_none()
+            && requested_volume.is_none()
             || req.spec.entrypoint.is_some()
             || req.spec.cmd.is_some()
-            || req.spec.files.is_some()
             || req.spec.ports.is_some()
             || req.spec.restart.is_some()
             || req.sleep.is_some()
@@ -374,7 +382,7 @@ impl Manager {
             || req.probes.is_some()
         {
             return Err(MError::Conflict(
-                "assigned stopped updates accept image, env, size, volume and disk limits with size only".into(),
+                "assigned stopped updates accept image, env, files, size, volume and disk limits with size only".into(),
             ));
         }
         req.spec.check().map_err(invalid)?;
@@ -446,7 +454,12 @@ impl Manager {
             }
             let origin = self.settled_assigned_origin_durable(source)?;
             Self::check_assigned_binding(source, &origin)?;
-            if source.pid != 0 || !origin.mapping_exited || source.pending.is_some() {
+            if ((source.pid != 0 || !origin.mapping_exited)
+                && !existing
+                    .as_ref()
+                    .is_some_and(|update| update.creation_settlement.is_some()))
+                || (source.pending.is_some() && existing.is_none())
+            {
                 return Err(MError::Conflict(
                     "creation update lacks positive stopped process evidence".into(),
                 ));
@@ -454,7 +467,7 @@ impl Manager {
             creation_source = if let Some(existing) = &existing {
                 self.check_update_source(existing)?;
                 self.check_creation_update_backing(existing).await?;
-                existing.creation_source.clone()
+                existing.creation_authority().cloned()
             } else {
                 let binding = origin.sandbox.as_ref().unwrap();
                 let receipt = self
@@ -503,6 +516,8 @@ impl Manager {
                     "assigned pending update differs from its durable authority".into(),
                 ));
             }
+            self.check_creation_update_backing(update).await?;
+            self.ensure_assigned_volume_update(update).await?;
             if update.resolved_image.is_some() {
                 return Err(MError::Conflict(
                     "assigned image root update is already in recovery; start it before another resize".into(),
@@ -528,6 +543,9 @@ impl Manager {
             env: env
                 .clone()
                 .or_else(|| record.pending.as_ref().and_then(|p| p.env.clone())),
+            files: files
+                .clone()
+                .or_else(|| record.pending.as_ref().and_then(|p| p.files.clone())),
             size: size.or_else(|| record.pending.as_ref().and_then(|p| p.size)),
             volume: growth.map(|(_, to)| api::VolumeSize { size_gb: to }),
             ..Default::default()
@@ -543,6 +561,7 @@ impl Manager {
                 source_current_sha256 = existing.source_current_sha256.clone();
                 change.image = image.or(existing.change.image.clone());
                 change.env = env.or(existing.change.env.clone());
+                change.files = files.or(existing.change.files.clone());
                 change.size = size.or(existing.change.size);
                 change.volume = growth
                     .map(|(_, to)| api::VolumeSize { size_gb: to })
@@ -620,7 +639,13 @@ impl Manager {
             );
         }
         let intent = UpdateIntent {
-            schema: if creation_source.is_some() { 2 } else { 1 },
+            schema: if change.files.is_some() || existing.as_ref().is_some_and(|u| u.schema == 3) {
+                3
+            } else if creation_source.is_some() {
+                2
+            } else {
+                1
+            },
             machine: record.id.clone(),
             source_current_sha256,
             source_record: Box::new(source_record),
@@ -630,7 +655,20 @@ impl Manager {
             predecessor_target,
             resolved_image,
             root_swap,
-            creation_source,
+            creation_source: if existing
+                .as_ref()
+                .is_some_and(|u| u.live_creation_source.is_some())
+            {
+                None
+            } else {
+                creation_source.clone()
+            },
+            live_creation_source: existing
+                .as_ref()
+                .and_then(|u| u.live_creation_source.clone()),
+            creation_settlement: existing
+                .as_ref()
+                .and_then(|u| u.creation_settlement.clone()),
         };
         self.check_update_source(&intent)
             .map_err(|error| MError::Conflict(format!("assigned update intent: {error:#}")))?;
@@ -728,6 +766,17 @@ impl Manager {
             return Ok(());
         };
         let data = update.target.data_dataset();
+        let expected = match self.check_update_source(update)? {
+            Some(current) => current.data,
+            None => update
+                .creation_authority()
+                .and_then(|source| source.data.clone()),
+        }
+        .context("assigned volume update data identity missing")?;
+        anyhow::ensure!(
+            expected.dataset == data && self.inner.zfs.guid(&data).await? == expected.guid,
+            "assigned volume update data identity differs"
+        );
         let wanted = u64::from(volume.size_gb)
             .checked_mul(1 << 30)
             .context("assigned volume size overflow")?;
@@ -818,5 +867,4 @@ impl Manager {
             .filter_map(|update| update.resolved_image.map(|image| image.key))
             .collect())
     }
-
 }

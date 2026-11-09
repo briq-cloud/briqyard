@@ -438,6 +438,8 @@ async fn concurrent_assigned_volume_growths_reserve_namespace_quota_atomically()
             resolved_image: None,
             root_swap: None,
             creation_source: None,
+            live_creation_source: None,
+            creation_settlement: None,
         };
         tasks.push(tokio::task::spawn_blocking(move || {
             gate.wait();
@@ -1533,7 +1535,11 @@ async fn assigned_unreadable_update_journal_defers_backing_cleanup() {
     h.pool.zfs.create(&next, 1 << 20).await.unwrap();
     h.m.inner
         .store
-        .put_durable(UPDATES, &record.id, &serde_json::json!({"unknown": true}))
+        .put_durable(
+            UPDATES,
+            &record.id,
+            &serde_json::json!({"schema": 3, "unknown": true}),
+        )
         .unwrap();
     assert!(h.m.tidy(&entry).await.is_err());
     assert!(h.m.finish_swap(&record, "root").await.is_err());

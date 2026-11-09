@@ -4,6 +4,7 @@ use rand::RngCore;
 mod adoption;
 mod launch;
 mod lifecycle;
+mod live_updates;
 mod model;
 #[allow(dead_code)]
 // Pure projection; durable run transitions are wired with the terminal capability floor.
@@ -228,6 +229,10 @@ struct UpdateIntent {
     root_swap: Option<RootSwap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     creation_source: Option<update_authority::CreationSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    live_creation_source: Option<update_authority::CreationSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    creation_settlement: Option<live_updates::CreationSettlement>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -246,7 +251,7 @@ impl UpdateIntent {
     fn check_shape(&self) -> Result<()> {
         self.check_source_shape()?;
         let source_run = self.source_record.assigned_run.as_ref();
-        let source_phase_allowed = self.creation_source.is_some()
+        let source_phase_allowed = self.creation_authority().is_some()
             || source_run.is_some_and(|run| {
                 run.phase == Phase::Settled
                     || (run.phase == Phase::Observed
@@ -261,7 +266,7 @@ impl UpdateIntent {
                         && self.change.restart.is_none())
             });
         anyhow::ensure!(
-            matches!(self.schema, 1 | 2)
+            matches!(self.schema, 1 | 2 | 3)
                 && self.machine == self.source_record.id
                 && self.machine == self.target.id
                 && self.source_record.assigned_run == self.target.assigned_run
@@ -302,10 +307,11 @@ impl UpdateIntent {
                 || volume_change
                 || self.change.image.is_some()
                 || self.change.env.is_some()
+                || (self.schema == 3 && self.change.files.is_some())
                 || canceled_image)
                 && self.change.entrypoint.is_none()
                 && self.change.cmd.is_none()
-                && self.change.files.is_none()
+                && (self.schema == 3 || self.change.files.is_none())
                 && self.change.ports.is_none()
                 && self.change.restart.is_none()
                 && self.target.disk_limits
@@ -362,7 +368,7 @@ impl UpdateIntent {
             anyhow::ensure!(
                 pending.entrypoint.is_none()
                     && pending.cmd.is_none()
-                    && pending.files.is_none()
+                    && (self.schema == 3 || pending.files.is_none())
                     && pending.ports.is_none()
                     && pending.restart.is_none()
                     && pending.volume.as_ref().is_none_or(|pending| {
@@ -394,6 +400,10 @@ impl UpdateIntent {
             (None, None, None) => {}
             _ => anyhow::bail!("assigned update record changes volume presence"),
         }
+        self.normalize_creation_settlement(&mut projected)?;
+        if self.creation_settlement.is_some() {
+            projected = projection::preserve_advisory(&projected, &self.source_record)?;
+        }
         projected.pending = self.source_record.pending.clone();
         projected.pending_since = self.source_record.pending_since;
         projected.version = self.source_record.version;
@@ -409,7 +419,7 @@ impl UpdateIntent {
 
     pub(super) fn check(&self, current: &Current) -> Result<()> {
         anyhow::ensure!(
-            self.creation_source.is_none() && self.schema == 1,
+            self.creation_authority().is_none() && matches!(self.schema, 1 | 3),
             "creation update cannot claim current-run authority"
         );
         current.check()?;

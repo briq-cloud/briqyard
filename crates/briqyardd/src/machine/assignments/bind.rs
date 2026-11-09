@@ -207,6 +207,10 @@ impl Manager {
     }
 
     pub(in crate::machine) fn check_assigned_bound_record(&self, record: &Record) -> Result<()> {
+        if let Some(source) = self.creation_update_source_record(record)? {
+            let origin = self.settled_assigned_origin(&source)?;
+            return Self::check_assigned_binding(&source, &origin);
+        }
         let origin = self.settled_assigned_origin(record)?;
         Self::check_assigned_binding(record, &origin)
     }

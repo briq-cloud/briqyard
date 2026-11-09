@@ -33,9 +33,7 @@ impl Manager {
                 "assigned spec updates require a stopped machine".into(),
             ));
         }
-        if e.snapshot().assigned_run.is_some()
-            || (self.assigned_lifecycle(&e.snapshot()) && e.snapshot().state == state::STOPPED)
-        {
+        if e.snapshot().assigned_run.is_some() || self.assigned_lifecycle(&e.snapshot()) {
             if self.assigned_lifecycle(&e.snapshot()) {
                 if req.spec.volume.is_some() && e.snapshot().state == state::RUNNING {
                     return self.update_assigned_volume(&e, req, at).await;

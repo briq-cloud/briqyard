@@ -19,7 +19,10 @@ impl Manager {
         self.apply_assigned_root_update(resolved).await
     }
 
-    pub(super) async fn apply_assigned_root_update(&self, mut resolved: UpdateIntent) -> Result<()> {
+    pub(super) async fn apply_assigned_root_update(
+        &self,
+        mut resolved: UpdateIntent,
+    ) -> Result<()> {
         let reference = resolved
             .change
             .image
@@ -190,7 +193,7 @@ impl Manager {
         anyhow::ensure!(
             source_guid
                 == current.as_ref().map_or_else(
-                    || update.creation_source.as_ref().unwrap().root.guid,
+                    || update.creation_authority().unwrap().root.guid,
                     |current| current.root.guid
                 ),
             "assigned image update source root differs from settled backing"
