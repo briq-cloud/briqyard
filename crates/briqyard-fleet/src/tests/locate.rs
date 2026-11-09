@@ -278,16 +278,9 @@ async fn stopped_spec_patch_preserves_wire_body_cas_and_registered_host_routing(
                     let patches = ds[0].stub.patches.lock().unwrap();
                     assert_eq!(patches.len(), before + 1);
                     assert_eq!(patches.last().unwrap(), &(machine.id.clone(), body));
-                    assert_eq!(
-                        ds[0]
-                            .stub
-                            .if_match
-                            .lock()
-                            .unwrap()
-                            .last()
-                            .map(String::as_str),
-                        Some("7")
-                    );
+                    let if_match = ds[0].stub.if_match.lock().unwrap();
+                    assert_eq!(if_match.len(), cas_before + 1);
+                    assert_eq!(if_match[cas_before], "7");
                 }
                 let reg = f.st.reg.lock().unwrap();
                 assert_eq!(reg.machines[&machine.id], registered);
