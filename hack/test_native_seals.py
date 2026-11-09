@@ -277,7 +277,7 @@ timeout() {
     systemctl)
       if [ -e "$events/signaled" ]; then boundary=new_pid_query; else boundary=old_pid_query; fi;;
     briqyard)
-      if [ "$2" = warm-maintenance ]; then
+      if [ "$2" = warm-maintenance ] || [ "$2" = status ]; then
         if [ -e "$events/signaled" ]; then boundary=readiness_query; else boundary=previous_incarnation; fi
       fi;;
   esac
@@ -318,7 +318,10 @@ systemctl() {
 }
 briqyard() {
   if [ "$1 ${2-}" = 'namespace ls' ]; then echo '[]'; return; fi
-  if [ "$1" = warm-maintenance ]; then
+  if [ "$1" = warm-maintenance ] || [ "$1" = status ]; then
+    [ "$BRIQYARD_URL" = http://offline-fixture ] || return 22
+    # Match api/warm.rs: maintenance requires configured auth, even on loopback.
+    if [ "$1" = warm-maintenance ] && [ -e "$events/signaled" ] && [ -z "$seal_expected_token" ]; then return 1; fi
     if [ -e "$events/signaled" ]; then
       [ "${BRIQYARD_TOKEN-}" = "${seal_expected_token-}" ] || return 22
       local ready_at=84
@@ -327,8 +330,9 @@ briqyard() {
       echo new >> "$events/queries"
       local incarnation=new digest=original
       [ "$scenario" != sameincarnation ] || incarnation=old
+      [ "$scenario" != emptyincarnation ] || incarnation=
       case "$scenario" in wrongconfig|accepted_slow_wrongconfig) digest=fixture;; accepted_slow_sameincarnation) incarnation=old;; esac
-      if [ "$scenario" = malformed ]; then echo '{'; else
+      if [ "$scenario" = recovery_fault ]; then echo '{"conditions":[]}'; elif [ "$scenario" = malformed ]; then echo '{'; else
         printf '{"observation":{"incarnation":"%s","config":{"source":"file","sha256":"%s"}}}\n' "$incarnation" "$digest"
       fi
     else
@@ -351,8 +355,8 @@ export -f timeout sleep sudo systemctl briqyard
                      "previous_incarnation": "previous_incarnation_query", "previous_incarnation_timeout": "previous_incarnation_timeout",
                      "copy": "config_restore", "copy_timeout": "config_restore_timeout",
                      "old_pid_invalid": "old_pid_invalid", "pid_change_exhausted": "pid_change_exhausted",
-                     "sameincarnation": "readiness_exhausted_identity_mismatch",
-                     "wrongconfig": "readiness_exhausted_identity_mismatch", "malformed": "readiness_exhausted_identity_mismatch",
+                     "sameincarnation": "readiness_exhausted_identity_mismatch", "emptyincarnation": "readiness_exhausted_identity_mismatch",
+                     "wrongconfig": "readiness_exhausted_identity_mismatch", "recovery_fault": "readiness_exhausted_identity_mismatch", "malformed": "readiness_exhausted_identity_mismatch",
                      "readiness_query": "readiness_exhausted_query_failed",
                      "readiness_query_timeout": "readiness_exhausted_query_timeout", "overall_timeout": "overall_timeout"}
         for boundary in ["check_config", "old_pid_query", "new_pid_query", "kill", "start"]:
@@ -360,7 +364,7 @@ export -f timeout sleep sudo systemctl briqyard
             scenarios[boundary] = category
             scenarios[boundary + "_timeout"] = category + "_timeout"
         for scenario, category in scenarios.items():
-            for original_token in (["original", ""] if scenario == "success" else ["original"]):
+            for original_token in ["original", ""]:
                 with self.subTest(scenario=scenario, authenticated=bool(original_token)), tempfile.TemporaryDirectory() as directory:
                     # Guard against missing function exports invoking any host command.
                     guard = Path(directory) / "bin"

@@ -80,7 +80,9 @@ seal_restore_handover() {
   [ "$((SECONDS + 25))" -ge "$until" ] || until=$((SECONDS + 25))
   while [ "$((SECONDS + 2))" -lt "$until" ]; do
     status=0
-    observed=$(seal_restore_call 3 briqyard warm-maintenance 2>/dev/null) || status=$?
+    # Restored configuration may have no token; maintenance requires one.
+    # Status carries the same identity only after recovery has resolved.
+    observed=$(seal_restore_call 3 briqyard status 2>/dev/null) || status=$?
     if [ "$status" = 0 ] && [ "$SECONDS" -lt "$until" ]; then
       if printf '%s' "$observed" | jq -e --arg old "$before" --argjson config "$expected" \
         '.observation.incarnation != $old and (.observation.incarnation | type == "string" and length > 0) and .observation.config == $config' >/dev/null 2>&1; then return 0; fi

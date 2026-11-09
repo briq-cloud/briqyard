@@ -64,3 +64,27 @@ A unit regression dispatches two replay admissions and requires handover to fini
 both maintenance gates held, preserving the machine record and issuing no machine work.
 This source-established defect explains a permanent shutdown drain after the successful
 replays; the complete native restoration outcome still needs validation on the fixed head.
+
+## Restored readiness with authentication disabled
+
+After replay settlement was repaired, native acceptance at `eecfb88` reported
+accepted handover completion followed by readiness query failure. The native host
+bootstrap defaults to an empty API token. Sealed acceptance temporarily installs
+its own token, then restores the original configuration and CLI environment.
+`warm-maintenance` calls an endpoint that deliberately returns 409 when no token
+is configured, so it cannot observe the restored native daemon. The exported Bash
+caller fake had incorrectly allowed that request without configured authentication.
+Correcting that fake reproduced the readiness failure before the fixture fix.
+
+`GET /v1/status` now includes the existing runtime observation once recovery is
+resolved. Older daemons and daemons with a recovery fault omit it. It uses ordinary
+API authentication: a configured token is still required, and a host configured
+without one can answer. Maintenance authentication and admission are unchanged.
+The restored readiness query uses status with the original CLI environment and
+still requires a new nonempty incarnation and the exact restored configuration
+identity. Missing observation fails. The 128-second budget is unchanged.
+
+Offline caller regressions cover both original authentication modes, wrong config,
+stale incarnation, missing observation, recovery fault and existing deadline/failure
+boundaries. The source mismatch is established; native qualification of the new
+candidate remains outstanding.

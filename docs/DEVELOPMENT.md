@@ -617,6 +617,10 @@ claim. These added native gates require a native run; offline fixture tests do n
 
 Restoration failures print only fixed categories for configuration validation/copy,
 previous incarnation, PID queries/change, signal, start, readiness and the outer timeout.
+Restored readiness uses `briqyard status` with the original CLI authentication, including
+an originally empty token. Its observation must carry a new nonempty incarnation and the
+exact restored configuration identity. Recovery faults omit the observation and fail this
+check. The pre-handover maintenance query still requires the fixture token.
 Readiness exhaustion distinguishes query failure, query timeout and identity mismatch. The
 90-second ownership drain and 10-second file restore bounds remain. Handover has one
 128-second budget: 22 seconds for bounded preflight calls, the runtime's five-second admission
