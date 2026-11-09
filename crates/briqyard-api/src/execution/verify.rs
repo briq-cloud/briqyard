@@ -51,6 +51,38 @@ pub struct DispatchContext<'a> {
     pub request_digest: &'a str,
 }
 
+/// Trusted metadata used before an operation permit exists. The authenticated installer
+/// supplies this snapshot; submitted credentials must never construct it.
+pub struct DelegationContext<'a> {
+    pub principal: &'a str,
+    pub team: &'a str,
+    pub subject: &'a str,
+    pub target: &'a Target,
+    pub resource_set: &'a ResourceSet,
+    pub metadata_revision: &'a str,
+    pub authority: &'a str,
+    pub authority_epoch: &'a str,
+}
+
+/// Checked central credentials, without an operation debit or dispatch permission.
+pub struct VerifiedDelegation {
+    grant: Grant,
+    allocations: Vec<Allocation>,
+    allocation_digests: Vec<String>,
+}
+impl VerifiedDelegation {
+    /// Digests of the verified compact tokens, in the same order as allocations().
+    pub fn allocation_digests(&self) -> &[String] {
+        &self.allocation_digests
+    }
+    pub fn grant(&self) -> &Grant {
+        &self.grant
+    }
+    pub fn allocations(&self) -> &[Allocation] {
+        &self.allocations
+    }
+}
+
 /// Cryptographically checked data, not permission to dispatch or evidence of consumption.
 pub struct VerifiedBundle {
     grant: Grant,
@@ -202,16 +234,16 @@ fn decode<T: DeserializeOwned>(
     .map_err(|_| VerifyError::Encoding)
 }
 
-/// Verify both independent signatures, all ceilings, and the trusted dispatch snapshot.
-/// This does not consume an admission. It must not be wired to existing admin routes.
-pub fn verify_bundle(
+/// Verify an installation's central credentials before an operation permit exists.
+/// This neither installs a fence nor reserves quota. Each allocation has its own expiry;
+/// a longer-lived grant never extends an allocation's usable interval.
+pub fn verify_delegation(
     grant_token: &str,
-    permit_token: &str,
     allocation_tokens: &[&str],
     trust: &Trust<'_>,
     clock: Clock,
-    context: &DispatchContext<'_>,
-) -> Result<VerifiedBundle> {
+    context: &DelegationContext<'_>,
+) -> Result<VerifiedDelegation> {
     if allocation_tokens.is_empty() || allocation_tokens.len() > MAX_ALLOCATIONS {
         return Err(VerifyError::Claims);
     }
@@ -266,6 +298,101 @@ pub fn verify_bundle(
             return Err(VerifyError::Claims);
         }
     }
+    if g.principal != context.principal
+        || g.team != context.team
+        || g.subject != context.subject
+        || g.target != *context.target
+        || g.resource_set != *context.resource_set
+        || g.metadata_revision != context.metadata_revision
+        || !id(context.authority)
+        || !id(context.authority_epoch)
+    {
+        return Err(VerifyError::Binding);
+    }
+    let mut allocations = Vec::with_capacity(allocation_tokens.len());
+    for token in allocation_tokens {
+        let a: Allocation = decode(
+            token,
+            ALLOCATION_TYPE,
+            KeyRole::Central,
+            trust.central_issuer,
+            None,
+            trust,
+        )?;
+        common(a.v, &a.iss, &a.aud, trust.central_issuer, trust.audience)?;
+        times(a.iat, a.nbf, a.exp, clock)?;
+        if ![
+            &a.id,
+            &a.epoch,
+            &a.authority,
+            &a.authority_epoch,
+            &a.principal,
+            &a.bucket,
+        ]
+        .into_iter()
+        .all(|s| id(s))
+            || ![a.window_start, a.window_end, a.units]
+                .into_iter()
+                .all(safe)
+            || a.units == 0
+            || a.window_start > a.iat
+            || a.window_start > a.nbf
+            || a.exp > a.window_end
+            || a.window_start >= a.window_end
+        {
+            return Err(VerifyError::Claims);
+        }
+        if allocations
+            .iter()
+            .any(|previous: &Allocation| previous.id == a.id || previous.bucket == a.bucket)
+            || a.principal != g.principal
+            || a.authority != context.authority
+            || a.authority_epoch != context.authority_epoch
+        {
+            return Err(VerifyError::Binding);
+        }
+        allocations.push(a);
+    }
+    Ok(VerifiedDelegation {
+        grant: g,
+        allocations,
+        allocation_digests: allocation_tokens
+            .iter()
+            .map(|token| token_digest(token))
+            .collect(),
+    })
+}
+
+/// Verify both independent signatures, all ceilings, and the trusted dispatch snapshot.
+/// This does not consume an admission. It must not be wired to existing admin routes.
+pub fn verify_bundle(
+    grant_token: &str,
+    permit_token: &str,
+    allocation_tokens: &[&str],
+    trust: &Trust<'_>,
+    clock: Clock,
+    context: &DispatchContext<'_>,
+) -> Result<VerifiedBundle> {
+    let VerifiedDelegation {
+        grant: g,
+        allocations,
+        ..
+    } = verify_delegation(
+        grant_token,
+        allocation_tokens,
+        trust,
+        clock,
+        &DelegationContext {
+            principal: context.principal,
+            team: context.team,
+            subject: context.subject,
+            target: context.target,
+            resource_set: context.resource_set,
+            metadata_revision: context.metadata_revision,
+            authority: context.authority,
+            authority_epoch: context.authority_epoch,
+        },
+    )?;
     let p: Permit = decode(
         permit_token,
         PERMIT_TYPE,
@@ -303,38 +430,14 @@ pub fn verify_bundle(
     {
         return Err(VerifyError::Binding);
     }
-    let mut allocations = Vec::with_capacity(allocation_tokens.len());
-    for (i, (token, reference)) in allocation_tokens.iter().zip(&p.allocations).enumerate() {
-        let a: Allocation = decode(
-            token,
-            ALLOCATION_TYPE,
-            KeyRole::Central,
-            trust.central_issuer,
-            None,
-            trust,
-        )?;
-        common(a.v, &a.iss, &a.aud, trust.central_issuer, trust.audience)?;
-        times(a.iat, a.nbf, a.exp, clock)?;
-        if ![
-            &a.id,
-            &a.epoch,
-            &a.authority,
-            &a.authority_epoch,
-            &a.principal,
-            &a.bucket,
-        ]
-        .into_iter()
-        .all(|s| id(s))
-            || ![a.window_start, a.window_end, a.units, reference.units]
-                .into_iter()
-                .all(safe)
-            || a.units == 0
+    for ((token, reference), a) in allocation_tokens
+        .iter()
+        .zip(&p.allocations)
+        .zip(&allocations)
+    {
+        if !safe(reference.units)
             || reference.units == 0
             || reference.units > a.units
-            || a.window_start > a.iat
-            || a.window_start > a.nbf
-            || a.exp > a.window_end
-            || a.window_start >= a.window_end
             || p.exp > a.exp
             || p.iat < a.iat
             || p.nbf < a.nbf
@@ -342,28 +445,16 @@ pub fn verify_bundle(
         {
             return Err(VerifyError::Claims);
         }
-        if p.allocations[..i].iter().any(|r| r.id == reference.id)
-            || allocations
-                .iter()
-                .any(|previous: &Allocation| previous.bucket == a.bucket)
-            || reference.id != a.id
+        if reference.id != a.id
             || reference.epoch != a.epoch
             || reference.digest != token_digest(token)
-            || a.principal != g.principal
             || a.authority != p.authority
             || a.authority_epoch != p.authority_epoch
         {
             return Err(VerifyError::Binding);
         }
-        allocations.push(a);
     }
-    if g.principal != context.principal
-        || g.team != context.team
-        || g.subject != context.subject
-        || g.target != *context.target
-        || g.resource_set != *context.resource_set
-        || g.metadata_revision != context.metadata_revision
-        || p.authority != context.authority
+    if p.authority != context.authority
         || p.authority_epoch != context.authority_epoch
         || p.operation != context.operation
         || p.request_digest != context.request_digest

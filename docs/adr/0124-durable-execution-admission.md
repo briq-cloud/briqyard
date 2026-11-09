@@ -9,13 +9,25 @@ The public execution gateway owns neither. `DurableIssuer::issue` verifies the c
 credential bundle and persists every quota debit and the admission before releasing its
 signed permit. Repeated admission IDs return a status-only refusal, never another dispatch.
 
+Installation precedes any operation permit. `verify_delegation` validates the central grant
+and allocation vector against an independently supplied trusted snapshot, without an
+authority signing key or a fabricated permit. Dispatch reuses these checks before validating
+the authority permit. Allocation IDs and buckets must both be unique. Each allocation keeps
+its own expiry even when the grant lives longer.
+
+`Journal::install_allocations` durably stores those exact signed allocations under the
+current service instance and authority fence. Repeated installation preserves every debit;
+a different signed allocation cannot replace the same ID. This acknowledges quota storage
+only. It does not install ownership metadata, freeze membership or acknowledge protection,
+and is insufficient to make a delegation ready for dispatch.
+
 The host consumes that admission durably before its first guest frame. Both boundaries
 use `briqyard-api/execution-admission`; guest builds do not enable this feature.
 
 | Boundary | Required evidence |
 | --- | --- |
 | Issuer | Exact signed allocations, authority identity and current issuer instance/epoch, complete operation debit vector |
-| Host installation | Authenticated administrative installer, exact current host journal instance, acknowledged authority epoch, exact signed allocation vector |
+| Host installation | Authenticated scoped installer, exact current host journal instance, acknowledged authority epoch, exact signed allocation vector |
 | Host dispatch | Independently installed ownership snapshot, current allocation fence, live VMM incarnation, unchanged frozen resources, committed request, unused admission ID |
 
 Synchronous execution consumes one `requests` and one `exec_calls` unit. The issuer and
@@ -104,6 +116,17 @@ Activation still requires authenticated ownership/metadata installation, host-in
 allocation acknowledgement transport, authority registration/key provisioning, regional
 routing, bounded clock monitoring and integrated lifecycle/partition/crash qualification.
 The installer must fence membership/policy updates and acknowledge every old owner before
-publishing replacement authority. The end-to-end caller must recover uncertain receipts by
+publishing replacement authority. A dedicated authenticated channel must enforce installer,
+authority and gateway roles separately from administrator credentials, including on loopback.
+Missing scoped credentials refuse access.
+
+Membership protection must cover the complete reachable native resource set. Network attach,
+clone publication, policy replacement, namespace/ownership moves, gateway replacement and
+assignment publication must advance the trusted revision before their effects are visible.
+Broadening membership or reachability remains blocked through the frozen command deadline;
+invalidation of later dispatch alone cannot protect an already running command. Explicit
+stop/removal may terminate work. Protection must survive journal reopening: a fresh journal
+instance invalidates old credentials, but does not prove a previously accepted guest command
+has stopped. These gates are not implemented by allocation installation. The end-to-end caller must recover uncertain receipts by
 status without replay. Files, sessions, streams and multi-host frozen resources remain
 unavailable through scoped access until their own commitments and fences are implemented.

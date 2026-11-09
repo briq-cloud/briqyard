@@ -113,6 +113,30 @@ impl Fixture {
             request_digest: &self.permit.request_digest,
         }
     }
+    fn delegation(&self) -> VerifiedDelegation {
+        let context = self.context();
+        verify_delegation(
+            &self.grant_token,
+            &self
+                .allocations
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            &self.trust(),
+            clock(),
+            &DelegationContext {
+                principal: context.principal,
+                team: context.team,
+                subject: context.subject,
+                target: context.target,
+                resource_set: context.resource_set,
+                metadata_revision: context.metadata_revision,
+                authority: context.authority,
+                authority_epoch: context.authority_epoch,
+            },
+        )
+        .unwrap()
+    }
     fn bundle(&self) -> VerifiedBundle {
         verify_bundle(
             &self.grant_token,
@@ -386,4 +410,78 @@ fn issuer_can_prune_expired_receipts_without_rotating_its_authority() {
         .unwrap();
     assert_eq!(issuer.instance(), instance);
     assert_eq!(issuer.status(&f.permit.admission).unwrap(), None);
+}
+
+#[test]
+fn pre_permit_installation_requires_fences_and_never_resets_debits() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut authority = Journal::open(
+        &dir.path().join("authority"),
+        Role::Authority("authority-1".into()),
+    )
+    .unwrap();
+    let f = Fixture::new(authority.instance());
+    let authority_instance = authority.instance().to_owned();
+    authority
+        .install_allocations(&f.delegation(), &authority_instance, clock())
+        .unwrap();
+    assert!(authority.state.admissions.is_empty());
+    assert_eq!(authority.state.allocations.len(), 2);
+    authority.reserve(&f.bundle(), clock()).unwrap();
+    authority
+        .install_allocations(&f.delegation(), &authority_instance, clock())
+        .unwrap();
+    assert_eq!(authority.state.allocations["general"].used, 1);
+    assert_eq!(authority.state.allocations["calls"].used, 1);
+
+    let path = dir.path().join("host");
+    let mut host = Journal::open(&path, Role::Host("host-1".into())).unwrap();
+    let host_instance = host.instance().to_owned();
+    assert!(matches!(
+        host.install_allocations(&f.delegation(), &host_instance, clock()),
+        Err(Error::Binding)
+    ));
+    assert!(host.state.allocations.is_empty());
+    host.fence("authority-1", &authority_instance, &host_instance, clock())
+        .unwrap();
+    host.install_allocations(&f.delegation(), &host_instance, clock())
+        .unwrap();
+    host.consume(&f.bundle(), clock()).unwrap();
+    host.install_allocations(&f.delegation(), &host_instance, clock())
+        .unwrap();
+    assert_eq!(host.state.allocations["calls"].used, 1);
+    assert_eq!(host.state.allocations["general"].used, 1);
+
+    // A different signed vector cannot replace a previously acknowledged allocation.
+    let mut changed = Fixture::new(&authority_instance);
+    let mut allocation: Allocation = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(changed.allocations[1].split('.').nth(1).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    allocation.units += 1;
+    changed.allocations[1] = sign(&allocation, ALLOCATION_TYPE, 1, "central-test");
+    assert!(matches!(
+        host.install_allocations(&changed.delegation(), &host_instance, clock()),
+        Err(Error::Binding)
+    ));
+    assert_eq!(host.state.allocations["calls"].allocation.units, 1);
+    assert_eq!(host.state.allocations["general"].used, 1);
+
+    drop(host);
+    let mut host = Journal::open(&path, Role::Host("host-1".into())).unwrap();
+    assert!(matches!(
+        host.install_allocations(&f.delegation(), &host_instance, clock()),
+        Err(Error::Binding)
+    ));
+    let instance = host.instance().to_owned();
+    assert!(matches!(
+        host.install_allocations(&f.delegation(), &instance, clock()),
+        Err(Error::Binding)
+    ));
+    assert!(matches!(
+        host.fence("authority-1", &authority_instance, &instance, clock()),
+        Err(Error::Binding)
+    ));
 }

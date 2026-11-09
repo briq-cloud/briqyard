@@ -65,8 +65,8 @@ fn fixture() -> Value {
         {"kid":"authority-test","role":"authority","issuer":"authority","authority":"authority-1","public_key":public(&AUTHORITY_SEED)}],
         "grant":grant,"allocation":allocation,"permit":permit,"grant_token":grant_token,"allocation_token":allocation_token,"permit_token":permit_token})
 }
-fn check(f: &Value, now: u64, uncertainty: u64) -> Result<VerifiedBundle, VerifyError> {
-    let keys: Vec<_> = f["keys"]
+fn keys(f: &Value) -> Vec<VerificationKey> {
+    f["keys"]
         .as_array()
         .unwrap()
         .iter()
@@ -85,7 +85,10 @@ fn check(f: &Value, now: u64, uncertainty: u64) -> Result<VerifiedBundle, Verify
                 .try_into()
                 .unwrap(),
         })
-        .collect();
+        .collect()
+}
+fn check(f: &Value, now: u64, uncertainty: u64) -> Result<VerifiedBundle, VerifyError> {
+    let keys = keys(f);
     let original = fixture();
     let g: Grant = serde_json::from_value(original["grant"].clone()).unwrap();
     let p: Permit = serde_json::from_value(original["permit"].clone()).unwrap();
@@ -365,4 +368,118 @@ fn rejects_tampering_and_non_integer_times() {
         resign(&mut f, "grant");
         assert!(check(&f, 1010, 1).is_err());
     }
+}
+
+fn check_delegation(
+    f: &Value,
+    tokens: &[&str],
+    now: u64,
+) -> Result<VerifiedDelegation, VerifyError> {
+    // Installation needs no authority signing key or fabricated permit.
+    let keys: Vec<_> = keys(f)
+        .into_iter()
+        .filter(|k| k.role == KeyRole::Central)
+        .collect();
+    let original = fixture();
+    let g: Grant = serde_json::from_value(original["grant"].clone()).unwrap();
+    verify_delegation(
+        f["grant_token"].as_str().unwrap(),
+        tokens,
+        &Trust {
+            keys: &keys,
+            central_issuer: "central",
+            authority_issuer: "authority",
+            audience: "runtime",
+        },
+        Clock {
+            now,
+            uncertainty: 1,
+        },
+        &DelegationContext {
+            principal: "key:credential-1",
+            team: "team-1",
+            subject: "subject-1",
+            target: &g.target,
+            resource_set: &g.resource_set,
+            metadata_revision: "metadata-1",
+            authority: "authority-1",
+            authority_epoch: "authority-epoch-1",
+        },
+    )
+}
+
+#[test]
+fn delegation_installation_is_independent_of_operation_permits() {
+    let mut f = fixture();
+    // A grant can outlive its allocation, but allocation expiry still prevents use.
+    f["allocation"]["exp"] = json!(1020);
+    resign(&mut f, "allocation");
+    let token = f["allocation_token"].as_str().unwrap();
+    let verified = check_delegation(&f, &[token], 1010).unwrap();
+    assert_eq!(verified.grant().id, "grant-1");
+    assert_eq!(verified.allocations()[0].exp, 1020);
+    assert!(matches!(
+        check_delegation(&f, &[token], 1019),
+        Err(VerifyError::Time)
+    ));
+    assert!(check_delegation(&f, &[], 1010).is_err());
+    assert!(check_delegation(&f, &[token; MAX_ALLOCATIONS + 1], 1010).is_err());
+    assert!(check_delegation(&f, &[token, token], 1010).is_err());
+}
+
+#[test]
+fn delegation_installation_requires_exact_trusted_binding_and_valid_capacity() {
+    for (which, path, value) in [
+        ("grant", "/target/run", json!("stale")),
+        ("grant", "/resource_set/revision", json!("stale")),
+        ("grant", "/metadata_revision", json!("stale")),
+        ("grant", "/subject", json!("other")),
+        ("grant", "/team", json!("other")),
+        ("grant", "/principal", json!("other")),
+        ("grant", "/idle/expires_at", json!(1040)),
+        ("grant", "/source/expires_at", json!(1040)),
+        ("allocation", "/authority", json!("other")),
+        ("allocation", "/authority_epoch", json!("stale")),
+        ("allocation", "/principal", json!("other")),
+        ("allocation", "/units", json!(0)),
+        ("allocation", "/window_end", json!(1050)),
+        ("allocation", "/nbf", json!(1011)),
+    ] {
+        let mut f = fixture();
+        *f[which].pointer_mut(path).unwrap() = value;
+        resign(&mut f, which);
+        assert!(
+            check_delegation(&f, &[f["allocation_token"].as_str().unwrap()], 1010).is_err(),
+            "{which}{path}"
+        );
+    }
+    let f = fixture();
+    let mut second = f["allocation"].clone();
+    second["id"] = json!("second");
+    let token = sign_value(
+        &header(ALLOCATION_TYPE, "central-test"),
+        &second,
+        &CENTRAL_SEED,
+    );
+    assert!(matches!(
+        check_delegation(&f, &[f["allocation_token"].as_str().unwrap(), &token], 1010),
+        Err(VerifyError::Binding)
+    ));
+    second["bucket"] = json!("other");
+    second["id"] = f["allocation"]["id"].clone();
+    let token = sign_value(
+        &header(ALLOCATION_TYPE, "central-test"),
+        &second,
+        &CENTRAL_SEED,
+    );
+    assert!(matches!(
+        check_delegation(&f, &[f["allocation_token"].as_str().unwrap(), &token], 1010),
+        Err(VerifyError::Binding)
+    ));
+    let wrong_role = sign_value(
+        &header(ALLOCATION_TYPE, "authority-test"),
+        &f["allocation"],
+        &AUTHORITY_SEED,
+    );
+    assert!(check_delegation(&f, &[&wrong_role], 1010).is_err());
 }

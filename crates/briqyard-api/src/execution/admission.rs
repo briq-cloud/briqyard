@@ -237,17 +237,56 @@ impl Journal {
         if instance != self.instance() || !self.bound(bundle) {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
-        for (allocation, reference) in bundle
-            .allocations()
-            .iter()
-            .zip(&bundle.permit().allocations)
+        self.install_vector(
+            bundle
+                .allocations()
+                .iter()
+                .zip(&bundle.permit().allocations)
+                .map(|(a, r)| (a, r.digest.as_str())),
+            clock,
+        )
+    }
+
+    /// Pre-permit allocation installation on the trusted channel. This acknowledges
+    /// quota storage only, never metadata, membership protection or dispatch readiness.
+    /// Exact service instance and authority fences are still mandatory.
+    pub fn install_allocations(
+        &mut self,
+        delegation: &VerifiedDelegation,
+        instance: &str,
+        clock: Clock,
+    ) -> Result<(), Error> {
+        self.check(clock)?;
+        if instance != self.instance()
+            || !delegation
+                .allocations()
+                .iter()
+                .all(|a| self.binding(&delegation.grant().target, &a.authority, &a.authority_epoch))
         {
+            return Err(Error::Binding);
+        }
+        self.install_vector(
+            delegation
+                .allocations()
+                .iter()
+                .zip(delegation.allocation_digests())
+                .map(|(a, digest)| (a, digest.as_str())),
+            clock,
+        )
+    }
+
+    fn install_vector<'a>(
+        &mut self,
+        allocations: impl Iterator<Item = (&'a Allocation, &'a str)>,
+        clock: Clock,
+    ) -> Result<(), Error> {
+        let mut next = self.state.clone();
+        for (allocation, digest) in allocations {
             if allocation.exp <= clock.now.saturating_add(clock.uncertainty) {
                 return Err(Error::Binding);
             }
             match next.allocations.get(&allocation.id) {
-                Some(old) if old.allocation != *allocation || old.digest != reference.digest => {
+                Some(old) if old.allocation != *allocation || old.digest != digest => {
                     return Err(Error::Binding)
                 }
                 Some(_) => {}
@@ -256,7 +295,7 @@ impl Journal {
                         allocation.id.clone(),
                         Installed {
                             allocation: allocation.clone(),
-                            digest: reference.digest.clone(),
+                            digest: digest.to_owned(),
                             used: 0,
                         },
                     );
@@ -381,15 +420,15 @@ impl Journal {
         self.commit(next)
     }
     fn bound(&self, bundle: &VerifiedBundle) -> bool {
+        let permit = bundle.permit();
+        self.binding(&permit.target, &permit.authority, &permit.authority_epoch)
+    }
+    fn binding(&self, target: &Target, authority: &str, epoch: &str) -> bool {
         match self.role() {
-            Role::Authority(authority) => {
-                bundle.permit().authority == *authority
-                    && bundle.permit().authority_epoch == self.instance()
-            }
+            Role::Authority(id) => authority == id && epoch == self.instance(),
             Role::Host(host) => {
-                bundle.permit().target.host == *host
-                    && self.state.fences.get(&bundle.permit().authority)
-                        == Some(&bundle.permit().authority_epoch)
+                target.host == *host
+                    && self.state.fences.get(authority).map(String::as_str) == Some(epoch)
             }
         }
     }
