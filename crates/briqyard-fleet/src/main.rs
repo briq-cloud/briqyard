@@ -15,6 +15,8 @@ mod execution_host;
 mod execution_install;
 #[allow(dead_code)]
 mod execution_operation;
+#[allow(dead_code)]
+mod execution_service;
 mod forward;
 mod hosts;
 mod join;

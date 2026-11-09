@@ -380,3 +380,35 @@ Permit envelope preflight receives an inert, equal-length signature placeholder.
 The issuer retains the usable signature until the complete durable reservation
 succeeds. Permit issue and not-before times use the qualified clock interval's
 lower bound; verified grant and allocation lower bounds still apply.
+
+### Dormant regional HTTP boundary
+
+The fleet source now has an unmounted regional authority router. Construction receives one
+live `DurableIssuer`, one fixed pinned host transport, distinct central-installer and
+gateway-only bearers, trusted verification keys and an injectable qualified-clock source.
+Neither role accepts the fleet or host administrator credential. Authentication applies on
+loopback. The router has no listener, config field or production credential/clock provisioner.
+A clock observation includes a monotonic expiry and maximum five-second uncertainty;
+missing or expired evidence refuses mutation. Ordinary `SystemTime` is not a clock
+qualifier. The issuer journal remains the single writer across all handlers; an async
+turn serializes network calls and journal mutations without a synchronous mutex held
+across awaits.
+
+The wire prefix is `/internal/authority/v1/`. All endpoints are POST with an
+`application/json` body bounded to 8 MiB; replies are JSON and errors contain no
+request, token or destination text. The central-installer bearer alone accesses
+`register`, `discover`, `ownership`, `protect`, `delegation`, `invalidate`, `revoke`
+and `installation_status`. Their request DTOs contain an immutable intent `id` plus
+the named typed control input; `delegation` has separate `control` and `signed`
+objects. `installation_status` accepts `{kind,id}`. It returns `{state,evidence}`:
+`unknown`, `pending` or `ready`, with only the typed host acknowledgement or
+receipt as evidence. The gateway bearer alone accesses `exec`, `operation_status`
+and `observe`. `exec` accepts `{id,delegation_intent,request}` and returns a first
+`completed` response with status and bounded result, or `existing` with status only.
+`operation_status` and `observe` accept `{id}` and return status evidence, never
+replay permission. Request DTOs have no destination URL or caller-selected role.
+
+The production provisioner for the regional listener, its two central credentials,
+trusted keys, pinned host endpoint and qualified clock is still missing. This source
+candidate does not activate scoped access or satisfy the native lifecycle, retention,
+downgrade and Linux qualification gates above.

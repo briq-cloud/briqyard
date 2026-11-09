@@ -59,6 +59,8 @@ pub(super) struct HostTransport {
     origin: Url,
     installer: header::HeaderValue,
     execution: header::HeaderValue,
+    administrator: String,
+    host_id: String,
 }
 
 impl HostTransport {
@@ -121,7 +123,17 @@ impl HostTransport {
             origin,
             installer: bearer(installer)?,
             execution: bearer(execution)?,
+            administrator: host.token.clone(),
+            host_id: host.id.clone(),
         })
+    }
+
+    pub(super) fn administrator_token(&self) -> &str {
+        &self.administrator
+    }
+
+    pub(super) fn host_id(&self) -> &str {
+        &self.host_id
     }
 
     /// Sends exactly once. The caller must validate the typed ACK against its
