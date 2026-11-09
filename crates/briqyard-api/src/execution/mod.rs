@@ -29,9 +29,11 @@ pub const GRANT_TYPE: &str = "briqyard-execution-grant+jwt";
 pub const ALLOCATION_TYPE: &str = "briqyard-execution-allocation+jwt";
 pub const PERMIT_TYPE: &str = "briqyard-execution-permit+jwt";
 pub const MAX_TOKEN_BYTES: usize = 16_384;
-/// JSON can expand each control byte to six bytes. The initial 1 MiB input/output
-/// allowance needs room for that encoding and the signed credential envelope.
+/// Request and control JSON bounds include credentials and escaped input.
 pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// Two retained 4 MiB streams, including JSON control-byte escaping and UTF-8 lossiness.
+pub const MAX_EXEC_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_CAPTURE_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_ALLOCATIONS: usize = 16;
 pub const MAX_RESOURCES: usize = 64;
 /// Absolute host boundary, also retained monotonically during recovery.
@@ -91,12 +93,31 @@ pub struct IdleProtection {
     pub expires_at: u64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum OutputMode {
+    #[serde(rename = "capture_per_stream_v1")]
+    CapturePerStreamV1,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     pub max_duration_seconds: u64,
     pub max_input_bytes: u64,
     pub max_output_bytes: u64,
+    /// Omission preserves legacy combined-output exhaustion semantics.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_output_mode"
+    )]
+    pub output_mode: Option<OutputMode>,
+}
+
+fn deserialize_output_mode<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<OutputMode>, D::Error> {
+    OutputMode::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

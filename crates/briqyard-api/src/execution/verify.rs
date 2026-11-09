@@ -146,9 +146,12 @@ fn limits(l: &Limits) -> bool {
         && safe(l.max_duration_seconds)
         && safe(l.max_input_bytes)
         && safe(l.max_output_bytes)
+        && (l.output_mode.is_none()
+            || (l.max_output_bytes > 0 && l.max_output_bytes <= MAX_CAPTURE_BYTES))
 }
 fn within(a: &Limits, b: &Limits) -> bool {
-    a.max_duration_seconds <= b.max_duration_seconds
+    a.output_mode == b.output_mode
+        && a.max_duration_seconds <= b.max_duration_seconds
         && a.max_input_bytes <= b.max_input_bytes
         && a.max_output_bytes <= b.max_output_bytes
 }

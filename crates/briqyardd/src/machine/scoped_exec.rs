@@ -533,10 +533,15 @@ impl Manager {
         // The allocation and lifecycle fences covered the initial guest frame.
         drop(ledger);
         drop(turns);
-        let out = tokio::time::timeout_at(
-            deadline.instant,
-            guestc::collect_limited(&mut conn, bundle.permit().limits.max_output_bytes),
-        )
+        let out = tokio::time::timeout_at(deadline.instant, async {
+            let limits = &bundle.permit().limits;
+            match limits.output_mode {
+                Some(api::execution::OutputMode::CapturePerStreamV1) => {
+                    guestc::collect_capture(&mut conn, limits.max_output_bytes).await
+                }
+                None => guestc::collect_limited(&mut conn, limits.max_output_bytes).await,
+            }
+        })
         .await
         .map_err(|_| {
             MError::NotRunning("execution authorization expired; outcome unresolved".into())

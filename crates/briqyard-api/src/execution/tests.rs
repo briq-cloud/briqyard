@@ -483,3 +483,75 @@ fn delegation_installation_requires_exact_trusted_binding_and_valid_capacity() {
     );
     assert!(check_delegation(&f, &[&wrong_role], 1010).is_err());
 }
+
+#[test]
+fn capture_mode_is_signed_bounded_and_cannot_change_during_attenuation() {
+    // Legacy typed serialization reproduces the original claims without a new field.
+    let f = fixture();
+    let grant: Grant = serde_json::from_value(f["grant"].clone()).unwrap();
+    assert_eq!(serde_json::to_value(grant).unwrap(), f["grant"]);
+    for (grant_mode, permit_mode, grant_cap, permit_cap, valid) in [
+        (true, true, 4096, 4096, true),
+        (true, true, MAX_CAPTURE_BYTES, 1, true),
+        (true, true, 4096, 4097, false),
+        (true, true, 0, 0, false),
+        (true, true, MAX_CAPTURE_BYTES + 1, 1, false),
+        (true, false, 4096, 1, false),
+        (false, true, 4096, 1, false),
+    ] {
+        let mut f = fixture();
+        for (kind, mode, cap) in [
+            ("grant", grant_mode, grant_cap),
+            ("permit", permit_mode, permit_cap),
+        ] {
+            f[kind]["limits"]["max_output_bytes"] = cap.into();
+            if mode {
+                f[kind]["limits"]["output_mode"] = "capture_per_stream_v1".into();
+            }
+        }
+        resign(&mut f, "grant");
+        assert_eq!(
+            check(&f, 1010, 1).is_ok(),
+            valid,
+            "{grant_mode}/{permit_mode}/{grant_cap}/{permit_cap}"
+        );
+    }
+    for kind in ["grant", "permit"] {
+        for mode in [json!("capture_future"), Value::Null, json!(1)] {
+            let mut f = fixture();
+            f[kind]["limits"]["output_mode"] = mode;
+            resign(&mut f, kind);
+            assert!(check(&f, 1010, 1).is_err());
+        }
+    }
+}
+
+#[test]
+fn interoperable_capture_fixture() {
+    let mut generated = fixture();
+    generated["grant"]["limits"]["output_mode"] = "capture_per_stream_v1".into();
+    generated["permit"]["limits"]["output_mode"] = "capture_per_stream_v1".into();
+    resign(&mut generated, "grant");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/execution-capture-v1.json"
+    );
+    if std::env::var_os("BRIQYARD_UPDATE_EXECUTION_FIXTURE").is_some() {
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&generated).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+    let disk: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(disk, generated);
+    let verified = check(&disk, 1010, 1).unwrap();
+    assert_eq!(
+        verified.grant().limits.output_mode,
+        Some(OutputMode::CapturePerStreamV1)
+    );
+    assert_eq!(
+        verified.permit().limits.output_mode,
+        Some(OutputMode::CapturePerStreamV1)
+    );
+}

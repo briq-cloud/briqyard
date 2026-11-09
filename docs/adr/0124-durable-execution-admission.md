@@ -352,7 +352,7 @@ clock at each security transition, including after network calls; the earlier cl
 not reused as evidence of remaining authority. The positive request timeout fits both the signed
 limit and remaining permit lifetime. Failed, missing or malformed replies are
 unconfirmed; host status absence is never evidence of non-execution. A confirmed first result
-must fit the permit's combined UTF-8 stdout and stderr limit. It returns bounded guest output
+must fit the permit's signed output mode and byte limit. It returns bounded guest output
 transiently and persists only its outcome hash. An over-limit response is unconfirmed. Later
 calls return status without guest output. This source candidate keeps scoped access dormant pending
 the host lifecycle and Linux qualification gates below.
@@ -581,3 +581,22 @@ the retained evidence. Restart still requires the full monotonic command drain.
 The standalone mode and clock callbacks remain candidates until independent review
 and native qualification. They do not supply real-guest, closure-race, partition,
 crash or clock-step evidence for the authenticated end-to-end execution path.
+
+## Synchronous output capture
+
+The optional signed `limits.output_mode` accepts only `capture_per_stream_v1`.
+Omission preserves the original wire bytes and combined raw-output exhaustion rule.
+Permit attenuation requires identical output modes and nonincreasing limits.
+In capture mode `max_output_bytes` is a positive raw-byte retention cap per stream,
+at most 4 MiB. The host retains each stream's first bytes, then drains all later
+frames until terminal exit under the same expiring connection and absolute deadline.
+Exhausting retention alone is neither success nor failure; EOF, guest error or
+authorization expiry before exit still leaves an unresolved operation.
+The four-field execution result is unchanged; lossy UTF-8 conversion happens after
+raw capture. The authority bounds each decoded UTF-8 stream to three times its
+signed raw cap. Legacy replies keep their combined decoded-byte validation.
+
+Host dispatch replies alone have a 64 MiB JSON transport bound. Two 4 MiB streams
+fit even when each control byte expands to six JSON bytes; lossy UTF-8 expands each
+invalid byte to at most three. Requests, installation, metadata and status replies
+keep their 8 MiB bounds. This changes no activation or qualification gate.

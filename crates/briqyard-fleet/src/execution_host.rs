@@ -40,6 +40,13 @@ impl Route {
         }
     }
 
+    fn response_limit(self) -> usize {
+        match self {
+            Self::Dispatch => api::execution::MAX_EXEC_RESPONSE_BYTES,
+            _ => MAX_BODY,
+        }
+    }
+
     fn installer(self) -> bool {
         !matches!(self, Self::Prepare | Self::Dispatch | Self::Status)
     }
@@ -207,17 +214,18 @@ impl HostTransport {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(body);
         }
+        let response_limit = route.response_limit();
         let mut response = request.send().await.map_err(|_| Error::Unconfirmed)?;
         if response.status() != reqwest::StatusCode::OK
             || response
                 .content_length()
-                .is_some_and(|len| len > MAX_BODY as u64)
+                .is_some_and(|len| len > response_limit as u64)
         {
             return Err(Error::Unconfirmed);
         }
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| Error::Unconfirmed)? {
-            if chunk.len() > MAX_BODY - body.len() {
+            if chunk.len() > response_limit - body.len() {
                 return Err(Error::Unconfirmed);
             }
             body.extend_from_slice(&chunk);
@@ -276,7 +284,21 @@ pub(super) mod tests {
             )
                 .into_response(),
             "/internal/execution/v1/dispatch" => {
-                (StatusCode::SERVICE_UNAVAILABLE, "{}").into_response()
+                let requested: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                match requested.as_str() {
+                    Some("capture_control_bytes") => axum::Json(api::ExecResult {
+                        stdout: "\0".repeat(api::execution::MAX_CAPTURE_BYTES as usize),
+                        stderr: "\0".repeat(api::execution::MAX_CAPTURE_BYTES as usize),
+                        exit_code: 0,
+                        timed_out: false,
+                    })
+                    .into_response(),
+                    Some("oversized") => {
+                        axum::Json("x".repeat(api::execution::MAX_EXEC_RESPONSE_BYTES))
+                            .into_response()
+                    }
+                    _ => (StatusCode::SERVICE_UNAVAILABLE, "{}").into_response(),
+                }
             }
             "/internal/execution/v1/status" => " ".repeat(MAX_BODY + 1).into_response(),
             "/internal/execution/v1/register" => axum::Json(api::ExecResult {
@@ -511,5 +533,62 @@ pub(super) mod tests {
         let result: api::ExecResult = transport.call(Route::Register, &request).await.unwrap();
         assert_eq!(result.stdout, request.stdin);
         assert_eq!(server.calls.lock().unwrap().len(), 1);
+    }
+    #[tokio::test]
+    async fn only_dispatch_accepts_large_capture_replies_and_retains_a_response_ceiling() {
+        for route in [
+            Route::Instance,
+            Route::Register,
+            Route::Discover,
+            Route::Ownership,
+            Route::Protect,
+            Route::Delegation,
+            Route::Invalidate,
+            Route::Revoke,
+            Route::Prepare,
+            Route::Status,
+        ] {
+            assert_eq!(route.response_limit(), MAX_BODY);
+        }
+        assert_eq!(Route::Dispatch.response_limit(), 64 * 1024 * 1024);
+        let server = server();
+        let transport = HostTransport::new(
+            &server.host,
+            "installer",
+            "execution",
+            Duration::from_secs(20),
+        )
+        .unwrap();
+        let result: api::ExecResult = transport
+            .call(Route::Dispatch, &"capture_control_bytes")
+            .await
+            .unwrap();
+        assert_eq!(
+            result.stdout.len(),
+            api::execution::MAX_CAPTURE_BYTES as usize
+        );
+        assert_eq!(
+            result.stderr.len(),
+            api::execution::MAX_CAPTURE_BYTES as usize
+        );
+        assert!(serde_json::to_vec(&result).unwrap().len() > MAX_BODY);
+        assert_eq!(
+            transport
+                .call::<_, serde_json::Value>(Route::Dispatch, &"oversized")
+                .await,
+            Err(Error::Unconfirmed)
+        );
+        assert_eq!(
+            transport
+                .call::<_, serde_json::Value>(Route::Status, &())
+                .await,
+            Err(Error::Unconfirmed)
+        );
+        assert_eq!(
+            transport
+                .call::<_, serde_json::Value>(Route::Dispatch, &"x".repeat(MAX_BODY))
+                .await,
+            Err(Error::Request)
+        );
     }
 }

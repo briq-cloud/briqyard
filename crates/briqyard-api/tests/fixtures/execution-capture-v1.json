@@ -1,0 +1,131 @@
+{
+  "allocation": {
+    "aud": "runtime",
+    "authority": "authority-1",
+    "authority_epoch": "authority-epoch-1",
+    "bucket": "exec",
+    "epoch": "allocation-epoch-1",
+    "exp": 1060,
+    "iat": 990,
+    "id": "allocation-1",
+    "iss": "central",
+    "nbf": 990,
+    "principal": "key:credential-1",
+    "units": 10,
+    "v": 1,
+    "window_end": 1080,
+    "window_start": 960
+  },
+  "allocation_token": "eyJhbGciOiJFZERTQSIsImtpZCI6ImNlbnRyYWwtdGVzdCIsInR5cCI6ImJyaXF5YXJkLWV4ZWN1dGlvbi1hbGxvY2F0aW9uK2p3dCIsInYiOjF9.eyJhdWQiOiJydW50aW1lIiwiYXV0aG9yaXR5IjoiYXV0aG9yaXR5LTEiLCJhdXRob3JpdHlfZXBvY2giOiJhdXRob3JpdHktZXBvY2gtMSIsImJ1Y2tldCI6ImV4ZWMiLCJlcG9jaCI6ImFsbG9jYXRpb24tZXBvY2gtMSIsImV4cCI6MTA2MCwiaWF0Ijo5OTAsImlkIjoiYWxsb2NhdGlvbi0xIiwiaXNzIjoiY2VudHJhbCIsIm5iZiI6OTkwLCJwcmluY2lwYWwiOiJrZXk6Y3JlZGVudGlhbC0xIiwidW5pdHMiOjEwLCJ2IjoxLCJ3aW5kb3dfZW5kIjoxMDgwLCJ3aW5kb3dfc3RhcnQiOjk2MH0.ORAmdEK5leAzOhxKIvYuMZwdL0CBepi_xXhHStCpEznu7S39Y6K2bZnoGsoDKJEdwhA_oonOMdrTbA5xhkplBA",
+  "description": "TEST ONLY: deterministic Ed25519 seeds are 32 bytes of 0x01 (central) and 0x02 (authority). JSON claims below are informational; signatures bind the compact bytes.",
+  "grant": {
+    "aud": "runtime",
+    "exp": 1050,
+    "iat": 1000,
+    "id": "grant-1",
+    "idle": {
+      "admission": "idle-1",
+      "expires_at": 1060
+    },
+    "iss": "central",
+    "limits": {
+      "max_duration_seconds": 20,
+      "max_input_bytes": 1024,
+      "max_output_bytes": 4096,
+      "output_mode": "capture_per_stream_v1"
+    },
+    "metadata_revision": "metadata-1",
+    "nbf": 1000,
+    "operations": [
+      "exec",
+      "exec_stream",
+      "shell",
+      "files_read",
+      "files_write"
+    ],
+    "principal": "key:credential-1",
+    "resource_set": {
+      "resources": [
+        {
+          "host": "host-1",
+          "machine": "machine-1",
+          "namespace": "team-1",
+          "placement": "placement-1",
+          "run": "run-1"
+        }
+      ],
+      "revision": "resources-1"
+    },
+    "source": {
+      "expires_at": 1100,
+      "id": "credential-1",
+      "kind": "api_key"
+    },
+    "subject": "subject-1",
+    "target": {
+      "host": "host-1",
+      "machine": "machine-1",
+      "namespace": "team-1",
+      "placement": "placement-1",
+      "run": "run-1"
+    },
+    "team": "team-1",
+    "v": 1
+  },
+  "grant_token": "eyJhbGciOiJFZERTQSIsImtpZCI6ImNlbnRyYWwtdGVzdCIsInR5cCI6ImJyaXF5YXJkLWV4ZWN1dGlvbi1ncmFudCtqd3QiLCJ2IjoxfQ.eyJhdWQiOiJydW50aW1lIiwiZXhwIjoxMDUwLCJpYXQiOjEwMDAsImlkIjoiZ3JhbnQtMSIsImlkbGUiOnsiYWRtaXNzaW9uIjoiaWRsZS0xIiwiZXhwaXJlc19hdCI6MTA2MH0sImlzcyI6ImNlbnRyYWwiLCJsaW1pdHMiOnsibWF4X2R1cmF0aW9uX3NlY29uZHMiOjIwLCJtYXhfaW5wdXRfYnl0ZXMiOjEwMjQsIm1heF9vdXRwdXRfYnl0ZXMiOjQwOTYsIm91dHB1dF9tb2RlIjoiY2FwdHVyZV9wZXJfc3RyZWFtX3YxIn0sIm1ldGFkYXRhX3JldmlzaW9uIjoibWV0YWRhdGEtMSIsIm5iZiI6MTAwMCwib3BlcmF0aW9ucyI6WyJleGVjIiwiZXhlY19zdHJlYW0iLCJzaGVsbCIsImZpbGVzX3JlYWQiLCJmaWxlc193cml0ZSJdLCJwcmluY2lwYWwiOiJrZXk6Y3JlZGVudGlhbC0xIiwicmVzb3VyY2Vfc2V0Ijp7InJlc291cmNlcyI6W3siaG9zdCI6Imhvc3QtMSIsIm1hY2hpbmUiOiJtYWNoaW5lLTEiLCJuYW1lc3BhY2UiOiJ0ZWFtLTEiLCJwbGFjZW1lbnQiOiJwbGFjZW1lbnQtMSIsInJ1biI6InJ1bi0xIn1dLCJyZXZpc2lvbiI6InJlc291cmNlcy0xIn0sInNvdXJjZSI6eyJleHBpcmVzX2F0IjoxMTAwLCJpZCI6ImNyZWRlbnRpYWwtMSIsImtpbmQiOiJhcGlfa2V5In0sInN1YmplY3QiOiJzdWJqZWN0LTEiLCJ0YXJnZXQiOnsiaG9zdCI6Imhvc3QtMSIsIm1hY2hpbmUiOiJtYWNoaW5lLTEiLCJuYW1lc3BhY2UiOiJ0ZWFtLTEiLCJwbGFjZW1lbnQiOiJwbGFjZW1lbnQtMSIsInJ1biI6InJ1bi0xIn0sInRlYW0iOiJ0ZWFtLTEiLCJ2IjoxfQ.uqotPk7JsP3noG4OPJjfneAw18oypZbwlBg-_b7_68mmag5vDuU2PHmO5Urx-maHAbkVqznULxAADvpgMtX1DQ",
+  "keys": [
+    {
+      "authority": null,
+      "issuer": "central",
+      "kid": "central-test",
+      "public_key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+      "role": "central"
+    },
+    {
+      "authority": "authority-1",
+      "issuer": "authority",
+      "kid": "authority-test",
+      "public_key": "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q",
+      "role": "authority"
+    }
+  ],
+  "now": 1010,
+  "permit": {
+    "admission": "admission-1",
+    "allocations": [
+      {
+        "digest": "au6qo6e8nGt9ANsU7iO8blGottXiE93gInT1LOjOhi4",
+        "epoch": "allocation-epoch-1",
+        "id": "allocation-1",
+        "units": 1
+      }
+    ],
+    "aud": "runtime",
+    "authority": "authority-1",
+    "authority_epoch": "authority-epoch-1",
+    "exp": 1040,
+    "grant_digest": "vH-L_WaKunLy5BGELB23dP6O6OUrWWRHnCRioJAifGI",
+    "iat": 1001,
+    "iss": "authority",
+    "limits": {
+      "max_duration_seconds": 20,
+      "max_input_bytes": 1024,
+      "max_output_bytes": 4096,
+      "output_mode": "capture_per_stream_v1"
+    },
+    "metadata_revision": "metadata-1",
+    "nbf": 1001,
+    "operation": "exec",
+    "request_digest": "JI62LZRgXllOLwxSJ-Rl-s3imrIXbnmBKmYjKlnGe-Q",
+    "target": {
+      "host": "host-1",
+      "machine": "machine-1",
+      "namespace": "team-1",
+      "placement": "placement-1",
+      "run": "run-1"
+    },
+    "v": 1
+  },
+  "permit_token": "eyJhbGciOiJFZERTQSIsImtpZCI6ImF1dGhvcml0eS10ZXN0IiwidHlwIjoiYnJpcXlhcmQtZXhlY3V0aW9uLXBlcm1pdCtqd3QiLCJ2IjoxfQ.eyJhZG1pc3Npb24iOiJhZG1pc3Npb24tMSIsImFsbG9jYXRpb25zIjpbeyJkaWdlc3QiOiJhdTZxbzZlOG5HdDlBTnNVN2lPOGJsR290dFhpRTkzZ0luVDFMT2pPaGk0IiwiZXBvY2giOiJhbGxvY2F0aW9uLWVwb2NoLTEiLCJpZCI6ImFsbG9jYXRpb24tMSIsInVuaXRzIjoxfV0sImF1ZCI6InJ1bnRpbWUiLCJhdXRob3JpdHkiOiJhdXRob3JpdHktMSIsImF1dGhvcml0eV9lcG9jaCI6ImF1dGhvcml0eS1lcG9jaC0xIiwiZXhwIjoxMDQwLCJncmFudF9kaWdlc3QiOiJ2SC1MX1dhS3VuTHk1QkdFTEIyM2RQNk82T1VyV1dSSG5DUmlvSkFpZkdJIiwiaWF0IjoxMDAxLCJpc3MiOiJhdXRob3JpdHkiLCJsaW1pdHMiOnsibWF4X2R1cmF0aW9uX3NlY29uZHMiOjIwLCJtYXhfaW5wdXRfYnl0ZXMiOjEwMjQsIm1heF9vdXRwdXRfYnl0ZXMiOjQwOTYsIm91dHB1dF9tb2RlIjoiY2FwdHVyZV9wZXJfc3RyZWFtX3YxIn0sIm1ldGFkYXRhX3JldmlzaW9uIjoibWV0YWRhdGEtMSIsIm5iZiI6MTAwMSwib3BlcmF0aW9uIjoiZXhlYyIsInJlcXVlc3RfZGlnZXN0IjoiSkk2MkxaUmdYbGxPTHd4U0otUmwtczNpbXJJWGJubUJLbVlqS2xuR2UtUSIsInRhcmdldCI6eyJob3N0IjoiaG9zdC0xIiwibWFjaGluZSI6Im1hY2hpbmUtMSIsIm5hbWVzcGFjZSI6InRlYW0tMSIsInBsYWNlbWVudCI6InBsYWNlbWVudC0xIiwicnVuIjoicnVuLTEifSwidiI6MX0.oIyD1UNSNXhzgL29BfuGZZHA9LvfVQt92FzfmV4kXbv-QrdWP8MXZNymo182FS0NN8zPLLZ2kRbEDMwNFC0_Bg",
+  "uncertainty": 1
+}
