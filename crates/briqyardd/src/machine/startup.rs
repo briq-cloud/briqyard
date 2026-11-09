@@ -59,6 +59,8 @@ impl Manager {
         let ledger = Ledger::load(&store, Utc::now()).context("usage")?;
         let idle_protection =
             idle_protection::Protection::load(&store).context("execution idle protection")?;
+        let execution_fence =
+            execution_fence::ExecutionFence::load(&store).context("execution namespace fences")?;
         let events = Events::open(&store.dir("events")).context("events")?;
         images.events = Some(events.clone());
         let advertise = advertise_address(
@@ -115,6 +117,7 @@ impl Manager {
             cfg,
             store,
             idle_protection: Mutex::new(idle_protection),
+            execution_fence: Mutex::new(execution_fence),
             zfs,
             images,
             dns,

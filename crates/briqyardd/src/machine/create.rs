@@ -860,11 +860,16 @@ impl Manager {
                 "machine cgroup identity is already owned".into(),
             ));
         }
+        let mutation = self.begin_execution_mutation(
+            &[rec.namespace.clone()],
+            execution_fence::MutationMode::Broaden,
+        )?;
         self.inner.vmm.register_new(&id)?;
         let e = Entry::new(rec, self.inner.events.clone());
         machines.insert(id, e.clone());
         drop(machines);
         self.refresh_dns(t);
+        self.finish_execution_mutation(&mutation)?;
         Ok(e)
     }
 

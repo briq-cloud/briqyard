@@ -14,6 +14,7 @@ pub struct ExecutionProtectionRequest<'a> {
     pub target: &'a Target,
     pub subject: &'a str,
     pub resources: &'a [Target],
+    pub resource_revision: &'a str,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,6 +22,7 @@ pub struct ExecutionProtectionReceipt {
     pub admission: String,
     pub expires_at_ms: u64,
     pub targets: Vec<Target>,
+    pub resource_revision: String,
 }
 
 pub struct ScopedCredentials<'a> {
@@ -90,6 +92,25 @@ impl Manager {
         {
             return Err(invalid("execution protection interval exceeds policy"));
         }
+        let snapshot = self.execution_namespace_snapshot(targets)?;
+        if execution_mutations::execution_resource_revision(targets, &snapshot)?
+            != request.resource_revision
+        {
+            return Err(MError::Conflict(
+                "execution namespace generation changed".into(),
+            ));
+        }
+        self.inner
+            .execution_fence
+            .lock()
+            .unwrap()
+            .protect(
+                &self.inner.store,
+                &snapshot,
+                expires_at_ms,
+                execution_mutations::execution_now_ms()?,
+            )
+            .map_err(|_| MError::Conflict("execution namespace protection unresolved".into()))?;
         self.inner
             .idle_protection
             .lock()
@@ -114,6 +135,7 @@ impl Manager {
             admission: request.admission.into(),
             expires_at_ms,
             targets: targets.to_vec(),
+            resource_revision: request.resource_revision.into(),
         })
     }
     /// Read-only discovery of one actual run. Lifecycle callers must hold the same
@@ -250,6 +272,31 @@ impl Manager {
         }
         let deadline = guestc::CommandDeadline::new(bundle.permit().exp, clock.uncertainty)
             .map_err(not_running_if_unreachable)?;
+        let snapshot = self.execution_namespace_snapshot(&context.resource_set.resources)?;
+        if execution_mutations::execution_resource_revision(
+            &context.resource_set.resources,
+            &snapshot,
+        )? != context.resource_set.revision
+            || !self
+                .inner
+                .execution_fence
+                .lock()
+                .unwrap()
+                .check_protected(
+                    &snapshot,
+                    bundle
+                        .permit()
+                        .exp
+                        .checked_mul(1000)
+                        .ok_or_else(|| invalid("execution deadline exceeds range"))?,
+                    execution_mutations::execution_now_ms()?,
+                )
+                .map_err(|_| MError::Conflict("execution namespace protection unresolved".into()))?
+        {
+            return Err(MError::Conflict(
+                "execution namespace generation or protection changed".into(),
+            ));
+        }
         // This fsync is the final no-replay boundary. Every subsequent failure is an
         // uncertain consumed outcome, including cancellation before any guest frame.
         ledger

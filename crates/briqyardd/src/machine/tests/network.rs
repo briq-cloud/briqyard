@@ -2,6 +2,71 @@
 
 use super::*;
 
+#[tokio::test]
+async fn revocation_survives_a_poisoned_fence_but_preserves_real_network_errors() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    let machine =
+        h.m.create_made(h.request_egress("revoke", "none", None))
+            .await
+            .unwrap();
+    let record = h.m.entry(&machine.id).unwrap().snapshot();
+    h.m.inner.execution_fence.lock().unwrap().poison();
+    h.host.refuse_policies.store(true, Relaxed);
+    assert!(h.m.unplug(&machine.id, &record.ip).await.is_err());
+    assert!(h.m.inner.policies.lock().unwrap().contains_key(&machine.id));
+    h.host.refuse_policies.store(false, Relaxed);
+    h.host.calls();
+    h.m.unplug(&machine.id, &record.ip).await.unwrap();
+    assert!(h
+        .host
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("delete_tap ")));
+    assert!(!h.m.inner.policies.lock().unwrap().contains_key(&machine.id));
+    assert!(
+        h.m.inner
+            .execution_fence
+            .lock()
+            .unwrap()
+            .snapshot(
+                &h.m.inner.store,
+                &[record.namespace],
+                execution_mutations::execution_now_ms().unwrap(),
+            )
+            .is_err(),
+        "successful revocation must not clear scoped poison"
+    );
+}
+
+#[tokio::test]
+async fn revocation_finish_failure_keeps_the_successful_effect_and_disables_admission() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let path = h.m.inner.store.dir("execution-namespace-fence");
+    let result =
+        h.m.execution_revocation("t1", async {
+            // Fail the post-effect fence write, after its pending ticket is durable.
+            std::fs::rename(&path, path.with_extension("retained"))?;
+            std::fs::write(&path, b"unavailable directory")?;
+            Ok(17)
+        })
+        .await
+        .unwrap();
+    assert_eq!(result, 17);
+    assert!(h
+        .m
+        .inner
+        .execution_fence
+        .lock()
+        .unwrap()
+        .snapshot(
+            &h.m.inner.store,
+            &["t1".into()],
+            execution_mutations::execution_now_ms().unwrap(),
+        )
+        .is_err());
+}
+
 // --- egress (ADR 0015) ---
 
 pub(super) fn egress(mode: &str, via: Option<&str>) -> api::Egress {
@@ -159,6 +224,18 @@ async fn a_via_names_another_machine_of_the_namespace() {
         .await
         .unwrap();
     let m = h.m.create_made(h.request("sbx")).await.unwrap();
+    let namespace = h.m.entry(&m.id).unwrap().snapshot().namespace;
+    let generations =
+        h.m.inner
+            .execution_fence
+            .lock()
+            .unwrap()
+            .snapshot(
+                &h.m.inner.store,
+                std::slice::from_ref(&namespace),
+                execution_mutations::execution_now_ms().unwrap(),
+            )
+            .unwrap();
     h.host.calls();
     h.pool.calls();
     let missing = "m_000000000000";
@@ -193,6 +270,20 @@ async fn a_via_names_another_machine_of_the_namespace() {
     assert!(zfs.is_empty(), "{zfs:?}");
     assert!(h.m.list(None, &[]).iter().all(|x| x.name != "sbx2"));
     assert_eq!(h.stored(&m.id).unwrap().egress, api::Egress::default());
+    assert_eq!(
+        h.m.inner
+            .execution_fence
+            .lock()
+            .unwrap()
+            .snapshot(
+                &h.m.inner.store,
+                &[namespace],
+                execution_mutations::execution_now_ms().unwrap(),
+            )
+            .unwrap(),
+        generations,
+        "rejected input must not leave a pending mutation or advance its generation"
+    );
     // Its own namespace's machine is a gateway.
     h.m.update(&m.id, set_egress("via", Some(&gw.id)), None)
         .await

@@ -252,6 +252,7 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             range: Range::parse(&cfg.network.range).unwrap(),
             cfg,
             idle_protection: Mutex::new(idle_protection::Protection::load(&store).unwrap()),
+            execution_fence: Mutex::new(execution_fence::ExecutionFence::load(&store).unwrap()),
             store,
             zfs,
             images,

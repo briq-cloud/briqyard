@@ -81,13 +81,26 @@ impl Manager {
             // The size it has: no change.
             req.spec.volume = None;
         }
+        if let Some(egress) = &req.egress {
+            let record = e.snapshot();
+            self.check_egress(egress, &record.namespace, &record.id)?;
+        }
+        // Keep the revision pending until both network effects and the owning
+        // record agree. A failure cannot expose an installable partial snapshot.
+        let mutation = if req.metadata.is_some() || req.egress.is_some() || req.limits.is_some() {
+            Some(self.begin_execution_mutation(
+                &[e.snapshot().namespace],
+                execution_fence::MutationMode::Broaden,
+            )?)
+        } else {
+            None
+        };
         // Held until the record says `via: gateway`, as a start holds it.
         let mut gateway_turn = None;
         let reprobe;
         if req.egress.is_some() || req.limits.is_some() {
             let mut r = e.snapshot();
             if let Some(eg) = &req.egress {
-                self.check_egress(eg, &r.namespace, &r.id)?;
                 r.egress = eg.clone();
             }
             if let Some(l) = &req.limits {
@@ -172,6 +185,9 @@ impl Manager {
             reprobe = r.probes != was.probes && r.state == state::RUNNING;
         }
         self.save(&e)?;
+        if let Some(mutation) = mutation {
+            self.finish_execution_mutation(&mutation)?;
+        }
         drop(gateway_turn);
         if reprobe {
             self.restart_probes(&e);

@@ -55,6 +55,9 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
     grant.target = target.clone();
     grant.subject = "bq-test".into();
     grant.resource_set.resources = vec![target.clone()];
+    grant.resource_set.revision =
+        h.m.execution_resource_revision(&grant.resource_set.resources)
+            .unwrap();
     grant.iat = now - 1;
     grant.nbf = now - 1;
     grant.exp = now + 30;
@@ -185,6 +188,7 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
         target: &grant.target,
         subject: &grant.subject,
         resources: &grant.resource_set.resources,
+        resource_revision: &grant.resource_set.revision,
     };
     let version = entry.snapshot().version;
     let receipt =
@@ -201,6 +205,16 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
     );
     assert_eq!(entry.snapshot().version, version);
     assert_eq!(entry.snapshot().last_used_at, machine.last_used_at);
+    // A descriptor protects the namespace before its first command. Neither a
+    // new peer nor even an apparently harmless policy rewrite may publish into it.
+    assert!(h.m.create_made(h.request("late-peer")).await.is_err());
+    assert!(h.m.replace_policy(&machine.id, None).await.is_err());
+    assert_eq!(
+        h.m.execution_resource_revision(&grant.resource_set.resources)
+            .unwrap(),
+        grant.resource_set.revision,
+        "refused mutations must leave the installed generation intact"
+    );
     entry.rec.lock().unwrap().last_used_at = Some(Utc::now() - chrono::Duration::hours(1));
     h.m.stop_entry(&entry, stop::IDLE, Duration::from_secs(1), false, None)
         .await

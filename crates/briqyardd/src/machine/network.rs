@@ -283,12 +283,12 @@ impl Manager {
     /// Puts a machine's policy in the tables and the resolver, in place of what they held
     /// for it; open with no limits leaves nothing. The resolver keeps the machine in from
     /// before the tables do until after they stop.
-    pub(super) async fn set_policy(
+    async fn set_policy_unfenced(
         &self,
         id: &str,
         policy: Option<(Ipv4Addr, nft::Policy)>,
     ) -> Result<()> {
-        self.unset_policy(id).await?;
+        self.unset_policy_unfenced(id).await?;
         let Some((gateway, p)) = policy else {
             return Ok(());
         };
@@ -317,7 +317,7 @@ impl Manager {
 
     /// Takes a machine's policy out of the tables, then out of the resolver. None held is
     /// success.
-    pub(super) async fn unset_policy(&self, id: &str) -> Result<()> {
+    async fn unset_policy_unfenced(&self, id: &str) -> Result<()> {
         let held = self.inner.policies.lock().unwrap().get(id).cloned();
         let Some((gateway, p)) = held else {
             return Ok(());
@@ -328,10 +328,53 @@ impl Manager {
         Ok(())
     }
 
+    pub(super) async fn replace_policy(
+        &self,
+        id: &str,
+        new: Option<(Ipv4Addr, nft::Policy)>,
+    ) -> Result<()> {
+        let namespace = self.entry(id)?.snapshot().namespace;
+        self.execution_mutation(
+            &namespace,
+            execution_fence::MutationMode::Broaden,
+            self.replace_policy_unfenced(id, new),
+        )
+        .await
+    }
+
+    pub(super) async fn activate_clone_network(&self, r: &Record) -> Result<()> {
+        self.execution_mutation(
+            &r.namespace,
+            execution_fence::MutationMode::Broaden,
+            self.activate_clone_network_unfenced(r),
+        )
+        .await
+    }
+
+    pub(super) async fn attach_network(
+        &self,
+        r: &Record,
+        namespace: &Namespace,
+        new: Option<(Ipv4Addr, nft::Policy)>,
+    ) -> Result<String> {
+        self.execution_mutation(
+            &r.namespace,
+            execution_fence::MutationMode::Broaden,
+            self.attach_network_unfenced(r, namespace, new),
+        )
+        .await
+    }
+
+    pub(super) async fn unplug(&self, id: &str, ip: &str) -> Result<()> {
+        let namespace = self.entry(id)?.snapshot().namespace;
+        self.execution_revocation(&namespace, self.unplug_unfenced(id, ip))
+            .await
+    }
+
     /// Changes a running machine's policy. From one policy to another is one transaction,
     /// so there is no moment with neither, and a refusal leaves the old one; the resolver
     /// takes the machine in before the tables change and lets it go after.
-    pub(super) async fn replace_policy(
+    async fn replace_policy_unfenced(
         &self,
         id: &str,
         new: Option<(Ipv4Addr, nft::Policy)>,
@@ -364,13 +407,13 @@ impl Manager {
                     .insert(id.into(), (gateway, p));
                 Ok(())
             }
-            (None, new) => self.set_policy(id, new).await,
-            (Some(_), None) => self.unset_policy(id).await,
+            (None, new) => self.set_policy_unfenced(id, new).await,
+            (Some(_), None) => self.unset_policy_unfenced(id).await,
         }
     }
 
     /// Atomic network admission. DNS is restricted before the bridge policy becomes visible.
-    pub(super) async fn activate_clone_network(&self, r: &Record) -> Result<()> {
+    async fn activate_clone_network_unfenced(&self, r: &Record) -> Result<()> {
         let policy = self.policy_for(r)?;
         self.inner
             .net
@@ -388,7 +431,7 @@ impl Manager {
         Ok(())
     }
 
-    pub(super) async fn attach_network(
+    async fn attach_network_unfenced(
         &self,
         r: &Record,
         namespace: &Namespace,
@@ -435,7 +478,7 @@ impl Manager {
     }
 
     /// Revoke membership and policy before the address can be released or reused.
-    pub(super) async fn unplug(&self, id: &str, ip: &str) -> Result<()> {
+    async fn unplug_unfenced(&self, id: &str, ip: &str) -> Result<()> {
         let rec = self.entry(id).map_err(anyhow::Error::from)?.snapshot();
         let held = self.inner.policies.lock().unwrap().get(id).cloned();
         if let Err(error) = self

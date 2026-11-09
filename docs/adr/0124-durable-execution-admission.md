@@ -119,6 +119,49 @@ window can outlive the grant. Long-running service activation needs a safe reten
 scheme and a release compatibility barrier: an older daemon that ignores this new
 collection must not run accepted protected admissions.
 
+### Namespace generation and mutation fencing
+
+The host keeps namespace generations in a separate bounded durable record. Namespace
+deletion does not erase a generation. The resource revision hashes a versioned domain,
+the ordered namespace generation vector and the exact run targets sorted by host and
+machine. Discovery durably seeds missing names; it establishes no protection. Protection
+requires that exact revision, persists namespace deadlines before idle receipts, and
+returns the revision in its acknowledgement. Dispatch checks the current revision and
+coverage through the permit deadline before consuming its admission.
+
+A mutation persists a unique pending ticket and advances every affected generation
+before effects. Independent mutations may overlap; only an exact ticket can retire its
+own evidence. Pending mutations refuse snapshot installation and dispatch. Broadening
+is refused through the protected deadline plus five seconds of clock uncertainty.
+Explicit revocation may proceed and retains the deadline. A failed or cancelled effect
+retains its ticket across restart; recovery does not replay it or clear it on drop.
+No fence mutex is held while waiting for lifecycle or network work.
+
+Pure network revocation attempts durable invalidation first. A fence failure poisons
+scoped admission before detachment, but does not skip detachment. Its actual network
+result determines success and address retention. A failed post-detachment ticket write
+also poisons admission without changing a successful network result. Reopening can read
+a valid older record and clear in-memory poison; safety still requires fresh journal/run
+identity, actual lifecycle reconciliation and the retained namespace deadlines.
+
+The record admits at most 16,384 namespace names, 4,096 pending tickets and 4 MiB of
+serialized state. Strict startup inspection refuses stray files, malformed records and
+uncertain writes. Persisted clock observations refuse rollback beyond five seconds.
+Successful effect completion retires only its ticket after the relevant network or
+record publication has completed.
+Namespaces never discovered for scoped access retain only pending generation-zero
+tickets while their effects run. Once those tickets finish, ordinary namespace churn
+uses no permanent generation capacity. First discovery seeds generation zero durably;
+every later mutation advances it, and tracked names are never reset or evicted.
+
+Current hooks cover machine creation, ordinary metadata and policy updates, network
+attachment, clone network activation, policy replacement and explicit network
+revocation. This is not yet the complete publication fence: namespace moves, gateway
+replacement, assigned ownership/publication and startup reconstruction still need their
+complete composite ticket contracts. Complete reachable-set discovery, pending-ticket
+reconciliation, retention and a downgrade compatibility barrier remain activation gates.
+No public scoped route is enabled by these hooks.
+
 Request commitment v1 is SHA-256, unpadded base64url, over these bytes:
 
 1. UTF-8 `briqyard-exec-request-v1` followed by one zero byte.

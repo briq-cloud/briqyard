@@ -34,6 +34,8 @@ mod consistency;
 mod create;
 mod endpoints;
 mod exec;
+mod execution_fence;
+mod execution_mutations;
 mod gateway;
 mod idle_protection;
 mod launch_identity;
@@ -865,6 +867,7 @@ struct Inner {
     cfg: Config,
     store: Store,
     idle_protection: Mutex<idle_protection::Protection>,
+    execution_fence: Mutex<execution_fence::ExecutionFence>,
     zfs: Zfs,
     images: Builder,
     dns: Resolver,
