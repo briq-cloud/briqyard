@@ -206,9 +206,28 @@ pub struct MemoryOrigin {
     pub identity: Option<crate::guest::CloneIdentity>,
 }
 
+/// The accepted creation path, distinct from the current boot or readiness.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateOrigin {
+    pub kind: CreateOriginKind,
+    pub request_id: String,
+    /// Digest of the original sandbox create, as used by exact request replay.
+    pub create_sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CreateOriginKind {
+    SandboxSeed,
+    UnboundWarm,
+}
+
 /// A machine as the API returns it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Machine {
+    /// Absent means unproven, never cold. No claim about the current boot or readiness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_origin: Option<CreateOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_origin: Option<MemoryOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

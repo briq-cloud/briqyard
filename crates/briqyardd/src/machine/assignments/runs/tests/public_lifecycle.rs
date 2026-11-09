@@ -30,6 +30,8 @@ fn bounded_for<T>(
 async fn assigned_combined_provider_resize_is_durable_and_consumed_on_cold_start() {
     let (h, entry) = stopped(false).await;
     let id = entry.snapshot().id;
+    let create_origin = h.m.get(&id).unwrap().create_origin.unwrap();
+    assert_eq!(create_origin.kind, api::CreateOriginKind::UnboundWarm);
     bounded(h.m.start(&id, None)).await.unwrap();
     let before = entry.snapshot();
     let current_before: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
@@ -215,6 +217,7 @@ async fn assigned_combined_provider_resize_is_durable_and_consumed_on_cold_start
         .expect("startup including tidy must retain the exact completed root swap");
     let next = bounded(h.m.start(&id, None)).await.unwrap();
     assert_eq!(next.state, state::RUNNING);
+    assert_eq!(next.create_origin.as_ref(), Some(&create_origin));
     assert_eq!(next.size, requested_size);
     assert_eq!(next.image, image);
     assert_eq!(next.volume.as_ref().unwrap().size_gb, requested_volume_gb);

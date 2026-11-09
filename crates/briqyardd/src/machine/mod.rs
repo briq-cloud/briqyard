@@ -575,6 +575,8 @@ struct Entry {
     /// Serializes lifecycle operations on one machine; owned by a hand-over (ADR 0027).
     lock: Arc<tokio::sync::Mutex<()>>,
     rec: Mutex<Record>,
+    /// Sandbox request index cached only after its durable write; scoped to this entry.
+    sandbox_index: Mutex<Option<templates::sandbox::Index>>,
     live: Mutex<Option<fc::Vm>>,
     memory_protection: Mutex<Option<fc::MemoryProtection>>,
     launch_pending: AtomicBool,
@@ -618,6 +620,7 @@ impl Entry {
         Arc::new(Self {
             lock: Default::default(),
             rec: Mutex::new(rec),
+            sandbox_index: Mutex::new(None),
             live: Mutex::new(None),
             memory_protection: Mutex::new(None),
             launch_pending: AtomicBool::new(false),

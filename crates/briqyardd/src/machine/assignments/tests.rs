@@ -2,6 +2,7 @@ use super::*;
 mod adoption;
 mod bind;
 mod live;
+mod provenance;
 mod publication;
 use crate::machine::templates::tests::launch_identity::prepared_with;
 

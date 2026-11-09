@@ -24,6 +24,25 @@ struct Receipt {
     machine: String,
 }
 impl Receipt {
+    fn owns_record(&self, record: &Record) -> bool {
+        self.namespace == record.namespace
+            && self.machine == record.id
+            && record.launch_identity.is_some()
+            && record
+                .warm_slot
+                .as_ref()
+                .and_then(|slot| slot.claimed.as_deref())
+                == Some(self.request_id.as_str())
+            && record
+                .clone_origin
+                .as_ref()
+                .and_then(|origin| origin.sandbox.as_ref())
+                .is_some_and(|binding| {
+                    binding.request_id == self.request_id
+                        && binding.create_sha256 == self.create_sha256
+                })
+    }
+
     fn key(&self) -> String {
         key(&self.namespace, &self.request_id)
     }
@@ -75,6 +94,34 @@ impl State {
 }
 
 impl Manager {
+    pub(in crate::machine) fn cached_destination_assignment_owns(&self, machine: &str) -> bool {
+        self.inner
+            .assignments
+            .lock()
+            .unwrap()
+            .slots
+            .contains_key(machine)
+    }
+
+    pub(in crate::machine) fn cached_unbound_create_origin(
+        &self,
+        record: &Record,
+    ) -> Option<api::CreateOrigin> {
+        let state = self.inner.assignments.lock().unwrap();
+        if state.pending.contains(&record.id) {
+            return None;
+        }
+        let key = state.slots.get(&record.id)?;
+        let receipt = state.receipts.get(key)?;
+        (receipt.key() == *key && receipt.check().is_ok() && receipt.owns_record(record)).then(
+            || api::CreateOrigin {
+                kind: api::CreateOriginKind::UnboundWarm,
+                request_id: receipt.request_id.clone(),
+                create_sha256: receipt.create_sha256.clone(),
+            },
+        )
+    }
+
     fn destination_receipt(&self, namespace: &str, request: &str) -> Result<Option<Receipt>> {
         let key = key(namespace, request);
         let mut state = self.inner.assignments.lock().unwrap();
@@ -131,21 +178,7 @@ impl Manager {
             )
         })?;
         let record = entry.snapshot();
-        if record.namespace != namespace
-            || record.launch_identity.is_none()
-            || record
-                .warm_slot
-                .as_ref()
-                .and_then(|slot| slot.claimed.as_deref())
-                != Some(request)
-            || record
-                .clone_origin
-                .as_ref()
-                .and_then(|origin| origin.sandbox.as_ref())
-                .is_none_or(|binding| {
-                    binding.request_id != request || binding.create_sha256 != digest
-                })
-        {
+        if !receipt.owns_record(&record) {
             return Err(MError::Conflict(
                 "destination assignment ownership differs from its receipt".into(),
             ));

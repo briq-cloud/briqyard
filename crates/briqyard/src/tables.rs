@@ -15,7 +15,7 @@ pub(super) fn reason_of(m: &api::Machine) -> &str {
 
 pub(super) fn machine_table(ms: &[api::Machine]) -> String {
     let mut out = format!(
-        "{:<16} {:<12} {:<14} {:<24} {:<8} {:<18} {:<5} {:<12} {:<9} {:<7} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} HOST\n",
+        "{:<16} {:<12} {:<14} {:<24} {:<8} {:<18} {:<5} {:<12} {:<9} {:<7} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} {:<14} HOST\n",
         "ID",
         "NAMESPACE",
         "NAME",
@@ -31,7 +31,8 @@ pub(super) fn machine_table(ms: &[api::Machine]) -> String {
         "LIMITS",
         "DISK",
         "BACKUP",
-        "PENDING"
+        "PENDING",
+        "CREATE ORIGIN"
     );
     for m in ms {
         let state = match reason_of(m) {
@@ -43,7 +44,7 @@ pub(super) fn machine_table(ms: &[api::Machine]) -> String {
             None => "-".into(),
         };
         out.push_str(&format!(
-            "{:<16} {:<12} {:<14} {:<24} {:<8} {:<18} {:<5} {:<12} {:<9} {:<7} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} {}\n",
+            "{:<16} {:<12} {:<14} {:<24} {:<8} {:<18} {:<5} {:<12} {:<9} {:<7} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} {:<14} {}\n",
             m.id,
             m.namespace,
             m.name,
@@ -60,6 +61,11 @@ pub(super) fn machine_table(ms: &[api::Machine]) -> String {
             disk_label(&m.disk_limits),
             backup_label(m.backup.as_ref()),
             pending,
+            match m.create_origin.as_ref().map(|origin| origin.kind) {
+                Some(api::CreateOriginKind::SandboxSeed) => "sandbox_seed",
+                Some(api::CreateOriginKind::UnboundWarm) => "unbound_warm",
+                None => "-",
+            },
             m.host
         ));
     }

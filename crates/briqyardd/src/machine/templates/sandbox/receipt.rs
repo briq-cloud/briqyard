@@ -12,8 +12,8 @@ pub struct Binding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ack_sha256: Option<String>,
 }
-#[derive(Serialize, Deserialize)]
-struct Index {
+#[derive(Clone, Serialize, Deserialize)]
+pub(in crate::machine) struct Index {
     namespace: String,
     request_id: String,
     machine: String,
@@ -94,6 +94,36 @@ fn resolve(
 }
 
 impl Manager {
+    /// Original accepted creation only. Cached authority adds no store reads to views.
+    pub(in crate::machine) fn create_origin(
+        &self,
+        entry: &Entry,
+        record: &Record,
+    ) -> Option<api::CreateOrigin> {
+        let binding = record.clone_origin.as_ref()?.sandbox.as_ref()?;
+        if record.launch_identity.is_some()
+            || record.warm_slot.is_some()
+            || record.assigned_run.is_some()
+            || self.cached_destination_assignment_owns(&record.id)
+        {
+            return self.cached_unbound_create_origin(record);
+        }
+        let cache = entry.sandbox_index.lock().unwrap();
+        let index = cache.as_ref()?;
+        (api::valid_sandbox_request_id(&index.request_id)
+            && index.create_sha256.len() == 64
+            && index.create_sha256.bytes().all(|v| v.is_ascii_hexdigit())
+            && index.namespace == record.namespace
+            && index.machine == record.id
+            && index.request_id == binding.request_id
+            && index.create_sha256 == binding.create_sha256)
+            .then(|| api::CreateOrigin {
+                kind: api::CreateOriginKind::SandboxSeed,
+                request_id: index.request_id.clone(),
+                create_sha256: index.create_sha256.clone(),
+            })
+    }
+
     pub async fn sandbox_request_lookup(
         &self,
         query: api::SandboxRequestLookup,
@@ -194,15 +224,18 @@ impl Manager {
             );
         }
         self.inner.store.put_durable("machines", &r.id, &r)?;
+        let index = Index {
+            namespace: r.namespace.clone(),
+            request_id: binding.request_id.clone(),
+            machine: r.id.clone(),
+            create_sha256: binding.create_sha256.clone(),
+        };
         self.inner.store.put_durable(
             "sandbox-requests",
             &key(&r.namespace, &binding.request_id),
-            &Index {
-                namespace: r.namespace.clone(),
-                request_id: binding.request_id.clone(),
-                machine: r.id.clone(),
-                create_sha256: binding.create_sha256.clone(),
-            },
-        )
+            &index,
+        )?;
+        *e.sandbox_index.lock().unwrap() = Some(index);
+        Ok(())
     }
 }

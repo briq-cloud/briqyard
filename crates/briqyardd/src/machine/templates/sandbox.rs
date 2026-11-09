@@ -6,6 +6,7 @@ mod policy;
 mod receipt;
 mod start;
 mod turn;
+pub(in crate::machine) use receipt::Index;
 pub(in crate::machine) use receipt::{replay, request_digest, Binding};
 pub(in crate::machine) use turn::Turns;
 

@@ -2,6 +2,37 @@
 
 use super::*;
 
+#[test]
+fn creation_origin_column_distinguishes_seed_warm_and_unknown() {
+    let mut machine = api::Machine::default();
+    assert_eq!(
+        col(
+            machine_table(&[machine.clone()]).lines().nth(1).unwrap(),
+            225,
+            14
+        ),
+        "-"
+    );
+    for (kind, label) in [
+        (api::CreateOriginKind::SandboxSeed, "sandbox_seed"),
+        (api::CreateOriginKind::UnboundWarm, "unbound_warm"),
+    ] {
+        machine.create_origin = Some(api::CreateOrigin {
+            kind,
+            request_id: "request-one".into(),
+            create_sha256: "a".repeat(64),
+        });
+        let table = machine_table(&[machine.clone()]);
+        assert_eq!(col(table.lines().nth(1).unwrap(), 225, 14), label);
+    }
+    let encoded = serde_json::to_value(api::Machine::default()).unwrap();
+    assert!(encoded.get("create_origin").is_none());
+    assert!(serde_json::from_value::<api::Machine>(encoded)
+        .unwrap()
+        .create_origin
+        .is_none());
+}
+
 /// The text of a column, by the character offset the header puts it at.
 fn col(line: &str, at: usize, width: usize) -> String {
     line.chars()
@@ -76,7 +107,7 @@ fn the_machine_table() {
     assert!(out.ends_with('\n'));
     assert_eq!(
         lines[0],
-        "ID               NAMESPACE    NAME           IMAGE                    CLASS    STATE              READY IP           SIZE      CPU m   SLEEP  EGRESS             LIMITS                   DISK             BACKUP   PENDING      HOST"
+        "ID               NAMESPACE    NAME           IMAGE                    CLASS    STATE              READY IP           SIZE      CPU m   SLEEP  EGRESS             LIMITS                   DISK             BACKUP   PENDING      CREATE ORIGIN  HOST"
     );
     // Every column starts where its header does.
     let cols = [
@@ -146,8 +177,8 @@ fn the_machine_table() {
     );
     assert_eq!(
         lines[2].len(),
-        212 + 12 + 1,
-        "no host: nothing after the pending fields"
+        225 + 14 + 1,
+        "no host: nothing after the creation origin"
     );
     assert_eq!(col(lines[1], 186, 16), "-", "no disk limit");
     assert_eq!(col(lines[1], 203, 8), "-", "no schedule");

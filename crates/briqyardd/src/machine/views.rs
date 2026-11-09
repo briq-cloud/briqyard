@@ -46,6 +46,7 @@ impl Manager {
         };
         let waiting_restart = r.state == state::STOPPED && r.stopped_reason == stop::EXIT;
         api::Machine {
+            create_origin: self.create_origin(e, &r),
             fork: r.fork.clone(),
             template_profile: r.template_birth.as_ref().map(|b| b.profile.clone()),
             memory_origin: r.clone_origin.as_ref().map(|o| api::MemoryOrigin {
