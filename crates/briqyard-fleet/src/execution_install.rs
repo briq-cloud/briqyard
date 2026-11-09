@@ -99,7 +99,6 @@ impl Installer<'_> {
         request: Invalidate,
         clock: Clock,
     ) -> Result<Outcome, InstallError> {
-        self.instance(host_instance).await?;
         if !self.journal.begin_authority_intent(
             id,
             self.host_id,
@@ -112,6 +111,7 @@ impl Installer<'_> {
         )? {
             return self.outcome(id);
         }
+        self.instance(host_instance).await?;
         let ack: Instance = self.host.call(Route::Invalidate, &request).await?;
         self.journal
             .confirm_authority_instance(id, &ack.host_instance, clock)?;
@@ -125,7 +125,6 @@ impl Installer<'_> {
         request: Revoke,
         clock: Clock,
     ) -> Result<Outcome, InstallError> {
-        self.instance(host_instance).await?;
         if !self.journal.begin_authority_intent(
             id,
             self.host_id,
@@ -138,6 +137,7 @@ impl Installer<'_> {
         )? {
             return self.outcome(id);
         }
+        self.instance(host_instance).await?;
         let ack: Instance = self.host.call(Route::Revoke, &request).await?;
         self.journal
             .confirm_authority_instance(id, &ack.host_instance, clock)?;
@@ -150,5 +150,86 @@ impl Installer<'_> {
         } else {
             Outcome::Pending
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use briqyard_api::execution::admission::Role;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn unavailable_host_does_not_prevent_local_invalidation_or_revocation() {
+        // Reserve our own TCP port without serving TLS. Each call has a one-second deadline.
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = crate::registry::HostRec {
+            id: "host-1".into(),
+            url: format!("https://{}", socket.local_addr().unwrap()),
+            token: "admin".into(),
+            tls_fingerprint: "ab".repeat(32),
+            ..Default::default()
+        };
+        let transport =
+            HostTransport::new(&host, "installer", "execution", Duration::from_secs(1)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal =
+            Journal::open(&dir.path().join("issuer"), Role::Authority("region".into())).unwrap();
+        let clock = Clock {
+            now: 100,
+            uncertainty: 0,
+        };
+        let mut installer = Installer {
+            journal: &mut journal,
+            host: &transport,
+            host_id: &host.id,
+        };
+        assert!(installer
+            .invalidate(
+                "invalidate",
+                "host-instance",
+                Invalidate {
+                    installation: "ownership".into(),
+                    generation: 1,
+                },
+                clock
+            )
+            .await
+            .is_err());
+        assert!(matches!(
+            installer
+                .journal
+                .authority_intent("invalidate")
+                .unwrap()
+                .unwrap()
+                .payload,
+            AuthorityPayload::Invalidate { .. }
+        ));
+        assert!(!installer
+            .journal
+            .authority_intent_ready("invalidate")
+            .unwrap());
+        assert!(installer
+            .revoke(
+                "revoke",
+                "host-instance",
+                Revoke {
+                    id: "delegation".into(),
+                    version: 1,
+                },
+                clock
+            )
+            .await
+            .is_err());
+        assert!(matches!(
+            installer
+                .journal
+                .authority_intent("revoke")
+                .unwrap()
+                .unwrap()
+                .payload,
+            AuthorityPayload::Revoke { .. }
+        ));
+        assert!(!installer.journal.authority_intent_ready("revoke").unwrap());
     }
 }

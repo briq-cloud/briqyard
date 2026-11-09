@@ -290,6 +290,16 @@ operation against the wire bound before debit. Any failed or malformed response 
 never permission to resend dispatch or choose another host. Typed replies still
 require exact validation against durable installation intent before readiness.
 
+Authority installation intents share the issuer's locked journal. Registration
+and ownership become ready only after the exact host instance, generation and
+record digest are acknowledged. Lost ACKs remain pending. Invalidation and
+revocation persist their local fence before querying or mutating the host;
+unreachable hosts leave propagation pending, without restoring local readiness.
+Ownership retains its exact registration intent and generation dependency.
+Beginning registration replacement makes old ownership unready, including when
+the host instance stays the same. A new registration ACK never revives that
+ownership; it must be independently installed under the new registration.
+
 No mounted HTTP route or configuration accepts these credentials yet. Administrator routes do not
 call this boundary and keep their existing authentication and behavior.
 

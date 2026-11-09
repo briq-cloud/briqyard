@@ -61,10 +61,20 @@ pub struct AuthorityIntent {
     pub host: String,
     pub host_instance: String,
     pub authority_epoch: String,
+    /// Missing in older records: ownership without this dependency is unready.
+    #[serde(default)]
+    pub registration_dependency: Option<AuthorityRegistrationDependency>,
     pub payload: AuthorityPayload,
     pub acknowledgement: Option<InstallationAck>,
     #[serde(default)]
     pub instance_confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorityRegistrationDependency {
+    pub intent: String,
+    pub generation: u64,
 }
 
 impl Journal {
@@ -85,6 +95,7 @@ impl Journal {
         if !valid_id(authority) || !valid_id(id) || !valid_id(host) || !valid_id(host_instance) {
             return Err(Error::Binding);
         }
+        let mut registration_dependency = None;
         match &payload {
             AuthorityPayload::Registration(r) => {
                 if r.host_instance != host_instance
@@ -96,21 +107,29 @@ impl Journal {
                 }
             }
             AuthorityPayload::Ownership(r) => {
-                if r.host_instance != host_instance
-                    || r.primary.host != host
-                    || r.generation == 0
-                    || !self
-                        .state
+                if r.host_instance != host_instance || r.primary.host != host || r.generation == 0 {
+                    return Err(Error::Binding);
+                }
+                registration_dependency =
+                    self.state
                         .authority_intents
                         .iter()
-                        .any(|(intent_id, intent)| {
-                            intent.host == host
-                                && intent.host_instance == host_instance
-                                && intent.authority_epoch == self.instance()
-                                && matches!(intent.payload, AuthorityPayload::Registration(_))
-                                && self.authority_intent_ready(intent_id).unwrap_or(false)
-                        })
-                {
+                        .find_map(|(intent_id, intent)| {
+                            if let AuthorityPayload::Registration(registration) = &intent.payload {
+                                if intent.host == host
+                                    && intent.host_instance == host_instance
+                                    && intent.authority_epoch == self.instance()
+                                    && self.authority_intent_ready(intent_id).unwrap_or(false)
+                                {
+                                    return Some(AuthorityRegistrationDependency {
+                                        intent: intent_id.clone(),
+                                        generation: registration.generation,
+                                    });
+                                }
+                            }
+                            None
+                        });
+                if registration_dependency.is_none() {
                     return Err(Error::Binding);
                 }
             }
@@ -120,6 +139,7 @@ impl Journal {
             host: host.into(),
             host_instance: host_instance.into(),
             authority_epoch: self.instance().into(),
+            registration_dependency,
             payload,
             acknowledgement: None,
             instance_confirmed: false,
@@ -128,6 +148,7 @@ impl Journal {
             if prior.host == intended.host
                 && prior.host_instance == intended.host_instance
                 && prior.authority_epoch == intended.authority_epoch
+                && prior.registration_dependency == intended.registration_dependency
                 && prior.payload == intended.payload
             {
                 return Ok(false);
@@ -218,10 +239,28 @@ impl Journal {
             ),
             _ => false,
         };
+        let registration_current = if matches!(intent.payload, AuthorityPayload::Ownership(_)) {
+            let Some(dependency) = &intent.registration_dependency else {
+                return Ok(false);
+            };
+            let Some(registration) = self.state.authority_intents.get(&dependency.intent) else {
+                return Ok(false);
+            };
+            matches!(&registration.payload, AuthorityPayload::Registration(record)
+                if record.generation == dependency.generation
+                    && record.host_instance == intent.host_instance)
+                && registration.host == intent.host
+                && registration.host_instance == intent.host_instance
+                && registration.authority_epoch == intent.authority_epoch
+                && self.authority_intent_ready(&dependency.intent)?
+        } else {
+            true
+        };
         Ok(intent.authority_epoch == self.instance()
             && (intent.acknowledgement.is_some() || intent.instance_confirmed)
             && self.state.authority_highwater.get(&key) == Some(&generation)
-            && !invalidated)
+            && !invalidated
+            && registration_current)
     }
 
     /// Invalidation and revocation return the current host instance only.
@@ -286,6 +325,128 @@ mod tests {
             AuthorityPayload::Registration(record),
             clock(),
         )
+    }
+
+    fn ownership(host_instance: &str, generation: u64) -> HostOwnership {
+        let target = Target {
+            host: "host-1".into(),
+            machine: "machine-1".into(),
+            namespace: "team".into(),
+            run: "run-1".into(),
+            placement: "version-1".into(),
+        };
+        HostOwnership {
+            installation: "ownership".into(),
+            generation,
+            team: "team".into(),
+            subject: "public-1".into(),
+            metadata_revision: "metadata-1".into(),
+            primary: target.clone(),
+            public_seeds: vec![target.clone()],
+            public_resources: vec![PublicResource {
+                id: "public-1".into(),
+                target: target.clone(),
+            }],
+            resource_set: ResourceSet {
+                revision: "resources-1".into(),
+                resources: vec![target],
+            },
+            host_instance: host_instance.into(),
+        }
+    }
+
+    fn install_ownership(journal: &mut Journal, id: &str, owner: HostOwnership) {
+        let payload = AuthorityPayload::Ownership(Box::new(owner.clone()));
+        journal
+            .begin_authority_intent(id, "host-1", &owner.host_instance, payload.clone(), clock())
+            .unwrap();
+        journal
+            .acknowledge_authority_intent(
+                id,
+                payload.expected_ack(&owner.host_instance).unwrap(),
+                clock(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn ownership_depends_on_its_exact_current_ready_registration() {
+        for replacement_instance in ["host-run-1", "host-run-2"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut journal = open(&dir.path().join("issuer"));
+            let old = registration(&journal);
+            begin(&mut journal, "register-1", old.clone()).unwrap();
+            journal
+                .acknowledge_authority_intent(
+                    "register-1",
+                    AuthorityPayload::Registration(old.clone())
+                        .expected_ack(&old.host_instance)
+                        .unwrap(),
+                    clock(),
+                )
+                .unwrap();
+            install_ownership(&mut journal, "owner-1", ownership(&old.host_instance, 1));
+            assert!(journal.authority_intent_ready("owner-1").unwrap());
+            assert_eq!(
+                journal
+                    .authority_intent("owner-1")
+                    .unwrap()
+                    .unwrap()
+                    .registration_dependency,
+                Some(AuthorityRegistrationDependency {
+                    intent: "register-1".into(),
+                    generation: 1
+                })
+            );
+            let replacement = HostRegistration {
+                generation: 2,
+                host_instance: replacement_instance.into(),
+                ..old
+            };
+            let payload = AuthorityPayload::Registration(replacement.clone());
+            journal
+                .begin_authority_intent(
+                    "register-2",
+                    "host-1",
+                    replacement_instance,
+                    payload.clone(),
+                    clock(),
+                )
+                .unwrap();
+            // Pending registration already fences old ownership, even before host ACK.
+            assert!(!journal.authority_intent_ready("owner-1").unwrap());
+            journal
+                .acknowledge_authority_intent(
+                    "register-2",
+                    payload.expected_ack(replacement_instance).unwrap(),
+                    clock(),
+                )
+                .unwrap();
+            assert!(journal.authority_intent_ready("register-2").unwrap());
+            // An arbitrary current registration cannot validate ownership from R1.
+            assert!(!journal.authority_intent_ready("owner-1").unwrap());
+            install_ownership(&mut journal, "owner-2", ownership(replacement_instance, 2));
+            assert!(journal.authority_intent_ready("owner-2").unwrap());
+            assert_eq!(
+                journal
+                    .authority_intent("owner-2")
+                    .unwrap()
+                    .unwrap()
+                    .registration_dependency,
+                Some(AuthorityRegistrationDependency {
+                    intent: "register-2".into(),
+                    generation: 2
+                })
+            );
+            // Legacy records missing the dependency fail closed.
+            journal
+                .state
+                .authority_intents
+                .get_mut("owner-2")
+                .unwrap()
+                .registration_dependency = None;
+            assert!(!journal.authority_intent_ready("owner-2").unwrap());
+        }
     }
 
     #[test]
