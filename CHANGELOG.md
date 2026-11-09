@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.2 — 2026-11-09
+
+### Upgrade notes
+
+- Image-created machines use stopped-update receipts; assigned machines keep their existing lifecycle. The init digest is expected to remain unchanged (ADR 0101): no init source or dependency changed. Confirm the exact candidate's init digests in `SHA256SUMS` before reusing sealed seeds.
+
+### Features
+
+- `POST /v1/machines/{id}/stopped-update` records the complete cold image and environment target after compare-and-swap and VMM exit. Exact-nonce `GET` recovers the receipt without replaying the POST ([757de264](https://github.com/briq-cloud/briqyard/commit/757de2648b0c3ee66f38fbcc45d552691b90d8f3)).
+
+### Fixes
+
+- Preserve accepted targets and nonce reservations after directory-sync failure; establish durability before later writes or lifecycle effects ([80ae1b55](https://github.com/briq-cloud/briqyard/commit/80ae1b5509dedc07cb7389f9f5747deab8f2abd3)).
+
+### Maintenance
+
+- Verify native unbound claim and refill (#202) ([f3c21764](https://github.com/briq-cloud/briqyard/commit/f3c21764846d8985911a2756263dcf27f3fb4878)).
 ## 0.2.1 — 2026-11-09
 
 ### Upgrade notes
