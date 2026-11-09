@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0 — 2026-11-09
+
+### Upgrade notes
+
+- **Breaking:** SIGUSR2 now checks the same conservative warm-catalog predicate as `briqyard warm-maintenance`, under exclusive warm then namespace admission retained through exit. Compatible replacement capabilities alone no longer permit handover with outstanding warm ownership, including healthy assigned workloads. Settle ownership through its normal lifecycle; the check never drains workloads. The daemon being replaced must implement this guard, so it cannot protect the first upgrade from an older daemon.
+- Pools with nonzero desired capacity, outstanding claims, warm machines, holds, transitions, pending assignments and unsettled run authority refuse maintenance. Valid historical claim receipts whose destinations are absent from both live and durable machines, and settled run histories with matching durable machine/reference and reader links, remain valid history. Malformed, inaccessible, inconsistent or over-budget state refuses without repair or cleanup. An eligible observation is not a handover permit.
+- Native handover, workload continuity, warm auto-claim/refill and recovery qualification remain open. Init digest continuity and any need to reseal seeds remain pending `hack/init-digest-check.sh` and comparison of the exact candidate's init digests in `SHA256SUMS` (ADR 0101).
+
+### Features
+
+- Define version-one scoped execution grant, allocation and permit types with optional Ed25519 verification. No daemon or fleet route accepts these credentials; administrator authentication is unchanged (#196, ADR 0120) ([0847399e](https://github.com/briq-cloud/briqyard/commit/0847399ed4cc4a3520ee9993e44c66dd43ad3b30)).
+- Retain the validated configuration input identity. `briqyardd --config PATH check-config` uses the same parser and validation and returns only that identity, or `configuration_invalid`, without opening host state. Defaults have a distinct identity; constructed configurations are unobserved (ADR 0121).
+- Observe an exact sealed snapshot through authenticated `GET /v1/machines/{id}/snapshots/{snap}/sandbox-recipe`, including on loopback. The source lifecycle lock and existing provenance checks validate its recipe and runtime/configuration identity; observation creates no reservation or authorization (ADR 0122).
+- **Breaking:** Add authenticated `GET /v1/maintenance/warm-catalog`, the `briqyard warm-maintenance` command and the shared SIGUSR2 handover guard (#197, ADR 0123) ([4f713342](https://github.com/briq-cloud/briqyard/commit/4f7133427ebd4f8325c67342f0a9bb1ffb6ec4a0)).
+
+### Fixes
+
+- A record deleted during a store listing is not an error (#195) ([c07f068a](https://github.com/briq-cloud/briqyard/commit/c07f068ab16f41246e1ee1da47219db152dad2b1)).
+
 ## 0.1.33 — 2026-11-08
 
 ### Upgrade notes
