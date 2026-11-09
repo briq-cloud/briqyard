@@ -42,8 +42,8 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --features briqyard-api/execution-verifier -- -D warnings
-      - run: cargo test --workspace --features briqyard-api/execution-verifier
+      - run: cargo clippy --workspace --all-targets --features briqyard-api/execution-admission -- -D warnings
+      - run: cargo test --workspace --features briqyard-api/execution-admission
       # The init's SHA-256 binds seeds (ADR 0076): a release or a commit outside the init must not change it (ADR 0101).
       - run: sudo apt-get install -y musl-tools && hack/init-digest-check.sh
       # The init's test that changes users needs root: its test binary, as built above, as root.

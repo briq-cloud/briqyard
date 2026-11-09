@@ -25,6 +25,8 @@ base64 = { workspace = true, optional = true }
 [features]
 # Scoped execution verification only; not enabled by the guest or any route.
 execution-verifier = ["dep:ring", "dep:base64", "dep:sha2"]
+# Durable scoped admission for host services; never enabled by the guest.
+execution-admission = ["execution-verifier", "dep:nix"]
 # Child-process inheritance for host supervisors; never enabled by the guest init.
 host-process = ["dep:nix"]
 # What the daemon, the fleet and the CLI share and the init does not: the pinned verifier and
