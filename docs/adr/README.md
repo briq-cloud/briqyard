@@ -122,3 +122,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0124](0124-durable-execution-admission.md) | Durable quota admission, one-shot host consumption and lifecycle-fenced synchronous dispatch; HTTP access remains unavailable |
 
 - [0125: Assigned creation updates retain original process authority](0125-assigned-creation-updates.md)
+
+- [0126: Stopped target acceptance receipts](0126-stopped-target-acceptance-receipts.md)

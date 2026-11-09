@@ -28,6 +28,7 @@ impl Manager {
         if *removed {
             return Ok(());
         }
+        self.sync_stopped_update(e)?;
         let rec = {
             let mut r = e.rec.lock().unwrap();
             if !edit(&mut r) {
@@ -51,6 +52,7 @@ impl Manager {
         if *removed {
             return Ok(());
         }
+        self.sync_stopped_update(e)?;
         let mut r = e.rec.lock().unwrap();
         if !edit(&mut r) {
             return Ok(());
@@ -58,6 +60,26 @@ impl Manager {
         r.updated_at = Utc::now();
         e.unsaved_use.store(false, Relaxed);
         self.inner.store.put("machines", &r.id, &*r)
+    }
+
+    /// Under `removed`, finish the already-renamed acceptance before another writer
+    /// captures or edits a record. Never rewrite possibly newer memory to repair sync.
+    fn sync_stopped_update(&self, e: &Entry) -> Result<()> {
+        if e.stopped_update_unsynced.load(Relaxed) {
+            self.inner.store.sync_dir("machines")?;
+            e.stopped_update_unsynced.store(false, Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Lifecycle checks must finish uncertain acceptance before making further effects.
+    pub(super) fn settle_stopped_update(&self, e: &Entry) -> Result<()> {
+        if !e.stopped_update_unsynced.load(Relaxed) {
+            return Ok(());
+        }
+        let removed = e.removed.lock().unwrap();
+        anyhow::ensure!(!*removed, "machine removed during stopped acceptance");
+        self.sync_stopped_update(e)
     }
 
     /// Deletes the record for good, under the lock every write of it checks.

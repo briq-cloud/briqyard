@@ -108,6 +108,7 @@ impl Manager {
     /// `asked`: a caller asked for this run (a create, a start, a wake), not the restart
     /// policy; its startup probe failing is a failed boot (ADR 0022).
     pub(super) async fn start_entry(&self, e: &Arc<Entry>, asked: bool) -> Result<(), MError> {
+        self.settle_stopped_update(e)?;
         self.refresh_launch_reservation(e);
         let cfg = &self.inner.cfg;
         let rec = e.snapshot();

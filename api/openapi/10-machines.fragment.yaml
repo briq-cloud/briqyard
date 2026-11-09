@@ -437,3 +437,22 @@
         size_gb: { type: integer }
         built_at: { type: string, format: date-time }
         machines: { type: integer }
+    StoppedUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [claim_nonce, image, env]
+      properties:
+        claim_nonce: { type: string, minLength: 1, maxLength: 64, pattern: "^[a-z0-9_-]+$" }
+        image: { type: string, minLength: 1 }
+        env: { type: object, additionalProperties: { type: string }, description: complete replacement environment }
+    StoppedUpdateReceipt:
+      type: object
+      additionalProperties: false
+      required: [claim_nonce, machine_id, namespace, version, host_id, host_boot_id]
+      properties:
+        claim_nonce: { type: string }
+        machine_id: { type: string }
+        namespace: { type: string }
+        version: { type: integer, minimum: 0 }
+        host_id: { type: string }
+        host_boot_id: { type: string }

@@ -27,6 +27,7 @@ mod retirement;
 mod scoped_exec;
 mod sessions;
 mod siblings;
+mod stopped_update;
 mod tick;
 mod units;
 mod update;
@@ -126,6 +127,7 @@ pub(in crate::machine) fn record() -> Record {
         warm_slot: None,
         launch_identity: None,
         assigned_run: None,
+        stopped_updates: BTreeMap::new(),
         rest: Default::default(),
         snapshots: Vec::new(),
         restoring: None,
