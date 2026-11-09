@@ -4,12 +4,15 @@ use super::*;
 // The initial destination assignment predates the continuation journal. Establish a
 // public continuation and its settled Current, as the existing resize fixtures do.
 async fn settled_run(checkpoint: bool) -> (crate::machine::tests::Harness, Arc<Entry>) {
+    eprintln!("stopped-fixture stage=settled-enter");
     let (h, entry) = stopped(false).await;
+    eprintln!("stopped-fixture stage=initial-stop-ready");
     let id = entry.snapshot().id;
     tokio::time::timeout(Duration::from_secs(60), h.m.start(&id, None))
         .await
         .unwrap()
         .unwrap();
+    eprintln!("stopped-fixture stage=continuation-start-ready");
     tokio::time::timeout(
         Duration::from_secs(60),
         h.m.stop(&id, Duration::from_secs(1), checkpoint, None),
@@ -17,6 +20,7 @@ async fn settled_run(checkpoint: bool) -> (crate::machine::tests::Harness, Arc<E
     .await
     .unwrap()
     .unwrap();
+    eprintln!("stopped-fixture stage=continuation-stop-ready");
     let current: Current =
         h.m.inner
             .store
