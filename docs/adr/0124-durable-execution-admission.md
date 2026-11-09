@@ -154,13 +154,33 @@ tickets while their effects run. Once those tickets finish, ordinary namespace c
 uses no permanent generation capacity. First discovery seeds generation zero durably;
 every later mutation advances it, and tracked names are never reset or evicted.
 
-Current hooks cover machine creation, ordinary metadata and policy updates, network
-attachment, clone network activation, policy replacement and explicit network
-revocation. This is not yet the complete publication fence: namespace moves, gateway
-replacement, assigned ownership/publication and startup reconstruction still need their
-complete composite ticket contracts. Complete reachable-set discovery, pending-ticket
+Current hooks cover machine creation and cold start, ordinary metadata and policy
+updates, network attachment, clone network activation, namespace moves and renames,
+gateway replacement, assigned ownership and live publication, policy replacement and
+explicit network revocation. Composite tickets remain pending through durable record
+publication, including directory synchronization, and network and DNS effects. Source
+and destination namespaces share one ticket for ownership transfers.
+This is not yet the complete publication fence: ordinary startup reconstruction and
+namespace removal/address reuse still need their composite contracts.
+Complete reachable-set discovery, pending-ticket
 reconciliation, retention and a downgrade compatibility barrier remain activation gates.
 No public scoped route is enabled by these hooks.
+
+The remaining lifecycle contract retains namespace records as subnet reservations.
+Machine and gateway teardown may proceed, but empty namespace network deletion is a
+broadening operation: protection refuses it before DNS or bridge removal. Successful
+teardown durably deletes the namespace record before releasing its in-memory reservation.
+Namespace creation must fence before bridge/DNS setup and retain its ticket through a
+durable namespace record and map publication.
+
+Startup must drain the maximum retained protection deadline before backing recovery or
+network reconstruction, while preserving native startup ownership, existing processes
+and kernel topology. Validate the persisted clock floor, wait monotonically through the
+deadline plus uncertainty, then recheck the wall-clock lower bound. Invalid state or an
+insufficient bound leaves startup diagnostically closed. Deferred adoption is not failed
+adoption. Ordinary adoption still needs a composite ticket through durable publication;
+a failed save must retain process ownership and pending evidence. Draining deadlines
+never clears pending tickets. These lifecycle requirements are not implemented yet.
 
 Request commitment v1 is SHA-256, unpadded base64url, over these bytes:
 

@@ -211,6 +211,98 @@ async fn concurrent_pending_assignments_cannot_share_quota_name_or_address() {
 }
 
 #[tokio::test]
+async fn protected_destination_refuses_assignment_before_ownership_changes() {
+    let (h, entry, request) = fixture().await;
+    let source = entry.snapshot();
+    h.m.stage_destination_assignment(request.clone(), &entry, 2)
+        .await
+        .unwrap();
+    let destination = "destination".to_owned();
+    let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+    let generations = {
+        let mut fence = h.m.inner.execution_fence.lock().unwrap();
+        let generations = fence
+            .snapshot(&h.m.inner.store, std::slice::from_ref(&destination), now)
+            .unwrap();
+        fence
+            .protect(&h.m.inner.store, &generations, now + 30_000, now)
+            .unwrap();
+        generations
+    };
+    let digest = templates::sandbox::request_digest(&request).unwrap();
+    assert!(h
+        .m
+        .commit_destination_assignment("destination", "assignment-one", &digest)
+        .await
+        .is_err());
+    assert_eq!(entry.snapshot().namespace, source.namespace);
+    assert_eq!(
+        h.m.inner
+            .store
+            .get::<Record>("machines", &source.id)
+            .unwrap()
+            .unwrap()
+            .namespace,
+        source.namespace
+    );
+    assert!(h.m.destination_assignment_pending(&source.id).unwrap());
+    assert_eq!(
+        h.m.inner
+            .execution_fence
+            .lock()
+            .unwrap()
+            .snapshot(
+                &h.m.inner.store,
+                &[destination],
+                crate::machine::execution_mutations::execution_now_ms().unwrap(),
+            )
+            .unwrap(),
+        generations,
+    );
+}
+
+#[tokio::test]
+async fn failed_assignment_reader_write_retains_pending_namespace_ticket() {
+    let (h, entry, request) = fixture().await;
+    h.m.stage_destination_assignment(request.clone(), &entry, 2)
+        .await
+        .unwrap();
+    let destination = "destination".to_owned();
+    let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+    h.m.inner
+        .execution_fence
+        .lock()
+        .unwrap()
+        .snapshot(&h.m.inner.store, std::slice::from_ref(&destination), now)
+        .unwrap();
+    let reader_tmp =
+        h.m.inner
+            .store
+            .dir(templates::READERS)
+            .join(format!("{}.json.tmp", entry.snapshot().id));
+    std::fs::create_dir(&reader_tmp).unwrap();
+    let digest = templates::sandbox::request_digest(&request).unwrap();
+    assert!(h
+        .m
+        .commit_destination_assignment("destination", "assignment-one", &digest)
+        .await
+        .is_err());
+    assert!(h
+        .m
+        .inner
+        .execution_fence
+        .lock()
+        .unwrap()
+        .snapshot(
+            &h.m.inner.store,
+            &[destination],
+            crate::machine::execution_mutations::execution_now_ms().unwrap(),
+        )
+        .is_err());
+    std::fs::remove_dir(reader_tmp).unwrap();
+}
+
+#[tokio::test]
 async fn live_transfer_preserves_entry_process_backing_and_exact_replay_at_each_durable_boundary() {
     for boundary in 0..4 {
         let (h, entry, request) = fixture().await;

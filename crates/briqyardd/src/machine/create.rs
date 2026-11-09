@@ -470,7 +470,7 @@ impl Manager {
             self.room_on_pool(v.size_gb).await?;
         }
         let t = self.ensure_namespace(&req.namespace).await?;
-        let e = self.add_machine(rec, &t)?;
+        let (e, publication) = self.add_machine(rec, &t)?;
         self.persist_sandbox_assignment(&e)?;
         if let Some(origin) = e.snapshot().clone_origin {
             let reserved = self
@@ -503,6 +503,7 @@ impl Manager {
                     self.inner
                         .store
                         .put_durable("machines", &e.snapshot().id, &e.snapshot())?;
+                    self.finish_execution_mutation(&publication)?;
                     return Ok((e, Make::Existing));
                 }
                 Err(error) => {
@@ -524,7 +525,7 @@ impl Manager {
         let counted = self.inner.net.count(&ip).await.context("usage counters");
         // Written before the answer: a machine the caller was told of survives a restart, and
         // a restart finds it `creating` and fails it (`recover`).
-        if let Err(err) = counted.and_then(|()| self.save(&e)) {
+        if let Err(err) = counted.and_then(|()| self.save_execution_publication(&e)) {
             if req.sandbox_seed.is_some() {
                 e.set_state(state::ERROR, |r| {
                     r.error = "sandbox assignment setup failed".into();
@@ -534,6 +535,7 @@ impl Manager {
                 self.inner
                     .store
                     .put_durable("machines", &e.snapshot().id, &e.snapshot())?;
+                self.finish_execution_mutation(&publication)?;
                 return Ok((e, Make::Existing));
             }
             self.remove_machine(&e);
@@ -546,6 +548,7 @@ impl Manager {
             (None, Some((s, fork))) => Make::Fork(s, fork),
             (None, None) => Make::Image,
         };
+        self.finish_execution_mutation(&publication)?;
         Ok((e, how))
     }
 
@@ -759,7 +762,11 @@ impl Manager {
     /// Gives the machine an address and registers it, within its namespace's quota (ADR 0025):
     /// a machine and its volume, and when its create starts it its size, which the host's
     /// memory must hold too (ADR 0048). Nothing on disk yet.
-    fn add_machine(&self, mut rec: Record, t: &Namespace) -> Result<Arc<Entry>, MError> {
+    fn add_machine(
+        &self,
+        mut rec: Record,
+        t: &Namespace,
+    ) -> Result<(Arc<Entry>, execution_fence::MutationTicket), MError> {
         self.check_host_size(&rec.size)?;
         let mut machines = self.inner.machines.lock().unwrap();
         // A rename of the namespace (ADR 0056) swaps it under this lock: a create that read
@@ -869,8 +876,7 @@ impl Manager {
         machines.insert(id, e.clone());
         drop(machines);
         self.refresh_dns(t);
-        self.finish_execution_mutation(&mutation)?;
-        Ok(e)
+        Ok((e, mutation))
     }
 
     pub(super) fn remove_machine(&self, e: &Entry) {

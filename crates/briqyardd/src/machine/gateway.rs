@@ -101,6 +101,10 @@ impl Manager {
         {
             return Ok(());
         }
+        let publication = self.begin_execution_mutation(
+            std::slice::from_ref(&was.namespace),
+            execution_fence::MutationMode::Broaden,
+        )?;
         let running = was.state == state::RUNNING;
         if running {
             self.stop_entry(gw, stop::HOST, Duration::from_secs(10), false, None)
@@ -148,11 +152,13 @@ impl Manager {
                 );
                 gw.note_locked(&mut r, ev.data(json!({ "fields": fields })));
             }
-            self.save(gw)?;
+            self.save_execution_publication(gw)?;
         }
         if running {
             self.run_gateway(gw).await?;
         }
+        self.save_execution_publication(gw)?;
+        self.finish_execution_mutation(&publication)?;
         Ok(())
     }
 

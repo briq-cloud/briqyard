@@ -94,23 +94,24 @@ impl Manager {
             .context("run missing")?;
         self.verify_run_process(&current, &vm)?;
         self.validate_current_run_record(&entry.snapshot())?;
-        let result: Result<()> = async {
-            let approved: Vec<_> = self
-                .inner
-                .machines
-                .lock()
-                .unwrap()
-                .values()
-                .filter_map(|other| {
-                    let record = other.snapshot();
-                    self.assignment_publication_allowed(
-                        &record,
-                        other.identity_trusted.load(Relaxed),
-                    )
+        let approved: Vec<_> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|other| {
+                let record = other.snapshot();
+                self.assignment_publication_allowed(&record, other.identity_trusted.load(Relaxed))
                     .then_some(record)
-                })
-                .collect();
-            self.policy_for_records(&entry.snapshot(), &approved)?;
+            })
+            .collect();
+        self.policy_for_records(&entry.snapshot(), &approved)?;
+        let ticket = self.begin_execution_mutation(
+            std::slice::from_ref(&current.target.namespace),
+            crate::machine::execution_fence::MutationMode::Broaden,
+        )?;
+        let result: Result<()> = async {
             *entry.live.lock().unwrap() = Some(vm.clone());
             entry.identity_trusted.store(true, Relaxed);
             self.inner.net.count(&current.target.ip).await?;
@@ -140,7 +141,7 @@ impl Manager {
                     .data(json!({"pid": vm.pid})),
                 )
             });
-            self.save(entry)?;
+            self.save_execution_publication(entry)?;
             *entry.stop_req.lock().unwrap() = None;
             self.watch(entry, &vm);
             if let Some(namespace) = self.namespace_of(&current.target.namespace) {
@@ -159,6 +160,7 @@ impl Manager {
             }
             return Err(error);
         }
+        self.finish_execution_mutation(&ticket)?;
         Ok(())
     }
 }

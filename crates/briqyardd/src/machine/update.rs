@@ -184,7 +184,7 @@ impl Manager {
             }
             reprobe = r.probes != was.probes && r.state == state::RUNNING;
         }
-        self.save(&e)?;
+        self.save_execution_publication(&e)?;
         if let Some(mutation) = mutation {
             self.finish_execution_mutation(&mutation)?;
         }

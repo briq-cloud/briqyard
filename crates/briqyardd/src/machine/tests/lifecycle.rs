@@ -3,6 +3,31 @@
 use super::*;
 
 #[tokio::test]
+async fn protected_namespace_refuses_cold_start_before_publication() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    let mut request = h.request("stopped");
+    request.start = Some(false);
+    let machine = h.m.create_made(request).await.unwrap();
+    let now = crate::machine::execution_mutations::execution_now_ms().unwrap();
+    {
+        let mut fence = h.m.inner.execution_fence.lock().unwrap();
+        let generations = fence
+            .snapshot(&h.m.inner.store, &["t1".into()], now)
+            .unwrap();
+        fence
+            .protect(&h.m.inner.store, &generations, now + 30_000, now)
+            .unwrap();
+    }
+    h.host.calls();
+    assert!(h.m.start(&machine.id, None).await.is_err());
+    let entry = h.m.entry(&machine.id).unwrap();
+    assert!(entry.live.lock().unwrap().is_none());
+    assert_eq!(entry.snapshot().state, state::CREATED);
+    assert!(h.host.calls().is_empty());
+}
+
+#[tokio::test]
 async fn a_reservation_is_one_step() {
     // Eight starts race for the memory of two: never more than two may take it,
     // however they interleave.

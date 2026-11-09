@@ -12,6 +12,12 @@ impl Manager {
         })
     }
 
+    /// Publication tickets retire only after the record's rename is crash durable.
+    pub(super) fn save_execution_publication(&self, e: &Entry) -> Result<()> {
+        self.save(e)?;
+        self.inner.store.sync_dir("machines")
+    }
+
     /// Every write of a machine's record: the record as `edit` leaves it (nothing when it says
     /// false), unless the machine is out of the manager. Checked and written under `removed`'s
     /// lock, which [`Self::forget`] holds to delete the record: a write from a task that took

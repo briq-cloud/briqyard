@@ -154,7 +154,7 @@ impl Store {
         crate::assignment_compatibility::ensure_assigned_run_lifecycle_floor(&self.root)
     }
 
-    fn sync_dir(&self, kind: &str) -> Result<()> {
+    pub(crate) fn sync_dir(&self, kind: &str) -> Result<()> {
         let dir = self.dir(kind);
         std::fs::File::open(&dir)
             .and_then(|d| d.sync_all())
