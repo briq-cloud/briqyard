@@ -619,6 +619,13 @@ Restoration failures print only fixed categories for configuration validation/co
 previous incarnation, PID queries/change, signal, start, readiness and the outer timeout.
 Readiness exhaustion distinguishes query failure, query timeout and identity mismatch. The
 90-second ownership drain, 10-second file restore and 70-second handover bounds remain.
+After an attempted SIGUSR2, a failure also projects journal evidence from the recorded daemon
+PID since that attempt. Only disposable CI reads it: at most 129 entries to detect a 128-entry
+limit, 128 KiB and a three-second reader deadline (one-second kill grace). Exact structured
+refusal reasons distinguish maintenance and compatibility; accepted shutdown, shutdown timeout
+and completion remain separate. Missing, malformed, mismatched, conflicting or over-limit
+evidence is unknown. Raw journal messages and errors are suppressed. Only the recorded PID is
+signaled; these diagnostics never retry handover or relax restoration identity checks.
 `python3 -m unittest hack/test_native_seals.py` exercises the exported Bash caller with offline,
 authentication-aware command fakes; it does not establish the cause of a native failure.
 

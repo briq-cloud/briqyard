@@ -1,5 +1,6 @@
 # Sourced by e2e.sh; its namespace cleanup owns every builder and destination.
 [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || { echo 'sealed acceptance requires a disposable CI host' >&2; exit 2; }
+seal_handover_projection=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e-handover-evidence.py
 seal_counts=$(mktemp)
 (
 # Operator seed APIs require authenticated mode. Scope this disposable-runner token
@@ -21,18 +22,37 @@ seal_api() {
 # Success requires the new daemon to acknowledge exactly that file's identity.
 seal_restore_handover() {
   local expected before=$1 old_pid new_pid observed until status last=unavailable
+  local signal_attempted=0 signal_since= evidence=unknown
   # Only fixed categories cross the native log boundary. Command stderr can contain
   # configuration, credentials or response values, so never forward it here.
   seal_restore_failure() {
     local category=$1 status=${2:-1}
     case "$status" in 124|137) category=${category}_timeout;; esac
     printf 'sealed restoration: %s\n' "$category" >&2
+    if [ "$signal_attempted" = 1 ]; then
+      # Disposable CI only. Journal metadata selects this daemon and this attempt;
+      # the projection accepts only exact structured events, never substring matches.
+      if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] && [[ "$signal_since" =~ ^[0-9]+\.[0-9]{6}$ ]]; then
+        evidence=$(set -o pipefail
+          timeout --kill-after=1 3s sudo journalctl -b -u briqyardd --no-pager -o json -n 129 \
+            --since="@$signal_since" "_PID=$old_pid" 2>/dev/null |
+            timeout --kill-after=1 3s python3 "$seal_handover_projection" "$old_pid" "$signal_since" 2>/dev/null
+        ) || evidence=unknown
+      fi
+      case "$evidence" in
+        unknown|refused_unknown|refused_maintenance_outstanding_warm_state|refused_maintenance_state_unknown|refused_maintenance_recovery_unresolved|refused_warm_admission_deadline|refused_namespace_admission_deadline|refused_compatibility_capability|refused_compatibility_command|refused_compatibility_deadline|accepted_shutdown|accepted_shutdown_timeout|accepted_complete) ;;
+        *) evidence=unknown;;
+      esac
+      printf 'sealed restoration handover evidence: %s\n' "$evidence" >&2
+    fi
     return 1
   }
   expected=$(timeout --kill-after=2 5s sudo briqyardd --config /etc/briqyard/config.yaml check-config 2>/dev/null) || { seal_restore_failure check_config "$?"; return 1; }
   old_pid=$(timeout --kill-after=2 3s systemctl show -p MainPID --value briqyardd 2>/dev/null) || { seal_restore_failure old_pid_query "$?"; return 1; }
   [[ "$old_pid" =~ ^[1-9][0-9]*$ ]] || { seal_restore_failure old_pid_invalid; return 1; }
-  timeout --kill-after=2 5s sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd >/dev/null 2>&1 || { seal_restore_failure signal "$?"; return 1; }
+  signal_since=$(timeout --kill-after=1 2s date +%s.%6N 2>/dev/null) || signal_since=
+  signal_attempted=1
+  timeout --kill-after=2 5s sudo kill -USR2 "$old_pid" >/dev/null 2>&1 || { seal_restore_failure signal "$?"; return 1; }
   until=$((SECONDS + 15))
   while [ "$SECONDS" -lt "$until" ]; do
     new_pid=$(timeout --kill-after=2 3s systemctl show -p MainPID --value briqyardd 2>/dev/null) || { seal_restore_failure new_pid_query "$?"; return 1; }
@@ -132,6 +152,7 @@ seal_cleanup() {
   fi
   if [ -n "$seal_original_token" ]; then export BRIQYARD_TOKEN=$seal_original_token; else unset BRIQYARD_TOKEN; fi
   if [ "$clean" = 1 ] && [ "$restored" = 1 ]; then
+    export seal_handover_projection
     export -f seal_restore_handover
     timeout --kill-after=2 70s bash -c 'seal_restore_handover "$1"' seal-restoration "$before" || {
       case "$?" in

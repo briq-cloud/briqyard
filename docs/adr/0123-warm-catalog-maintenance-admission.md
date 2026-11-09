@@ -28,3 +28,12 @@ prints no configuration, credentials, paths or command arguments. Readiness stil
 new serving incarnation and the exact restored configuration identity after signal and PID
 change; no fallback or longer deadline is introduced. Offline exported-function caller tests
 cover success, refusal and exhaustion. These diagnostics do not establish a native root cause.
+
+On failure after a signal attempt, disposable CI projects a bounded journal selection for the
+recorded daemon PID and attempt timestamp. Journal-owned unit, executable, transport and PID
+metadata must match; exact structured daemon messages distinguish refusal from accepted
+shutdown or completion. Only allowlisted reason categories leave the projection. Missing,
+malformed, ambiguous or over-budget evidence stays unknown. No raw error or journal message
+is printed. The signal targets the recorded PID, and the existing deadlines and restoration
+predicates remain unchanged. Offline Bash fixtures exercise this boundary without a journal,
+systemd or network; native root-cause evidence still requires a new native run.

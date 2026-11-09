@@ -203,9 +203,13 @@ briqyard() { if [ "$3" = m_zero ]; then echo native-zero; else echo native-first
         function = "seal_restore_handover() {" + source.split("seal_restore_handover() {", 1)[1].split("\n}\n", 1)[0] + "\n}"
         prelude = r"""
 set -u
+RUNNER_ENVIRONMENT=offline-fixture
 timeout() { shift; shift; "$@"; }
 sleep() { SECONDS=$((SECONDS+30)); }
-sudo() { if [ "$1" = briqyardd ]; then echo '{"source":"file","sha256":"restored"}'; else "$@"; fi; }
+sudo() { if [ "$1" = briqyardd ]; then echo '{"source":"file","sha256":"restored"}'; elif [ "$1" = kill ]; then
+  [ "$2 $3" = '-USR2 11' ] || return 99
+  [ "$scenario" != refused ] || return 1; echo signaled > "$events"
+else "$@"; fi; }
 systemctl() {
   case "$1" in
     show) if [ -e "$events" ]; then echo 22; else echo 11; fi;;
@@ -236,6 +240,7 @@ briqyard() {
         functions = functions.replace('sudo cp "$seal_config" /etc/briqyard/config.yaml', 'sudo cp "$seal_config" "$events/restored"')
         prelude = r"""
 set -euo pipefail
+RUNNER_ENVIRONMENT=offline-fixture
 T=owned; pass=0; fail=0; seal_saved=1
 seal_original_token=${3-original}; export scenario=$2 events=$1
 export BRIQYARD_URL=http://offline-fixture BRIQYARD_TOKEN=native-seal-test
@@ -254,6 +259,7 @@ timeout() {
         briqyardd) boundary=check_config;;
         cp) boundary=copy;;
         systemctl) boundary=$3;;
+        kill) boundary=kill;;
       esac;;
     systemctl)
       if [ -e "$events/signaled" ]; then boundary=new_pid_query; else boundary=old_pid_query; fi;;
@@ -271,7 +277,10 @@ timeout() {
 sleep() { SECONDS=$((SECONDS+30)); }
 ok() { pass=$((pass+1)); }
 sudo() {
-  if [ "$1" = briqyardd ]; then echo '{"source":"file","sha256":"original"}'; else "$@"; fi
+  if [ "$1" = briqyardd ]; then echo '{"source":"file","sha256":"original"}'; elif [ "$1" = kill ]; then
+    [ "$2 $3" = '-USR2 11' ] || return 99
+    echo signal > "$events/signaled"
+  else "$@"; fi
 }
 systemctl() {
   case "$1" in
@@ -345,6 +354,8 @@ export -f timeout sleep sudo systemctl briqyard
                         if scenario in ["copy", "copy_timeout"]:
                             lines.append("original configuration restore failed; private backup retained")
                         elif scenario not in ["previous_incarnation", "previous_incarnation_timeout", "missingincarnation", "overall_timeout"]:
+                            if scenario not in ["check_config", "check_config_timeout", "old_pid_query", "old_pid_query_timeout", "old_pid_invalid"]:
+                                lines.append("sealed restoration handover evidence: unknown")
                             lines.append("sealed restoration: handover_failed")
                         self.assertEqual(result.stderr.splitlines(), lines)
                     if scenario not in ["copy", "copy_timeout"]:
@@ -353,6 +364,108 @@ export -f timeout sleep sudo systemctl briqyard
                     if scenario in ["previous_incarnation", "previous_incarnation_timeout", "missingincarnation", "copy", "copy_timeout", "check_config", "check_config_timeout",
                                     "old_pid_query", "old_pid_query_timeout", "old_pid_invalid", "kill", "kill_timeout", "overall_timeout"]:
                         self.assertFalse((root / "signaled").exists())
+
+
+    def test_failure_journal_projection_uses_recorded_signal_attempt_and_no_raw_output(self):
+        source = (HACK / "e2e-seals.sh").read_text()
+        function = "seal_restore_handover() {" + source.split("seal_restore_handover() {", 1)[1].split("\n}\n", 1)[0] + "\n}"
+        projection_path = HACK / "e2e-handover-evidence.py"
+        spec = importlib.util.spec_from_file_location("handover_evidence", projection_path)
+        projection = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(projection)
+        daemon = (HACK.parent / "crates/briqyardd/src/main.rs").read_text()
+        maintenance = (HACK.parent / "crates/briqyardd/src/machine/maintenance.rs").read_text()
+        identity = (HACK.parent / "crates/briqyardd/src/machine/launch_identity.rs").read_text()
+        compatibility = (HACK.parent / "crates/briqyardd/src/assignment_compatibility.rs").read_text()
+        for message in ["handover refused; daemon remains serving", "shutting down", "handed over", "the shutdown ran past 60 s: ending without it"]:
+            self.assertIn('"' + message + '"', daemon)
+        for reason in projection.REFUSALS:
+            if reason.startswith("warm catalog maintenance refused:"):
+                self.assertIn('"warm catalog maintenance refused: {:?}"', identity)
+                self.assertIn("R::" + reason.split(": ")[1], maintenance)
+            else:
+                self.assertIn('"' + reason + '"', maintenance + compatibility)
+
+        def record(message, level="INFO", **fields):
+            return {"_PID": "11", "_SYSTEMD_UNIT": "briqyardd.service", "_COMM": "briqyardd",
+                    "_EXE": "/usr/local/bin/briqyardd", "_TRANSPORT": "stdout",
+                    "__REALTIME_TIMESTAMP": "1700000000000001",
+                    "MESSAGE": json.dumps({"level": level, "fields": {"message": message, **fields}})}
+
+        def encoded(*entries):
+            return "".join(json.dumps(entry) + "\n" for entry in entries)
+
+        refusal = record("handover refused; daemon remains serving", "ERROR", err="synthetic-private-token/config/path")
+        accepted = record("shutting down", hand_over=True)
+        cases = [("absent", "", "unknown"), ("malformed", "synthetic-private-token/config/path", "unknown"),
+                 ("unclassified_refusal", encoded(refusal), "refused_unknown"),
+                 ("accepted", encoded(accepted), "accepted_shutdown"),
+                 ("shutdown_timeout", encoded(accepted, record("the shutdown ran past 60 s: ending without it", "WARN", hand_over=True)), "accepted_shutdown_timeout"),
+                 ("complete", encoded(accepted, record("handed over")), "accepted_complete"),
+                 ("contradictory", encoded(accepted, refusal), "unknown"),
+                 ("substring", encoded(record("CLI echo: handed over synthetic-private-token/config/path")), "unknown"),
+                 ("stopping", encoded(record("shutting down", hand_over=False)), "unknown"),
+                 ("wrong_level", encoded(record("handover refused; daemon remains serving", "INFO", err="synthetic-private-token/config/path")), "unknown"),
+                 ("over_bytes", "x" * (projection.LIMIT_BYTES + 1), "unknown"),
+                 ("over_count", encoded(*([accepted] * (projection.LIMIT_ENTRIES + 1))), "unknown"),
+                 ("retrieval_failure", encoded(accepted), "unknown"),
+                 ("retrieval_timeout", encoded(accepted), "unknown"),
+                 ("outside_ci", encoded(accepted), "unknown"),
+                 ("missing_timestamp", encoded(accepted), "unknown")]
+        for error, category in projection.REFUSALS.items():
+            cases.append((category, encoded(record("handover refused; daemon remains serving", "ERROR", err=error)), "refused_" + category))
+        for key, value in {"_PID": "22", "_SYSTEMD_UNIT": "other.service", "_COMM": "bash", "_EXE": "/bin/bash", "_TRANSPORT": "journal", "__REALTIME_TIMESTAMP": "1700000000000000"}.items():
+            wrong = dict(accepted, **{key: value})
+            cases.append((key, encoded(wrong), "unknown"))
+        wrong = dict(accepted, _PID=["11", "22"])
+        cases.append(("ambiguous_metadata", encoded(wrong), "unknown"))
+        cases.append(("duplicate_json", encoded(accepted).replace('"_PID": "11"', '"_PID": "11", "_PID": "11"'), "unknown"))
+        prelude = r"""
+set -euo pipefail
+RUNNER_ENVIRONMENT=github-hosted
+[ "$scenario" != outside_ci ] || RUNNER_ENVIRONMENT=offline-fixture
+timeout() { shift; shift; "$@"; }
+sleep() { SECONDS=$((SECONDS+30)); }
+date() { [ "$scenario" != missing_timestamp ] || return 1; echo 1700000000.000001; }
+sudo() {
+  case "$1" in
+    briqyardd) echo '{"source":"file","sha256":"original"}';;
+    kill) [ "$2 $3" = '-USR2 11' ] || return 99; echo signal >> "$events";;
+    journalctl) journalctl "${@:2}";;
+    *) return 99;;
+  esac
+}
+systemctl() { [ "$*" = 'show -p MainPID --value briqyardd' ] || return 99; echo 11; }
+journalctl() {
+  [ "$*" = '-b -u briqyardd --no-pager -o json -n 129 --since=@1700000000.000001 _PID=11' ] || return 99
+  echo journal >> "$events"
+  cat "$fixture"
+  echo 'synthetic-private-token/config/path' >&2
+  [ "$scenario" != retrieval_failure ] || return 1
+  [ "$scenario" != retrieval_timeout ] || return 124
+}
+"""
+        for scenario, fixture, category in cases:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "fixture").write_text(fixture)
+                # A missing fake must never reach host journal/systemd or signal commands.
+                guard = root / "bin"
+                guard.mkdir()
+                for command in ["sudo", "systemctl", "journalctl", "kill", "briqyard", "briqyardd", "timeout"]:
+                    fake = guard / command
+                    fake.write_text("#!/bin/sh\necho offline_guard >&2\nexit 99\n")
+                    fake.chmod(0o700)
+                setup = 'export PATH="$1/bin:$PATH"\nevents=$1/events; fixture=$1/fixture; scenario=$2; seal_handover_projection=$3\n'
+                caller = "\nexport RUNNER_ENVIRONMENT events fixture scenario seal_handover_projection\nexport -f timeout sleep date sudo systemctl journalctl seal_restore_handover\nbash -c 'seal_restore_handover old'"
+                result = subprocess.run(["bash", "-c", setup + prelude + function + caller,
+                                         "fixture", directory, scenario, str(projection_path.resolve())], capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr.splitlines(), ["sealed restoration: pid_change_exhausted",
+                                 "sealed restoration handover evidence: " + category])
+                expected = ["signal"] if scenario in ["outside_ci", "missing_timestamp"] else ["signal", "journal"]
+                self.assertEqual((root / "events").read_text().splitlines(), expected)
 
     def test_cleanup_refuses_handover_when_authority_is_outstanding(self):
         source = (HACK / "e2e-seals.sh").read_text()
