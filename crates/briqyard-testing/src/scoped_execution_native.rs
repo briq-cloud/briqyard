@@ -70,19 +70,58 @@ impl Channel {
             .map_err(|_| anyhow::anyhow!("authority transport failed for {action}; do not replay"))
     }
     async fn call(&self, role: &str, action: &str, body: Value) -> Result<Value> {
-        let response = self.request(role, action, &body).await?;
+        let mut response = self.request(role, action, &body).await?;
         ensure!(
             response.status().is_success(),
             "authority {action} returned {}",
             response.status()
         );
-        let bytes = response
-            .bytes()
+        let limit = if action == "exec" {
+            briqyard_api::execution::MAX_EXEC_RESPONSE_BYTES
+        } else {
+            briqyard_api::execution::MAX_BODY_BYTES
+        };
+        ensure!(
+            response.content_length().is_none_or(|n| n <= limit as u64),
+            "oversized authority reply"
+        );
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .context("authority reply unavailable; do not replay")?;
-        ensure!(bytes.len() <= 8 * 1024 * 1024, "oversized authority reply");
+            .context("authority reply unavailable; do not replay")?
+        {
+            ensure!(
+                chunk.len() <= limit - bytes.len(),
+                "oversized authority reply"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
         Ok(serde_json::from_slice(&bytes)?)
     }
+    async fn wait_ready(&self) -> Result<()> {
+        // Read-only discovery may wait for the independently started listeners and clock.
+        // Installation and execution below are still sent exactly once.
+        tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                match self.request("installer", "identity", &json!({})).await {
+                    Ok(response) if response.status().is_success() => return Ok(()),
+                    Ok(response)
+                        if !matches!(
+                            response.status(),
+                            StatusCode::SERVICE_UNAVAILABLE | StatusCode::BAD_GATEWAY
+                        ) =>
+                    {
+                        anyhow::bail!("authority readiness refused")
+                    }
+                    _ => tokio::time::sleep(Duration::from_millis(250)).await,
+                }
+            }
+        })
+        .await
+        .context("authority readiness deadline exceeded")?
+    }
+
     async fn install(&self, action: &str, body: Value) -> Result<Value> {
         let value = self.call("installer", action, body).await?;
         ensure!(
@@ -136,6 +175,7 @@ async fn main() -> Result<()> {
             .context("host execution credential")?
             .into(),
     };
+    channel.wait_ready().await?;
     // Both TLS and role negatives are read-only and precede installation.
     let wrong_pin = Client::builder()
         .use_preconfigured_tls(briqyard_api::tls::pinned_client(&"00".repeat(32)))
@@ -208,7 +248,7 @@ async fn main() -> Result<()> {
         "id":"delegation","principal":"key:native","source":{"kind":"api_key","id":"native","expires_at":expiry+60},
         "team":namespace,"subject":"native-primary","target":discovery["primary"],"resource_set":discovery["resource_set"],
         "idle":{"admission":"idle","expires_at":expiry+15},"metadata_revision":"native-metadata",
-        "operations":["exec"],"limits":{"max_duration_seconds":20,"max_input_bytes":1024,"max_output_bytes":4096}});
+        "operations":["exec"],"limits":{"max_duration_seconds":20,"max_input_bytes":1024,"max_output_bytes":briqyard_api::execution::MAX_CAPTURE_BYTES,"output_mode":"capture_per_stream_v1"}});
     let allocations: Vec<_> = ["requests", "exec_calls"].into_iter().map(|bucket| sign(&central, ALLOCATION_TYPE,
         json!({"v":1,"iss":"central","aud":"runtime","iat":now-10,"nbf":now-10,"exp":expiry,
             "id":bucket,"epoch":"native-allocation","authority":"native","authority_epoch":identity["authority_epoch"],
@@ -317,6 +357,30 @@ async fn main() -> Result<()> {
                 .is_some_and(|s| s.trim() == "1"),
         "duplicate replayed guest side effect"
     );
-    println!("scoped native: TLS pin, role separation, full closure, omitted closure refusal, projection, guest exec, duplicate and host status passed");
+    let capture = channel
+        .call(
+            "gateway",
+            "exec",
+            operation(
+                "capture-output",
+                "head -c 4194432 /dev/zero; head -c 4194432 /dev/zero >&2; exit 7",
+            ),
+        )
+        .await?;
+    ensure!(
+        capture["state"] == "completed" && capture["result"]["exit_code"] == 7,
+        "capture saturation lost terminal completion"
+    );
+    for stream in ["stdout", "stderr"] {
+        let text = capture["result"][stream]
+            .as_str()
+            .context("captured stream missing")?;
+        ensure!(
+            text.len() == briqyard_api::execution::MAX_CAPTURE_BYTES as usize
+                && text.bytes().all(|b| b == 0),
+            "captured raw stream prefix differs"
+        );
+    }
+    println!("scoped native: TLS pin, role separation, full closure, omitted closure refusal, projection, guest exec, duplicate, host status and saturated capture passed");
     Ok(())
 }

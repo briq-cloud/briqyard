@@ -93,7 +93,8 @@ AUTHORITY_PID=$!
 PHASE=host_ready
 timeout 75 bash -c 'until briqyard status >/dev/null 2>&1; do sleep 1; done'
 PHASE=gateway
-briqyard namespace gateway set "$T" --image alpine:3.20 --memory 128 --port 3128 -- httpd -f -p 3128 >/dev/null
+# Reuse the native suite's server image; Alpine does not ship an httpd executable.
+briqyard namespace gateway set "$T" --image python:3.12-alpine --memory 128 --port 3128 -- python3 -m http.server 3128 >/dev/null
 PHASE=primary
 M=$(briqyard machine run --namespace "$T" --name primary --image alpine:3.20 --memory 128 --egress via:gateway+siblings -l briq_id=native-primary -l "team=$T" -- sleep 3600 | jq -er .id)
 PHASE=sibling
