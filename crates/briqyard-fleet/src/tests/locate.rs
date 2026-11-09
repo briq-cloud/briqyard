@@ -213,3 +213,95 @@ async fn delete_fallback_requires_valid_existing_pin_and_exact_delete_path() {
     assert_eq!(pinned(&f.st, "kept").as_deref(), Some("d1"));
     assert_eq!(std::fs::read(&f.st.state_path).unwrap(), written);
 }
+
+/// Fleet routing must preserve the adapter's flattened payload and CAS header.
+/// The HTTP peer is a stub: daemon lifecycle/authority belongs to Manager/native tests.
+#[tokio::test]
+async fn stopped_spec_patch_preserves_wire_body_cas_and_registered_host_routing() {
+    for different_registration in [false, true] {
+        for reports_cpu in [false, true] {
+            let (f, ds) = fleet_with_daemons(1).await;
+            let machine = ds[0].stub.add("destination", "home", 256);
+            ds[0].stub.machines.lock().unwrap()[0].state = api::state::STOPPED.into();
+            poll_static_hosts_once(&f.st).await;
+            let registered = if different_registration {
+                "h_registered"
+            } else {
+                "d1"
+            };
+            {
+                let mut reg = f.st.reg.lock().unwrap();
+                let mut host = reg.hosts.remove("d1").unwrap();
+                host.id = registered.into();
+                if !reports_cpu {
+                    host.capacity.cpu_millis = None;
+                }
+                reg.hosts.insert(registered.into(), host);
+                reg.machines.insert(machine.id.clone(), registered.into());
+                reg.namespaces
+                    .insert("destination".into(), registered.into());
+            }
+            let path = format!("/v1/machines/{}?namespace=destination", machine.id);
+            ds[0].stub.calls();
+            for resource in 0..4 {
+                let mut body = serde_json::json!({
+                    "image": "alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "env": if resource == 1 { serde_json::json!({}) } else { serde_json::json!({"REPLACEMENT":"new"}) }
+                });
+                if resource > 0 {
+                    body["size"] = serde_json::json!({"vcpus":1,"memory_mb":256});
+                    if resource >= 2 {
+                        body["size"]["cpu_millis"] =
+                            serde_json::json!(if resource == 3 { 0 } else { 1000 });
+                    }
+                    body["disk_limits"] =
+                        serde_json::json!({"bandwidth_mb":100,"iops":1000,"burst_sec":1});
+                }
+                let before = ds[0].stub.patches.lock().unwrap().len();
+                let cas_before = ds[0].stub.if_match.lock().unwrap().len();
+                let (status, _, answer) = call_with(
+                    &f.st,
+                    std::net::IpAddr::from([127, 0, 0, 1]),
+                    &[("if-match", "7")],
+                    "PATCH",
+                    &path,
+                    "api",
+                    Some(body.clone()),
+                )
+                .await;
+                if resource >= 2 && !reports_cpu {
+                    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+                    assert_eq!(ds[0].stub.patches.lock().unwrap().len(), before);
+                    assert_eq!(ds[0].stub.if_match.lock().unwrap().len(), cas_before);
+                } else {
+                    assert_eq!(status, StatusCode::OK, "{answer}");
+                    let patches = ds[0].stub.patches.lock().unwrap();
+                    assert_eq!(patches.len(), before + 1);
+                    assert_eq!(patches.last().unwrap(), &(machine.id.clone(), body));
+                    assert_eq!(
+                        ds[0]
+                            .stub
+                            .if_match
+                            .lock()
+                            .unwrap()
+                            .last()
+                            .map(String::as_str),
+                        Some("7")
+                    );
+                }
+                let reg = f.st.reg.lock().unwrap();
+                assert_eq!(reg.machines[&machine.id], registered);
+                assert_eq!(reg.namespaces["destination"], registered);
+            }
+            assert!(!ds[0]
+                .stub
+                .calls()
+                .iter()
+                .any(|call| call.contains("/start")));
+            assert_eq!(
+                ds[0].stub.machines.lock().unwrap()[0].state,
+                api::state::STOPPED
+            );
+        }
+    }
+}
