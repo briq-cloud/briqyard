@@ -98,33 +98,6 @@ async fn maintenance_retains_both_gates_and_cancellation_releases_them() {
 }
 
 #[tokio::test]
-async fn maintenance_pending_names_and_durable_only_holds_refuse_without_cleanup() {
-    let h = harness("10.64.0.0/22", 4096).await;
-    h.m.inner
-        .warm_names
-        .lock()
-        .unwrap()
-        .insert(("t1".into(), "worker".into()), "m_owned".into());
-    let view = h.m.warm_catalog_eligibility().await;
-    assert!(!view.eligible);
-    assert_eq!(view.counts.unwrap().warm_names, 1);
-    h.m.inner.warm_names.lock().unwrap().clear();
-    let identity = launch_identity::LaunchIdentity::new(&h.m.inner.cfg, "t1", 1, 2).unwrap();
-    let path = h.m.inner.store.dir("launch-holds").join("m_owned.json");
-    std::fs::write(
-        &path,
-        serde_json::to_vec(&json!({"machine":"m_owned","identity":identity})).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        h.m.warm_catalog_eligibility().await.reason,
-        api::WarmMaintenanceReason::StateUnknown
-    );
-    assert!(h.m.inner.launch_holds.lock().unwrap().is_empty());
-    assert!(path.exists());
-}
-
-#[tokio::test]
 async fn maintenance_http_requires_api_auth_and_exposes_only_fixed_projection() {
     use tower::ServiceExt;
     let h = harness("10.64.0.0/22", 4096).await;

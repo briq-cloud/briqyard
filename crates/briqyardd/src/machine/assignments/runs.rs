@@ -52,7 +52,7 @@ impl Manager {
                 Ok(machine.assigned_run.as_ref() == Some(&current.reference) && target_matches)
             };
             anyhow::ensure!(
-                matches(machine)? && live.get(id).map(&matches).transpose()?.unwrap_or(true),
+                matches(machine)? && live.get(id).map(matches).transpose()?.unwrap_or(true),
                 "maintenance machine/current link differs"
             );
             let reader = readers.get(id).context("maintenance run reader missing")?;

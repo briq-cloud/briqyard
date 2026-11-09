@@ -103,7 +103,7 @@ impl Manager {
                 api::valid_id(&record.id) && key == &record.id,
                 "maintenance machine key differs"
             );
-            if has_warm_authority(&record) {
+            if has_warm_authority(record) {
                 warm.insert(record.id.clone());
             }
         }

@@ -438,3 +438,34 @@ async fn late_lifecycle_writer_rechecks_schema2_only_candidate_inside_handover_f
     assert!(pending.await.is_err());
     assert!(h.m.inner.namespace_lifecycle.try_read().is_ok());
 }
+
+#[tokio::test]
+async fn maintenance_pending_names_and_durable_only_holds_refuse_without_cleanup() {
+    let h = harness_config(|cfg| {
+        cfg.network.range = "10.64.0.0/22".into();
+        cfg.jailer = "/mock/jailer".into();
+    })
+    .await;
+    h.m.inner
+        .warm_names
+        .lock()
+        .unwrap()
+        .insert(("t1".into(), "worker".into()), "m_owned".into());
+    let view = h.m.warm_catalog_eligibility().await;
+    assert!(!view.eligible);
+    assert_eq!(view.counts.unwrap().warm_names, 1);
+    h.m.inner.warm_names.lock().unwrap().clear();
+    let identity = LaunchIdentity::new(&h.m.inner.cfg, "t1", 1, 2).unwrap();
+    let path = h.m.inner.store.dir("launch-holds").join("m_owned.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({"machine":"m_owned","identity":identity})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        h.m.warm_catalog_eligibility().await.reason,
+        api::WarmMaintenanceReason::StateUnknown
+    );
+    assert!(h.m.inner.launch_holds.lock().unwrap().is_empty());
+    assert!(path.exists());
+}
