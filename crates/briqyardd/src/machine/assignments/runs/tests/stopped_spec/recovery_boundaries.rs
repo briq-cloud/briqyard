@@ -228,9 +228,7 @@ async fn creation_first_consumption_full_startup_repairs_each_write_and_delete_b
             );
         }
         assert_eq!(h.m.inner.images.ensure_calls.load(Relaxed), image_calls);
-        assert!(
-            h.host_calls().is_empty(),
-            "repair cannot duplicate a launch"
-        );
+        // Reserved recovery may quarantine forwarding; it must never adopt or launch.
+        assert_no_launch_or_adoption(&h.host_calls());
     }
 }
