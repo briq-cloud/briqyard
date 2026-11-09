@@ -404,12 +404,39 @@ request, token or destination text. The central-installer bearer alone accesses
 and `installation_status`. Their request DTOs contain an immutable intent `id` plus
 the named typed control input; `delegation` has separate `control` and `signed`
 objects. `installation_status` accepts `{kind,id}`. It returns `{state,evidence}`:
-`unknown`, `pending` or `ready`, with only the typed host acknowledgement or
-receipt as evidence. The gateway bearer alone accesses `exec`, `operation_status`
-and `observe`. `exec` accepts `{id,delegation_intent,request}` and returns a first
+`unknown`, `pending` or `ready`, with typed host acknowledgement or receipt evidence.
+Delegation evidence also includes its persisted projection, intent and authority epoch.
+The gateway bearer alone accesses `projection`, `exec`, `operation_status`
+and `observe`. `exec` accepts `{id,delegation_intent,grant,projection_digest,request}` and returns a first
 `completed` response with status and bounded result, or `existing` with status only.
 `operation_status` and `observe` accept `{id}` and return status evidence, never
 replay permission. Request DTOs have no destination URL or caller-selected role.
+
+### Immutable delegation projections and renewal
+
+Authenticated delegation control installs an opaque projection with the grant intent,
+before the host call. The envelope is `{version:1,bytes,digest}`: 1–4,096 decoded bytes
+and a SHA-256 digest encoded as unpadded base64url. Recovery validates the bound and
+digest before rotating the journal epoch. The runtime never interprets the bytes;
+Debug output omits them. There is no separate projection update or listing endpoint.
+Changed projection bytes under an existing intent conflict.
+
+Gateway `projection` accepts `{delegation_intent,grant}` and returns only that installed
+version's projection, grant digest, delegation, ownership generation and authority epoch.
+It requires exact grant possession, current ready dependencies, an unrevoked delegation
+and qualified clock coverage for grant, source and protection. Dispatch repeats those
+checks under the issuer turn and requires the same projection digest before any admission.
+A previous read cannot authorize a later command. No signed credentials or allocations
+are returned by this read.
+
+Renewal retains the delegation, principal, ownership and source identity and installs a
+strictly higher version with a fresh grant, protection admission and projection. Starting
+that immutable intent fences all older versions for new admission, even while its host
+ACK is pending. Only the current acknowledged version is eligible; there is no fallback
+to an older ready installation. Hosts retain immutable version records and reject changed
+or lower versions. Revocation remains delegation-wide. Existing operations keep their
+status and cannot be redispatched. Retained version records share the bounded journal;
+exhaustion refuses admission rather than dropping rejection evidence.
 
 The production provisioner for the regional listener, its two central credentials,
 trusted keys, pinned host endpoint and qualified clock is still missing. This source

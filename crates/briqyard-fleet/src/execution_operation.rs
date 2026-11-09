@@ -30,6 +30,8 @@ pub(super) enum Error {
 pub(super) struct Control {
     pub id: String,
     pub delegation_intent: String,
+    pub grant: String,
+    pub projection_digest: String,
     pub request: ExecRequest,
 }
 
@@ -131,6 +133,12 @@ impl Coordinator<'_> {
     ) -> Result<ExecOutcome, Error> {
         let clock = fresh_clock()?;
         let journal = self.issuer.installation_journal();
+        let projection = journal
+            .presented_projection(&control.delegation_intent, &control.grant, clock)
+            .map_err(|_| Error::Binding)?;
+        if projection.projection.digest() != control.projection_digest {
+            return Err(Error::Binding);
+        }
         if let Some(old) = journal
             .operation_intent(&control.id)
             .map_err(|_| Error::Journal)?

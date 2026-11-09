@@ -171,6 +171,7 @@ struct DelegationControlDto {
     ownership: String,
     protection: String,
     source: Source,
+    projection: briqyard_api::execution::admission::Projection,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -197,6 +198,8 @@ struct Revocation {
 struct Execution {
     id: String,
     delegation_intent: String,
+    grant: String,
+    projection_digest: String,
     request: briqyard_api::ExecRequest,
 }
 #[derive(Serialize)]
@@ -256,7 +259,10 @@ async fn handle(
             | "revoke"
             | "installation_status"
     );
-    let gateway_role = matches!(action.as_str(), "exec" | "operation_status" | "observe");
+    let gateway_role = matches!(
+        action.as_str(),
+        "exec" | "projection" | "operation_status" | "observe"
+    );
     if !installer_role && !gateway_role {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -378,6 +384,7 @@ async fn run(
                         ownership: dto.control.ownership,
                         protection: dto.control.protection,
                         source: dto.control.source,
+                        projection: dto.control.projection,
                     },
                     SignedDelegation {
                         grant: dto.signed.grant,
@@ -412,6 +419,19 @@ async fn run(
             let dto: InstallationStatus = parse(body)?;
             installation_reply(installer.journal, &dto.kind, &dto.id, Outcome::Pending)
         }
+        "projection" => {
+            let dto: ProjectionRead = parse(body)?;
+            value(
+                installer
+                    .journal
+                    .presented_projection(
+                        &dto.delegation_intent,
+                        &dto.grant,
+                        clock(service.clock.as_ref())?,
+                    )
+                    .map_err(|_| StatusCode::CONFLICT)?,
+            )
+        }
         "exec" => {
             let dto: Execution = parse(body)?;
             let mut coordinator = Coordinator {
@@ -424,6 +444,8 @@ async fn run(
                     Control {
                         id: dto.id,
                         delegation_intent: dto.delegation_intent,
+                        grant: dto.grant,
+                        projection_digest: dto.projection_digest,
                         request: dto.request,
                     },
                     &service.trust.borrowed(),
@@ -475,6 +497,13 @@ async fn run(
 struct InstallationStatus {
     kind: String,
     id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectionRead {
+    delegation_intent: String,
+    grant: String,
 }
 
 fn installation_reply(
@@ -587,10 +616,10 @@ fn installation_reply(
                 journal
                     .delegation_intent_ready(id)
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-                intent
-                    .acknowledgement
-                    .as_ref()
-                    .map(|r| serde_json::to_value(r).unwrap()),
+                intent.acknowledgement.as_ref().map(|r| {
+                    serde_json::json!({"acknowledgement":r,"projection":intent.projection,
+                        "intent":id,"authority_epoch":intent.authority_epoch})
+                }),
             )
         }
         _ => return Err(StatusCode::BAD_REQUEST),
@@ -756,6 +785,34 @@ mod tests {
             uncertainty: 1,
         }))));
         let status = br#"{"id":"missing"}"#.to_vec();
+        for token in ["", "central-installer", "fleet-admin"] {
+            assert_eq!(
+                request(&app, "projection", token, vec![]).await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            request(
+                &app,
+                "projection",
+                "gateway-only",
+                br#"{"delegation_intent":"missing"}"#.to_vec()
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            request(
+                &app,
+                "projection",
+                "gateway-only",
+                br#"{"delegation_intent":"missing","grant":"presented"}"#.to_vec()
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
         assert_eq!(
             request(&app, "operation_status", "", status.clone())
                 .await

@@ -7,6 +7,10 @@ use briqyard_api::execution::{
 use ring::signature::KeyPair;
 use std::time::Duration;
 
+fn projection() -> briqyard_api::execution::admission::Projection {
+    briqyard_api::execution::admission::Projection::new(b"opaque snapshot".to_vec()).unwrap()
+}
+
 fn target(machine: &str) -> Target {
     Target {
         host: "host".into(),
@@ -364,6 +368,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         principal: "key:credential".into(),
         ownership: "ownership".into(),
         protection: "protection".into(),
+        projection: projection(),
         source: briqyard_api::execution::Source {
             kind: "api_key".into(),
             id: "credential".into(),
@@ -450,6 +455,44 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         Outcome::Ready
     );
     assert!(installer.journal.delegation_intent_ready("signed").unwrap());
+    let evidence = installer
+        .journal
+        .presented_projection("signed", &grant, clock)
+        .unwrap();
+    assert_eq!(evidence.projection, projection());
+    assert!(installer
+        .journal
+        .presented_projection("signed", "another grant", clock)
+        .is_err());
+    assert!(installer
+        .journal
+        .presented_projection(
+            "signed",
+            &grant,
+            Clock {
+                now: 1050,
+                uncertainty: 0
+            }
+        )
+        .is_err());
+    let mut changed_projection = control();
+    changed_projection.projection =
+        briqyard_api::execution::admission::Projection::new(b"changed".to_vec()).unwrap();
+    assert!(installer
+        .delegation(
+            "signed",
+            "registration",
+            changed_projection,
+            SignedDelegation {
+                grant: grant.clone(),
+                allocations: vec![allocation.clone(), calls_allocation.clone()]
+            },
+            &trust,
+            clock
+        )
+        .await
+        .is_err());
+
     assert_eq!(
         installer
             .delegation(
@@ -479,7 +522,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         .journal
         .acknowledge_delegation_intent("signed", wrong, clock)
         .is_err());
-    let mut pending_body = grant_body;
+    let mut pending_body = grant_body.clone();
     pending_body["id"] = "pending-delegation".into();
     let pending_grant = sign(GRANT_TYPE, pending_body);
     let pending_control = || DelegationControl {
@@ -488,6 +531,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         principal: "key:credential".into(),
         ownership: "ownership".into(),
         protection: "protection".into(),
+        projection: projection(),
         source: briqyard_api::execution::Source {
             kind: "api_key".into(),
             id: "credential".into(),
@@ -545,8 +589,24 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
     let operation = |id: &str| crate::execution_operation::Control {
         id: id.into(),
         delegation_intent: "signed".into(),
+        grant: grant.clone(),
+        projection_digest: projection().digest().into(),
         request: request(),
     };
+    for mismatch in ["grant", "projection"] {
+        let mut bad = operation(mismatch);
+        if mismatch == "grant" {
+            bad.grant.push('x');
+        } else {
+            bad.projection_digest.push('x');
+        }
+        assert!(matches!(
+            coordinator.exec(bad, &trust, || Ok(clock)).await,
+            Err(crate::execution_operation::Error::Binding)
+        ));
+        assert!(coordinator.status(mismatch).unwrap().is_none());
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     let first = coordinator
         .exec(operation("first"), &trust, || Ok(clock))
         .await
@@ -654,11 +714,81 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         coordinator.status("oversized").unwrap().unwrap().phase,
         briqyard_api::execution::admission::OperationPhase::Intent
     );
-    let installer = Installer {
+    let mut installer = Installer {
         journal: issuer.installation_journal(),
         host: &transport,
         host_id: &host.id,
     };
+    installer
+        .protect(
+            "renewed-protection",
+            "ownership",
+            CommittedIdle {
+                admission: "renewed-admission".into(),
+                expires_at_ms: 1060000,
+            },
+            clock,
+        )
+        .await
+        .unwrap();
+    let mut renewed_body = grant_body;
+    renewed_body["idle"]["admission"] = "renewed-admission".into();
+    let renewed_grant = sign(GRANT_TYPE, renewed_body);
+    let mut renewal = control();
+    renewal.version = 2;
+    renewal.protection = "renewed-protection".into();
+    renewal.projection =
+        briqyard_api::execution::admission::Projection::new(b"renewed snapshot".to_vec()).unwrap();
+    // The host deliberately returns a wrong expiration for version 2. The durable
+    // replacement still fences the old version before acknowledgement.
+    assert!(installer
+        .delegation(
+            "renewed",
+            "registration",
+            renewal,
+            SignedDelegation {
+                grant: renewed_grant.clone(),
+                allocations: vec![allocation.clone(), calls_allocation.clone()]
+            },
+            &trust,
+            clock
+        )
+        .await
+        .is_err());
+    assert!(!installer.journal.delegation_intent_ready("signed").unwrap());
+    assert!(!installer
+        .journal
+        .delegation_intent_ready("renewed")
+        .unwrap());
+    assert!(installer
+        .journal
+        .presented_projection("signed", &grant, clock)
+        .is_err());
+    let expected = installer
+        .journal
+        .delegation_intent("renewed")
+        .unwrap()
+        .unwrap()
+        .expected
+        .clone();
+    installer
+        .journal
+        .acknowledge_delegation_intent("renewed", expected, clock)
+        .unwrap();
+    assert!(installer
+        .journal
+        .delegation_intent_ready("renewed")
+        .unwrap());
+    assert!(!installer.journal.delegation_intent_ready("signed").unwrap());
+    assert_eq!(
+        installer
+            .journal
+            .presented_projection("renewed", &renewed_grant, clock)
+            .unwrap()
+            .version,
+        2
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 11);
     installer
         .journal
         .begin_authority_intent(
@@ -684,7 +814,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
             .await,
         Err(crate::execution_operation::Error::Binding)
     ));
-    assert_eq!(calls.load(Ordering::SeqCst), 10);
+    assert_eq!(calls.load(Ordering::SeqCst), 11);
     let mut installer = Installer {
         journal: issuer.installation_journal(),
         host: &transport,

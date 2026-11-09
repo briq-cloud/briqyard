@@ -27,6 +27,7 @@ pub(super) struct DelegationControl {
     pub ownership: String,
     pub protection: String,
     pub source: Source,
+    pub projection: briqyard_api::execution::admission::Projection,
 }
 
 pub(super) struct SignedDelegation {
@@ -354,6 +355,7 @@ impl Installer<'_> {
             ownership: control.ownership,
             protection: control.protection,
             trusted_source: Some(control.source),
+            projection: Some(control.projection),
             request: request.clone(),
             expected,
             acknowledgement: None,
