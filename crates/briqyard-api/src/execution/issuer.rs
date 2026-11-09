@@ -31,6 +31,11 @@ impl DurableIssuer {
     pub fn instance(&self) -> &str {
         self.journal.instance()
     }
+    /// Trusted installation uses the same exclusive authority journal and epoch.
+    /// Keep the issuer alive while borrowing it; this does not expose its key.
+    pub fn installation_journal(&mut self) -> &mut admission::Journal {
+        &mut self.journal
+    }
     pub fn status(&self, id: &str) -> Result<Option<admission::Status>, admission::Error> {
         self.journal.status(id)
     }

@@ -35,7 +35,7 @@ pub struct ProtectionAck {
     pub revision: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct InstallDelegation {
     pub installation: String,

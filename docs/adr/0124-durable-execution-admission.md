@@ -311,6 +311,19 @@ calling host protection. Only a matching ordered ACK is ready. Pending calls
 are never resent by this path. These steps use the issuer's existing exclusive
 journal and do not create another authority ledger.
 
+The dormant authority installer also persists each signed delegation request before its
+one host call. Its authenticated input supplies principal, delegation ID and version,
+ownership, and protection independently of the signed tokens. It verifies the central
+grant and complete allocation vector against the current ready registration, exact
+ownership and acknowledged millisecond protection receipt. The signed idle deadline
+is the inward whole-second floor of that receipt and covers grant expiry. The complete
+serialized host request fits the channel bound before persistence or transmission.
+Only an exact typed host delegation receipt makes the intent ready. Lost or mismatched
+ACKs stay pending; retries do not resend. Any retained delegation revocation, even
+before host confirmation or at a lower version, refuses installation and readiness.
+Restart rotates the issuer epoch and leaves old intents unready. This path installs no
+host allocation, issues no permit and dispatches no command.
+
 No mounted HTTP route or configuration accepts these credentials yet. Administrator routes do not
 call this boundary and keep their existing authentication and behavior.
 

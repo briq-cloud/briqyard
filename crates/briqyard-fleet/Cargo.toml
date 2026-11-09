@@ -37,4 +37,5 @@ axum = { workspace = true, features = ["ws"] }
 tokio-tungstenite = { workspace = true }
 tempfile = "3"
 rcgen = { workspace = true }
+ring = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

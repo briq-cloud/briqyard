@@ -4,8 +4,10 @@
 //! requires the trusted control channel's acknowledgement of this exact new instance.
 use super::*;
 mod authority_install;
+mod delegation_install;
 mod installation_flow;
 pub use authority_install::{AuthorityIntent, AuthorityPayload};
+pub use delegation_install::DelegationIntent;
 pub use installation_flow::{
     validate_discovery_receipt, DiscoveryIntent, OwnershipControl, ProtectionIntent,
 };
@@ -89,6 +91,8 @@ struct State {
     discovery_intents: BTreeMap<String, DiscoveryIntent>,
     #[serde(default)]
     protection_intents: BTreeMap<String, ProtectionIntent>,
+    #[serde(default)]
+    delegation_intents: BTreeMap<String, DelegationIntent>,
 }
 
 /// Authenticated installer input. These records are never constructed from a grant.
@@ -254,12 +258,14 @@ impl Journal {
                 authority_highwater: BTreeMap::new(),
                 discovery_intents: BTreeMap::new(),
                 protection_intents: BTreeMap::new(),
+                delegation_intents: BTreeMap::new(),
             },
         };
         if state.admissions.len() > MAX_RECORDS
             || state.allocations.len() > MAX_RECORDS
             || state.discovery_intents.len() > MAX_RECORDS
             || state.protection_intents.len() > MAX_RECORDS
+            || state.delegation_intents.len() > MAX_RECORDS
         {
             return Err(Error::Full);
         }
