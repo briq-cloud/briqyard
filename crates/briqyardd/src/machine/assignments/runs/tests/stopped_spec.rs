@@ -17,11 +17,57 @@ fn patch(
     }
 }
 
+// Endpoints have separate durable records, rather than fields on the machine record.
+fn seed_endpoint(h: &crate::machine::tests::Harness, record: &Record) -> EndpointRec {
+    let endpoint = EndpointRec {
+        id: "ep_stopped_spec".into(),
+        machine_id: record.id.clone(),
+        namespace: record.namespace.clone(),
+        port: 8080,
+        protocol: "tcp".into(),
+        host_port: Some(30001),
+        host: String::new(),
+        created_at: Utc::now(),
+    };
+    h.m.inner
+        .store
+        .put_durable("endpoints", &endpoint.id, &endpoint)
+        .unwrap();
+    h.m.inner
+        .endpoints
+        .lock()
+        .unwrap()
+        .insert(endpoint.id.clone(), endpoint.clone());
+    endpoint
+}
+
+fn assert_endpoint_retained(h: &crate::machine::tests::Harness, expected: &EndpointRec) {
+    let expected_record = serde_json::to_value(expected).unwrap();
+    let durable: EndpointRec =
+        h.m.inner
+            .store
+            .get("endpoints", &expected.id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(serde_json::to_value(durable).unwrap(), expected_record);
+    assert_eq!(
+        serde_json::to_value(h.m.endpoint(&expected.id).unwrap()).unwrap(),
+        expected_record
+    );
+    let view = h.m.endpoints_of(&expected.machine_id);
+    assert_eq!(view.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&view[0]).unwrap(),
+        serde_json::to_value(h.m.endpoint_view(expected)).unwrap()
+    );
+}
+
 #[tokio::test]
 async fn stopped_image_env_replacement_keeps_identity_volume_and_waits_for_start() {
     for resource in 0..3 {
         let (h, entry) = stopped(true).await;
         let before = entry.snapshot();
+        let endpoint = seed_endpoint(&h, &before);
         let id = before.id.clone();
         let image = format!("alpine@sha256:{}", "3".repeat(64));
         h.m.inner
@@ -60,10 +106,7 @@ async fn stopped_image_env_replacement_keeps_identity_volume_and_waits_for_start
         assert_eq!(pending.image, before.image);
         assert_eq!(pending.launch_identity, before.launch_identity);
         assert_eq!(pending.volume, before.volume);
-        assert_eq!(
-            serde_json::to_value(&pending.endpoints).unwrap(),
-            serde_json::to_value(&before.endpoints).unwrap()
-        );
+        assert_endpoint_retained(&h, &endpoint);
         assert_eq!(pending.pending.as_ref().unwrap().env, Some(env.clone()));
         let intent: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
         intent.check(&run).unwrap();
@@ -111,10 +154,7 @@ async fn stopped_image_env_replacement_keeps_identity_volume_and_waits_for_start
         assert!(!applied.suspended);
         assert_eq!(applied.launch_identity, before.launch_identity);
         assert_eq!(applied.volume, before.volume);
-        assert_eq!(
-            serde_json::to_value(&applied.endpoints).unwrap(),
-            serde_json::to_value(&before.endpoints).unwrap()
-        );
+        assert_endpoint_retained(&h, &endpoint);
         assert_eq!(h.pool.zfs.guid(&data).await.unwrap(), data_guid);
     }
 }
