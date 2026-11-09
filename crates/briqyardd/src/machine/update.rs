@@ -23,7 +23,7 @@ impl Manager {
                 if req.spec.volume.is_some() && e.snapshot().state == state::RUNNING {
                     return self.update_assigned_volume(&e, req, at).await;
                 }
-                return self.update_assigned_stopped_size(&e, req, at).await;
+                return self.update_assigned_stopped_spec(&e, req, at).await;
             }
             return Err(MError::Conflict(
                 "assigned-run updates require journal integration; pending intent retained".into(),

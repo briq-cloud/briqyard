@@ -1360,7 +1360,7 @@ async fn update_shape_rejects_tampered_predecessor_bindings() {
             serde_json::json!({"size_gb": first_gb + 2, "mount": earlier["volume"]["mount"]}),
         ),
         ("volume", serde_json::Value::Null),
-        ("pending", serde_json::json!({"env": {"INJECTED": "value"}})),
+        ("pending", serde_json::json!({"cmd": ["injected"]})),
         (
             "pending",
             serde_json::json!({"size": {"vcpus": 0, "memory_mb": 0}}),

@@ -345,7 +345,7 @@ impl Manager {
         Ok(self.view(entry))
     }
 
-    pub(in crate::machine) async fn update_assigned_stopped_size(
+    pub(in crate::machine) async fn update_assigned_stopped_spec(
         &self,
         entry: &Arc<Entry>,
         req: api::UpdateMachineRequest,
@@ -353,12 +353,12 @@ impl Manager {
     ) -> Result<api::Machine, MError> {
         let size = req.spec.size;
         let image = req.spec.image.clone();
+        let env = req.spec.env.clone();
         let requested_volume = req.spec.volume;
         let disk_limits = req.disk_limits.clone();
-        if size.is_none() && image.is_none() && requested_volume.is_none()
+        if size.is_none() && image.is_none() && env.is_none() && requested_volume.is_none()
             || req.spec.entrypoint.is_some()
             || req.spec.cmd.is_some()
-            || req.spec.env.is_some()
             || req.spec.files.is_some()
             || req.spec.ports.is_some()
             || req.spec.restart.is_some()
@@ -371,7 +371,7 @@ impl Manager {
             || req.probes.is_some()
         {
             return Err(MError::Conflict(
-                "assigned updates currently journal stopped size changes only".into(),
+                "assigned stopped updates accept image, env, size, volume and disk limits with size only".into(),
             ));
         }
         req.spec.check().map_err(invalid)?;
@@ -390,7 +390,7 @@ impl Manager {
             && record.assigned_run.is_some())
         {
             return Err(MError::BadState(
-                "assigned size update requires a stopped assigned machine".into(),
+                "assigned spec update requires a stopped assigned machine".into(),
             ));
         }
         let current: Current = self
@@ -413,7 +413,7 @@ impl Manager {
                 && existing.is_none())
         {
             return Err(MError::Conflict(
-                "assigned size update requires the exact settled run".into(),
+                "assigned spec update requires the exact settled run".into(),
             ));
         }
         self.check_run_creation_authority(&current)
@@ -460,6 +460,9 @@ impl Manager {
             image: image
                 .clone()
                 .or_else(|| record.pending.as_ref().and_then(|p| p.image.clone())),
+            env: env
+                .clone()
+                .or_else(|| record.pending.as_ref().and_then(|p| p.env.clone())),
             size: size.or_else(|| record.pending.as_ref().and_then(|p| p.size)),
             volume: growth.map(|(_, to)| api::VolumeSize { size_gb: to }),
             ..Default::default()
@@ -474,6 +477,7 @@ impl Manager {
                 source_record = existing.source_record.as_ref().clone();
                 source_current_sha256 = existing.source_current_sha256.clone();
                 change.image = image.or(existing.change.image.clone());
+                change.env = env.or(existing.change.env.clone());
                 change.size = size.or(existing.change.size);
                 change.volume = growth
                     .map(|(_, to)| api::VolumeSize { size_gb: to })

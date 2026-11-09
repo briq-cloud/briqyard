@@ -3,6 +3,7 @@ use super::*;
 mod legacy545;
 mod public_lifecycle;
 mod recovery;
+mod stopped_spec;
 mod terminal;
 
 #[test]

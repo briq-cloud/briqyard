@@ -15,7 +15,7 @@ run is still active.
 ## Decisions
 
 - **Journal the provider's stopped resize as one transition.** A stopped PATCH may combine
-  image, size, disk limits and data-volume growth. The durable update intent records the
+  image, the complete environment, size, disk limits and data-volume growth. The durable update intent records the
   complete pending target; image resolution and root replacement are separately replayable
   under that intent. A running volume-only PATCH grows the data disk immediately and marks
   the filesystem growth pending for the next cold start.
@@ -34,7 +34,7 @@ run is still active.
   sync the machine directory. A failure retains the existing intent and quota reservation.
   One predecessor is then sufficient; no history chain is needed. Both target and
   predecessor preserve source ownership, creation, workload and backing bindings, allowing
-  only pending image/size/volume, event versions, disk limits and data-volume size growth.
+  only pending image/env/size/volume, event versions, disk limits and data-volume size growth.
 - **Treat volume growth as an idempotent external side effect.** Recovery must inspect
   the existing zvol size and either finish growth to the journaled target or retain the
   intent on mismatch. A command error alone cannot establish whether growth occurred.
@@ -84,3 +84,14 @@ and the next-run chain. The old root remains available until the consumed update
 run authority are durable, then normal snapshot tidying retires it. This does not establish
 warm-pool enablement or native qualification. Ordinary `pending` fields alone are not
 sufficient evidence for volume or image changes.
+
+## Stopped environment replacement
+
+A stopped assigned machine accepts `env` with or without an image or resource change.
+It replaces the complete environment, including an empty map to clear it. Omission
+keeps the existing pending environment. The same update journal binds the full target
+to the settled run; coalescing, cancellation and uncertain writes use its existing
+predecessor recovery. PATCH never starts the machine or changes its assignment, launch
+identity, endpoints or data volume. The next explicit start consumes the environment
+through `apply_pending`, invalidating saved memory and booting cold. Running environment
+updates remain refused.

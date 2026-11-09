@@ -207,10 +207,13 @@ impl UpdateIntent {
                 .as_ref()
                 .is_some_and(|earlier| earlier.pending.as_ref().is_some_and(|p| p.image.is_some()));
         anyhow::ensure!(
-            (pending_size || volume_change || self.change.image.is_some() || canceled_image)
+            (pending_size
+                || volume_change
+                || self.change.image.is_some()
+                || self.change.env.is_some()
+                || canceled_image)
                 && self.change.entrypoint.is_none()
                 && self.change.cmd.is_none()
-                && self.change.env.is_none()
                 && self.change.files.is_none()
                 && self.change.ports.is_none()
                 && self.change.restart.is_none()
@@ -266,7 +269,6 @@ impl UpdateIntent {
             anyhow::ensure!(
                 pending.entrypoint.is_none()
                     && pending.cmd.is_none()
-                    && pending.env.is_none()
                     && pending.files.is_none()
                     && pending.ports.is_none()
                     && pending.restart.is_none()
