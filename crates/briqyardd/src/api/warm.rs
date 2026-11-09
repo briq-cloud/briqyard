@@ -1,5 +1,14 @@
 use super::*;
 
+pub(super) async fn warm_catalog_eligibility(
+    State(st): S,
+) -> Result<Json<api::WarmCatalogEligibility>, AppError> {
+    if st.token.is_empty() {
+        return Err(MError::Conflict("configured API authentication is required".into()).into());
+    }
+    Ok(Json(st.mgr.warm_catalog_eligibility().await))
+}
+
 pub(super) async fn warm_catalog(
     State(st): S,
     Path(namespace): Path<String>,

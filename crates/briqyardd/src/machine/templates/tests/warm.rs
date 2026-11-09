@@ -315,6 +315,41 @@ async fn paused_adoption_keeps_identity_and_claim_retry_survives_restart_and_des
 }
 
 #[tokio::test]
+async fn maintenance_closed_pool_destroyed_claim_is_history_not_upgrade_authority() {
+    let (h, _) = pool(1).await;
+    fill(&h).await;
+    let made =
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "old-request"))
+            .await
+            .unwrap();
+    h.m.delete_warm_pool("t1", "tools").await.unwrap();
+    h.m.warm_step().await;
+    assert!(
+        !h.m.warm_catalog_eligibility().await.eligible,
+        "live claimed destination still owns state"
+    );
+    h.m.destroy(&made.id, None).await.unwrap();
+    h.m.warm_step().await;
+    let view = h.m.warm_catalog_eligibility().await;
+    assert!(view.eligible, "{:?}", view.reason);
+    assert_eq!(view.counts.unwrap().pool_claims, 0);
+    let stored: serde_json::Value =
+        h.m.inner
+            .store
+            .list::<serde_json::Value>("warm-pools")
+            .unwrap()
+            .pop()
+            .unwrap();
+    assert_eq!(stored["claims"].as_object().unwrap().len(), 1);
+    assert_eq!(stored["claims"]["old-request"]["machine"], made.id);
+    assert!(matches!(
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "old-request"))
+            .await,
+        Err(MError::Conflict(_))
+    ));
+}
+
+#[tokio::test]
 async fn quota_refusal_and_drain_keep_full_reservations_without_cold_fallback() {
     let (h, _) = pool(1).await;
     let e = fill(&h).await;

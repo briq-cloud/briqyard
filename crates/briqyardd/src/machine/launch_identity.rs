@@ -246,11 +246,11 @@ impl Manager {
     }
 
     /// The current daemon enforces compatibility even if the installer is older.
-    /// Hold namespace admission closed from this check through process handover.
+    /// Hold warm and namespace admission closed from this check through process handover.
     pub async fn handover_admission(
         &self,
         executable: &Path,
-    ) -> Result<tokio::sync::RwLockWriteGuard<'_, ()>> {
+    ) -> Result<super::maintenance::HandoverAdmission<'_>> {
         self.handover_admission_until(
             executable,
             tokio::time::Instant::now() + Duration::from_secs(5),
@@ -262,25 +262,14 @@ impl Manager {
         &self,
         executable: &Path,
         deadline: tokio::time::Instant,
-    ) -> Result<tokio::sync::RwLockWriteGuard<'_, ()>> {
-        let admission = tokio::time::timeout_at(deadline, self.inner.namespace_lifecycle.write())
-            .await
-            .context("namespace admission did not settle before handover deadline")?;
-        if !self.inner.launch_holds.lock().unwrap().is_empty() {
-            let probe = tokio::process::Command::new(executable)
-                .arg("state-capabilities")
-                .stdin(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .output();
-            let output = tokio::time::timeout_at(deadline, probe)
-                .await
-                .context("replacement daemon compatibility probe timed out")??;
-            anyhow::ensure!(
-                output.status.success() && output.stdout == b"launch-identity-v1\n",
-                "replacement daemon cannot preserve launch allocations; handover refused"
-            );
-        }
+    ) -> Result<super::maintenance::HandoverAdmission<'_>> {
+        let admission = self.warm_maintenance_admission_until(deadline).await?;
+        let eligibility = self.warm_catalog_eligibility_locked(deadline);
+        anyhow::ensure!(
+            eligibility.eligible,
+            "warm catalog maintenance refused: {:?}",
+            eligibility.reason
+        );
         crate::assignment_compatibility::check_required_candidate(
             &self.inner.cfg.state_dir(),
             executable,
@@ -288,6 +277,27 @@ impl Manager {
         )
         .await?;
         Ok(admission)
+    }
+
+    pub(in crate::machine) fn maintenance_launch_holds(
+        &self,
+        budget: &mut crate::store::InspectionBudget,
+    ) -> Result<usize> {
+        let holds = self.inner.store.inspect::<Hold>(HOLDS, budget)?;
+        let mut durable = BTreeMap::new();
+        for (key, hold) in holds {
+            anyhow::ensure!(
+                api::valid_id(&hold.machine) && key == hold.machine,
+                "maintenance launch key differs"
+            );
+            hold.identity.check(&self.inner.cfg)?;
+            durable.insert(hold.machine, hold.identity);
+        }
+        anyhow::ensure!(
+            *self.inner.launch_holds.lock().unwrap() == durable,
+            "maintenance launch cache differs"
+        );
+        Ok(durable.len())
     }
 
     pub(in crate::machine) fn check_durable_launch_hold(

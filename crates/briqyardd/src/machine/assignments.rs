@@ -75,6 +75,41 @@ impl State {
 }
 
 impl Manager {
+    pub(in crate::machine) fn maintenance_assignments(
+        &self,
+        budget: &mut crate::store::InspectionBudget,
+    ) -> Result<usize> {
+        let receipts = self.inner.store.inspect::<Receipt>(REQUESTS, budget)?;
+        for (key, receipt) in &receipts {
+            receipt.check()?;
+            anyhow::ensure!(receipt.key() == *key, "maintenance receipt key differs");
+        }
+        let intents = self.inner.store.inspect::<model::Intent>(INTENTS, budget)?;
+        let state = self.inner.assignments.lock().unwrap();
+        anyhow::ensure!(
+            state.receipts == receipts,
+            "maintenance receipt cache differs"
+        );
+        anyhow::ensure!(
+            state.slots.len() == receipts.len()
+                && receipts
+                    .iter()
+                    .all(|(key, r)| state.slots.get(&r.machine) == Some(key)),
+            "maintenance receipt slots differ"
+        );
+        let mut pending = state.pending.clone();
+        pending.extend(state.targets.keys().cloned());
+        for (key, intent) in intents {
+            intent.check()?;
+            anyhow::ensure!(
+                intent.receipt.key() == key,
+                "maintenance intent key differs"
+            );
+            pending.insert(intent.receipt.machine);
+        }
+        Ok(pending.len())
+    }
+
     fn destination_receipt(&self, namespace: &str, request: &str) -> Result<Option<Receipt>> {
         let key = key(namespace, request);
         let mut state = self.inner.assignments.lock().unwrap();

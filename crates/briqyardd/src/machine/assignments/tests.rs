@@ -5,6 +5,60 @@ mod live;
 mod publication;
 use crate::machine::templates::tests::launch_identity::prepared_with;
 
+#[tokio::test]
+async fn maintenance_terminal_receipt_history_is_allowed_but_pending_cache_is_not() {
+    let h = crate::machine::tests::harness("10.64.0.0/22", 4096).await;
+    let receipt = Receipt {
+        schema: 1,
+        namespace: "t1".into(),
+        request_id: "request-one".into(),
+        create_sha256: "a".repeat(64),
+        machine: "m_owned".into(),
+    };
+    h.m.inner
+        .store
+        .put_durable(REQUESTS, &receipt.key(), &receipt)
+        .unwrap();
+    h.m.inner
+        .assignments
+        .lock()
+        .unwrap()
+        .remember(&receipt, false)
+        .unwrap();
+    assert!(h.m.warm_catalog_eligibility().await.eligible);
+    // Compatibility history remains after successful work; no cleanup is needed.
+    assert!(crate::assignment_compatibility::required(&h.m.inner.cfg.state_dir()).unwrap());
+    h.m.inner
+        .assignments
+        .lock()
+        .unwrap()
+        .pending
+        .insert(receipt.machine.clone());
+    assert_eq!(
+        h.m.warm_catalog_eligibility()
+            .await
+            .counts
+            .unwrap()
+            .pending_assignments,
+        1
+    );
+    h.m.inner.assignments.lock().unwrap().pending.clear();
+    h.m.inner
+        .assignments
+        .lock()
+        .unwrap()
+        .targets
+        .insert(receipt.machine.clone(), crate::machine::tests::record());
+    assert!(!h.m.warm_catalog_eligibility().await.eligible);
+    assert!(h
+        .m
+        .inner
+        .store
+        .get::<Receipt>(REQUESTS, &receipt.key())
+        .unwrap()
+        .is_some());
+}
+
 pub(in crate::machine) async fn fixture() -> (
     crate::machine::tests::Harness,
     Arc<Entry>,

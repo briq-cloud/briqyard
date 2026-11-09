@@ -69,6 +69,49 @@ pub(in crate::machine) fn fingerprint(artifact: &templates::CloneArtifact) -> Re
 }
 
 impl Manager {
+    pub(in crate::machine) fn maintenance_pools(
+        &self,
+        budget: &mut crate::store::InspectionBudget,
+        records: &BTreeMap<String, Record>,
+        live: &BTreeMap<String, Record>,
+    ) -> Result<(usize, usize, usize)> {
+        let pools = self.inner.store.inspect::<Pool>(POOLS, budget)?;
+        let mut desired = 0;
+        let mut claims = 0;
+        for (stored_key, pool) in &pools {
+            anyhow::ensure!(
+                key(&pool.namespace, &pool.name)? == *stored_key
+                    && fingerprint(&pool.artifact)? == pool.fingerprint,
+                "maintenance pool identity differs"
+            );
+            desired += usize::from(pool.desired);
+            let mut destinations = std::collections::HashSet::new();
+            for (request, claim) in &pool.claims {
+                anyhow::ensure!(
+                    api::valid_id(request)
+                        && api::valid_id(&claim.machine)
+                        && api::valid_name(&claim.name)
+                        && destinations.insert(&claim.machine),
+                    "maintenance claim receipt invalid"
+                );
+                // These receipts never expire: a destroyed destination must not make
+                // the old request consume another slot. History is not live authority.
+                if records.contains_key(&claim.machine) || live.contains_key(&claim.machine) {
+                    claims += 1;
+                }
+            }
+        }
+        let cached = self.inner.warm_pool_cache.lock().unwrap();
+        match cached.as_ref() {
+            Some(cached) => anyhow::ensure!(
+                serde_json::to_value(cached)? == serde_json::to_value(&pools)?,
+                "maintenance pool cache differs"
+            ),
+            None => anyhow::ensure!(pools.is_empty(), "maintenance pools unobserved"),
+        }
+        Ok((pools.len(), desired, claims))
+    }
+
     pub fn warm_pool_profiles(&self) -> Vec<String> {
         if self.inner.cfg.templates.warm_pools
             && self.inner.vmm.paused_slots_supported()

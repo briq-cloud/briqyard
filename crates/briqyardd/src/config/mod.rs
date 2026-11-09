@@ -4,6 +4,7 @@ use crate::{fc, netw};
 use anyhow::{bail, Context, Result};
 use briqyard_api as api;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -15,9 +16,14 @@ pub use sandbox::SandboxRecipe;
 mod warm;
 pub use warm::*;
 
+pub use api::LoadedConfigIdentity;
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Derived at load time; cannot be supplied by configuration.
+    #[serde(skip)]
+    pub loaded_identity: LoadedConfigIdentity,
     /// The API's address. Served over TLS unless it is loopback or `api_tls` is false.
     pub listen: String,
     /// TLS on the API with the daemon's own certificate (`<data_dir>/api-cert.pem`, ADR
@@ -110,6 +116,7 @@ pub use sections::*;
 impl Default for Config {
     fn default() -> Self {
         Self {
+            loaded_identity: LoadedConfigIdentity::Unobserved,
             listen: "127.0.0.1:7420".into(),
             api_tls: true,
             token: String::new(),
@@ -154,12 +161,19 @@ impl Config {
     /// Reads a YAML file over the defaults. An empty path is the defaults.
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let cfg = match path {
-            None => Self::default(),
+            None => Self {
+                loaded_identity: LoadedConfigIdentity::Defaults,
+                ..Self::default()
+            },
             Some(p) => {
-                let text = std::fs::read_to_string(p)
-                    .with_context(|| format!("read config {}", p.display()))?;
-                serde_yaml::from_str(&text)
-                    .with_context(|| format!("parse config {}", p.display()))?
+                let bytes =
+                    std::fs::read(p).with_context(|| format!("read config {}", p.display()))?;
+                let mut cfg: Self = serde_yaml::from_slice(&bytes)
+                    .with_context(|| format!("parse config {}", p.display()))?;
+                cfg.loaded_identity = LoadedConfigIdentity::File {
+                    sha256: hex::encode(Sha256::digest(&bytes)),
+                };
+                cfg
             }
         };
         cfg.validate()?;
@@ -283,6 +297,48 @@ impl Config {
 mod tests {
     use super::*;
     use crate::config::testutil::load;
+
+    #[test]
+    fn loaded_identity_binds_the_parsed_bytes_and_survives_path_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let before = b"listen: 127.0.0.1:7421\ntoken: synthetic-private-value\n";
+        std::fs::write(&path, before).unwrap();
+        let cfg = Config::load(Some(&path)).unwrap();
+        std::fs::write(&path, b"listen: 127.0.0.1:7422\n").unwrap();
+        assert_eq!(cfg.listen, "127.0.0.1:7421");
+        assert_eq!(
+            cfg.loaded_identity,
+            LoadedConfigIdentity::File {
+                sha256: hex::encode(Sha256::digest(before)),
+            }
+        );
+        let projection = serde_json::to_string(&cfg.loaded_identity).unwrap();
+        assert!(!projection.contains("synthetic-private-value"));
+        assert!(!projection.contains("config.yaml"));
+        assert_ne!(
+            cfg.loaded_identity,
+            Config::load(Some(&path)).unwrap().loaded_identity
+        );
+    }
+
+    #[test]
+    fn defaults_and_unobserved_config_have_distinct_identities() {
+        assert_eq!(
+            Config::default().loaded_identity,
+            LoadedConfigIdentity::Unobserved
+        );
+        assert_eq!(
+            Config::load(None).unwrap().loaded_identity,
+            LoadedConfigIdentity::Defaults
+        );
+    }
+
+    #[test]
+    fn configuration_cannot_supply_a_loaded_identity() {
+        assert!(load("loaded_identity: {source: defaults}\n").is_err());
+        assert!(load("listen: invalid\n").is_err());
+    }
 
     #[test]
     fn defaults() {

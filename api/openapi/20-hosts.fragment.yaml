@@ -1,3 +1,25 @@
+    WarmCatalogEligibility:
+      type: object
+      required: [observation, eligible, reason, counts]
+      properties:
+        observation: { $ref: "#/components/schemas/RuntimeObservation" }
+        eligible: { type: boolean }
+        reason: { type: string, enum: [eligible, busy, recovery_unresolved, state_unknown, outstanding_warm_state] }
+        counts:
+          type: object
+          nullable: true
+          description: "Complete fixed counts; null if admission or inspection is incomplete. Warm machine and authority counts include live or durable ownership; no cleanup authority."
+          required: [pools, desired_slots, pool_claims, warm_machines, launch_holds, launch_transitions, warm_names, pending_assignments, run_authorities]
+          properties:
+            pools: { type: integer, minimum: 0 }
+            desired_slots: { type: integer, minimum: 0 }
+            pool_claims: { type: integer, minimum: 0, description: "Outstanding claim receipts with a live or durable destination; validated historical receipts excluded" }
+            warm_machines: { type: integer, minimum: 0 }
+            launch_holds: { type: integer, minimum: 0 }
+            launch_transitions: { type: integer, minimum: 0 }
+            warm_names: { type: integer, minimum: 0 }
+            pending_assignments: { type: integer, minimum: 0 }
+            run_authorities: { type: integer, minimum: 0 }
     Namespace:
       type: object
       properties:
@@ -342,6 +364,54 @@
           allOf: [{ $ref: "#/components/schemas/Machine" }]
           description: "with `boot_failed`, the machine left in state `error`; with `conflict` on a stale `If-Match`, the machine as it is"
         oldest: { type: integer, description: "with `gone`: the oldest event seq kept" }
+    LoadedConfigIdentity:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [source]
+          properties:
+            source: { type: string, enum: [unobserved, defaults] }
+        - type: object
+          additionalProperties: false
+          required: [source, sha256]
+          properties:
+            source: { type: string, enum: [file] }
+            sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+    RuntimeObservation:
+      type: object
+      required: [host_id, version, host_boot_id, incarnation, config]
+      properties:
+        host_id: { type: string }
+        version: { type: string }
+        host_boot_id: { type: string, nullable: true, description: "Host boot at observation, separate from the sealed artifact's boot identity" }
+        incarnation: { type: string, pattern: '^[0-9a-f]{32}$', description: "Fresh for each daemon manager, retained across its observations" }
+        config: { $ref: "#/components/schemas/LoadedConfigIdentity" }
+    SealedSandboxRecipe:
+      type: object
+      required: [observation, source_machine, namespace, snapshot, generation, profile, source_host, image, image_digest, image_config_digest, init_sha256, boot_identity_sha256, size, root_disk_gb, data_device]
+      properties:
+        observation: { $ref: "#/components/schemas/RuntimeObservation" }
+        source_machine: { type: string }
+        namespace: { type: string }
+        snapshot: { type: string, description: "Exact sealed snapshot ID, never a name alias" }
+        generation: { type: string }
+        profile: { type: string, enum: [sandbox-ready-v1] }
+        source_host: { type: string, description: "Intrinsic source host identity from the validated artifact" }
+        image: { type: string }
+        image_digest: { type: string }
+        image_config_digest: { type: string }
+        init_sha256: { type: string }
+        boot_identity_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        size: { $ref: "#/components/schemas/Size" }
+        root_disk_gb: { type: integer, minimum: 1, description: "From the validated artifact recipe" }
+        data_device:
+          type: object
+          nullable: true
+          required: [bytes, logical_sector_bytes, drive_id]
+          properties:
+            bytes: { type: integer, minimum: 1073741824 }
+            logical_sector_bytes: { type: integer, enum: [512] }
+            drive_id: { type: string, enum: [data] }
     PutWarmPoolRequest:
       type: object
       additionalProperties: false

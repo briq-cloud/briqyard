@@ -235,6 +235,7 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
     let backups = Backups::open(&cfg.backup, &store).unwrap();
     let m = Manager {
         inner: Arc::new(Inner {
+            observation_incarnation: hex::encode(rand::random::<[u8; 16]>()),
             stats: Stats::default(),
             warm_lock: tokio::sync::RwLock::new(()),
             sandbox_create_lock: tokio::sync::RwLock::new(()),
