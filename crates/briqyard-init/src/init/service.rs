@@ -118,8 +118,11 @@ pub(super) fn outside_workload(pid: i32, status: &str, cgroup: &str) -> Option<S
             .find_map(|l| l.strip_prefix(key))
             .map(str::trim)
     };
-    let ppid: i32 = field("PPid:")?.parse().ok()?;
     let name = field("Name:").unwrap_or("?");
+    // A status that cannot be read counts as foreign: refuse rather than guess.
+    let Some(ppid) = field("PPid:").and_then(|v| v.parse::<i32>().ok()) else {
+        return Some(format!("{name}[{pid}]"));
+    };
     if pid == 1 || pid == 2 || ppid == 2 || ppid == 0 {
         return None;
     }
@@ -127,9 +130,10 @@ pub(super) fn outside_workload(pid: i32, status: &str, cgroup: &str) -> Option<S
         return None;
     }
     let inside = cgroup.lines().any(|l| {
-        l.rsplit(':')
-            .next()
-            .is_some_and(|p| p.trim_start_matches('/').starts_with("briqyard-workload"))
+        l.rsplit(':').next().is_some_and(|p| {
+            let p = p.trim_start_matches('/');
+            p == "briqyard-workload" || p.starts_with("briqyard-workload/")
+        })
     });
     (!inside).then(|| format!("{name}[{pid}]"))
 }
@@ -581,5 +585,19 @@ mod tests {
         assert!(outside_workload(1, &st("init", 0, "S (sleeping)"), root).is_none());
         assert!(outside_workload(9, &st("kworker", 2, "I (idle)"), root).is_none());
         assert!(outside_workload(41, &st("sh", 1, "Z (zombie)"), root).is_none());
+        assert!(outside_workload(
+            40,
+            &st("app", 1, "S (sleeping)"),
+            "0::/briqyard-workload/sub\n"
+        )
+        .is_none());
+        assert!(outside_workload(
+            40,
+            &st("app", 1, "S (sleeping)"),
+            "0::/briqyard-workload2\n"
+        )
+        .is_some());
+        assert!(outside_workload(40, "Name:\tapp\nState:\tS\n", inside).is_some());
+        assert!(outside_workload(40, "Name:\tapp\nPPid:\tx\n", inside).is_some());
     }
 }
