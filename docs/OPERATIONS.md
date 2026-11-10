@@ -222,7 +222,7 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `conditions.disk_free_pct` | `10` | `disk_pressure` when the pool's free space is under this share of its size: the fleet places nothing new, and unused images go, oldest first, until it is back. `0`: never |
 | `console_max_mb` | `64` | A running machine's console is rotated past this size; one previous file is kept |
 | `boot_timeout_sec` | `120` | How long a guest may take to answer after its process starts |
-| `boots_at_once` | half the threads, at least 2 | Boots run at once; the rest wait their turn, each with the whole timeout |
+| `boots_at_once` | 1.5 × the threads, at least 2 | Boots run at once; the rest wait their turn, each with the whole timeout |
 | `backup.store` | none | `s3://bucket/prefix` or `file:///path`; set, `POST /v1/machines/{id}/backups` works. Credentials `BRIQYARD_S3_ACCESS_KEY` / `BRIQYARD_S3_SECRET_KEY` in `/etc/briqyard/briqyardd.env` (root's, `0600`), read at the next start: change them with a hand-over, never `systemctl restart` (ADR 0041) |
 | `backup.endpoint`, `backup.region` | none | The S3 endpoint (`https://s3.fr-par.scw.cloud`) and region |
 | `backup.keep_snapshots` | `1` | Backup snapshots kept on the host per machine (the newest is the base of the next incremental send) |

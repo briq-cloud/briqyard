@@ -48,11 +48,11 @@ impl Manager {
         let boots_at_once = if cfg.boots_at_once > 0 {
             cfg.boots_at_once
         } else {
-            (std::thread::available_parallelism()
-                .map(|n| n.get() as u32)
-                .unwrap_or(4)
-                / 2)
-            .max(2)
+            default_boots_at_once(
+                std::thread::available_parallelism()
+                    .map(|n| n.get() as u32)
+                    .unwrap_or(4),
+            )
         };
         let backups = Backups::open(&cfg.backup, &store)?;
         let (endpoint_events, _) = broadcast::channel(64);
@@ -927,6 +927,13 @@ pub(super) fn default_memory_mb(host_mb: u32, reserved_mb: u32, arc_max_mb: u32)
 /// (`capacity.reserved_threads`), at least one thread's.
 pub(super) fn default_vcpus(threads: u32, reserved: u32) -> u32 {
     threads.saturating_sub(reserved).max(1) * 4
+}
+
+/// Boots at once when the configuration does not say: one and a half times the hardware
+/// threads, at least 2 (ADR 0129). A boot does not keep a thread busy all the way through, so a
+/// few more boots than threads keep the CPUs full; many more only share them.
+pub(super) fn default_boots_at_once(threads: u32) -> u32 {
+    (threads.saturating_mul(3) / 2).max(2)
 }
 
 /// The ZFS cache's ceiling (`zfs_arc_max`, the bootstrap sets it), in MB; 0 when it is the

@@ -90,7 +90,7 @@ pub struct Config {
     /// How long a guest may take to answer after its process starts before the start fails.
     pub boot_timeout_sec: u64,
     /// Boots run at once; the rest wait their turn, each with the whole timeout once it
-    /// starts. 0: half the hardware threads, at least 2.
+    /// starts. 0: one and a half times the hardware threads, at least 2 (ADR 0129).
     pub boots_at_once: u32,
     /// Sleep with a memory snapshot instead of a stop, so a wake resumes in well under a
     /// second. Costs the machine's memory in disk while it sleeps.
