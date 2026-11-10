@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.4 — 2026-11-10
+
+### Upgrade notes
+
+- Stopped updates accept an optional `probes` object that atomically replaces the stopped machine's probes with its image and environment; an empty object clears them, and omission preserves them. Older hosts refuse the field as unknown, so callers must require 0.2.4 before sending it.
+- `FileRequest` v1 commitments are defined but dormant: no routes, grants, admission or guest-protocol changes are active.
+
+### Features
+
+- define scoped file request commitments (#215) ([90ae6bce](https://github.com/briq-cloud/briqyard/commit/90ae6bcef67ce22d0a59be0cfd5bcde3c4dc7916))
+
+- atomically replace probes in stopped updates (#216) ([e703de67](https://github.com/briq-cloud/briqyard/commit/e703de6763684cd4b7b8df9c6b9d13282fbf80e8))
+
+### Fixes
+
+- verify streamed upload acknowledgements against the host-computed byte count and SHA-256 (#214) ([1f7db636](https://github.com/briq-cloud/briqyard/commit/1f7db63674364a996f6da767a5f7d146b5536905))
+
 ## 0.2.3 — 2026-11-10
 
 ### Upgrade notes
