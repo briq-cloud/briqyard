@@ -74,6 +74,9 @@ impl Manager {
             ..Default::default()
         };
         spec.check().map_err(invalid)?;
+        if let Some(probes) = &req.probes {
+            probes.check().map_err(invalid)?;
+        }
         // Canonical ordered environment and CAS are bound to this nonce. This digest
         // stays inside the private record because an environment may have low entropy.
         let commitment = hex::encode(Sha256::digest(
@@ -100,6 +103,9 @@ impl Manager {
         }
         let host_boot_id = self.stopped_update_authority(&e, &r)?;
         let mut next = r.clone();
+        if let Some(probes) = req.probes.clone() {
+            next.probes = probes;
+        }
         next.pending = update::pending_after(&next, spec);
         next.pending_since = next
             .pending

@@ -445,6 +445,7 @@
         claim_nonce: { type: string, minLength: 1, maxLength: 64, pattern: "^[a-z0-9_-]+$" }
         image: { type: string, minLength: 1 }
         env: { type: object, additionalProperties: { type: string }, description: complete replacement environment }
+        probes: { $ref: "#/components/schemas/Probes", description: "Omitted preserves probes; an empty object clears them" }
     StoppedUpdateReceipt:
       type: object
       additionalProperties: false

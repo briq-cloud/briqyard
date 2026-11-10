@@ -394,6 +394,9 @@ pub fn check_snapshot_name(name: &str) -> Result<(), String> {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoppedUpdateRequest {
+    /// Omitted preserves the probes; an empty object clears them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probes: Option<Probes>,
     pub claim_nonce: String,
     pub image: String,
     pub env: BTreeMap<String, String>,

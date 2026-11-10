@@ -116,6 +116,7 @@ async fn stopped_update_sync_failure_fences_scheduler_record_writes() {
     let e = h.m.own_entry(&m.id).unwrap();
     let r = e.snapshot();
     let req = api::StoppedUpdateRequest {
+        probes: None,
         claim_nonce: "n_scheduler".into(),
         image: r.image,
         env: r.env,
