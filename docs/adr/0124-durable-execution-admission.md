@@ -697,6 +697,13 @@ elapsed authority. It then publishes the exact live lease and releases the admis
 guard, allowing continuation and revocation while output is collected. Legacy
 operations keep their existing operation, fixed deadline and lock scope.
 
+The fixed command deadline retains the signed wall expiry and the initial
+uncertainty-narrowed monotonic deadline separately. Each fresh check subtracts
+its own clock uncertainty once from the signed expiry, then takes the earlier
+wall or retained monotonic bound. Storing an already-narrowed wall expiry would
+subtract uncertainty twice and terminate quiet commands prematurely. A smaller
+later uncertainty cannot extend the original monotonic authorization.
+
 Guest upgrades do not replace an init already running in an adopted microVM.
 A `pong` therefore advertises `exec_renewable_v1` explicitly, defaulting to false
 when omitted. Streaming support or a daemon version is insufficient. The trusted
