@@ -140,31 +140,8 @@ pub(super) fn router_with_continuation(
     clock: Arc<dyn ClockSource>,
     continuation: Option<Arc<dyn renewal::ContinuationProvider>>,
 ) -> Result<Router, &'static str> {
-    build_router(
-        issuer,
-        host,
-        host_id,
-        credentials,
-        administrator,
-        trust,
-        clock,
-        continuation,
-        false,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_router(
-    issuer: briqyard_api::execution::DurableIssuer,
-    host: HostTransport,
-    host_id: String,
-    credentials: Credentials,
-    administrator: &str,
-    trust: TrustConfig,
-    clock: Arc<dyn ClockSource>,
-    continuation: Option<Arc<dyn renewal::ContinuationProvider>>,
-    renewable: bool,
-) -> Result<Router, &'static str> {
+    // Only explicitly provisioned callbacks negotiate renewable operation authority.
+    let renewable = continuation.is_some();
     if host_id.is_empty()
         || host_id != host.host_id()
         || credentials.host_administrator != host.administrator_token()
@@ -185,7 +162,7 @@ fn build_router(
         trust,
         clock,
         continuation,
-        renewable, // Production construction always passes false.
+        renewable,
         live: Arc::new(LiveOperations::default()),
     });
     Ok(Router::new()

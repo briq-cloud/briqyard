@@ -759,9 +759,10 @@ accepts only `{state: "continued" | "recovered" | "not-needed"}`. Source checks,
 committed idle authorization and central signing remain the callback service's
 responsibility; unsigned callback success itself never extends a host timer.
 
-Provisioning defaults to no callback. The production renewable capability remains
-false pending independent review, Linux lifecycle/crash/clock qualification,
-compatibility evidence and CI. Mac checks do not supply native evidence.
+Provisioning defaults to no callback and refuses renewable issuance in that state.
+The production constructor negotiates renewal only with an explicitly configured,
+validated callback. Deployment requires independent review, Linux lifecycle/crash/clock
+qualification, compatibility evidence and CI. Mac checks do not supply native evidence.
 
 
 ## Activation observation and authorization clocks
@@ -781,11 +782,11 @@ renewable capability. Neither reads or changes a journal. Missing or stale local
 clock qualification refuses the request. A signer may conservatively use these
 lower bounds; observation alone never extends signed authorization freshness.
 
-The existing disposable native proof includes a test-only qualified Service,
-central callback reentry, exact host protection and continuation ACK, a quiet
+The existing disposable native proof uses the production Service constructor with
+an explicitly injected callback. It covers central callback reentry, exact host
+protection and continuation ACK, a quiet
 60-second guest timeout across the original quota window, one-unit quota budgets,
 status-only duplicates, source refusal/lease expiry and active revocation. It also
-runs the monotonic activation and completion-owner regressions. Normal Service
-construction keeps renewable issuance false. A compiled fixture or Mac checks do
-not satisfy native qualification; production activation requires separately
-reviewed native evidence.
+runs the monotonic activation and completion-owner regressions. There is no separate
+test-only capability override. A compiled fixture or Mac checks do not satisfy native
+qualification; deployment with renewal requires separately reviewed native evidence.

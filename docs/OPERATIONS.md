@@ -1329,8 +1329,12 @@ be separate from the credentials bundle and differ from all six credential value
 The callback receives only `{operation_id, previous_sequence}`; its strict success
 reply is `{state: "continued" | "recovered" | "not-needed"}`. Requests have a
 ten-second deadline and 4 KiB request/reply limits, without redirects or retries.
-Omission preserves legacy execution. Provisioning this callback does not enable
-the renewable capability, which remains disabled pending native qualification.
+Omission preserves legacy execution and refuses renewable issuance. Configuring a
+validated callback enables negotiation of `renewable_exec_v1`; commands still need
+the signed mode, exact installed state and qualified clocks. Install this configuration
+only after the disposable native renewal proof and deployment qualification pass.
+The callback cannot mint or extend authority by returning success: each extension
+still requires the independently verified signed continuation and protection receipt.
 
 Credentials JSON has `host_installer`, `host_execution`, `central_installer`, `gateway`,
 `host_administrator` and `fleet_administrator`. The four scoped values must be distinct

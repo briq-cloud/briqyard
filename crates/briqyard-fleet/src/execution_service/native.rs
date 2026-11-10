@@ -1,4 +1,4 @@
-//! Disposable native fixture only: production construction cannot enable renewal.
+//! Disposable native fixture using the configured production Service constructor.
 use super::*;
 use crate::{config::Execution, execution_host::TrustedHost};
 use anyhow::{ensure, Context, Result};
@@ -271,7 +271,7 @@ async fn renewable_service_callback_host_guest() -> Result<()> {
             Duration::from_secs(85),
         )
         .map_err(|_| anyhow::anyhow!("host transport"))?;
-        let app = build_router(
+        let app = router_with_continuation(
             issuer,
             transport,
             cfg.host_id.clone(),
@@ -290,7 +290,6 @@ async fn renewable_service_callback_host_guest() -> Result<()> {
             },
             Arc::new(briqyard_api::execution::clock::KernelClock),
             Some(central.clone()),
-            true,
         )
         .map_err(anyhow::Error::msg)?;
         *central.app.lock().unwrap() = Some(app.clone());

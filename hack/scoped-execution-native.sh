@@ -107,8 +107,8 @@ S=$(briqyard machine run --namespace "$T" --name sibling --image alpine:3.20 --m
 PHASE=scoped_dispatch
 sudo "$DRIVER" run "$D" "$T" "$M" "$S"
 
-# The production authority always refuses renewable issuance. Only this compiled
-# test fixture may inject the qualified Service capability and central callback.
+# The fixture uses the production Service constructor with its explicitly configured
+# callback. The preceding standalone authority has no callback and remains legacy.
 PHASE=legacy_authority_stop
 AUTHORITY_CHILD=$(sudo cat "$D/authority.pid")
 [[ "$AUTHORITY_CHILD" =~ ^[0-9]+$ ]] || exit 1
