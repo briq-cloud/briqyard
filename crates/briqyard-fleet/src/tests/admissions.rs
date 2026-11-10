@@ -378,6 +378,51 @@ async fn cancellation_is_durable_and_cannot_undo_dispatched_route_or_shared_gate
     );
 }
 
+/// A cancel of an id never seen leaves a tombstone that lasts the replay window, and every
+/// cancel (a repeat too) restarts that window.
+#[tokio::test]
+async fn a_cancel_tombstone_for_an_unknown_id_survives_prune_and_a_repeat_refreshes_it() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    source(&f, &ds[0], "m_seed");
+    let cancel = || async {
+        call(
+            &f.st,
+            "DELETE",
+            &admission_path("fresh", "req_unknown"),
+            "api",
+            None,
+        )
+        .await
+        .0
+    };
+    let at = || {
+        let reg = f.st.reg.lock().unwrap();
+        let a = reg
+            .sandbox_admissions
+            .values()
+            .next()
+            .expect("the tombstone");
+        a.at()
+    };
+    assert_eq!(cancel().await, StatusCode::NO_CONTENT);
+    let first = at().expect("a cancel stamps the tombstone");
+    // Aged by less than the window: still there after a prune, so a late PUT is refused.
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        for a in reg.sandbox_admissions.values_mut() {
+            a.backdate(Duration::hours(23));
+        }
+        reg.prune(Utc::now());
+    }
+    assert_eq!(
+        admit(&f, "fresh", "req_unknown", "m_seed").await.0,
+        StatusCode::CONFLICT
+    );
+    // A repeated cancel refreshes the stamp.
+    assert_eq!(cancel().await, StatusCode::NO_CONTENT);
+    assert!(at().unwrap() >= first);
+}
+
 #[tokio::test]
 async fn admission_authentication_strict_input_and_gateway_hint_fail_closed() {
     let (f, ds) = fleet_with_daemons(1).await;

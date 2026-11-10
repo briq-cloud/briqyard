@@ -249,7 +249,7 @@ pub(super) async fn cancel(
             return Err(conflict("admission already dispatched"));
         }
         let placed = a.kind == Kind::Placement;
-        if !matches!(a.phase, Phase::Cancelled | Phase::Expired) {
+        if a.phase != Phase::Expired {
             a.phase = Phase::Cancelled;
             a.at = Some(chrono::Utc::now());
         }
