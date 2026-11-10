@@ -30,6 +30,10 @@ declared total. A truncated chunk, EOF without the terminal or a mismatched tota
 commits. This one format accepts both known and unknown sizes, without vsock half-close
 semantics. The guest computes SHA-256 while writing and answers `ok` with `size` and
 `sha256` after commit; HTTP answers 200 with those fields as JSON.
+The host independently hashes the streamed body and accepts the acknowledgement only
+when both size and SHA-256 match the sent bytes. Hashing adds constant memory, not a
+whole-file buffer. A mismatched acknowledgement can follow a committed write: report
+failure without reopening or replaying the upload.
 
 GET's ready carries `size`; exactly that many raw bytes follow. An old init answers its
 usual unknown-op error, which names the init and the image-change upgrade path; there
