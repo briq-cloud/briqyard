@@ -206,20 +206,42 @@ pub(super) async fn run_hook(
     let pid = child.id().unwrap_or(0) as i32;
     let mut stderr = child.stderr.take();
     let mut tail: Vec<u8> = vec![];
+    // The hook ends when it exits, not when its stderr closes: a background child may hold
+    // the pipe. Its group is killed then, which closes the pipe, and the rest is drained.
     let outcome = tokio::time::timeout(Duration::from_secs(u64::from(timeout_s)), async {
         let mut chunk = [0u8; 1024];
-        if let Some(e) = stderr.as_mut() {
-            while let Ok(n) = e.read(&mut chunk).await {
-                if n == 0 {
-                    break;
-                }
-                tail.extend_from_slice(&chunk[..n]);
-                if tail.len() > 2 * TAIL {
-                    tail.drain(..tail.len() - TAIL);
-                }
+        let mut open = stderr.is_some();
+        let status = loop {
+            tokio::select! {
+                status = child.wait() => break status,
+                n = async { stderr.as_mut().unwrap().read(&mut chunk).await }, if open => match n {
+                    Ok(n) if n > 0 => {
+                        tail.extend_from_slice(&chunk[..n]);
+                        if tail.len() > 2 * TAIL {
+                            tail.drain(..tail.len() - TAIL);
+                        }
+                    }
+                    _ => open = false,
+                },
             }
+        };
+        let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
+        if let Some(e) = stderr.as_mut() {
+            // A descendant in its own group may still hold the pipe: read what is there.
+            let _ = tokio::time::timeout(Duration::from_secs(1), async {
+                while let Ok(n) = e.read(&mut chunk).await {
+                    if n == 0 {
+                        break;
+                    }
+                    tail.extend_from_slice(&chunk[..n]);
+                    if tail.len() > 2 * TAIL {
+                        tail.drain(..tail.len() - TAIL);
+                    }
+                }
+            })
+            .await;
         }
-        child.wait().await
+        status
     })
     .await;
     let result = match outcome {
