@@ -600,3 +600,73 @@ Host dispatch replies alone have a 64 MiB JSON transport bound. Two 4 MiB stream
 fit even when each control byte expands to six JSON bytes; lossy UTF-8 expands each
 invalid byte to at most three. Requests, installation, metadata and status replies
 keep their 8 MiB bounds. This changes no activation or qualification gate.
+
+## Dormant renewable operation primitives
+
+`limits.execution_mode` optionally names `renewable_exec_v1`. Omission preserves
+legacy signed bytes and deadlines. Null and unknown modes refuse. Execution and
+output modes attenuate independently and must each match the grant; every numeric
+limit is nonincreasing. Renewable guest duration is at most 60 seconds. The existing
+issuer and host dispatch explicitly refuse this mode. No route accepts continuation
+credentials, and these primitives do not activate renewable execution.
+
+The new central-signed token type is `briqyard-execution-continuation+jwt`, with the
+existing Ed25519 header, key roles, token bound and strict decoding. Its claims are:
+
+| Field | Binding or bound |
+| --- | --- |
+| `v, iss, aud, iat, nbf, exp` | Existing version, issuer, audience and qualified interval rules |
+| `checked_at` | Independent source/session authorization; no later than `iat`; `exp <= checked_at + 60` |
+| `previous_sequence, sequence` | Exact retained sequence and its successor; safe integers |
+| `binding` | Exact immutable active operation identity below |
+| `protection` | Exact `InstalledProtection` ACK already persisted by this host; same ownership generation, resource vector and revision; coverage through `exp` |
+
+`ActiveOperationBinding` contains `operation_id`, `admission`, original
+`grant_digest`, `permit_digest`, `request_digest`, `authority`, `authority_epoch`,
+`host_instance`, `ownership`, `ownership_generation`, `policy_revision`,
+`delegation`, `delegation_version`, `principal`, `source`, `team`, `subject`,
+`metadata_revision`, `target`, `resource_set`, `limits`, `guest_timeout_ms`,
+`started_at_ms` and `operation_deadline_ms`. It binds the exact run and frozen
+resource closure. The source's absolute expiry also bounds every lease.
+The guest timeout remains positive and at most 60,000 ms. The immutable operation
+envelope is at most 80,000 ms from consumption: ten seconds for dispatch, sixty for
+the guest and ten for terminal I/O. This envelope is not an authorization lease.
+Continuation cannot change it or extend execution by restarting either timer.
+
+The host journal records a consumed operation only after its exact admission was
+consumed and its initial dispatch was marked. A separate trusted first-frame ACK
+changes it to active. Neither unused reservations nor status polling establish
+activity. Only active operations accept continuation, before the old lease's upper
+clock bound expires, with a strictly higher expiry and exact next sequence. The
+source check time cannot regress. The complete protection ACK must already exist
+before the new sequence and expiry are fsynced. No allocation is read or debited;
+quota-window expiry does not itself end a consumed operation's authorization lease.
+
+Completion, delegation revocation and ownership invalidation serialize with lease
+updates in the same journal. Terminal evidence never becomes active again. Reopen
+marks all previously consumed/active records recovered, regardless of wall time;
+there is no command replay or lease recovery. Active-operation evidence and its
+admission survive pruning of expired permits. The existing 16 MiB / 16,384-record
+bounds apply; exhaustion refuses instead of deleting rejection evidence.
+
+`guestc::active_lease` is a separate dormant live guard. It accepts only active
+committed evidence and applies the exact next fsynced ACK before extending a timer.
+Its immutable monotonic operation deadline never moves. A new ACK must arrive
+before the old wall and monotonic deadlines; expiry, revocation, completion,
+cancellation and clock loss cannot resume work. An independent timer and registered
+notification wake quiet guest I/O at lease expiry or revocation. Fresh qualification guards each poll and terminal result. The guarded future
+is created once and never replayed across updates.
+
+Integration still requires authenticated source reauthorization, continuation and
+active-evidence transports, independent policy installation, and exact first-frame
+ACK wiring and per-I/O clock checks. The authority's whole-call turn and the host's whole-command admission
+read guard must be split without releasing the initial-dispatch fence. Journal
+revocation/invalidation must drive the live guard before acknowledging control
+changes. Protection must cover each extension before its journal commit. Initial
+permit/allocation expiry becomes dispatch admission only in that future path;
+legacy commands retain their current fixed deadline. Guest timeout, dispatch and
+terminal budgets must be enforced separately, and restart protection drain must
+cover the full 80-second envelope before enabling it. Existing 60-second recovery
+drain is sufficient only while renewable dispatch remains refused. Independent
+review, Linux lifecycle/crash/clock qualification and compatibility evidence remain
+required; Mac primitive tests supply none of that native evidence.

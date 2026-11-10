@@ -18,15 +18,20 @@ mod issuer;
 pub use issuer::*;
 #[cfg(feature = "execution-admission")]
 pub mod clock;
+#[cfg(feature = "execution-admission")]
+mod continuation;
 #[cfg(all(feature = "execution-admission", feature = "tls"))]
 pub mod provision;
 #[cfg(feature = "execution-verifier")]
 mod request;
+#[cfg(feature = "execution-admission")]
+pub use continuation::*;
 #[cfg(feature = "execution-verifier")]
 pub use request::*;
 
 pub const GRANT_TYPE: &str = "briqyard-execution-grant+jwt";
 pub const ALLOCATION_TYPE: &str = "briqyard-execution-allocation+jwt";
+pub const CONTINUATION_TYPE: &str = "briqyard-execution-continuation+jwt";
 pub const PERMIT_TYPE: &str = "briqyard-execution-permit+jwt";
 pub const MAX_TOKEN_BYTES: usize = 16_384;
 /// Request and control JSON bounds include credentials and escaped input.
@@ -99,9 +104,22 @@ pub enum OutputMode {
     CapturePerStreamV1,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ExecutionMode {
+    #[serde(rename = "renewable_exec_v1")]
+    RenewableExecV1,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
+    /// Omission retains the fixed-deadline contract. Null is never omission.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_execution_mode"
+    )]
+    pub execution_mode: Option<ExecutionMode>,
     pub max_duration_seconds: u64,
     pub max_input_bytes: u64,
     pub max_output_bytes: u64,
@@ -112,6 +130,12 @@ pub struct Limits {
         deserialize_with = "deserialize_output_mode"
     )]
     pub output_mode: Option<OutputMode>,
+}
+
+fn deserialize_execution_mode<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ExecutionMode>, D::Error> {
+    ExecutionMode::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_output_mode<'de, D: serde::Deserializer<'de>>(

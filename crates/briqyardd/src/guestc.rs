@@ -9,6 +9,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+pub mod active_lease;
 #[cfg(test)]
 mod capture_tests;
 mod deadline;

@@ -124,38 +124,40 @@ pub fn token_digest(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
 }
 
-fn id(s: &str) -> bool {
+pub(super) fn id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 128
         && s.bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"_-.:/".contains(&c))
 }
-fn digest(s: &str) -> bool {
+pub(super) fn digest(s: &str) -> bool {
     s.len() == 43 && URL_SAFE_NO_PAD.decode(s).is_ok_and(|b| b.len() == 32)
 }
 fn safe(n: u64) -> bool {
     n <= MAX_SAFE_INTEGER
 }
-fn target(t: &Target) -> bool {
+pub(super) fn target(t: &Target) -> bool {
     [&t.host, &t.machine, &t.namespace, &t.run, &t.placement]
         .into_iter()
         .all(|s| id(s))
 }
-fn limits(l: &Limits) -> bool {
+pub(super) fn limits(l: &Limits) -> bool {
     l.max_duration_seconds > 0
         && safe(l.max_duration_seconds)
+        && (l.execution_mode.is_none() || l.max_duration_seconds <= MAX_COMMAND_SECONDS)
         && safe(l.max_input_bytes)
         && safe(l.max_output_bytes)
         && (l.output_mode.is_none()
             || (l.max_output_bytes > 0 && l.max_output_bytes <= MAX_CAPTURE_BYTES))
 }
 fn within(a: &Limits, b: &Limits) -> bool {
-    a.output_mode == b.output_mode
+    a.execution_mode == b.execution_mode
+        && a.output_mode == b.output_mode
         && a.max_duration_seconds <= b.max_duration_seconds
         && a.max_input_bytes <= b.max_input_bytes
         && a.max_output_bytes <= b.max_output_bytes
 }
-fn times(iat: u64, nbf: u64, exp: u64, clock: Clock) -> Result<()> {
+pub(super) fn times(iat: u64, nbf: u64, exp: u64, clock: Clock) -> Result<()> {
     if ![iat, nbf, exp, clock.now, clock.uncertainty]
         .into_iter()
         .all(safe)
@@ -178,14 +180,14 @@ fn times(iat: u64, nbf: u64, exp: u64, clock: Clock) -> Result<()> {
     }
     Ok(())
 }
-fn common(v: u8, iss: &str, aud: &str, issuer: &str, audience: &str) -> Result<()> {
+pub(super) fn common(v: u8, iss: &str, aud: &str, issuer: &str, audience: &str) -> Result<()> {
     if v != 1 || !id(iss) || !id(aud) || iss != issuer || aud != audience {
         return Err(VerifyError::Claims);
     }
     Ok(())
 }
 
-fn decode<T: DeserializeOwned>(
+pub(super) fn decode<T: DeserializeOwned>(
     token: &str,
     typ: &str,
     role: KeyRole,
@@ -279,6 +281,7 @@ pub fn verify_delegation(
         || !limits(&g.limits)
         || !safe(g.source.expires_at)
         || !safe(g.idle.expires_at)
+        || (g.limits.execution_mode.is_some() && g.exp > g.iat.saturating_add(MAX_COMMAND_SECONDS))
         || g.exp > g.source.expires_at
         || g.exp > g.idle.expires_at
         || g.resource_set.resources.is_empty()

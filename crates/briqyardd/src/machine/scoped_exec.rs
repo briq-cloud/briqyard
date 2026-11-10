@@ -443,6 +443,9 @@ impl Manager {
             context,
         )
         .map_err(|_| invalid("execution credentials refused"))?;
+        if bundle.permit().limits.execution_mode.is_some() {
+            return Err(invalid("renewable scoped execution is unavailable"));
+        }
         let digest = access::exec_request_digest(&request, &bundle.permit().limits)
             .map_err(|_| invalid("execution request exceeds its authority"))?;
         if digest != context.request_digest {

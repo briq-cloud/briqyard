@@ -96,6 +96,10 @@ impl DurableIssuer {
         context: &DispatchContext<'_>,
         preflight: impl FnOnce(&str) -> Result<(), IssueError>,
     ) -> Result<String, IssueError> {
+        // The continuation primitives do not activate the dispatch path.
+        if permit.limits.execution_mode.is_some() {
+            return Err(VerifyError::Claims.into());
+        }
         let header = Header {
             alg: "EdDSA".into(),
             typ: PERMIT_TYPE.into(),

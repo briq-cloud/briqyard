@@ -651,3 +651,6 @@ fn incompatible_journal_evidence_is_refused_without_rewrite() {
         assert!(!path.join("journal.next").exists());
     }
 }
+
+#[path = "active_tests.rs"]
+mod active_tests;

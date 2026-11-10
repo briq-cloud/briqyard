@@ -474,6 +474,7 @@ mod output_tests {
             max_duration_seconds: 1,
             max_input_bytes: 0,
             max_output_bytes: 4,
+            execution_mode: None,
             output_mode: Some(OutputMode::CapturePerStreamV1),
         };
         let mut result = ExecResult {
