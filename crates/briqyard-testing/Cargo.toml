@@ -24,3 +24,6 @@ tokio = { workspace = true, optional = true }
 name = "scoped-execution-native"
 path = "src/scoped_execution_native.rs"
 required-features = ["scoped-native"]
+
+[dev-dependencies]
+tempfile = "3"

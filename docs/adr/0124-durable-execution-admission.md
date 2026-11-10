@@ -818,3 +818,12 @@ stages. They never include requests, signed credentials, destinations or error t
 The disposable native fixture collects these categories through a byte- and line-bound
 allowlist parser. Unknown events and fields are discarded. The diagnostic does not
 retry an installation or establish readiness; a refusal still ends that attempt.
+
+
+The disposable native scenarios use distinct delegation identities as registration
+and ownership generations change. Host registration clears current delegation
+readiness but retains identity history and tombstones. Reusing a delegation for a
+new ownership generation correctly refuses installation. A local regression runs
+all four scenario identities through one retained host journal and verifies both
+that old-ID rebinding refuses and each fresh identity installs. This fixes the
+fixture; it does not relax the production history or revocation fences.

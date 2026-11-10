@@ -30,6 +30,90 @@ fn sign(key: &Ed25519KeyPair, kind: &str, body: Value) -> String {
         URL_SAFE_NO_PAD.encode(key.sign(input.as_bytes()).as_ref())
     )
 }
+fn initial_delegation_id(generation: u64) -> String {
+    format!("delegation-{generation}")
+}
+
+#[test]
+fn native_scenario_delegations_survive_retained_registration_history() {
+    use briqyard_api::execution::{
+        admission::{Error, HostDelegation, HostOwnership, HostRegistration, Journal, Role},
+        Clock, Grant, PublicResource,
+    };
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../briqyard-api/tests/fixtures/execution-v1.json"
+    ))
+    .unwrap();
+    let grant: Grant = serde_json::from_value(fixture["grant"].clone()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut journal = Journal::open(
+        &dir.path().join("host"),
+        Role::Host(grant.target.host.clone()),
+    )
+    .unwrap();
+    let clock = Clock {
+        now: 1010,
+        uncertainty: 1,
+    };
+    let mut previous: Option<HostDelegation> = None;
+    for generation in 1..=4 {
+        journal
+            .register_host(
+                HostRegistration {
+                    authority: "native".into(),
+                    epoch: format!("native-epoch-{generation}"),
+                    key_id: "native-authority".into(),
+                    public_key: [7; 32],
+                    host_instance: journal.instance().into(),
+                    generation,
+                },
+                clock,
+            )
+            .unwrap();
+        let owner = HostOwnership {
+            installation: "ownership-installation".into(),
+            generation,
+            team: grant.team.clone(),
+            subject: grant.subject.clone(),
+            metadata_revision: grant.metadata_revision.clone(),
+            primary: grant.target.clone(),
+            public_seeds: vec![grant.target.clone()],
+            public_resources: vec![PublicResource {
+                id: grant.subject.clone(),
+                target: grant.target.clone(),
+            }],
+            resource_set: grant.resource_set.clone(),
+            host_instance: journal.instance().into(),
+        };
+        journal.install_ownership(owner.clone(), clock).unwrap();
+        let record = HostDelegation {
+            id: initial_delegation_id(generation),
+            version: generation,
+            ownership: owner.installation,
+            ownership_generation: generation,
+            grant_digest: format!("grant-{generation}"),
+            allocation_digests: vec![],
+            principal: "key:native".into(),
+            expires_at: 1050,
+        };
+        if let Some(prior) = &previous {
+            // Registration replaces current ownership, not retained delegation identity.
+            assert!(matches!(
+                journal.install_delegation(
+                    HostDelegation {
+                        id: prior.id.clone(),
+                        ..record.clone()
+                    },
+                    clock
+                ),
+                Err(Error::Binding)
+            ));
+        }
+        journal.install_delegation(record.clone(), clock).unwrap();
+        previous = Some(record);
+    }
+}
+
 fn initial_idle_admission(generation: u64) -> String {
     format!("idle-{generation}")
 }
@@ -88,13 +172,14 @@ fn native_grant_body(
     issued: u64,
     expiry: u64,
     idle_expiry: u64,
-    idle_admission: &str,
+    identities: (&str, &str),
     namespace: &str,
     discovery: &Value,
     renewable: bool,
 ) -> Value {
+    let (delegation_id, idle_admission) = identities;
     let mut body = json!({"v":1,"iss":"central","aud":"runtime","iat":issued,"nbf":issued,"exp":expiry,
-        "id":"delegation","principal":"key:native","source":{"kind":"api_key","id":"native","expires_at":expiry+60},
+        "id":delegation_id,"principal":"key:native","source":{"kind":"api_key","id":"native","expires_at":expiry+60},
         "team":namespace,"subject":"native-primary","target":discovery["primary"],"resource_set":discovery["resource_set"],
         "idle":{"admission":idle_admission,"expires_at":idle_expiry},"metadata_revision":"native-metadata",
         "operations":["exec"],"limits":{"max_duration_seconds":20,"max_input_bytes":1024,"max_output_bytes":briqyard_api::execution::MAX_CAPTURE_BYTES,"output_mode":"capture_per_stream_v1"}});
@@ -177,7 +262,7 @@ fn native_signed_credentials_match_the_complete_discovered_closure() {
             issued,
             expiry,
             idle_expiry,
-            "idle-1",
+            (&initial_delegation_id(1), "idle-1"),
             context.team,
             &discovery,
             renewable,
@@ -490,6 +575,7 @@ async fn main() -> Result<()> {
     let allocation_expiry = if renewable { now + 18 } else { expiry };
     let idle_expiry = initial_idle_expiry_from_qualified_issue(issued, expiry, renewable);
     let idle_admission = initial_idle_admission(generation);
+    let delegation_id = initial_delegation_id(generation);
     std::fs::write(
         dir.join("protection-deadline"),
         (idle_expiry * 1000).to_string(),
@@ -500,7 +586,7 @@ async fn main() -> Result<()> {
         issued,
         expiry,
         idle_expiry,
-        &idle_admission,
+        (&delegation_id, &idle_admission),
         namespace,
         &discovery,
         renewable,
@@ -518,7 +604,7 @@ async fn main() -> Result<()> {
     let grant = sign(&central, GRANT_TYPE, grant_body.clone());
     let delegation = |id: &str, signed: &str| {
         json!({"id":id,"registration":"registration","control":{
-        "id":"delegation","version":generation,"principal":"key:native","ownership":"ownership","protection":"protection",
+        "id":delegation_id,"version":generation,"principal":"key:native","ownership":"ownership","protection":"protection",
         "source":{"kind":"api_key","id":"native","expires_at":expiry+60},"policy_revision":"native-policy","projection":projection},
         "signed":{"grant":signed,"allocations":allocations}})
     };

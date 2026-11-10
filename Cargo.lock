@@ -478,6 +478,7 @@ dependencies = [
  "reqwest",
  "ring",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
