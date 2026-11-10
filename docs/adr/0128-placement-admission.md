@@ -12,7 +12,7 @@ Today it cannot ask:
 |---|---|
 | `POST /v1/machines` names one `region`; a `503 capacity` is the answer for it | A caller that retried in another region would do so after `place` pinned the namespace and a hold was taken |
 | A first machine's `capacity` answer unpins the namespace (ADR 0013), but the daemon may have made the namespace's network before it refused | A refusal does not prove nothing was created. Only the fleet's own check, before any host is asked, does |
-| A credential gateway is a machine of the same namespace (ADR 0016) and its `PUT` pins the namespace before the consumer's create | The gateway can land in a region the consumer does not fit in; the pair is placed in two steps |
+| A credential gateway belongs to the namespace (ADR 0016) and its `PUT` pins the namespace before the consumer's create | The gateway can land in a region the consumer does not fit in; the pair is placed in two steps |
 | Seed admission (ADR 0076) freezes one region, one size and one seed | It does not account for the gateway, a volume, a runtime class or an ordered list of regions |
 | A write with no answer may have completed | A missing machine or a namespace 404 does not authorize another dispatch somewhere else |
 
@@ -22,7 +22,7 @@ Catching `capacity` around the machine POST and trying the next region is refuse
 
 **A placement admission is a durable decision, made once, under the registry lock, before any host is asked to create.** `PUT /v1/namespaces/{ns}/admissions/{id}`, authenticated like seed admission (`capability_unsupported` without a configured token). `id` is the caller's request identity (`valid_sandbox_request_id`), unique per namespace.
 
-It is a record of the same table as seed admissions, with a `kind` (`seed` for every record written before, `placement`). One key `(namespace, id)`, one meaning: a `PUT` of either kind to an id held by the other, or to a cancelled id, is 409; a cancel of an unknown id writes a tombstone both kinds find. Pruning, the header check and the fences below read that one table. The seed route (`sandbox-admissions`) and its contract do not change.
+It is a record of the same table as seed admissions, with a `kind` (`#[serde(default)]` to `seed`, so every record written before loads; `placement`). The placement body is its own type: the seed `Request` denies unknown fields and requires a seed. A fleet older than this change cannot load a registry that holds a `placement` record, so a rollback below it waits until none is pending and the next window has pruned the rest (`FLEET-OPERATIONS.md` says so with the code). One key `(namespace, id)`, one meaning: a `PUT` of either kind to an id held by the other, or to a cancelled id, is 409; a cancel of an unknown id writes a tombstone both kinds find. Pruning, the header check and the fences below read that one table. The seed route (`sandbox-admissions`) and its contract do not change.
 
 ```json
 {
@@ -36,14 +36,14 @@ It is a record of the same table as seed admissions, with a `kind` (`seed` for e
 }
 ```
 
-`regions` is non-empty, without repeats, in the caller's order: an allowlist and a preference, nothing else. `requirements` lists everything the namespace's first dispatches will ask for, the gateway included, with the fields the create already carries (size, volume, runtime class, memory profile, `egress.siblings`, seeds). The fleet reuses the predicates `place` and `create_machine` apply today; it does not copy them.
+`regions` is non-empty, without repeats, in the caller's order: an allowlist and a preference, nothing else. `requirements` lists everything the namespace's first dispatches will ask for, the gateway included, at most one `gateway` and one `consumer`, with the fields the create already carries (size, volume, runtime class, memory profile, `egress.siblings`, seeds). The fleet reuses the predicates `place` and `create_machine` apply today; it does not copy them.
 
 ```json
 {"region": "beauharnois", "host": "h_…", "binding": "new", "mode": "cold",
  "regions": [{"region": "beauharnois", "outcome": "placed"}]}
 ```
 
-`binding` is `new` (the admission pinned the namespace) or `existing` (it already was). `mode` is `sandbox-seed` or `cold` as in ADR 0076; `seed` names the selector used. `regions` lists the outcome of each region walked; it is evidence, not a promise.
+`binding` is `new` (the admission pinned the namespace) or `existing` (it already was). `sandbox_seeds` belong to the `consumer` requirement only, and so do `mode` (`sandbox-seed` or `cold`, as in ADR 0076) and `seed`, the selector used. `regions` lists the outcome of each region walked; it is evidence, not a promise.
 
 **Resolution order: binding first, preference second.**
 
@@ -54,39 +54,39 @@ It is a record of the same table as seed admissions, with a `kind` (`seed` for e
 | Host | Counts as |
 |---|---|
 | ready, fresh, serves every requirement, has room for **their sum** (physical memory reservation, CPU, disk) | `placed` candidate |
-| ready, serves them, no room, or under a pressure condition | `full` (pressure is a capacity signal today, ADR 0042) |
-| down, stale, `upgrading`, or ready with its memory policy unresolved, and it served the requirements at its last report | `unknown` |
+| ready, serves them, no room under the host's fill ceiling, or under a pressure condition | `full` (pressure is a capacity signal today, ADR 0042) |
+| down, stale, `upgrading`, or ready with its memory policy unresolved, and it served the requirements at its last report | `unknown`; tested before `full`, because `pressure()` includes the unresolved policy |
 | draining, retiring, failed, never reported, `joining`, `provisioning`, `bootstrapped` | ignored: an operator decision, or not capacity yet |
 | ready and serving nothing the requirements need | ignored |
 
 | Region class | When | Walk |
 |---|---|---|
-| `placed` | at least one `placed` candidate, whatever the other hosts are | stop; pick the host as `place` does (most free memory; a default machine avoids hosts with a hypervisor of their own first, ADR 0088); pin, hold, store |
+| `placed` | at least one `placed` candidate, whatever the other hosts are | stop; pick the host as `place` does (most free memory; a default machine avoids hosts with a hypervisor of their own first, ADR 0088), preferring one that holds a validated seed (below); pin, hold, store |
 | `unconfirmed` | no candidate, at least one `unknown` host | stop: 503 `capacity`, `reason: region_unconfirmed`. The next region is **not** tried |
 | `full` | no candidate, no `unknown`, at least one `full` host | next region |
 | `ineligible` | no host counted at all (none serves the requirements, or the region has no usable host) | **first region**: its own refusal, as a single-region create gives today (409 `capability_unsupported`, 400 for a runtime class no host serves, 503 `capacity` for a region with no host). A later region: skip it |
 
 Why the first region may not be `ineligible`: a preference must not weaken what a single region refuses today. Why `unconfirmed` stops the walk: an outage is not proof of no capacity; the caller sees a refusal and retries later, never a placement elsewhere. A draining or retiring host (ADR 0027) is an operator decision, not an outage.
 
-4. The walk ends without `placed`: every region `ineligible`, the first region's refusal; otherwise 503 `capacity` naming each region's class. **A refusal stores nothing.** It is counted as `capacity` in each region found `full` (ADR 0042), once per request.
+4. The walk ends without `placed` (the first region was not `ineligible`, step 3 refused otherwise): 503 `capacity` naming each region's class, or 409 `capability_unsupported` when every later region was `ineligible` and the first was `full`. **A refusal stores nothing.** It is counted as `capacity` in each region found `full` (ADR 0042), once per request.
 
 **Seeds are checked before the walk and rechecked inside it.** `check_sandbox_selector` asks the seed's host over the network, so it runs before the lock, as seed admission does. A seed whose check fails (not found, mismatched, host unreachable) is dropped from the candidates: the placement is `cold` if no seed remains, never a class and never an error for the walk. Under the lock the chosen host must still be the seed's host; if not, the mode is `cold`. Within a region a host that holds a validated seed and has room is preferred over the host `place` would pick; a seed is never used on another host, so never in another region.
 
 **The decision is a registry record, written before the answer.** Keyed `(namespace, id)`: kind, fingerprint of the canonical body, answer (host, region, mode, seed), phase, dispatched roles, time. The answer is the decision only once it is saved (ADR 0043). A failed save is a 5xx with the state in memory uncertain: the caller sends the same id again and gets the same decision if the fleet still holds it, or a fresh walk if it restarted, which is safe because nothing was promised or dispatched.
 
-**The pin outlives the heartbeat while the admission is pending.** Today a pin is kept by moves, pending seed admissions, unaccepted routes, a host that lists the namespace, or ten minutes (`registry/mod.rs`). A pending `placement` admission is a fence in every place a pending seed admission is: heartbeat reconciliation, `forget`, operator unpin and namespace delete (which refuse while it is pending), and the dispatch fences of `create_replay.rs`. Without it, a decision would stand for a day while its pin expired in ten minutes and the next member could be placed in another region.
+**The pin outlives the heartbeat while the admission is pending.** Today a pin is kept by moves, pending seed admissions, unaccepted routes, a host that lists the namespace, or ten minutes (`registry/mod.rs`). A `placement` admission is **pending while any of its requirements is neither dispatched nor cancelled**, not only before the first dispatch (the seed admission's single phase flips at the first). While pending it is a fence in every place a pending seed admission is: heartbeat reconciliation, the `named` set of `Registry::prune`, `forget`, operator unpin and namespace delete (which refuse), and the dispatch fences of `create_replay.rs`. When the last requirement is dispatched, its create's hold and route fence the namespace as for any create. Without it, a decision would stand for a day while its pin expired in ten minutes and the next member could be placed in another region.
 
-**Replay returns the original answer, whatever the fleet looks like now.** The same `id` and an equal body: 200 with the stored decision, no new walk, no new count. A different body: 409 `conflict` (`admission request identity conflict`). The decision does not follow capacity: a region that has since filled changes nothing for an id already answered.
+**Replay returns the original answer, whatever the fleet looks like now.** The same `id` and an equal body, for as long as the record is kept: 200 with the stored decision, no new walk, no new count. A different body: 409 `conflict` (`admission request identity conflict`). The decision does not follow capacity: a region that has since filled changes nothing for an id already answered.
 
-**Dispatch goes through the admission.** The gateway `PUT` (as `placement_request_id`, the query parameter it already takes) and the create (the `x-briqyard-placement-request-id` header) carry the id. The fleet checks the admission exists, is not cancelled or expired, the request's `region` equals the decision's, and the request is one of the admitted requirements (same role, size, volume, class, profile). A mismatch is 409 and nothing is forwarded. There is no new walk: the host is the decision's. Before marking the role dispatched, the fleet checks that host's room for that requirement itself, as the unbound path does; a pinned host is returned unchecked by `place` today, so the check is new. If it fails: 503 `capacity`, role not marked, decision and pin kept.
+**Dispatch goes through the admission.** The gateway `PUT` (as `placement_request_id`, the query parameter it already takes) and the create (the `x-briqyard-placement-request-id` header) carry the id. The fleet checks the admission exists, is not cancelled or expired, the request's `region` equals the decision's, and the request is the admitted requirement of its role: the gateway `PUT` is the `gateway`, a machine create is the `consumer` (same size, volume, class, profile). A create carries no role; the route does. A dispatch repeated for a role already dispatched is the caller's retry (ADR 0048's name as the idempotency key) and takes no new hold. A mismatch is 409 and nothing is forwarded. There is no new walk: the host is the decision's. Before marking the role dispatched, the fleet checks that host's room for that requirement itself, as the unbound path does; a pinned host is returned unchecked by `place` today, so the check is new. If it fails: 503 `capacity`, role not marked, decision and pin kept.
 
-**The gateway `PUT` becomes a dispatch.** Today only a create marks an admission dispatched. With a `placement` admission the gateway `PUT` marks the gateway role dispatched before the host is asked, because it creates the namespace's network on the host. Cancellation ends with the first dispatch of any role. This is new behaviour of the gateway route, only when it carries a `placement` id.
+**The gateway `PUT` becomes a dispatch.** Today only a create marks an admission dispatched. With a `placement` admission the gateway `PUT` marks the gateway role dispatched before the host is asked, because it creates the namespace's network on the host. Cancellation ends with the first dispatch of any role. This is new behaviour of the gateway route, only when it carries a `placement` id. A quota `PUT` shares the gateway's query and also makes the namespace on its host: with an id it is checked like the gateway `PUT` and ends cancellation, consuming no requirement.
 
-**Capacity is held from the decision to the dispatch, one hold per requirement.** Each requirement takes a hold (ADR 0044) at the decision, tagged with the admission and given a deadline (`admission_hold`, 10 minutes by default) that the heartbeat prunes, with no timer of its own (ADR 0119). Two admissions cannot be answered for the same last slot. A dispatch converts its requirement's hold (`made`); the other waits for its own dispatch. Admission holds do not count in `memory_policy_unresolved`: that predicate asks about creates in flight, not decisions waiting. Holds are in memory, as holds are. After the deadline or a fleet restart the decision stands and the dispatch's room check (above) is the only guard. This narrows the window to the hold's life; it cannot close it, and this ADR does not claim it does.
+**Capacity is held from the decision to the dispatch, one hold per requirement.** Each requirement takes a hold (ADR 0044) at the decision, tagged with the admission and given a deadline (`admission_hold`, 10 minutes by default) that the heartbeat prunes, with no timer of its own (ADR 0119). Two admissions cannot be answered for the same last slot. A dispatch converts its requirement's hold: it recomputes the physical reservation with the host's current policy, takes it from the hold, clears the deadline (so the heartbeat cannot prune a hold mid-forward) and calls `made`; the room check counts the requirement's own hold as already taken, never twice. The other requirement waits for its own dispatch. Admission holds do not count in `memory_policy_unresolved`: that predicate asks about creates in flight, not decisions waiting. Holds are in memory, as holds are. After the deadline or a fleet restart the decision stands and the dispatch's room check (above) is the only guard. This narrows the window to the hold's life; it cannot close it, and this ADR does not claim it does.
 
 **Cancel is `DELETE` on the same path, only before any dispatch.** It releases the holds and tombstones the id. The pin stays, as seed cancel keeps it: another member or a gateway not yet reported by its host may need it, and the heartbeat's rule releases it once nothing names the namespace. After any role was dispatched: 409 `admission already dispatched`. An uncertain dispatch keeps its decision; the control plane adopts in the admitted region only.
 
-**A pending admission nobody dispatched or cancelled expires after the replay window** (24 h, ADR 0119): holds and fence released, the id tombstoned. A late dispatch with that id is 409 `admission expired`. The control plane may then admit under a new id; nothing was dispatched under the old one, so a fresh walk is correct.
+**A pending admission nobody dispatched or cancelled expires after the replay window** (24 h, ADR 0119): holds and fence released, the id tombstoned. A late dispatch with that id is 409 `admission expired` until the tombstone is pruned (another window, ADR 0119), then 409 `placement admission missing`, and a `PUT` of the pruned id walks afresh like a new id. The control plane may then admit under a new id; nothing was dispatched under the old one, so a fresh walk is correct.
 
 **Concurrent first members share one binding.** Two admissions for one namespace serialize on the registry lock: the first pins it, the second answers `existing` and is accounted on that host. If the second's requirements do not fit, 503 `capacity`.
 
@@ -105,7 +105,7 @@ Why the first region may not be `ineligible`: a preference must not weaken what 
 | First region `ineligible` | its own refusal | nothing | no |
 | Namespace pinned, fits | 200 `existing` | decision, holds | no |
 | Namespace pinned, does not fit | 503 `capacity` | nothing | no |
-| Same id, same body, any time | 200, original | — | no |
+| Same id, same body, while the record is kept | 200, original | — | no |
 | Same id, other body or other kind | 409 | — | no |
 | Gateway fits, consumer does not | 503 `capacity` (the sum is checked) | nothing | next region by the same rule |
 | Dispatch after the hold expired, host full | 503 `capacity`, role not marked | decision, pin kept | no |
