@@ -3,8 +3,8 @@
 use crate::execution_host::{Error as TransportError, HostTransport, Route};
 use briqyard_api::execution::{
     admission::{
-        AuthorityPayload, DelegationIntent, Error as JournalError, HostDelegation, HostOwnership,
-        HostRegistration, Journal, OwnershipControl,
+        AuthorityPayload, DelegationIntent, Error as JournalError, HostDelegation,
+        HostOperationPolicy, HostOwnership, HostRegistration, Journal, OwnershipControl,
     },
     channel::{
         InstallDelegation, InstallationAck, Instance, Invalidate, Protect, ProtectionAck, Revoke,
@@ -352,6 +352,19 @@ impl Installer<'_> {
             expires_at: checked.grant().exp,
         };
         let host_instance = reg.host_instance.clone();
+        let operation_policy = checked
+            .grant()
+            .limits
+            .execution_mode
+            .map(|_| HostOperationPolicy {
+                host_instance: host_instance.clone(),
+                ownership: owner.installation.clone(),
+                ownership_generation: owner.generation,
+                delegation: request.id.clone(),
+                delegation_version: request.version,
+                grant_digest: expected.grant_digest.clone(),
+                policy_revision: control.policy_revision.clone(),
+            });
         let intent = DelegationIntent {
             host: self.host_id.into(),
             authority_epoch: self.journal.instance().into(),
@@ -364,6 +377,8 @@ impl Installer<'_> {
             request: request.clone(),
             expected,
             acknowledgement: None,
+            operation_policy: operation_policy.clone(),
+            operation_policy_ack: None,
         };
         if !self
             .journal
@@ -376,6 +391,11 @@ impl Installer<'_> {
         let ack: HostDelegation = self.host.call(Route::Delegation, &request).await?;
         self.journal
             .acknowledge_delegation_intent(intent_id, ack, fresh()?)?;
+        if let Some(policy) = operation_policy {
+            let ack: HostOperationPolicy = self.host.call(Route::Policy, &policy).await?;
+            self.journal
+                .acknowledge_operation_policy(intent_id, ack, fresh()?)?;
+        }
         self.current_outcome("delegation", intent_id, &mut fresh)
     }
 

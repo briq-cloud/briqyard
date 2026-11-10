@@ -574,3 +574,45 @@ fn credential_configuration_refuses_reuse_and_empty_values() {
         }));
     }
 }
+
+#[tokio::test]
+async fn operation_renewal_routes_require_installer_and_remain_disabled_by_default() {
+    let (app, _dir) = fixture(Arc::new(FixedClock(Some(Clock {
+        now: 1000,
+        uncertainty: 1,
+    }))));
+    for action in [
+        "operation_active",
+        "operation_protect",
+        "operation_continue",
+    ] {
+        for (credential, expected) in [
+            ("gateway-only", StatusCode::UNAUTHORIZED),
+            ("central-installer", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/internal/authority/v1/{action}"))
+                        .header(header::AUTHORIZATION, format!("Bearer {credential}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+}
+#[test]
+fn one_live_dispatch_owner_cannot_be_reconstructed_from_retained_status() {
+    let live = Arc::new(LiveOperations::default());
+    let owner = live.enter("operation").unwrap();
+    assert!(live.contains("operation"));
+    assert!(live.enter("operation").is_err());
+    drop(owner);
+    assert!(!live.contains("operation"));
+}

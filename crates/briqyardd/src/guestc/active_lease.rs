@@ -68,6 +68,28 @@ impl ActiveLease {
         })
     }
 
+    /// Activation retains the original consumption-time monotonic bounds. A new
+    /// qualified wall observation can narrow them, but cannot revive elapsed time.
+    pub fn from_committed_bounded(
+        evidence: ActiveOperation,
+        sample: &ClockSample,
+        initial_deadline: tokio::time::Instant,
+        operation_deadline: tokio::time::Instant,
+    ) -> anyhow::Result<Self> {
+        let now = tokio::time::Instant::now();
+        anyhow::ensure!(
+            now < initial_deadline && now < operation_deadline,
+            "initial execution authorization expired before active commit"
+        );
+        let lease = Self::from_committed(evidence, sample)?;
+        {
+            let mut state = lease.inner.state.lock().unwrap();
+            state.deadline = state.deadline.min(initial_deadline);
+            state.operation_deadline = state.operation_deadline.min(operation_deadline);
+        }
+        Ok(lease)
+    }
+
     fn validate(e: &ActiveOperation, sample: &ClockSample) -> anyhow::Result<tokio::time::Instant> {
         let expiry = e
             .lease_expires_at
@@ -350,6 +372,42 @@ mod tests {
                 uncertainty: Duration::ZERO,
             })
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn active_commit_cannot_reconstruct_expired_initial_monotonic_authority() {
+        let base = tokio::time::Instant::now();
+        let mut evidence = evidence();
+        evidence.checked_at = 100;
+        evidence.lease_expires_at = 107;
+        evidence.binding.started_at_ms = 100_000;
+        evidence.binding.operation_deadline_ms = 180_000;
+        // The first qualified interval is [96,104] at this monotonic origin.
+        let initial = base + Duration::from_secs(3);
+        let operation = base + Duration::from_secs(76);
+        tokio::time::advance(Duration::from_millis(3500)).await;
+        let fresh = ClockSample {
+            wall: Duration::from_millis(101_500),
+            uncertainty: Duration::from_secs(1),
+            monotonic: tokio::time::Instant::now().into_std(),
+        };
+        // The new interval, translated to that origin, is [97,99]. It overlaps
+        // the original evidence yet reconstructs a later lease deadline.
+        assert!(ActiveLease::from_committed(evidence.clone(), &fresh).is_ok());
+        assert!(
+            ActiveLease::from_committed_bounded(evidence.clone(), &fresh, initial, operation)
+                .is_err()
+        );
+        let lease = ActiveLease::from_committed_bounded(
+            evidence,
+            &fresh,
+            base + Duration::from_secs(4),
+            operation,
+        )
+        .unwrap();
+        let state = lease.inner.state.lock().unwrap();
+        assert!(state.deadline <= base + Duration::from_secs(4));
+        assert!(state.operation_deadline <= operation);
     }
 
     #[tokio::test(start_paused = true)]

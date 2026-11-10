@@ -192,7 +192,10 @@ impl Journal {
     ) -> Result<(), Error> {
         self.check(clock)?;
         let op = self.state.operation_intents.get(id).ok_or(Error::Binding)?;
-        if op.phase != OperationPhase::Dispatched
+        if !matches!(
+            op.phase,
+            OperationPhase::Dispatched | OperationPhase::Consumed
+        ) || (op.phase == OperationPhase::Consumed && phase != OperationPhase::Finished)
             || !matches!(phase, OperationPhase::Consumed | OperationPhase::Finished)
             || (phase == OperationPhase::Finished) != outcome_digest.is_some()
         {

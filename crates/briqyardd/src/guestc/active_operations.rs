@@ -139,6 +139,26 @@ mod tests {
         assert!(lease.observe(&evidence, &sample).is_err());
     }
     #[tokio::test]
+    async fn terminal_owner_remains_distinct_from_abandoned_until_finish_fsync() {
+        let evidence = evidence();
+        let sample = ClockSample {
+            wall: Duration::from_secs(1035),
+            monotonic: std::time::Instant::now(),
+            uncertainty: Duration::from_secs(1),
+        };
+        let registry = Arc::new(ActiveOperations::default());
+        let lease = ActiveLease::from_committed(evidence.clone(), &sample).unwrap();
+        let owner = registry
+            .register(&evidence.binding.admission, lease.clone())
+            .unwrap();
+        lease.end(); // Terminal output observed; manager has not obtained journal yet.
+        assert!(registry.get(&evidence.binding.admission).is_some());
+        assert!(lease.observe(&evidence, &sample).is_err());
+        drop(owner); // Completion persistence or manager cancellation releases ownership.
+        assert!(registry.get(&evidence.binding.admission).is_none());
+    }
+
+    #[tokio::test]
     async fn retained_revocation_ends_the_exact_live_connection_before_ack() {
         let mut evidence = evidence();
         let sample = ClockSample {

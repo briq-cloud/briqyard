@@ -598,14 +598,26 @@ impl Manager {
                 .unwrap()
                 .require_renewable(&self.inner.store, &protection.admission)
                 .map_err(|_| invalid("renewable recovery protection unavailable"))?;
-            Some((binding, protection))
+            let operation_deadline = tokio::time::Instant::from_std(sample.monotonic)
+                + Duration::from_millis(
+                    binding
+                        .operation_deadline_ms
+                        .checked_sub(
+                            sample
+                                .upper_ms()
+                                .ok_or_else(|| invalid("operation clock range"))?,
+                        )
+                        .ok_or_else(|| invalid("operation envelope elapsed"))?,
+                );
+            Some((binding, protection, operation_deadline))
         } else {
             None
         };
         ledger
             .consume(&bundle, execution_clock(clock_uncertainty_seconds)?)
             .map_err(|_| MError::Conflict("execution admission refused; query status".into()))?;
-        if let Some((binding, protection)) = initial_active {
+        let operation_deadline = initial_active.as_ref().map(|(_, _, deadline)| *deadline);
+        if let Some((binding, protection, _)) = initial_active {
             ledger
                 .record_consumed_operation(
                     &bundle,
@@ -687,8 +699,13 @@ impl Manager {
                 .map_err(|_| invalid("active operation acknowledgement unresolved"))?;
             let sample = access::clock::ClockSample::read()
                 .ok_or_else(|| invalid("qualified execution clock unavailable"))?;
-            let lease = guestc::active_lease::ActiveLease::from_committed(evidence, &sample)
-                .map_err(not_running_if_unreachable)?;
+            let lease = guestc::active_lease::ActiveLease::from_committed_bounded(
+                evidence,
+                &sample,
+                deadline.instant,
+                operation_deadline.ok_or_else(|| invalid("operation deadline missing"))?,
+            )
+            .map_err(not_running_if_unreachable)?;
             active_owner = Some(
                 control
                     .registry

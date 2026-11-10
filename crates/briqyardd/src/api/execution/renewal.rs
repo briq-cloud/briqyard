@@ -128,7 +128,12 @@ pub(super) async fn active(
             ActiveState::Active
         }
         Some(saved) => {
-            if matches!(saved.phase, ActivePhase::Consumed | ActivePhase::Active) {
+            // An exact retained owner may have just collected its terminal frame
+            // and be waiting for this journal turn to fsync completion. Only an
+            // abandoned owner can be reconciled to unresolved by status.
+            if matches!(saved.phase, ActivePhase::Consumed | ActivePhase::Active)
+                && st.active.get(&req.admission).is_none()
+            {
                 if let Some(lease) = st.active.get(&req.admission) {
                     lease.end();
                 }

@@ -649,7 +649,7 @@ there is no command replay or lease recovery. Active-operation evidence and its
 admission survive pruning of expired permits. The existing 16 MiB / 16,384-record
 bounds apply; exhaustion refuses instead of deleting rejection evidence.
 
-`guestc::active_lease` is a separate dormant live guard. It accepts only active
+`guestc::active_lease` is a separate live guard. It accepts only active
 committed evidence and applies the exact next fsynced ACK before extending a timer.
 Its immutable monotonic operation deadline never moves. A new ACK must arrive
 before the old wall and monotonic deadlines; expiry, revocation, completion,
@@ -678,13 +678,17 @@ commit crossing the old lease's expiry ends the operation instead of resuming it
 or `unknown`. `observed_at` is a fresh qualified host clock interval. The evidence's
 `checked_at` remains the last signed source authorization. Polling does not advance
 it or the sequence. Durable active records without a matching live owner become
-unresolved terminal evidence. No status path creates or reconnects a guest session.
+unresolved terminal evidence. A retained owner awaiting completion fsync remains
+distinct from abandoned ownership, even after its terminal frame ends the timer.
+No status path creates or reconnects a guest session.
 
 The new guest operation `exec_renewable_v1` validates a positive timeout of at most
 60,000 ms and emits an exact `accepted` frame only after successful process spawn.
 The guest timeout starts before spawn. The host retains its initial admission,
 ownership, lifecycle and lease fences through that ACK and the active journal
-fsync. It then publishes the exact live lease and releases the admission read
+fsync. Activation retains the original monotonic admission deadline and the
+consumption-time monotonic operation cap; a newer wall sample cannot reconstruct
+elapsed authority. It then publishes the exact live lease and releases the admission read
 guard, allowing continuation and revocation while output is collected. Legacy
 operations keep their existing operation, fixed deadline and lock scope.
 
@@ -703,8 +707,53 @@ the store. Startup drains the full 80 seconds and still requires qualified wall
 clock proof before protected guests can resume. Legacy receipts retain schema 5
 and their existing 60-second drain. Stamped receipts retain the stronger barrier.
 
-This host slice does not enable fleet issuance. Remaining integration must split
-the authority's whole-call turn, transport trusted policy and live evidence, obtain
-fresh source authorization and commit protection before central signing. Independent
-review, Linux lifecycle/crash/clock qualification and compatibility evidence remain
-required. Mac checks do not supply native evidence.
+## Fleet operation continuation
+
+The authority installs and retains the exact host policy ACK before a renewable
+delegation becomes ready. It preserves signed execution mode and numeric limits.
+A named renewable issuer entry point supports the integrated coordinator; the
+legacy issuer entry point continues to refuse renewable permits.
+
+The authority fsyncs one-shot dispatch intent before returning an immutable
+in-memory dispatch owner. It releases the sole issuer journal turn only around
+that one host dispatch, and reacquires it for the terminal digest. Status may record
+consumption concurrently. Duplicate IDs and restart recovery are status-only;
+no path reconstructs dispatch from a durable intent. A cancelled owner disappears
+from the live registry and cannot request continuation.
+
+Installer-only authority routes use one independently provisioned, pinned host:
+
+| Action | Request | Successful reply |
+| --- | --- | --- |
+| `operation_active` | `{id}` | Fresh host `ActiveStatus` for the exact saved operation |
+| `operation_protect` | `{id, operation_id, previous_sequence, committed: {admission, expires_at_ms}}` | Full exact `ProtectionAck` |
+| `operation_continue` | `{id, operation_id, previous_sequence, continuation}` | Fresh host `ActiveStatus` after exact signed timer application |
+
+Protection attempts bind immutable operation identity, sequence and exact committed
+protection deadline. Existing matching protection is inspected without reissuing an
+uncertain installation. Its reservation may conservatively outlast the operation;
+only signed lease expiry authorizes execution and it remains bounded by the
+immutable operation deadline. New protection uses a separate typed intent key.
+The continuation token digest is fsynced before its sole delivery. A duplicate is
+status-only; changed attempts or tokens refuse. A lost ACK never licenses redelivery,
+a new grant, delegation renewal or another quota debit.
+
+An optional provisioned `ContinuationProvider` requests fresh central authorization
+for a live renewable command when its lease has at most twenty seconds remaining.
+Commands expected to finish within initial admission do not arm this driver. Each
+observed sequence permits one callback attempt. No issuer turn is held across the
+callback, which may re-enter the three authority routes. Failure retains the
+original lease and never replays the callback or command.
+
+The fixed HTTPS provider uses `execution.continuation: {url, credential_file}`.
+The URL has a non-root path, no userinfo, query or fragment. The private credential
+is separate from the bundle and all six existing credential values. There are no
+redirects, proxies or retries. Request and response are bounded to 4 KiB and the
+whole request to ten seconds. It posts `{operation_id, previous_sequence}` and
+accepts only `{state: "continued" | "recovered" | "not-needed"}`. Source checks,
+committed idle authorization and central signing remain the callback service's
+responsibility; unsigned callback success itself never extends a host timer.
+
+Provisioning defaults to no callback. The production renewable capability remains
+false pending independent review, Linux lifecycle/crash/clock qualification,
+compatibility evidence and CI. Mac checks do not supply native evidence.

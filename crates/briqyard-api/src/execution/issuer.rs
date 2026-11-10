@@ -96,8 +96,35 @@ impl DurableIssuer {
         context: &DispatchContext<'_>,
         preflight: impl FnOnce(&str) -> Result<(), IssueError>,
     ) -> Result<String, IssueError> {
-        // The continuation primitives do not activate the dispatch path.
-        if permit.limits.execution_mode.is_some() {
+        self.issue_mode(credentials, permit, trust, clock, context, preflight, false)
+    }
+
+    /// Only the integrated renewable coordinator uses this entry point. Callers
+    /// must fence trusted policy installation and retain one-shot dispatch intent.
+    pub fn issue_renewable_with_preflight(
+        &mut self,
+        credentials: IssueCredentials<'_>,
+        permit: Permit,
+        trust: &Trust<'_>,
+        clock: Clock,
+        context: &DispatchContext<'_>,
+        preflight: impl FnOnce(&str) -> Result<(), IssueError>,
+    ) -> Result<String, IssueError> {
+        self.issue_mode(credentials, permit, trust, clock, context, preflight, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn issue_mode(
+        &mut self,
+        credentials: IssueCredentials<'_>,
+        permit: Permit,
+        trust: &Trust<'_>,
+        clock: Clock,
+        context: &DispatchContext<'_>,
+        preflight: impl FnOnce(&str) -> Result<(), IssueError>,
+        renewable: bool,
+    ) -> Result<String, IssueError> {
+        if permit.limits.execution_mode.is_some() != renewable {
             return Err(VerifyError::Claims.into());
         }
         let header = Header {

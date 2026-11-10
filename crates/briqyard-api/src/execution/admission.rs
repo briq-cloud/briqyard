@@ -10,7 +10,9 @@ mod delegation_install;
 mod installation_flow;
 mod operation;
 mod operation_policy;
+mod renewal_attempt;
 pub use operation_policy::HostOperationPolicy;
+pub use renewal_attempt::RenewalAttempt;
 mod projection;
 pub use authority_install::{AuthorityIntent, AuthorityPayload};
 pub use delegation_install::DelegationIntent;
@@ -111,6 +113,8 @@ struct State {
     active_operations: BTreeMap<String, ActiveOperation>,
     #[serde(default)]
     operation_policies: BTreeMap<String, HostOperationPolicy>,
+    #[serde(default)]
+    renewal_attempts: BTreeMap<String, RenewalAttempt>,
 }
 
 /// Authenticated installer input. These records are never constructed from a grant.
@@ -316,6 +320,7 @@ impl Journal {
                 uncertain_installations: BTreeSet::new(),
                 active_operations: BTreeMap::new(),
                 operation_policies: BTreeMap::new(),
+                renewal_attempts: BTreeMap::new(),
             },
         };
         if state
@@ -324,6 +329,7 @@ impl Journal {
             .map(Vec::len)
             .sum::<usize>()
             > MAX_RECORDS
+            || state.renewal_attempts.len() > MAX_RECORDS
             || state.operation_policies.len() > MAX_RECORDS
             || state.active_operations.len() > MAX_RECORDS
             || state.admissions.len() > MAX_RECORDS
@@ -966,6 +972,7 @@ impl Journal {
             .map(Vec::len)
             .sum::<usize>()
             > MAX_RECORDS
+            || next.renewal_attempts.len() > MAX_RECORDS
             || next.operation_policies.len() > MAX_RECORDS
             || next.active_operations.len() > MAX_RECORDS
             || next.admissions.len() > MAX_RECORDS

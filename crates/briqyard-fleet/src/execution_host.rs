@@ -21,6 +21,9 @@ pub(super) enum Route {
     Prepare,
     Dispatch,
     Status,
+    Policy,
+    Continue,
+    Active,
 }
 
 impl Route {
@@ -37,6 +40,9 @@ impl Route {
             Self::Prepare => "prepare",
             Self::Dispatch => "dispatch",
             Self::Status => "status",
+            Self::Policy => "policy",
+            Self::Continue => "continue",
+            Self::Active => "active",
         }
     }
 
@@ -48,7 +54,10 @@ impl Route {
     }
 
     fn installer(self) -> bool {
-        !matches!(self, Self::Prepare | Self::Dispatch | Self::Status)
+        !matches!(
+            self,
+            Self::Prepare | Self::Dispatch | Self::Status | Self::Active
+        )
     }
 }
 
@@ -84,6 +93,7 @@ pub(super) struct HostTransport {
     execution: header::HeaderValue,
     administrator: String,
     host_id: String,
+    timeout: Duration,
 }
 
 impl HostTransport {
@@ -172,6 +182,7 @@ impl HostTransport {
             execution: bearer(execution)?,
             administrator: host.administrator.into(),
             host_id: host.id.into(),
+            timeout,
         })
     }
 
@@ -197,7 +208,12 @@ impl HostTransport {
         } else {
             Method::POST
         };
-        let mut request = self.client.request(method, url).header(
+        let timeout = if matches!(route, Route::Dispatch) {
+            self.timeout
+        } else {
+            self.timeout.min(Duration::from_secs(10))
+        };
+        let mut request = self.client.request(method, url).timeout(timeout).header(
             header::AUTHORIZATION,
             if route.installer() {
                 &self.installer
@@ -461,6 +477,9 @@ pub(super) mod tests {
                 .await,
             Err(Error::Unconfirmed)
         );
+        for route in [Route::Policy, Route::Continue, Route::Active] {
+            let _ = transport.call::<_, serde_json::Value>(route, &()).await;
+        }
         assert_eq!(
             *server.calls.lock().unwrap(),
             [
@@ -482,6 +501,18 @@ pub(super) mod tests {
                 ),
                 (
                     "/internal/execution/v1/status".into(),
+                    "Bearer execution".into()
+                ),
+                (
+                    "/internal/execution/v1/policy".into(),
+                    "Bearer installer".into()
+                ),
+                (
+                    "/internal/execution/v1/continue".into(),
+                    "Bearer installer".into()
+                ),
+                (
+                    "/internal/execution/v1/active".into(),
                     "Bearer execution".into()
                 ),
             ]

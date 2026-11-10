@@ -138,6 +138,21 @@ pub struct ProtectionIntent {
 }
 
 impl Journal {
+    /// Existing immutable protection, including pending evidence, prevents a
+    /// continuation adapter from replaying an uncertain installation under a new ID.
+    pub fn protection_by_admission(
+        &self,
+        admission: &str,
+    ) -> Result<Option<(&str, &ProtectionIntent)>, Error> {
+        self.ownership()?;
+        Ok(self
+            .state
+            .protection_intents
+            .iter()
+            .find(|(_, p)| p.request.admission == admission)
+            .map(|(id, p)| (id.as_str(), p)))
+    }
+
     pub fn begin_discovery_intent(
         &mut self,
         id: &str,

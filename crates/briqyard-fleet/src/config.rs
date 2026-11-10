@@ -38,6 +38,13 @@ pub struct Execution {
     pub authority: String,
     pub key_id: String,
     pub signing_key: PathBuf,
+    pub continuation: Option<Continuation>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Continuation {
+    pub url: String,
+    pub credential_file: PathBuf,
 }
 use briqyard_api::execution::provision as api_execution;
 

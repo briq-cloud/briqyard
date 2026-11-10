@@ -22,6 +22,10 @@ pub struct DelegationIntent {
     pub request: InstallDelegation,
     pub expected: HostDelegation,
     pub acknowledgement: Option<HostDelegation>,
+    #[serde(default)]
+    pub operation_policy: Option<HostOperationPolicy>,
+    #[serde(default)]
+    pub operation_policy_ack: Option<HostOperationPolicy>,
 }
 
 impl Journal {
@@ -46,6 +50,7 @@ impl Journal {
             })
             || intended.authority_epoch != self.instance()
             || intended.acknowledgement.is_some()
+            || intended.operation_policy_ack.is_some()
             || self.delegation_revoked(&intended.request.id)?
             || !self.delegation_dependencies_ready(
                 &intended.host,
@@ -66,6 +71,24 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
+        if let Some(policy) = &intended.operation_policy {
+            let registration = self
+                .authority_intent(&intended.registration)?
+                .ok_or(Error::Binding)?;
+            let AuthorityPayload::Registration(registration) = &registration.payload else {
+                return Err(Error::Binding);
+            };
+            if policy.host_instance != registration.host_instance
+                || policy.ownership != intended.request.installation
+                || policy.ownership_generation != intended.request.generation
+                || policy.delegation != intended.request.id
+                || policy.delegation_version != intended.request.version
+                || policy.grant_digest != intended.expected.grant_digest
+                || Some(&policy.policy_revision) != intended.policy_revision.as_ref()
+            {
+                return Err(Error::Binding);
+            }
+        }
         if let Some(prior) = self.state.delegation_intents.get(intent_id) {
             if prior.host == intended.host
                 && prior.authority_epoch == intended.authority_epoch
@@ -77,6 +100,7 @@ impl Journal {
                 && prior.policy_revision == intended.policy_revision
                 && prior.request == intended.request
                 && prior.expected == intended.expected
+                && prior.operation_policy == intended.operation_policy
             {
                 return Ok(false);
             }
@@ -211,6 +235,33 @@ impl Journal {
         self.commit(next)
     }
 
+    pub fn acknowledge_operation_policy(
+        &mut self,
+        id: &str,
+        ack: HostOperationPolicy,
+        clock: Clock,
+    ) -> Result<(), Error> {
+        self.check(clock)?;
+        let intent = self.delegation_intent(id)?.ok_or(Error::Binding)?;
+        if intent.operation_policy.as_ref() != Some(&ack)
+            || intent.acknowledgement.as_ref() != Some(&intent.expected)
+            || self.delegation_revoked(&intent.request.id)?
+            || intent.expected.expires_at <= clock.now.saturating_add(clock.uncertainty)
+        {
+            return Err(Error::Binding);
+        }
+        if intent.operation_policy_ack.as_ref() == Some(&ack) {
+            return Ok(());
+        }
+        let mut next = self.state.clone();
+        next.delegation_intents
+            .get_mut(id)
+            .ok_or(Error::Binding)?
+            .operation_policy_ack = Some(ack);
+        next.clock_floor = clock.now;
+        self.commit(next)
+    }
+
     pub fn delegation_intent_ready(&self, id: &str) -> Result<bool, Error> {
         if self.installation_uncertain("delegation", id) {
             return Ok(false);
@@ -227,6 +278,7 @@ impl Journal {
             })
             && intent.trusted_source.is_some()
             && intent.acknowledgement.as_ref() == Some(&intent.expected)
+            && intent.operation_policy_ack == intent.operation_policy
             && !self.delegation_revoked(&intent.request.id)?
             && self.delegation_dependencies_ready(
                 &intent.host,
