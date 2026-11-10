@@ -454,9 +454,9 @@ mod tests {
 
     /// The tests that spawn processes run one at a time: they hold timing assumptions and
     /// the binary's other timing tests share the machine.
-    static SPAWNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
-        SPAWNS.lock().unwrap_or_else(|e| e.into_inner())
+    static SPAWNS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    async fn one_at_a_time() -> tokio::sync::MutexGuard<'static, ()> {
+        SPAWNS.lock().await
     }
 
     fn hooked_state(park: &[&str], resume: &[&str], seconds: u32) -> Arc<State> {
@@ -476,7 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn hook_exit_code_and_stderr_tail_are_reported() {
-        let _one = one_at_a_time();
+        let _one = one_at_a_time().await;
         let st = hooked_state(&["true"], &["true"], 5);
         run_hook(&st, "park", &["true".into()], 5).await.unwrap();
         let failure = run_hook(
@@ -493,7 +493,7 @@ mod tests {
 
     #[tokio::test]
     async fn hook_timeout_kills_the_whole_group() {
-        let _one = one_at_a_time();
+        let _one = one_at_a_time().await;
         let st = hooked_state(&["true"], &["true"], 1);
         let marker = std::env::temp_dir().join(format!("hook-orphan-{}", std::process::id()));
         let script = format!("(sleep 2; touch {}) & sleep 30", marker.display());
@@ -511,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn park_failure_leaves_the_gate_running() {
-        let _one = one_at_a_time();
+        let _one = one_at_a_time().await;
         let st = hooked_state(&["false"], &["true"], 5);
         let response = park(&st).await;
         assert_eq!(response.kind, "error");
@@ -540,7 +540,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_resume_never_thaws_and_reports_why() {
-        let _one = one_at_a_time();
+        let _one = one_at_a_time().await;
         let st = hooked_state(&["true"], &["sh", "-c", "echo no >&2; exit 1"], 5);
         let identity = guest::CloneIdentity {
             generation: "clone-1".into(),
