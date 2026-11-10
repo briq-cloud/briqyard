@@ -1,4 +1,4 @@
-//! Dormant host lease state. Consumption, initial-write acknowledgement and live
+//! Host lease state. Consumption, guest acceptance acknowledgement and live
 //! timers remain separate steps; recovery never interprets this as work to resume.
 use super::*;
 
@@ -10,6 +10,7 @@ pub enum ActivePhase {
     Finished,
     Revoked,
     Recovered,
+    Unresolved,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -209,6 +210,21 @@ impl Journal {
         Ok(self.state.active_operations.get(admission))
     }
 
+    /// No time authority is required to permanently end uncertain work.
+    pub fn end_active_operation(&mut self, admission: &str) -> Result<(), Error> {
+        self.ownership()?;
+        let mut next = self.state.clone();
+        let saved = next
+            .active_operations
+            .get_mut(admission)
+            .ok_or(Error::Binding)?;
+        if matches!(saved.phase, ActivePhase::Consumed | ActivePhase::Active) {
+            saved.phase = ActivePhase::Unresolved;
+            self.commit(next)?;
+        }
+        Ok(())
+    }
+
     fn active_fence(&self, b: &ActiveOperationBinding) -> Result<(), Error> {
         if b.host_instance != self.instance()
             || self
@@ -226,6 +242,18 @@ impl Journal {
                     && o.metadata_revision == b.metadata_revision
                     && o.resource_set == b.resource_set
             })
+            || !self
+                .state
+                .operation_policies
+                .get(&b.grant_digest)
+                .is_some_and(|p| {
+                    p.host_instance == b.host_instance
+                        && p.ownership == b.ownership
+                        && p.ownership_generation == b.ownership_generation
+                        && p.delegation == b.delegation
+                        && p.delegation_version == b.delegation_version
+                        && p.policy_revision == b.policy_revision
+                })
             || self.state.delegation_tombstones.contains_key(&b.delegation)
         {
             return Err(Error::Binding);

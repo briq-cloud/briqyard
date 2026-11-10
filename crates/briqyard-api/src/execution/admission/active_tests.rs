@@ -111,6 +111,19 @@ fn setup(
         started_at_ms: 1_010_000,
         operation_deadline_ms: 1_090_000,
     };
+    j.install_operation_policy(
+        HostOperationPolicy {
+            host_instance: b.host_instance.clone(),
+            ownership: b.ownership.clone(),
+            ownership_generation: b.ownership_generation,
+            delegation: b.delegation.clone(),
+            delegation_version: b.delegation_version,
+            grant_digest: b.grant_digest.clone(),
+            policy_revision: b.policy_revision.clone(),
+        },
+        clock(),
+    )
+    .unwrap();
     let protection = InstalledProtection {
         installation: "owner".into(),
         generation: 1,
@@ -333,4 +346,83 @@ fn renewable_mode_is_strict_and_cannot_issue_a_partial_path() {
         )
         .is_err());
     assert_eq!(issuer.status(&f.permit.admission).unwrap(), None);
+}
+
+#[test]
+fn interoperable_continuation_fixture() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut j, f, mut b, p) = setup(&dir.path().join("host"));
+    let p2 = extended(&mut j, &p);
+    b.host_instance = "host-instance-1".into();
+    let c = continuation(&b, &p2);
+    let token = sign(&c, CONTINUATION_TYPE, 1, "central-test");
+    let active = ActiveOperation {
+        binding: b.clone(),
+        phase: ActivePhase::Active,
+        sequence: 0,
+        checked_at: 1000,
+        lease_expires_at: 1040,
+        protection: p,
+    };
+    let fixture = json!({
+        "description": "TEST ONLY: central Ed25519 seed is 32 bytes of 0x01. Never provision these keys.",
+        "now":1035,"uncertainty":1,
+        "central_public_key":URL_SAFE_NO_PAD.encode(f.keys[0].public_key),
+        "active":active,"continuation":c,"continuation_token":token,
+    });
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/execution-continuation-v1.json"
+    );
+    if std::env::var_os("BRIQYARD_UPDATE_EXECUTION_FIXTURE").is_some() {
+        std::fs::write(path, serde_json::to_string_pretty(&fixture).unwrap() + "\n").unwrap();
+    }
+    let disk: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(disk, fixture);
+    assert!(verify_continuation(
+        disk["continuation_token"].as_str().unwrap(),
+        &f.trust(),
+        later(),
+        &b
+    )
+    .is_ok());
+}
+
+#[test]
+fn installed_policy_cannot_change_under_same_grant_and_is_required_for_activity() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut j, f, b, p) = setup(&dir.path().join("host"));
+    let mut policy = j
+        .operation_policy(&b.grant_digest)
+        .unwrap()
+        .unwrap()
+        .clone();
+    policy.policy_revision = "changed".into();
+    assert!(j.install_operation_policy(policy, clock()).is_err());
+    j.state.operation_policies.clear();
+    j.consume(&f.bundle(), clock()).unwrap();
+    assert!(j
+        .record_consumed_operation(&f.bundle(), b, p, clock())
+        .is_err());
+}
+
+#[test]
+fn terminal_fence_or_uncertainty_cannot_be_reported_as_success() {
+    for cause in ["revoke", "uncertain", "authority"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut j, f, b, p) = setup(&dir.path().join("host"));
+        active(&mut j, &f, &b, &p);
+        match cause {
+            "revoke" => j.revoke_delegation(&b.delegation, 1, later()).unwrap(),
+            "uncertain" => j.end_active_operation(&b.admission).unwrap(),
+            "authority" => {
+                let mut registration = j.registration().unwrap().unwrap().clone();
+                registration.generation += 1;
+                registration.epoch = "new-epoch".into();
+                j.register_host(registration, later()).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(j.finish(&f.permit, later()).is_err(), "{cause}");
+    }
 }

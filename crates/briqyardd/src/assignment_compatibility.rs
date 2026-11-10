@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
 
-pub const EXECUTION_CAPABILITY: &[u8] = b"scoped-execution-v1\n";
+pub const EXECUTION_CAPABILITY: &[u8] = b"scoped-execution-v2\n";
 pub const CAPABILITY: &[u8] = b"destination-assignment-v1\n";
 pub const RUN_CAPABILITY: &[u8] = b"assigned-run-v1\n";
 pub const UPDATE_CAPABILITY: &[u8] = b"assigned-update-v3\n";
@@ -17,6 +17,7 @@ pub enum Requirement {
     AssignedRunLifecycle,
     AssignedUpdates,
     ScopedExecution,
+    RenewableExecution,
 }
 pub const RUN_COLLECTIONS: [&str; 3] = [
     "assigned-run-intents",
@@ -55,6 +56,7 @@ fn floor(root: &Path) -> Result<Requirement> {
         (3, "assigned-run-lifecycle-v1") => Ok(Requirement::AssignedRunLifecycle),
         (4, "assigned-update-v3") => Ok(Requirement::AssignedUpdates),
         (5, "scoped-execution-v1") => Ok(Requirement::ScopedExecution),
+        (6, "scoped-execution-v2") => Ok(Requirement::RenewableExecution),
         _ => anyhow::bail!("unsupported assignment compatibility floor"),
     }
 }
@@ -109,7 +111,15 @@ pub fn requirement(root: &Path) -> Result<Requirement> {
 /// Inspect both committed evidence and a pending write using the same exact schemas.
 pub fn record_requirement(kind: &str, value: &Value) -> Result<Requirement> {
     if kind == "execution-idle-protection" {
-        return Ok(Requirement::ScopedExecution);
+        return Ok(match value.get("operation_envelope_ms") {
+            None => Requirement::ScopedExecution,
+            Some(value)
+                if value.as_u64() == Some(briqyard_api::execution::MAX_OPERATION_MILLIS) =>
+            {
+                Requirement::RenewableExecution
+            }
+            Some(_) => anyhow::bail!("unsupported renewable operation envelope"),
+        });
     }
     if kind == "execution-namespace-fence" {
         // Ordinary lifecycle mutations also persist namespace generations and
@@ -195,6 +205,7 @@ pub fn ensure_floor_at(root: &Path, minimum: Requirement) -> Result<()> {
             &meta.join(FLOOR),
             &serde_json::to_vec(&Floor {
                 schema: match minimum {
+                    Requirement::RenewableExecution => 6,
                     Requirement::ScopedExecution => 5,
                     Requirement::AssignedUpdates => 4,
                     Requirement::AssignedRunLifecycle => 3,
@@ -202,6 +213,7 @@ pub fn ensure_floor_at(root: &Path, minimum: Requirement) -> Result<()> {
                     _ => 1,
                 },
                 protocol: match minimum {
+                    Requirement::RenewableExecution => "scoped-execution-v2",
                     Requirement::ScopedExecution => "scoped-execution-v1",
                     Requirement::AssignedUpdates => "assigned-update-v3",
                     Requirement::AssignedRunLifecycle => "assigned-run-lifecycle-v1",
@@ -589,7 +601,7 @@ mod tests {
             ("sleep 2", false),
             ("printf 'assigned-run-lifecycle-v1\\n'", true),
         ] {
-            std::fs::write(&executable, format!("#!/bin/sh\ncase $1 in\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\nassigned-run-lifecycle-capabilities) {body};;\nassigned-update-capabilities) printf 'assigned-update-v3\\n';;\nscoped-execution-capabilities) printf 'scoped-execution-v1\\n';;\n*) exit 2;;\nesac\n")).unwrap();
+            std::fs::write(&executable, format!("#!/bin/sh\ncase $1 in\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\nassigned-run-lifecycle-capabilities) {body};;\nassigned-update-capabilities) printf 'assigned-update-v3\\n';;\nscoped-execution-capabilities) printf 'scoped-execution-v2\\n';;\n*) exit 2;;\nesac\n")).unwrap();
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
             let result = check_required_candidate(
                 dir.path(),

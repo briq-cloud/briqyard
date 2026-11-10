@@ -126,7 +126,7 @@ fn config_path(path: &std::path::Path) -> Result<Option<&std::path::Path>> {
 
 async fn run(args: Args) -> Result<()> {
     if matches!(args.cmd, Some(Cmd::ScopedExecutionCapabilities)) {
-        println!("scoped-execution-v1");
+        println!("scoped-execution-v2");
         return Ok(());
     }
     if matches!(args.cmd, Some(Cmd::StateCapabilities)) {

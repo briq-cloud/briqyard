@@ -58,6 +58,40 @@ async fn internal_execution_route_requires_its_installer_credential_on_loopback(
         );
     }
 
+    for (path, body, wrong_role) in [
+        (
+            "continue",
+            serde_json::json!({"admission":"unknown","continuation":"untrusted"}),
+            "execution-secret",
+        ),
+        (
+            "active",
+            serde_json::json!({"admission":"unknown"}),
+            "installer-secret",
+        ),
+        (
+            "policy",
+            serde_json::json!({"host_instance":"host","ownership":"owner","ownership_generation":1,
+            "delegation":"delegation","delegation_version":1,"grant_digest":"grant","policy_revision":"policy"}),
+            "execution-secret",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/internal/execution/v1/{path}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {wrong_role}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+    }
+
     // Parsing a supported logical input must fit even when JSON expands it 6x.
     // No credential is sent, so the command cannot reach guest dispatch.
     let dispatch = access::channel::Dispatch {

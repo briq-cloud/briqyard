@@ -1,5 +1,5 @@
-//! Dormant live-timer primitive. A host adapter must retain the dispatch fence
-//! through consumption/first write, then use this guard for the entire connection.
+//! Live operation timer. The host retains the dispatch fence through consumption
+//! and guest acceptance, then uses this guard for the entire connection.
 //! Only exact durable journal ACKs may reach `apply_committed` or `revoke_committed`.
 use briqyard_api::execution::{
     admission::{ActiveOperation, ActivePhase},
@@ -144,6 +144,45 @@ impl ActiveLease {
         drop(state);
         self.inner.changed.notify_waiters();
         Ok(())
+    }
+
+    /// A fresh observation of the actual retained live lease, never journal status.
+    pub fn observe(&self, expected: &ActiveOperation, sample: &ClockSample) -> anyhow::Result<()> {
+        let state = self.inner.state.lock().unwrap();
+        anyhow::ensure!(
+            !state.ended
+                && state.evidence == *expected
+                && tokio::time::Instant::now() < state.deadline
+                && tokio::time::Instant::now() < state.operation_deadline,
+            "active execution lease ended or changed"
+        );
+        narrowed_deadline(state.evidence.lease_expires_at * 1000, sample)?;
+        Ok(())
+    }
+    pub fn end(&self) {
+        self.inner.state.lock().unwrap().ended = true;
+        self.inner.changed.notify_waiters();
+    }
+    pub fn check_io(&self) -> std::io::Result<()> {
+        let check = || -> anyhow::Result<()> {
+            let sample = ClockSample::read()
+                .ok_or_else(|| anyhow::anyhow!("qualified execution clock unavailable"))?;
+            let state = self.inner.state.lock().unwrap();
+            anyhow::ensure!(
+                !state.ended
+                    && tokio::time::Instant::now() < state.deadline
+                    && tokio::time::Instant::now() < state.operation_deadline,
+                "active execution lease ended"
+            );
+            narrowed_deadline(state.evidence.lease_expires_at * 1000, &sample)?;
+            Ok(())
+        };
+        check().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "active execution authorization unavailable",
+            )
+        })
     }
 
     /// The guard owns a timer independent of guest traffic. Quiet reads/writes

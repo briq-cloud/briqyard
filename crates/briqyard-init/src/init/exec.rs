@@ -48,6 +48,15 @@ pub(super) async fn exec_op<R, W>(
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let versioned = req.op == "exec_stream_v1";
+    let renewable = req.op == "exec_renewable_v1";
+    if renewable && (req.timeout_ms == 0 || req.timeout_ms > 60_000 || req.interactive || req.tty) {
+        send(
+            &stream,
+            &Response::error("invalid renewable execution request"),
+        )
+        .await;
+        return;
+    }
     if versioned {
         let start = briqyard_api::session::stream::Start {
             cmd: req.cmd.clone(),
@@ -127,6 +136,7 @@ pub(super) async fn exec_op<R, W>(
         None
     };
     cmd.kill_on_drop(true);
+    let spawned_at = tokio::time::Instant::now();
     let mut child = {
         let mut tracked = TRACKED.lock().unwrap();
         match cmd.spawn() {
@@ -146,10 +156,24 @@ pub(super) async fn exec_op<R, W>(
             }
         }
     };
+    let pid = child.id().unwrap_or(0) as i32;
+    if renewable
+        && tokio::time::timeout_at(
+            spawned_at + Duration::from_millis(req.timeout_ms),
+            send(&stream, &Response::new("accepted")),
+        )
+        .await
+        .is_err()
+    {
+        // Acceptance backpressure cannot postpone the guest's execution timeout.
+        let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+        TRACKED.lock().unwrap().remove(pid);
+        return;
+    }
     // The command's copies of its terminal are its own now: once they are closed, the
     // terminal's output ends.
     drop(cmd);
-    let pid = child.id().unwrap_or(0) as i32;
     let sink = match &pty {
         Some(p) => Some(Stdin::Pty(p.clone())),
         None => child.stdin.take().map(Stdin::Pipe),
@@ -198,6 +222,9 @@ pub(super) async fn exec_op<R, W>(
     let end = {
         let exited = async {
             match deadline {
+                Some(d) if renewable => tokio::time::timeout_at(spawned_at + d, child.wait())
+                    .await
+                    .ok(),
                 Some(d) => tokio::time::timeout(d, child.wait()).await.ok(),
                 None => Some(child.wait().await),
             }
@@ -442,6 +469,42 @@ mod tests {
     use std::time::Instant;
 
     // --- exec ---
+
+    #[tokio::test]
+    async fn renewable_exec_acknowledges_spawn_and_keeps_a_bounded_guest_timeout() {
+        let st = state();
+        let mut request = exec_req(&["sh", "-c", "echo accepted-output"]);
+        request.op = "exec_renewable_v1".into();
+        request.timeout_ms = 60_000;
+        let frames = exec(&st, request.clone()).await;
+        assert_eq!(frames[0].kind, "accepted");
+        assert_eq!(text(&frames, "stdout"), "accepted-output\n");
+        assert_eq!(exit_of(&frames).code, 0);
+        for timeout_ms in [0, 60_001] {
+            request.timeout_ms = timeout_ms;
+            let frames = exec(&st, request.clone()).await;
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].kind, "error");
+        }
+        request.timeout_ms = 1000;
+        request.cmd = vec!["/__renewable_missing_executable__".into()];
+        let frames = exec(&st, request).await;
+        assert!(frames.iter().all(|frame| frame.kind != "accepted"));
+    }
+
+    #[tokio::test]
+    async fn renewable_acceptance_backpressure_cannot_postpone_guest_timeout() {
+        let st = state();
+        let mut request = exec_req(&["sleep", "30"]);
+        request.op = "exec_renewable_v1".into();
+        request.timeout_ms = 100;
+        let (_host, input) = tokio::io::duplex(64);
+        let (blocked, _unread) = tokio::io::duplex(1);
+        let sink = Arc::new(tokio::sync::Mutex::new(blocked));
+        tokio::time::timeout(Duration::from_secs(3), exec_op(&st, input, sink, request))
+            .await
+            .expect("blocked acceptance must still end the spawned command");
+    }
 
     #[tokio::test]
     async fn exec_streams_output_and_exit_code() {

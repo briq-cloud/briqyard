@@ -186,7 +186,7 @@ where
             )
             .await;
         }
-        "exec" | "exec_stream_v1" => exec_op(&st, input, stream, req).await,
+        "exec" | "exec_stream_v1" | "exec_renewable_v1" => exec_op(&st, input, stream, req).await,
         "put_stream" | "get_stream" => files::serve(input, stream, req).await,
         "put" => {
             // A frozen filesystem can block writes until thaw; never park a runtime

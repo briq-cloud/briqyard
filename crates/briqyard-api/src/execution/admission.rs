@@ -9,6 +9,8 @@ mod authority_install;
 mod delegation_install;
 mod installation_flow;
 mod operation;
+mod operation_policy;
+pub use operation_policy::HostOperationPolicy;
 mod projection;
 pub use authority_install::{AuthorityIntent, AuthorityPayload};
 pub use delegation_install::DelegationIntent;
@@ -107,6 +109,8 @@ struct State {
     uncertain_installations: BTreeSet<String>,
     #[serde(default)]
     active_operations: BTreeMap<String, ActiveOperation>,
+    #[serde(default)]
+    operation_policies: BTreeMap<String, HostOperationPolicy>,
 }
 
 /// Authenticated installer input. These records are never constructed from a grant.
@@ -311,6 +315,7 @@ impl Journal {
                 operation_intents: BTreeMap::new(),
                 uncertain_installations: BTreeSet::new(),
                 active_operations: BTreeMap::new(),
+                operation_policies: BTreeMap::new(),
             },
         };
         if state
@@ -319,6 +324,7 @@ impl Journal {
             .map(Vec::len)
             .sum::<usize>()
             > MAX_RECORDS
+            || state.operation_policies.len() > MAX_RECORDS
             || state.active_operations.len() > MAX_RECORDS
             || state.admissions.len() > MAX_RECORDS
             || state.allocations.len() > MAX_RECORDS
@@ -404,6 +410,11 @@ impl Journal {
         let mut next = self.state.clone();
         next.registration_highwater = record.generation;
         next.registration = Some(record);
+        for operation in next.active_operations.values_mut() {
+            if matches!(operation.phase, ActivePhase::Consumed | ActivePhase::Active) {
+                operation.phase = ActivePhase::Revoked;
+            }
+        }
         next.ownership.clear();
         next.delegations.clear();
         next.prepared.clear();
@@ -858,6 +869,14 @@ impl Journal {
         if !matches!(self.role(), Role::Host(_)) {
             return Err(Error::Binding);
         }
+        if self
+            .state
+            .active_operations
+            .get(&permit.admission)
+            .is_some_and(|o| o.phase != ActivePhase::Active)
+        {
+            return Err(Error::Binding);
+        }
         let mut next = self.state.clone();
         let saved = next
             .admissions
@@ -947,6 +966,7 @@ impl Journal {
             .map(Vec::len)
             .sum::<usize>()
             > MAX_RECORDS
+            || next.operation_policies.len() > MAX_RECORDS
             || next.active_operations.len() > MAX_RECORDS
             || next.admissions.len() > MAX_RECORDS
             || next.allocations.len() > MAX_RECORDS

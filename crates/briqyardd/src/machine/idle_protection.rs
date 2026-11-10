@@ -16,6 +16,8 @@ struct Receipt {
     admission: String,
     targets: Vec<Target>,
     expires_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operation_envelope_ms: Option<u64>,
 }
 
 #[derive(Default)]
@@ -52,6 +54,9 @@ impl Protection {
                     && !receipt.targets.is_empty()
                     && receipt.targets.len() <= execution::MAX_RESOURCES
                     && receipt.expires_at_ms > 0
+                    && receipt
+                        .operation_envelope_ms
+                        .is_none_or(|n| n == execution::MAX_OPERATION_MILLIS)
                     && i64::try_from(receipt.expires_at_ms)
                         .ok()
                         .and_then(DateTime::from_timestamp_millis)
@@ -104,6 +109,10 @@ impl Protection {
             admission: admission.into(),
             targets: targets.to_vec(),
             expires_at_ms,
+            operation_envelope_ms: self
+                .receipts
+                .get(admission)
+                .and_then(|r| r.operation_envelope_ms),
         };
         if let Some(old) = self.receipts.get(admission) {
             anyhow::ensure!(
@@ -141,6 +150,44 @@ impl Protection {
         }
         self.receipts.insert(admission.into(), receipt);
         self.bytes += bytes.len();
+        Ok(())
+    }
+
+    pub(super) fn recovery_millis(&self) -> u64 {
+        self.receipts
+            .values()
+            .map(|r| {
+                r.operation_envelope_ms
+                    .unwrap_or(execution::MAX_COMMAND_SECONDS * 1000)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+    /// A changed retained receipt is an old-reader rejection barrier even after
+    /// permanent-marker loss. Store writes schema6 before publishing this field.
+    pub(super) fn require_renewable(&mut self, store: &Store, admission: &str) -> Result<()> {
+        anyhow::ensure!(!self.poisoned, "execution protection unresolved");
+        let old = self
+            .receipts
+            .get(admission)
+            .context("missing initial operation protection")?;
+        if old.operation_envelope_ms == Some(execution::MAX_OPERATION_MILLIS) {
+            return Ok(());
+        }
+        let mut receipt = old.clone();
+        receipt.operation_envelope_ms = Some(execution::MAX_OPERATION_MILLIS);
+        let bytes = serde_json::to_vec_pretty(&receipt)?.len();
+        let total = self.bytes - serde_json::to_vec_pretty(old)?.len() + bytes;
+        anyhow::ensure!(
+            total <= MAX_TOTAL_BYTES,
+            "execution protection byte capacity"
+        );
+        if let Err(error) = store.put_durable(KIND, admission, &receipt) {
+            self.poisoned = true;
+            return Err(error);
+        }
+        self.receipts.insert(admission.into(), receipt);
+        self.bytes = total;
         Ok(())
     }
 
@@ -307,6 +354,42 @@ mod tests {
     }
 
     #[test]
+    fn renewable_receipt_reconstructs_downgrade_barrier_and_full_runtime_drain() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut protection = Protection::load(&store).unwrap();
+        protection
+            .accept(&store, "operation", &[target()], 50_000)
+            .unwrap();
+        assert_eq!(protection.recovery_millis(), 60_000);
+        protection.require_renewable(&store, "operation").unwrap();
+        protection
+            .accept(&store, "operation", &[target()], 50_000)
+            .unwrap();
+        assert_eq!(protection.recovery_millis(), 80_000);
+        let bytes = std::fs::read(store.dir(KIND).join("operation.json")).unwrap();
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyReceipt {
+            #[serde(rename = "admission")]
+            _admission: String,
+            #[serde(rename = "targets")]
+            _targets: Vec<Target>,
+            #[serde(rename = "expires_at_ms")]
+            _expires_at_ms: u64,
+        }
+        assert!(serde_json::from_slice::<LegacyReceipt>(&bytes).is_err());
+        std::fs::remove_file(dir.path().join("meta/required-assignment-protocol.json")).unwrap();
+        assert_eq!(
+            crate::assignment_compatibility::requirement(dir.path()).unwrap(),
+            crate::assignment_compatibility::Requirement::RenewableExecution
+        );
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(Protection::load(&store).unwrap().recovery_millis(), 80_000);
+    }
+
+    #[test]
     fn aggregate_startup_budget_refuses_before_ack() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -316,6 +399,7 @@ mod tests {
             admission: "a_one".into(),
             targets: vec![target()],
             expires_at_ms: end,
+            operation_envelope_ms: None,
         };
         let size = serde_json::to_vec_pretty(&receipt).unwrap().len();
         protection.bytes = MAX_TOTAL_BYTES - size + 1;

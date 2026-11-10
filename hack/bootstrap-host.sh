@@ -964,6 +964,8 @@ def required(config):
             needed = 4
         elif marker == {"schema": 5, "protocol": "scoped-execution-v1"} and type(marker["schema"]) is int:
             needed = 5
+        elif marker == {"schema": 6, "protocol": "scoped-execution-v2"} and type(marker["schema"]) is int:
+            needed = 6
         else:
             raise ValueError("invalid assignment protocol floor")
     runs = ("assigned-run-intents", "assigned-runs", "assigned-run-readers")
@@ -981,7 +983,12 @@ def required(config):
             if not isinstance(record, dict):
                 raise ValueError("invalid assignment state record")
             if kind in ("execution-idle-protection", "execution-namespace-fence"):
-                needed = max(needed, 5)
+                if kind == "execution-idle-protection" and "operation_envelope_ms" in record:
+                    if type(record["operation_envelope_ms"]) is not int or record["operation_envelope_ms"] != 80000:
+                        raise ValueError("unsupported renewable operation envelope")
+                    needed = max(needed, 6)
+                else:
+                    needed = max(needed, 5)
             elif kind == "assigned-run-updates":
                 if type(record.get("schema")) is not int or record["schema"] not in (1, 2, 3):
                     raise ValueError("unsupported assigned update evidence schema")
@@ -1046,7 +1053,7 @@ try:
     probe(sys.argv[1], "assigned-run-capabilities", b"assigned-run-v1\n")
     probe(sys.argv[1], "assigned-run-lifecycle-capabilities", b"assigned-run-lifecycle-v1\n")
     probe(sys.argv[1], "assigned-update-capabilities", b"assigned-update-v3\n")
-    probe(sys.argv[1], "scoped-execution-capabilities", b"scoped-execution-v1\n")
+    probe(sys.argv[1], "scoped-execution-capabilities", b"scoped-execution-v2\n")
 except Exception:
     print("assignment compatibility inspection/probe refused replacement", file=sys.stderr)
     sys.exit(1)

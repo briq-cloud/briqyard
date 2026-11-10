@@ -607,8 +607,8 @@ keep their 8 MiB bounds. This changes no activation or qualification gate.
 legacy signed bytes and deadlines. Null and unknown modes refuse. Execution and
 output modes attenuate independently and must each match the grant; every numeric
 limit is nonincreasing. Renewable guest duration is at most 60 seconds. The existing
-issuer and host dispatch explicitly refuse this mode. No route accepts continuation
-credentials, and these primitives do not activate renewable execution.
+issuer explicitly refuses this mode. Host support below is available only through
+the authenticated internal channel; fleet issuance remains disabled.
 
 The new central-signed token type is `briqyard-execution-continuation+jwt`, with the
 existing Ed25519 header, key roles, token bound and strict decoding. Its claims are:
@@ -657,16 +657,54 @@ cancellation and clock loss cannot resume work. An independent timer and registe
 notification wake quiet guest I/O at lease expiry or revocation. Fresh qualification guards each poll and terminal result. The guarded future
 is created once and never replayed across updates.
 
-Integration still requires authenticated source reauthorization, continuation and
-active-evidence transports, independent policy installation, and exact first-frame
-ACK wiring and per-I/O clock checks. The authority's whole-call turn and the host's whole-command admission
-read guard must be split without releasing the initial-dispatch fence. Journal
-revocation/invalidation must drive the live guard before acknowledging control
-changes. Protection must cover each extension before its journal commit. Initial
-permit/allocation expiry becomes dispatch admission only in that future path;
-legacy commands retain their current fixed deadline. Guest timeout, dispatch and
-terminal budgets must be enforced separately, and restart protection drain must
-cover the full 80-second envelope before enabling it. Existing 60-second recovery
-drain is sufficient only while renewable dispatch remains refused. Independent
+## Host renewable execution
+
+The installer installs an immutable `HostOperationPolicy` at
+`POST /internal/execution/v1/policy`: `host_instance`, `ownership`,
+`ownership_generation`, `delegation`, `delegation_version`, `grant_digest` and
+`policy_revision`. It binds policy identity to the exact installed grant. A
+changed record for the same grant refuses. Preparation and dispatch require it.
+
+`POST /internal/execution/v1/continue` requires installer credentials and
+`{admission, continuation}`. The host requires exact live evidence before verifying
+the central signature. Under the admission write guard it fsyncs the new sequence
+and already-installed protection, then applies that evidence to the live timer.
+Only a fresh successful observation after application returns an active ACK. A
+commit crossing the old lease's expiry ends the operation instead of resuming it.
+
+`POST /internal/execution/v1/active` requires execution credentials and
+`{admission}`. Both endpoints return
+`{state, observed_at: {now, uncertainty}, evidence}`; state is `active`, `terminal`
+or `unknown`. `observed_at` is a fresh qualified host clock interval. The evidence's
+`checked_at` remains the last signed source authorization. Polling does not advance
+it or the sequence. Durable active records without a matching live owner become
+unresolved terminal evidence. No status path creates or reconnects a guest session.
+
+The new guest operation `exec_renewable_v1` validates a positive timeout of at most
+60,000 ms and emits an exact `accepted` frame only after successful process spawn.
+The guest timeout starts before spawn. The host retains its initial admission,
+ownership, lifecycle and lease fences through that ACK and the active journal
+fsync. It then publishes the exact live lease and releases the admission read
+guard, allowing continuation and revocation while output is collected. Legacy
+operations keep their existing operation, fixed deadline and lock scope.
+
+A live owner exists only for that one connected execution. Every I/O poll checks a
+fresh qualified clock; a separate timer and notification interrupt quiet I/O.
+Revocation, ownership invalidation and authority changes persist terminal state
+and end the matching live lease before control ACK. Dropping the execution ends
+and removes its live owner. Recovery retains terminal evidence without replay.
+Dispatch is bounded to ten seconds; guest timeout remains independent; terminal
+collection has ten additional seconds, all within the immutable 80-second envelope.
+
+Before renewable consumption, the original idle-protection receipt gains
+`operation_envelope_ms: 80000`. Its strict schema and reconstructible assignment
+requirement `scoped-execution-v2` / schema 6 prevent an older runtime from accepting
+the store. Startup drains the full 80 seconds and still requires qualified wall
+clock proof before protected guests can resume. Legacy receipts retain schema 5
+and their existing 60-second drain. Stamped receipts retain the stronger barrier.
+
+This host slice does not enable fleet issuance. Remaining integration must split
+the authority's whole-call turn, transport trusted policy and live evidence, obtain
+fresh source authorization and commit protection before central signing. Independent
 review, Linux lifecycle/crash/clock qualification and compatibility evidence remain
-required; Mac primitive tests supply none of that native evidence.
+required. Mac checks do not supply native evidence.
