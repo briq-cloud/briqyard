@@ -41,6 +41,23 @@ fn native_scenarios_have_distinct_initial_protection_admissions() {
     assert_eq!(admissions.len(), 4);
 }
 
+fn initial_idle_expiry(now: u64, grant_expiry: u64, renewable: bool) -> u64 {
+    if renewable {
+        now + 60
+    } else {
+        grant_expiry + 15
+    }
+}
+
+#[test]
+fn renewable_fixture_protection_fits_the_installer_window() {
+    let now = 1_000;
+    let grant_expiry = now + 55;
+    let expiry = initial_idle_expiry(now, grant_expiry, true);
+    assert!(expiry > grant_expiry);
+    assert!(expiry <= now + 60);
+}
+
 fn provision(dir: &Path) -> Result<()> {
     let mut keys = vec![];
     for (name, role, issuer, authority) in [
@@ -271,7 +288,7 @@ async fn main() -> Result<()> {
     let namespace = &args[3];
     let discovery = channel.install("discover", json!({"id":"discovery","registration":"registration","control":{
         "host_instance":identity["host_instance"],"installation":"ownership-installation","generation":generation,
-        "team":namespace,"primary_id":"native-primary","metadata_revision":"native-metadata",
+        "team":namespace,"primary_id":"native-primary","require_renewable":renewable,"metadata_revision":"native-metadata",
         "seeds":[{"id":"native-primary","machine":args[4],"namespace":namespace,"team":namespace,"expected_version":null},
                  {"id":"native-sibling","machine":args[5],"namespace":namespace,"team":namespace,"expected_version":null}]
     }})).await?;
@@ -306,7 +323,7 @@ async fn main() -> Result<()> {
         .min(clocks.host.now.saturating_sub(clocks.host.uncertainty));
     let expiry = if renewable { issued + 60 } else { now + 40 };
     let allocation_expiry = if renewable { now + 18 } else { expiry };
-    let idle_expiry = if renewable { now + 120 } else { expiry + 15 };
+    let idle_expiry = initial_idle_expiry(now, expiry, renewable);
     let idle_admission = initial_idle_admission(generation);
     std::fs::write(
         dir.join("protection-deadline"),

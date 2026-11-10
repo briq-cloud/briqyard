@@ -51,8 +51,8 @@ namespace, stops the authority and restores the daemon configuration. It retains
 compatibility floor; the runner must be disposable.
 
 The same gate then runs `execution_service::native::renewable_service_callback_host_guest`
-from the compiled fleet test binary. Only that test constructor enables renewable issuance;
-production construction stays disabled. Its injected central callback re-enters the real
+from the compiled fleet test binary. The fixture uses the configured production constructor with an injected callback.
+An unconfigured production constructor refuses renewable issuance. The callback re-enters the real
 Service to observe, protect and install an exact signed continuation while dispatch is open.
 A quiet guest reaches its full 60-second timeout across the original allocation window with
 one unit per quota bucket. Duplicate continuations and dispatch IDs are status-only. Source

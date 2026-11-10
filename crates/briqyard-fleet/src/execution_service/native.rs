@@ -18,6 +18,18 @@ use std::{
 };
 use tower::ServiceExt;
 
+fn renewal_protection_deadline(now: u64) -> u64 {
+    (now + 60) * 1000
+}
+
+#[test]
+fn native_continuation_protection_fits_the_installer_window() {
+    let now = 1_000;
+    let deadline = renewal_protection_deadline(now);
+    assert!(deadline > (now + 55) * 1000);
+    assert!(deadline <= (now + 60) * 1000);
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configuration {
@@ -107,7 +119,7 @@ impl Central {
             .min(active.binding.source.expires_at);
         ensure!(expiry > active.lease_expires_at, "no extension");
         let attempt = format!("native-{id}-{previous}");
-        let deadline = (now + 120) * 1000;
+        let deadline = renewal_protection_deadline(now);
         std::fs::write(
             self.directory.join("protection-deadline"),
             deadline.to_string(),

@@ -803,3 +803,8 @@ status-only duplicates, source refusal/lease expiry and active revocation. It al
 runs the monotonic activation and completion-owner regressions. There is no separate
 test-only capability override. A compiled fixture or Mac checks do not satisfy native
 qualification; deployment with renewal requires separately reviewed native evidence.
+
+The native fixture requests at most 60 seconds of protection per initial or
+continuation admission, matching the production installer. Longer commands renew
+that bounded protection; the fixture does not bypass the installer with a single
+120-second receipt. Renewable discovery also requests the live guest capability.
