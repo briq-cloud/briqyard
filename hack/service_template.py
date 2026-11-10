@@ -59,7 +59,7 @@ echo "cached=$(cat /tmp/cached)"
 echo "fresh=$(cat /tmp/fresh 2>/dev/null)"
 echo "clone=$(tr -d ' \n' < /run/briqyard/clone.json 2>/dev/null)"
 '''
-PARK = '#!/bin/sh\nsync\nif [ -f /tmp/bgpark ]; then sleep 600 & echo $! > /tmp/bgpid; fi\n'
+PARK = '#!/bin/sh\nsync\nif [ -f /tmp/bgpark ]; then sleep 60417 & fi\n'
 RESUME = r'''#!/bin/sh
 head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' > /tmp/fresh
 if grep -q bad /run/briqyard/clone.json; then echo "refusing: $(cat /run/briqyard/clone.json)" >&2; exit 1; fi
@@ -205,8 +205,10 @@ def e2e():
         vals = [o.get(key) for o in out]
         check('clones differ in ' + key, len(set(vals)) == 3 and all(vals), str(vals))
     # 3c: the park hook's background child was killed when the hook ended: no clone has it.
+    # Matched by its unique argument in /proc, not by a pid that the snapshot may have outlived.
     gone = cli('exec', cl[0]['id'], '--', 'sh', '-c',
-               'p=$(cat /tmp/bgpid); if kill -0 $p 2>/dev/null; then echo alive; else echo gone; fi').stdout
+               'n=$(for c in /proc/[0-9]*/cmdline; do tr "\\0" " " < $c 2>/dev/null; echo; done | grep -c "^sleep 60417 "); '
+               'if [ "$n" = 0 ]; then echo gone; else echo alive; fi').stdout
     check('park hook background child absent from the clone', 'gone' in gone and 'alive' not in gone, gone.strip())
     # 2: the draw taken before the seal is shared: the documented application duty.
     check('cached draw is shared across clones', len({o['cached'] for o in out}) == 1 and bool(out[0]['cached']))

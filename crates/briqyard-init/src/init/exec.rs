@@ -43,6 +43,7 @@ pub(super) async fn exec_op<R, W>(
     input: R,
     stream: Arc<tokio::sync::Mutex<W>>,
     req: Request,
+    admission: Option<Admission>,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -156,6 +157,8 @@ pub(super) async fn exec_op<R, W>(
             }
         }
     };
+    // The process exists: a park scan sees it from here.
+    drop(admission);
     let pid = child.id().unwrap_or(0) as i32;
     if renewable
         && tokio::time::timeout_at(
@@ -501,9 +504,12 @@ mod tests {
         let (_host, input) = tokio::io::duplex(64);
         let (blocked, _unread) = tokio::io::duplex(1);
         let sink = Arc::new(tokio::sync::Mutex::new(blocked));
-        tokio::time::timeout(Duration::from_secs(3), exec_op(&st, input, sink, request))
-            .await
-            .expect("blocked acceptance must still end the spawned command");
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            exec_op(&st, input, sink, request, None),
+        )
+        .await
+        .expect("blocked acceptance must still end the spawned command");
     }
 
     #[tokio::test]
@@ -824,6 +830,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_hosts_close_hangs_up_a_terminal() {
+        let _one = testutil::one_at_a_time().await;
         let script = "trap 'exit 9' HUP; echo $$; while :; do sleep 0.1; done";
         let mut s = open(&state(), session(&["sh", "-c", script], true)).await;
         s.until("\n").await;

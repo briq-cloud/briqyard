@@ -118,7 +118,7 @@ impl Manager {
             Ok(a) if a.kind == "error" => {
                 if a.error_code == guest::PARK_UNRECOVERABLE {
                     // Frozen and without its identity: it never serves again.
-                    self.stop_parked(e).await;
+                    self.stop_parked(e, "service park unrecoverable").await;
                 }
                 return Err(MError::Conflict(format!(
                     "service park refused ({}): {}",
@@ -137,7 +137,7 @@ impl Manager {
         };
         let Some(parked) = parked else {
             // The guest's state is unknown: it may be parked.
-            self.stop_parked(e).await;
+            self.stop_parked(e, "service park not acknowledged").await;
             return Err(invalid("service park was not acknowledged"));
         };
         let synced = tokio::time::timeout(
@@ -146,15 +146,15 @@ impl Manager {
         )
         .await;
         if !matches!(synced, Ok(Ok(()))) {
-            self.stop_parked(e).await;
+            self.stop_parked(e, "service seal fs_sync failed").await;
             return Err(invalid("service seal fs_sync failed"));
         }
         Ok(parked.ram_marker)
     }
 
     /// Ends a parked source under its held lifecycle lock.
-    pub(in crate::machine) async fn stop_parked(&self, e: &Arc<Entry>) {
-        if let Err(err) = self.stop_locked(e, "service template sealed".into()).await {
+    pub(in crate::machine) async fn stop_parked(&self, e: &Arc<Entry>, reason: &str) {
+        if let Err(err) = self.stop_locked(e, reason.into()).await {
             tracing::warn!(machine = %e.snapshot().id, "stopping parked service source: {err:#}");
         }
     }

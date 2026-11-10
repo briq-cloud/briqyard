@@ -118,14 +118,24 @@ where
         Err(_) => return,
     };
     let stream = Arc::new(tokio::sync::Mutex::new(output));
-    if !st.clone_gate.lock().await.allows(&req.op) {
-        send(
-            &stream,
-            &Response::error("clone barrier: operation unavailable"),
-        )
-        .await;
-        return;
-    }
+    let admission = {
+        let gate = st.clone_gate.lock().await;
+        if gate.allows(&req.op) {
+            matches!(
+                req.op.as_str(),
+                "exec" | "exec_stream_v1" | "exec_renewable_v1"
+            )
+            .then(|| Admission::new(&st))
+        } else {
+            drop(gate);
+            send(
+                &stream,
+                &Response::error("clone barrier: operation unavailable"),
+            )
+            .await;
+            return;
+        }
+    };
     match req.op.as_str() {
         "fs_sync" | "fs_freeze" => {
             filesystems::serve(st.config(), input, stream, req).await;
@@ -191,7 +201,9 @@ where
             )
             .await;
         }
-        "exec" | "exec_stream_v1" | "exec_renewable_v1" => exec_op(&st, input, stream, req).await,
+        "exec" | "exec_stream_v1" | "exec_renewable_v1" => {
+            exec_op(&st, input, stream, req, admission).await
+        }
         "put_stream" | "get_stream" => files::serve(input, stream, req).await,
         "put" => {
             // A frozen filesystem can block writes until thaw; never park a runtime

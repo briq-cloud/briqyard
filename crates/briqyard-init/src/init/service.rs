@@ -14,6 +14,10 @@ const CGROUP: &str = "/sys/fs/cgroup/briqyard-workload";
 const TAIL: usize = 4096;
 /// The freezer settles within this or the park fails.
 const FREEZE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A killed hook's group is gone within this, or the scan decides.
+const GROUP_GONE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Executions admitted before the park settle (spawn) within this, or the park is refused.
+const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) fn prepare_cgroup() -> Result<()> {
     fs::create_dir_all(CGROUP).context("workload cgroup")?;
@@ -187,6 +191,16 @@ fn tail_of(bytes: &[u8]) -> String {
         .to_string()
 }
 
+/// Waits (at most `GROUP_GONE_TIMEOUT`) until no process is left in group `pgid`.
+async fn wait_group_gone(pgid: i32) {
+    let deadline = tokio::time::Instant::now() + GROUP_GONE_TIMEOUT;
+    while kill(Pid::from_raw(-pgid), None) != Err(nix::errno::Errno::ESRCH)
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 /// Runs one hook as the workload's user, in its environment, to its end or its timeout.
 pub(super) async fn run_hook(
     st: &State,
@@ -214,9 +228,17 @@ pub(super) async fn run_hook(
     let outcome = tokio::time::timeout(Duration::from_secs(u64::from(timeout_s)), async {
         let mut chunk = [0u8; 1024];
         let mut open = stderr.is_some();
-        let status = loop {
+        // The exit is observed without reaping: the group is killed while its leader still
+        // holds the pid, so the pid cannot have been reused.
+        let mut exited = tokio::task::spawn_blocking(move || {
+            waitid(
+                Id::Pid(Pid::from_raw(pid)),
+                WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT,
+            )
+        });
+        loop {
             tokio::select! {
-                status = child.wait() => break status,
+                _ = &mut exited => break,
                 n = async { stderr.as_mut().unwrap().read(&mut chunk).await }, if open => match n {
                     Ok(n) if n > 0 => {
                         tail.extend_from_slice(&chunk[..n]);
@@ -227,8 +249,9 @@ pub(super) async fn run_hook(
                     _ => open = false,
                 },
             }
-        };
+        }
         let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
+        let status = child.wait().await;
         if let Some(e) = stderr.as_mut() {
             // A descendant in its own group may still hold the pipe: read what is there.
             let _ = tokio::time::timeout(Duration::from_secs(1), async {
@@ -256,6 +279,7 @@ pub(super) async fn run_hook(
         ))),
         Ok(Err(e)) => Err(fail(format!("wait failed: {e}"))),
         Err(_) => {
+            // The leader is not reaped yet (the wait above is cancelled), so the pid is ours.
             let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
             let _ = child.wait().await;
             Err(fail(format!(
@@ -264,8 +288,9 @@ pub(super) async fn run_hook(
             )))
         }
     };
-    // Whatever the hook left running in its process group ends with it, however it exited.
-    let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
+    // Whatever the hook left running in its process group was killed with it: wait until the
+    // group is gone, so a dying child is not taken for a foreign process by the scan.
+    wait_group_gone(pid).await;
     TRACKED.lock().unwrap().remove(pid);
     result
 }
@@ -284,6 +309,37 @@ fn refusal(code: &str, message: String) -> Response {
     }
 }
 
+/// Refuses after the freeze: the service is thawed and keeps running as it was. If the thaw
+/// is not confirmed the workload's state is unknown and the refusal is terminal. An empty
+/// `code` is a plain error.
+async fn refuse_thawed(code: &str, message: String) -> Response {
+    let thawed = match set_frozen(false) {
+        Ok(()) => wait_frozen(false).await,
+        Err(e) => Err(e),
+    };
+    match thawed {
+        Ok(()) if code.is_empty() => Response::error(message),
+        Ok(()) => refusal(code, message),
+        Err(e) => refusal(
+            guest::PARK_UNRECOVERABLE,
+            format!("{message}; the workload could not be thawed: {e:#}"),
+        ),
+    }
+}
+
+/// Waits for the executions the gate admitted to spawn, so the process scan sees them. The
+/// gate is held by the caller: no new one is admitted meanwhile.
+async fn wait_admitted(st: &State) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + ADMISSION_TIMEOUT;
+    while st.admitting.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        if tokio::time::Instant::now() >= deadline {
+            return Err("an execution admitted before the park did not start in time".into());
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    Ok(())
+}
+
 /// Runs the park hook, then quiesces. A refusal up to and including the checks thaws the
 /// workload: the service keeps running as it was. A failure after them is terminal
 /// (`PARK_UNRECOVERABLE`) and the daemon stops the source.
@@ -296,6 +352,9 @@ pub(super) async fn park(st: &Arc<State>) -> Response {
         Ok(h) => h,
         Err(e) => return Response::error(format!("{e:#}")),
     };
+    if let Err(e) = wait_admitted(st).await {
+        return Response::error(e);
+    }
     if let Err(e) = run_hook(st, "park", &hooks.park, hooks.park_timeout_s).await {
         return refusal(CLONE_HOOK_FAILED, e.to_string());
     }
@@ -303,46 +362,39 @@ pub(super) async fn park(st: &Arc<State>) -> Response {
         return Response::error(format!("freeze: {e:#}"));
     }
     if let Err(e) = wait_frozen(true).await {
-        let _ = set_frozen(false);
-        return Response::error(format!("freeze: {e:#}"));
+        return refuse_thawed("", format!("freeze: {e:#}")).await;
     }
     // The tables are read with the workload frozen, so no connection opens or closes
     // between the check and the seal. A refusal thaws the service as it was.
     match external_connections() {
         Ok(open) if open.is_empty() => {}
         Ok(open) => {
-            let _ = set_frozen(false);
-            return refusal(
+            return refuse_thawed(
                 "established_socket",
                 format!(
                     "park left {} established non-loopback TCP connection(s): {}",
                     open.len(),
                     open.join(", ")
                 ),
-            );
+            )
+            .await;
         }
-        Err(e) => {
-            let _ = set_frozen(false);
-            return Response::error(format!("socket check: {e:#}"));
-        }
+        Err(e) => return refuse_thawed("", format!("socket check: {e:#}")).await,
     }
     match foreign_processes() {
         Ok(found) if found.is_empty() => {}
         Ok(found) => {
-            let _ = set_frozen(false);
-            return refusal(
+            return refuse_thawed(
                 "process_outside_workload",
                 format!(
-                    "park left {} process(es) outside the workload cgroup, which the freeze does not stop (an exec session or a leftover): {}",
+                    "park left {} process(es) outside the workload cgroup, which the freeze does not stop (an exec session, a leftover, or a child that left the hook's group): {}",
                     found.len(),
                     found.join(", ")
                 ),
-            );
+            )
+            .await;
         }
-        Err(e) => {
-            let _ = set_frozen(false);
-            return Response::error(format!("process check: {e:#}"));
-        }
+        Err(e) => return refuse_thawed("", format!("process check: {e:#}")).await,
     }
     // Nothing can reconnect from here: the workload is frozen.
     if let Err(e) = clone_identity::prepare_builder().await {
@@ -454,12 +506,7 @@ mod tests {
         );
     }
 
-    /// The tests that spawn processes run one at a time: they hold timing assumptions and
-    /// the binary's other timing tests share the machine.
-    static SPAWNS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    async fn one_at_a_time() -> tokio::sync::MutexGuard<'static, ()> {
-        SPAWNS.lock().await
-    }
+    use testutil::one_at_a_time;
 
     /// A state whose console and identity file live in a private temp directory, so the
     /// tests run without root.
@@ -543,6 +590,40 @@ mod tests {
         // Only a running service parks.
         *st.clone_gate.lock().await = clone::Gate::Parked;
         assert_eq!(park(&st).await.kind, "error");
+    }
+
+    #[tokio::test]
+    async fn park_waits_for_an_admitted_execution_to_spawn() {
+        let st = hooked_state(&["true"], &["true"], 5);
+        let admission = Admission::new(&st);
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop(admission);
+        });
+        let start = tokio::time::Instant::now();
+        wait_admitted(&st).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(90));
+        release.await.unwrap();
+        wait_admitted(&st).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_killed_hook_group_is_gone_before_the_run_returns() {
+        let _one = one_at_a_time().await;
+        let st = hooked_state(&["true"], &["true"], 5);
+        let marker = std::env::temp_dir().join(format!("hook-bg-{}", std::process::id()));
+        let script = format!("sleep 60411 & echo $! > {}", marker.display());
+        run_hook(&st, "park", &["sh".into(), "-c".into(), script], 5)
+            .await
+            .unwrap();
+        let bg: i32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        let _ = fs::remove_file(&marker);
+        // Not found, or at most a zombie awaiting the reaper: not a live process.
+        let state = fs::read_to_string(format!("/proc/{bg}/status")).unwrap_or_default();
+        assert!(
+            state.is_empty() || state.contains("State:\tZ"),
+            "the background child survived: {state}"
+        );
     }
 
     #[tokio::test]
