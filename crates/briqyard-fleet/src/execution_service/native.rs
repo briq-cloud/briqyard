@@ -65,6 +65,58 @@ struct Central {
     scenario: String,
     directory: PathBuf,
 }
+
+fn callback_failure_category(error: &anyhow::Error) -> &'static str {
+    let message = error.to_string();
+    for (prefix, category) in [
+        ("native central operation_active refused:", "active"),
+        ("native central authorization_clock refused:", "clock"),
+        ("native central operation_protect refused:", "protect"),
+        ("native central operation_continue refused:", "continue"),
+        ("native central revoke refused:", "revoke"),
+    ] {
+        if message.starts_with(prefix) {
+            return category;
+        }
+    }
+    match message.as_str() {
+        "not active" => "not_active",
+        "missing active evidence" => "evidence",
+        "sequence changed" => "sequence",
+        "fixture source reauthorization refused" => "source_refused",
+        "no extension" => "no_extension",
+        "timer ACK differs" => "timer_ack",
+        "duplicate continuation differs" => "duplicate_ack",
+        _ => "unknown",
+    }
+}
+
+fn report_callback_failure(error: anyhow::Error) -> renewal::ContinuationError {
+    // Never format the underlying error: serde/transport errors can carry input.
+    eprintln!(
+        "scoped native callback failure: {}",
+        callback_failure_category(&error)
+    );
+    renewal::ContinuationError::Unconfirmed
+}
+
+#[test]
+fn native_callback_diagnostics_never_include_error_text() {
+    for (message, expected) in [
+        (
+            "native central operation_protect refused: 409 Conflict",
+            "protect",
+        ),
+        ("fixture source reauthorization refused", "source_refused"),
+        ("private arbitrary response", "unknown"),
+    ] {
+        assert_eq!(
+            callback_failure_category(&anyhow::anyhow!(message)),
+            expected
+        );
+    }
+}
+
 impl Central {
     async fn call(&self, action: &str, body: Value) -> Result<Value> {
         let app = self
@@ -222,7 +274,7 @@ impl renewal::ContinuationProvider for Central {
                 let result = central
                     .extend(&id, previous)
                     .await
-                    .map_err(|_| renewal::ContinuationError::Unconfirmed);
+                    .map_err(report_callback_failure);
                 let _ = send.send(result);
             });
             self.tasks.lock().unwrap().push(task);
@@ -235,7 +287,7 @@ impl renewal::ContinuationProvider for Central {
         Box::pin(async move {
             self.extend(id, previous)
                 .await
-                .map_err(|_| renewal::ContinuationError::Unconfirmed)
+                .map_err(report_callback_failure)
         })
     }
 }

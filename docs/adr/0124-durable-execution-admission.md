@@ -819,6 +819,12 @@ The disposable native fixture collects these categories through a byte- and line
 allowlist parser. Unknown events and fields are discarded. The diagnostic does not
 retry an installation or establish readiness; a refusal still ends that attempt.
 
+The same bounded parser extracts fixed native-fixture assertion and callback
+failure labels from private stderr before cleanup. Callback errors are classified
+against source-owned strings before recording; unknown errors produce only an
+`unknown` label. No underlying error or response text reaches the CI log. These
+labels distinguish fixture failures from intentional negative installation checks.
+
 
 The disposable native scenarios use distinct delegation identities as registration
 and ownership generations change. Host registration clears current delegation

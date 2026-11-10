@@ -18,6 +18,19 @@ def event(stage="authority_verification", category="Binding", **extra):
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_native_fixture_failures_are_closed_and_exact(self):
+        self.assertEqual(diag.classify(b"Error: renewable full guest timeout did not complete\n"),
+                         ["scoped native failure: guest_timeout_result"])
+        self.assertEqual(diag.classify(b"scoped native callback failure: protect\n"),
+                         ["scoped native failure: callback_protect"])
+        self.assertEqual(diag.classify(b"Error: authority exec returned 503 Service Unavailable\n"),
+                         ["scoped native failure: authority_exec_http_503"])
+        for line in [b"Error: private error", b"Error: native driver failed trailing",
+                     b"scoped native callback failure: secret",
+                     b"scoped native callback failure: protect trailing",
+                     b"Error: authority exec returned 503 Service Unavailable secret"]:
+            self.assertEqual(diag.classify(line + b"\n"), [])
+
     def test_fixed_categories_only(self):
         self.assertEqual(diag.classify(event(secret="never emit this")),
                          ["scoped installation refusal: authority_verification Binding"])

@@ -19,6 +19,38 @@ CATEGORIES = frozenset((
     "Transport(Configuration)", "Transport(Request)", "Transport(Unconfirmed)",
 ))
 
+# The native fixture's stderr is private. Export only these source-owned failure
+# labels before cleanup; neither error text nor arbitrary JSON fields are output.
+FIXTURE_FAILURES = {
+    "renewable full guest timeout did not complete": "guest_timeout_result",
+    "guest/envelope time bounds differ": "guest_time_bounds",
+    "execution did not cross original quota window": "quota_window",
+    "source refusal completed a quiet command": "source_refusal_result",
+    "quiet I/O did not wake at initial lease expiry": "initial_lease_wakeup",
+    "duplicate command was dispatched again": "duplicate_dispatch",
+    "operation evidence lost beyond permit expiry": "operation_status",
+    "native driver deadline; do not replay": "driver_deadline",
+    "native driver failed": "driver_failed",
+    "no live initial lease observed": "initial_lease_missing",
+    "source refusal returned before earliest qualified lease expiry": "source_refusal_time",
+    "no successful durable revoke ACK": "revoke_ack_missing",
+    "quiet command did not terminate promptly after revoke ACK": "revoke_wakeup",
+    "revocation termination was not distinct from initial lease expiry": "revoke_time",
+    "continuation callback was not exercised": "callback_missing",
+}
+CALLBACK_FAILURES = frozenset((
+    "active", "clock", "protect", "continue", "revoke", "not_active", "evidence",
+    "sequence", "source_refused", "no_extension", "timer_ack", "duplicate_ack", "unknown",
+))
+for action in ("identity", "authorization_clock", "register", "discover", "ownership", "protect", "delegation",
+               "projection", "projection_lookup", "exec", "observe", "status", "active",
+               "continue", "policy", "revoke", "invalidate"):
+    for code, phrase in ((400, "Bad Request"), (401, "Unauthorized"), (403, "Forbidden"),
+                         (404, "Not Found"), (409, "Conflict"), (422, "Unprocessable Entity"),
+                         (500, "Internal Server Error"), (503, "Service Unavailable")):
+        FIXTURE_FAILURES[f"authority {action} returned {code} {phrase}"] = (
+            f"authority_{action}_http_{code}")
+
 
 def classify(data):
     """Ignore partial, unknown and nonmatching events; never return arbitrary text."""
@@ -28,6 +60,17 @@ def classify(data):
     if len(data) > MAX_BYTES and not bounded.endswith(b"\n"):
         bounded = bounded.rsplit(b"\n", 1)[0] if b"\n" in bounded else b""
     for line in bounded.splitlines()[:MAX_LINES]:
+        if line.startswith(b"scoped native callback failure: "):
+            category = line.removeprefix(b"scoped native callback failure: ").decode(
+                "ascii", errors="replace")
+            if category in CALLBACK_FAILURES:
+                output.append("scoped native failure: callback_" + category)
+            continue
+        if line.startswith(b"Error: "):
+            category = FIXTURE_FAILURES.get(line[7:].decode("utf-8", errors="replace"))
+            if category:
+                output.append("scoped native failure: " + category)
+            continue
         try:
             event = json.loads(line)
             fields = event.get("fields", {})
