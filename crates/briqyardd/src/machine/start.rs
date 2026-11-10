@@ -355,7 +355,7 @@ impl Manager {
         let _ = self.save(e);
         self.watch(e, &live);
 
-        let ready = async {
+        let ready = Box::pin(async {
             self.persist_launch_provenance(e, &live)?;
             if self.initial_memory_clone(&e.snapshot()) {
                 if e.snapshot()
@@ -383,7 +383,7 @@ impl Manager {
                     )
                     .await
             }
-        };
+        });
         let mut exited = live.exited.clone();
         let hook_failed = std::cell::Cell::new(false);
         let outcome = tokio::select! {

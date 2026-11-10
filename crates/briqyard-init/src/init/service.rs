@@ -8,7 +8,6 @@
 //! the hook exits 0.
 use super::*;
 use guest::{CloneHooks, CLONE_HOOK_FAILED};
-use std::os::unix::process::CommandExt;
 
 const CGROUP: &str = "/sys/fs/cgroup/briqyard-workload";
 const CLONE_JSON: &str = "/run/briqyard/clone.json";
