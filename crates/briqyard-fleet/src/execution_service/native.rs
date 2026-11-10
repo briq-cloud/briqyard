@@ -18,16 +18,31 @@ use std::{
 };
 use tower::ServiceExt;
 
-fn renewal_protection_deadline(now: u64) -> u64 {
-    (now + 60) * 1000
+fn renewal_protection_deadline_from_qualified_check(qualified_checked_at: u64) -> u64 {
+    (qualified_checked_at + 60) * 1000
 }
 
 #[test]
-fn native_continuation_protection_fits_the_installer_window() {
-    let now = 1_000;
-    let deadline = renewal_protection_deadline(now);
-    assert!(deadline > (now + 55) * 1000);
-    assert!(deadline <= (now + 60) * 1000);
+fn continuation_protection_covers_the_lease_within_the_qualified_lower_budget() {
+    use briqyard_api::execution::clock::ClockSample;
+    for fraction_ms in [100, 900] {
+        for uncertainty_ms in [2_000, 4_000] {
+            let sample = ClockSample {
+                wall: Duration::from_millis(1_000_000 + fraction_ms),
+                monotonic: std::time::Instant::now(),
+                uncertainty: Duration::from_millis(uncertainty_ms),
+            };
+            let clock = sample.interval().unwrap();
+            let checked = (clock.now - 5).min(clock.now - clock.uncertainty);
+            let deadline = renewal_protection_deadline_from_qualified_check(checked);
+            let lease_expiry = checked + 60;
+            assert_eq!(deadline, lease_expiry * 1000);
+            assert!(deadline > sample.upper_ms().unwrap());
+            assert!(deadline <= (clock.now + 60) * 1000);
+            assert!(deadline <= sample.lower_ms().unwrap() + 60_000);
+            assert!((clock.now + 60) * 1000 > sample.lower_ms().unwrap() + 60_000);
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -119,7 +134,7 @@ impl Central {
             .min(active.binding.source.expires_at);
         ensure!(expiry > active.lease_expires_at, "no extension");
         let attempt = format!("native-{id}-{previous}");
-        let deadline = renewal_protection_deadline(now);
+        let deadline = renewal_protection_deadline_from_qualified_check(checked);
         std::fs::write(
             self.directory.join("protection-deadline"),
             deadline.to_string(),

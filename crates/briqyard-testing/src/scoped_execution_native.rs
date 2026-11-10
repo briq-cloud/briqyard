@@ -41,21 +41,47 @@ fn native_scenarios_have_distinct_initial_protection_admissions() {
     assert_eq!(admissions.len(), 4);
 }
 
-fn initial_idle_expiry(now: u64, grant_expiry: u64, renewable: bool) -> u64 {
+fn initial_idle_expiry_from_qualified_issue(
+    qualified_issued_at: u64,
+    grant_expiry: u64,
+    renewable: bool,
+) -> u64 {
+    let protection_limit = qualified_issued_at + 60;
     if renewable {
-        now + 60
+        protection_limit
     } else {
-        grant_expiry + 15
+        (grant_expiry + 15).min(protection_limit)
     }
 }
 
 #[test]
-fn renewable_fixture_protection_fits_the_installer_window() {
-    let now = 1_000;
-    let grant_expiry = now + 55;
-    let expiry = initial_idle_expiry(now, grant_expiry, true);
-    assert!(expiry > grant_expiry);
-    assert!(expiry <= now + 60);
+fn initial_protection_covers_grants_within_the_qualified_lower_budget() {
+    use briqyard_api::execution::clock::ClockSample;
+    for fraction_ms in [100, 900] {
+        for uncertainty_ms in [2_000, 4_000] {
+            let sample = ClockSample {
+                wall: Duration::from_millis(1_000_000 + fraction_ms),
+                monotonic: std::time::Instant::now(),
+                uncertainty: Duration::from_millis(uncertainty_ms),
+            };
+            let clock = sample.interval().unwrap();
+            let issued = (clock.now - 5).min(clock.now - clock.uncertainty);
+            for (grant_expiry, renewable) in [(issued + 60, true), (issued + 50, false)] {
+                let expiry =
+                    initial_idle_expiry_from_qualified_issue(issued, grant_expiry, renewable);
+                assert!(expiry >= grant_expiry);
+                assert!(expiry * 1000 > sample.upper_ms().unwrap());
+                assert!(expiry <= clock.now + 60);
+                assert!(expiry * 1000 <= sample.lower_ms().unwrap() + 60_000);
+            }
+            // Wall time plus sixty seconds exceeds the fence's lower-clock budget.
+            assert!((clock.now + 60) * 1000 > sample.lower_ms().unwrap() + 60_000);
+            assert_eq!(
+                initial_idle_expiry_from_qualified_issue(issued, issued + 30, false),
+                issued + 45
+            );
+        }
+    }
 }
 
 fn provision(dir: &Path) -> Result<()> {
@@ -323,7 +349,7 @@ async fn main() -> Result<()> {
         .min(clocks.host.now.saturating_sub(clocks.host.uncertainty));
     let expiry = if renewable { issued + 60 } else { now + 40 };
     let allocation_expiry = if renewable { now + 18 } else { expiry };
-    let idle_expiry = initial_idle_expiry(now, expiry, renewable);
+    let idle_expiry = initial_idle_expiry_from_qualified_issue(issued, expiry, renewable);
     let idle_admission = initial_idle_admission(generation);
     std::fs::write(
         dir.join("protection-deadline"),
