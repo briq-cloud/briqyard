@@ -59,7 +59,7 @@ echo "cached=$(cat /tmp/cached)"
 echo "fresh=$(cat /tmp/fresh 2>/dev/null)"
 echo "clone=$(tr -d ' \n' < /run/briqyard/clone.json 2>/dev/null)"
 '''
-PARK = '#!/bin/sh\nsync\n'
+PARK = '#!/bin/sh\nsync\nif [ -f /tmp/bgpark ]; then sleep 600 & echo $! > /tmp/bgpid; fi\n'
 RESUME = r'''#!/bin/sh
 head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' > /tmp/fresh
 if grep -q bad /run/briqyard/clone.json; then echo "refusing: $(cat /run/briqyard/clone.json)" >&2; exit 1; fi
@@ -181,6 +181,15 @@ def e2e():
     except Exception as e:
         check('source serves again after the refusal', False, str(e))
     cli('exec', SRC, '--', 'sh', '-c', 'pkill nc; true')
+    # 3b: a process outside the workload cgroup (an exec session's) refuses the seal.
+    cli('exec', SRC, '--', 'sh', '-c', '(setsid sleep 601 </dev/null >/dev/null 2>&1 &); sleep 1')
+    try:
+        api('POST', '/machines/%s/snapshots' % SRC, {'name': 'loaded', 'memory': True, 'template': True})
+        check('seal refused with a process outside the workload', False, 'sealed')
+    except ApiError as e:
+        check('seal refused with a process outside the workload', e.status == 409 and 'outside the workload' in e.body, str(e))
+    check('source still running after the process refusal', api('GET', '/machines/' + SRC)['state'] == 'running')
+    cli('exec', SRC, '--', 'sh', '-c', 'pkill -f "sleep 60[1]"; touch /tmp/bgpark; true')
     # 1: seal, then three clones.
     snap = api('POST', '/machines/%s/snapshots' % SRC, {'name': 'loaded', 'memory': True, 'template': True})
     check('sealed', bool(snap.get('clone_generation')), str(snap))
@@ -195,6 +204,10 @@ def e2e():
     for key in ('mac', 'ip', 'machine_id', 'hostname', 'fresh'):
         vals = [o.get(key) for o in out]
         check('clones differ in ' + key, len(set(vals)) == 3 and all(vals), str(vals))
+    # 3c: the park hook's background child was killed when the hook ended: no clone has it.
+    gone = cli('exec', cl[0]['id'], '--', 'sh', '-c',
+               'p=$(cat /tmp/bgpid); if kill -0 $p 2>/dev/null; then echo alive; else echo gone; fi').stdout
+    check('park hook background child absent from the clone', 'gone' in gone and 'alive' not in gone, gone.strip())
     # 2: the draw taken before the seal is shared: the documented application duty.
     check('cached draw is shared across clones', len({o['cached'] for o in out}) == 1 and bool(out[0]['cached']))
     for o, m in zip(out, cl):

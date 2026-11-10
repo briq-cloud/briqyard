@@ -168,6 +168,11 @@ impl Manager {
             .clone()
             .ok_or_else(|| invalid("service-ready-v1 requires clone_hooks"))?;
         hooks.validate().map_err(|e| invalid(e.to_string()))?;
+        if !classes::normalized(&req.runtime_class).is_empty() {
+            return Err(invalid(
+                "a service template builder runs in the default runtime class",
+            ));
+        }
         if req.image.is_empty()
             || role.is_some()
             || req.fork.is_some()
@@ -205,6 +210,7 @@ impl Manager {
                     && birth.image == r.image
                     && birth.init_sha256 == self.inner.images.init_sha256()
                     && birth.hooks.as_ref().is_some_and(|h| h.validate().is_ok())
+                    && classes::normalized(&r.runtime_class).is_empty()
                     && r.volume.is_none()
                     && r.pending.is_none()
                     && r.clone_origin.is_none(),

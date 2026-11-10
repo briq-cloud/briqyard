@@ -129,6 +129,13 @@ impl Manager {
             ));
         }
         self.validate_launch_record(&rec)?;
+        // A clone that failed its resume hook never restores again: a second start would
+        // bring the same identity and entropy back.
+        if rec.clone_origin.is_some() && rec.error_reason == reason::CLONE_HOOK_FAILED {
+            return Err(MError::Conflict(
+                "this clone failed its resume hook and cannot start again; destroy it and clone the template again".into(),
+            ));
+        }
         match rec.state.as_str() {
             // `creating`: the create's own start (`make`), its lock held throughout.
             state::CREATING | state::CREATED | state::STOPPED | state::ERROR => {}

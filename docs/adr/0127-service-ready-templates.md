@@ -29,13 +29,20 @@ A seal (`snapshot` with `memory` and `template`) does, in the guest init:
 1. Refuse unless the service runs unparked, with the right init digest.
 2. Run `park` as the workload's user. Non-zero or a timeout: the service keeps running and
    the seal is refused with 409 (`clone_hook_failed`, exit code and the last 4 KB of stderr).
-3. Refuse when any established non-loopback TCP connection remains (`established_socket`),
-   or when the table cannot be read. This check does not rest on the hook.
-4. Freeze the workload's cgroup, take eth0 down, remove addresses and identity files.
+   However the hook exits, its whole process group is killed: a background child of `park`
+   does not outlive it and is not in any clone.
+3. Freeze the workload's cgroup and wait for `frozen 1`. Then, with the workload quiescent:
+   - Refuse (409, `process_outside_workload`) while any process other than init, kernel
+     threads and zombies is outside the workload cgroup. An exec session runs there and the
+     freeze would not stop it, so a seal needs no running exec session.
+   - Refuse (409, `established_socket`) when any established non-loopback TCP connection
+     remains, or when the table cannot be read. This check does not rest on the hook.
+   A refusal thaws the workload: the service keeps running as it was.
+4. Take eth0 down, remove addresses and identity files.
 5. Sync, pause and snapshot. The source is then stopped, sealed or not: a parked source never
    serves again. A source that keeps running is out of scope.
 
-A failure before step 4 completes restores the service. A failure after it stops the source.
+A failure before step 4 completes (a refusal in step 3 included) restores the service. A failure after it stops the source.
 
 A clone restores strictly, then crosses 0072's identity barrier unchanged
 (`clone_configure_v1`). `clone_activate_v1` for a service writes `/run/briqyard/clone.json`
@@ -49,12 +56,28 @@ thawed, its VMM is ended, and the machine is `error` with reason `clone_hook_fai
 caller can tell it from a workload exit. Capacity is released after the VMM exit is
 confirmed, as for any clone. Other clones are unaffected; there is no fleet transaction.
 
+The clone's network is activated before `resume` runs, so the clone has its address, and
+its egress policy (none for a template clone), from activation until its VMM ends: a window
+of the resume hook's duration, with the workload still frozen. Nothing in the workload runs
+in it, but the resume hook does, with the sealed memory and environment. A hook that must
+not reach the network while it runs has to enforce that itself. `start` on a clone that
+failed its resume hook is refused (409): it cannot restore again with the same identity and
+entropy. Destroy it and clone the template again.
+
 ## Scope
 
 Same namespace owner only, as in 0072. A clone keeps the sealed recipe: no overrides, egress
 none, no volume. Every clone inherits the source's memory, secrets included; this is
-acceptable within one owner and documented. Per-clone environment, volumes, a running source,
+acceptable within one owner and documented. The runtime has no secret concept: the
+environment is copied into the artifact as it is. The caller must refuse boot-scope secrets
+and credential-gateway placeholders before it requests a seal. Per-clone environment, volumes, a running source,
 cross-host distribution and ports on clones are not provided.
+
+## What the socket check leaves out
+
+It reads the TCP tables of the init's network namespace. It does not see half-closed TCP
+states (for example `FIN_WAIT` and `CLOSE_WAIT`), connected UDP sockets (QUIC), or sockets in
+nested network namespaces. An application that holds such sessions closes them in `park`.
 
 ## What the application owns
 

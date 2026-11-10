@@ -70,6 +70,19 @@ fn clone_request(builder: &str, name: &str) -> api::CreateMachineRequest {
 }
 
 #[tokio::test]
+async fn a_builder_in_another_runtime_class_is_refused_before_anything_is_created() {
+    let h = harness(true).await;
+    let mut req = builder_request(&h);
+    req.runtime_class = "kvm".into();
+    let error = h.m.create_made(req).await.unwrap_err();
+    assert!(
+        error.to_string().contains("default runtime class"),
+        "{error}"
+    );
+    assert!(h.m.list(None, &[]).is_empty());
+}
+
+#[tokio::test]
 async fn the_profile_is_off_unless_the_flag_is_on() {
     let off = harness(false).await;
     assert_eq!(off.m.named_memory_profiles(), ["init-ready-v1"]);
@@ -212,6 +225,9 @@ async fn a_failed_resume_quarantines_that_clone_and_releases_its_capacity() {
     );
     assert!(view.error.contains("resume hook"), "{}", view.error);
     h.service_fault(0);
+    // It cannot be started again: the same identity and entropy would come back.
+    let again = h.m.start(&view.id, None).await.unwrap_err();
+    assert!(matches!(again, MError::Conflict(_)), "{again:?}");
     // The first clone is untouched and the failed one holds no memory once its VMM exited.
     assert_eq!(h.m.get(&ok.id).unwrap().state, state::RUNNING);
     assert_eq!(h.m.usage().0.memory_mb, used);

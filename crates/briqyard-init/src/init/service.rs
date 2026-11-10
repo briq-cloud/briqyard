@@ -109,6 +109,53 @@ pub(super) fn established_external(table: &str, v6: bool) -> Vec<String> {
         .collect()
 }
 
+/// Why `/proc/<pid>` is outside the workload, or `None` when it is init, a kernel thread, a
+/// zombie, or inside the workload cgroup.
+pub(super) fn outside_workload(pid: i32, status: &str, cgroup: &str) -> Option<String> {
+    let field = |key: &str| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .map(str::trim)
+    };
+    let ppid: i32 = field("PPid:")?.parse().ok()?;
+    let name = field("Name:").unwrap_or("?");
+    if pid == 1 || pid == 2 || ppid == 2 || ppid == 0 {
+        return None;
+    }
+    if field("State:").is_some_and(|s| s.starts_with('Z')) {
+        return None;
+    }
+    let inside = cgroup.lines().any(|l| {
+        l.rsplit(':')
+            .next()
+            .is_some_and(|p| p.trim_start_matches('/').starts_with("briqyard-workload"))
+    });
+    (!inside).then(|| format!("{name}[{pid}]"))
+}
+
+fn foreign_processes() -> Result<Vec<String>> {
+    let mut found = vec![];
+    for entry in fs::read_dir("/proc").context("/proc")?.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        // A process that exits during the scan is gone, not foreign.
+        let (Ok(status), Ok(cgroup)) = (
+            fs::read_to_string(entry.path().join("status")),
+            fs::read_to_string(entry.path().join("cgroup")),
+        ) else {
+            continue;
+        };
+        found.extend(outside_workload(pid, &status, &cgroup));
+    }
+    Ok(found)
+}
+
 fn external_connections() -> Result<Vec<String>> {
     let mut found = vec![];
     for (path, v6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
@@ -184,7 +231,6 @@ pub(super) async fn run_hook(
         ))),
         Ok(Err(e)) => Err(fail(format!("wait failed: {e}"))),
         Err(_) => {
-            // The hook's whole process group ends; nothing of it outlives the failure.
             let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
             let _ = child.wait().await;
             Err(fail(format!(
@@ -193,6 +239,8 @@ pub(super) async fn run_hook(
             )))
         }
     };
+    // Whatever the hook left running in its process group ends with it, however it exited.
+    let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
     TRACKED.lock().unwrap().remove(pid);
     result
 }
@@ -225,9 +273,19 @@ pub(super) async fn park(st: &Arc<State>) -> Response {
     if let Err(e) = run_hook(st, "park", &hooks.park, hooks.park_timeout_s).await {
         return refusal(CLONE_HOOK_FAILED, e.to_string());
     }
+    if let Err(e) = set_frozen(true) {
+        return Response::error(format!("freeze: {e:#}"));
+    }
+    if let Err(e) = wait_frozen(true).await {
+        let _ = set_frozen(false);
+        return Response::error(format!("freeze: {e:#}"));
+    }
+    // The tables are read with the workload frozen, so no connection opens or closes
+    // between the check and the seal. A refusal thaws the service as it was.
     match external_connections() {
         Ok(open) if open.is_empty() => {}
         Ok(open) => {
+            let _ = set_frozen(false);
             return refusal(
                 "established_socket",
                 format!(
@@ -235,16 +293,30 @@ pub(super) async fn park(st: &Arc<State>) -> Response {
                     open.len(),
                     open.join(", ")
                 ),
-            )
+            );
         }
-        Err(e) => return Response::error(format!("socket check: {e:#}")),
+        Err(e) => {
+            let _ = set_frozen(false);
+            return Response::error(format!("socket check: {e:#}"));
+        }
     }
-    if let Err(e) = set_frozen(true) {
-        return Response::error(format!("freeze: {e:#}"));
-    }
-    if let Err(e) = wait_frozen(true).await {
-        let _ = set_frozen(false);
-        return Response::error(format!("freeze: {e:#}"));
+    match foreign_processes() {
+        Ok(found) if found.is_empty() => {}
+        Ok(found) => {
+            let _ = set_frozen(false);
+            return refusal(
+                "process_outside_workload",
+                format!(
+                    "park left {} process(es) outside the workload cgroup, which the freeze does not stop (an exec session or a leftover): {}",
+                    found.len(),
+                    found.join(", ")
+                ),
+            );
+        }
+        Err(e) => {
+            let _ = set_frozen(false);
+            return Response::error(format!("process check: {e:#}"));
+        }
     }
     // Nothing can reconnect from here: the workload is frozen.
     let machine_id = fs::read("/etc/machine-id").unwrap_or_default();
@@ -470,5 +542,22 @@ mod tests {
                 realtime_sec: 1_793_404_800,
             }
         }
+    }
+
+    #[test]
+    fn processes_outside_the_workload_are_found() {
+        let st = |name: &str, ppid: i32, state: &str| {
+            format!("Name:\t{name}\nState:\t{state}\nPPid:\t{ppid}\n")
+        };
+        let inside = "0::/briqyard-workload\n";
+        let root = "0::/\n";
+        assert_eq!(
+            outside_workload(40, &st("sh", 1, "S (sleeping)"), root).as_deref(),
+            Some("sh[40]")
+        );
+        assert!(outside_workload(40, &st("app", 1, "S (sleeping)"), inside).is_none());
+        assert!(outside_workload(1, &st("init", 0, "S (sleeping)"), root).is_none());
+        assert!(outside_workload(9, &st("kworker", 2, "I (idle)"), root).is_none());
+        assert!(outside_workload(41, &st("sh", 1, "Z (zombie)"), root).is_none());
     }
 }
