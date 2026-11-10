@@ -4,7 +4,7 @@ impl Manager {
     /// Caller holds the builder's lifecycle lock throughout Full snapshot and publication.
     pub(in crate::machine) async fn check_template_seal(
         &self,
-        e: &Entry,
+        e: &Arc<Entry>,
         memory: bool,
         seal: bool,
     ) -> Result<Option<String>, MError> {
@@ -48,6 +48,9 @@ impl Manager {
                 "actual guest init executable differs from reviewed recipe",
             ));
         }
+        if r.template_birth.as_ref().is_some_and(|b| b.is_service()) {
+            return self.park_service(e, &r, &live, report).await.map(Some);
+        }
         let status = report
             .clone_status
             .ok_or_else(|| invalid("template init lacks clone barrier protocol"))?;
@@ -72,6 +75,88 @@ impl Manager {
         .context("template seal fs_sync timeout")?
         .context("template seal fs_sync")?;
         Ok(Some(status.ram_marker))
+    }
+
+    /// Parks a running service for its seal: the hook, the socket check and the freeze all run
+    /// in the guest. A refusal there restored the service, which keeps running. Anything
+    /// after a park leaves the source parked, so it is stopped: a parked source never
+    /// serves again.
+    async fn park_service(
+        &self,
+        e: &Arc<Entry>,
+        r: &Record,
+        live: &fc::Vm,
+        report: guest::Response,
+    ) -> Result<String, MError> {
+        let hooks = r
+            .template_birth
+            .as_ref()
+            .and_then(|b| b.hooks.clone())
+            .ok_or_else(|| invalid("service template lacks its hooks"))?;
+        let status = report
+            .clone_status
+            .ok_or_else(|| invalid("service init lacks clone barrier protocol"))?;
+        if report.main_pid == 0
+            || status.protocol != 1
+            || status.profile != guest::SERVICE_READY_V1
+            || status.stage != "running"
+        {
+            return Err(invalid("service is not running unparked"));
+        }
+        let limit =
+            Duration::from_secs(u64::from(hooks.park_timeout_s) + guest::PARK_QUIESCE_S + 10);
+        let request = guest::Request {
+            op: guest::SERVICE_PARK_OP.into(),
+            ..Default::default()
+        };
+        let answer = self
+            .inner
+            .guest
+            .control_within(&live.vsock, request, limit)
+            .await;
+        let parked = match answer {
+            Ok(a) if a.kind == "error" => {
+                if a.error_code == guest::PARK_UNRECOVERABLE {
+                    // Frozen and without its identity: it never serves again.
+                    self.stop_parked(e).await;
+                }
+                return Err(MError::Conflict(format!(
+                    "service park refused ({}): {}",
+                    if a.error_code.is_empty() {
+                        "error"
+                    } else {
+                        &a.error_code
+                    },
+                    a.message
+                )));
+            }
+            Ok(a) => a
+                .clone_status
+                .filter(|s| s.stage == "parked" && s.ram_marker.len() == 32),
+            Err(_) => None,
+        };
+        let Some(parked) = parked else {
+            // The guest's state is unknown: it may be parked.
+            self.stop_parked(e).await;
+            return Err(invalid("service park was not acknowledged"));
+        };
+        let synced = tokio::time::timeout(
+            crate::guestc::CONTROL_TIMEOUT,
+            self.inner.guest.fs_sync(&live.vsock),
+        )
+        .await;
+        if !matches!(synced, Ok(Ok(()))) {
+            self.stop_parked(e).await;
+            return Err(invalid("service seal fs_sync failed"));
+        }
+        Ok(parked.ram_marker)
+    }
+
+    /// Ends a parked source under its held lifecycle lock.
+    pub(in crate::machine) async fn stop_parked(&self, e: &Arc<Entry>) {
+        if let Err(err) = self.stop_locked(e, "service template sealed".into()).await {
+            tracing::warn!(machine = %e.snapshot().id, "stopping parked service source: {err:#}");
+        }
     }
 
     pub(in crate::machine) fn seal_named_artifact(
@@ -141,7 +226,20 @@ impl Manager {
                 image_key: r.image_key.clone(),
                 size: r.size,
                 root_disk_gb: self.inner.cfg.root_disk_gb,
-                config: if birth.profile == guest::SANDBOX_READY_V1 {
+                config: if birth.is_service() {
+                    let (mut cfg, _) =
+                        crate::machine::start::resolved_guest_config(&r, Ipv4Addr::UNSPECIFIED)?;
+                    // Identity is the clone's own: it comes with the configure step.
+                    cfg.hostname.clear();
+                    cfg.ip.clear();
+                    cfg.gateway.clear();
+                    cfg.dns.clear();
+                    cfg.hosts.clear();
+                    cfg.files.clear();
+                    cfg.template_profile = Some(birth.profile.clone());
+                    cfg.clone_hooks = birth.hooks.clone();
+                    cfg
+                } else if birth.profile == guest::SANDBOX_READY_V1 {
                     sandbox::builder_config(
                         self.sandbox_recipe(
                             &r.image,

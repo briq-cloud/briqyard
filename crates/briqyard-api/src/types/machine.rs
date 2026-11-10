@@ -76,6 +76,9 @@ pub struct CreateMachineRequest {
     /// Reviewed pre-main builder; never promotes an ordinary machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_build: Option<String>,
+    /// Park and resume hooks of a `service-ready-v1` template build; refused without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_hooks: Option<crate::guest::CloneHooks>,
     /// Operator-produced pristine sandbox seed; never a configured warm slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_seed: Option<SandboxSeed>,

@@ -36,6 +36,8 @@ pub mod reason {
     pub const STARTUP_FAILED: &str = "startup_failed";
     pub const BOOT_FAILED: &str = "boot_failed";
     pub const START_FAILED: &str = "start_failed";
+    /// A memory clone's resume hook failed or timed out: the clone is quarantined (ADR 0127).
+    pub const CLONE_HOOK_FAILED: &str = "clone_hook_failed";
     pub const UPDATED: &str = "updated";
     /// A PATCH's pending change went onto the machine at its start (ADR 0024).
     pub const APPLIED: &str = "applied";
@@ -82,6 +84,7 @@ pub mod reason {
         STARTUP_FAILED,
         BOOT_FAILED,
         START_FAILED,
+        CLONE_HOOK_FAILED,
         UPDATED,
         APPLIED,
         EGRESS_CHANGED,

@@ -127,7 +127,10 @@ impl guestc::Guest for Mock {
                     .clone_configure
                     .ok_or_else(|| anyhow!("missing configuration"))?;
                 c.validate().map_err(|e| anyhow!(e))?;
-                anyhow::ensure!(status.stage == "builder", "clone barrier unavailable");
+                anyhow::ensure!(
+                    matches!(status.stage.as_str(), "builder" | "parked" | "running"),
+                    "clone barrier unavailable"
+                );
                 status.identity = Some(guest::CloneIdentity {
                     generation: c.generation,
                     hostname: c.hostname,
@@ -145,11 +148,52 @@ impl guestc::Guest for Mock {
                         .is_some_and(|i| i.generation == request.clone_generation),
                     "generation conflict"
                 );
-                status.stage = "active".into();
+                if self.service_fault.load(Relaxed) == 3 {
+                    status.stage = "hook_failed".into();
+                    status.failure = Some("resume hook exited 1: injected".into());
+                } else {
+                    status.stage = "active".into();
+                }
             }
             _ => return Err(anyhow!("unsupported clone op")),
         }
         Ok(status.clone())
+    }
+    async fn control_within(
+        &self,
+        vsock: &Path,
+        request: guest::Request,
+        _limit: Duration,
+    ) -> Result<guest::Response> {
+        self.record(format!("{} {}", request.op, vsock.display()));
+        anyhow::ensure!(
+            request.op == guest::SERVICE_PARK_OP,
+            "unsupported service op"
+        );
+        let mut statuses = self.clone_status.lock().unwrap();
+        let status = statuses
+            .get_mut(vsock)
+            .ok_or_else(|| anyhow!("no clone protocol"))?;
+        match self.service_fault.load(Relaxed) {
+            1 => {
+                return Ok(guest::Response {
+                    error_code: guest::CLONE_HOOK_FAILED.into(),
+                    ..guest::Response::error("park hook exited 3: injected")
+                })
+            }
+            2 => {
+                return Ok(guest::Response {
+                    error_code: "established_socket".into(),
+                    ..guest::Response::error("established connection to 10.0.0.9:443")
+                })
+            }
+            _ => {}
+        }
+        status.stage = "parked".into();
+        Ok(guest::Response {
+            clone_status: Some(status.clone()),
+            ..guest::Response::new("ok")
+        })
     }
     async fn ping(&self, vsock: &Path) -> Result<guest::Response> {
         let (pid, _, exited) = self.proc_at(vsock)?;
@@ -171,7 +215,7 @@ impl guestc::Guest for Mock {
             } else {
                 clone_status
                     .as_ref()
-                    .filter(|s| s.stage == "active")
+                    .filter(|s| matches!(s.stage.as_str(), "active" | "running" | "parked"))
                     .map_or(0, |_| 42)
             },
             sha256: self.destination_hash(vsock)?,

@@ -129,6 +129,13 @@ impl Manager {
             ));
         }
         self.validate_launch_record(&rec)?;
+        // A clone that failed its resume hook never restores again: a second start would
+        // bring the same identity and entropy back.
+        if rec.clone_origin.is_some() && rec.error_reason == reason::CLONE_HOOK_FAILED {
+            return Err(MError::Conflict(
+                "this clone failed its resume hook and cannot start again; destroy it and clone the template again".into(),
+            ));
+        }
         match rec.state.as_str() {
             // `creating`: the create's own start (`make`), its lock held throughout.
             state::CREATING | state::CREATED | state::STOPPED | state::ERROR => {}
@@ -228,7 +235,8 @@ impl Manager {
             None => return Err(fail(anyhow!("namespace network is gone"))),
         };
         self.validate_launch_record(&rec).map_err(fail)?;
-        let quarantined = rec.template_birth.is_some() || self.initial_memory_clone(&rec);
+        let quarantined = rec.template_birth.as_ref().is_some_and(|b| !b.is_service())
+            || self.initial_memory_clone(&rec);
         let tap = if quarantined {
             self.inner.net.quarantine(&rec.id).await
         } else {
@@ -354,7 +362,7 @@ impl Manager {
         let _ = self.save(e);
         self.watch(e, &live);
 
-        let ready = async {
+        let ready = Box::pin(async {
             self.persist_launch_provenance(e, &live)?;
             if self.initial_memory_clone(&e.snapshot()) {
                 if e.snapshot()
@@ -366,7 +374,7 @@ impl Manager {
                 } else {
                     self.activate_memory_clone(e, &live).await
                 }
-            } else if rec.template_birth.is_some() {
+            } else if rec.template_birth.as_ref().is_some_and(|b| !b.is_service()) {
                 self.template_builder_ready(
                     &live,
                     None,
@@ -382,10 +390,17 @@ impl Manager {
                     )
                     .await
             }
-        };
+        });
         let mut exited = live.exited.clone();
+        let hook_failed = std::cell::Cell::new(false);
         let outcome = tokio::select! {
-            r = ready => r.map_err(|err| (format!("the guest did not come up: {err}"), false)),
+            r = ready => r.map_err(|err| {
+                if err.downcast_ref::<templates::CloneHookFailed>().is_some() {
+                    hook_failed.set(true);
+                    return (format!("{err}"), true);
+                }
+                (format!("the guest did not come up: {err}"), false)
+            }),
             // `exited` is sent once the console is fully written, so the tail is complete.
             _ = exited.changed() => self.ran_before_ready(&live).await,
         };
@@ -403,12 +418,20 @@ impl Manager {
                     "clone VMM exit is unconfirmed; reservation retained".into(),
                 ));
             }
+            if let Some(origin) = e.rec.lock().unwrap().clone_origin.as_mut() {
+                // The VMM exited: the clone's capacity is released, its backing stays for the
+                // caller to read and destroy.
+                origin.mapping_exited = true;
+            }
             self.inner.stats.starts_failed.fetch_add(1, Relaxed);
             let why = match said {
                 true => why,
                 false => format!("{why}: {}", self.last_console_lines(&rec, 5)),
             };
-            return Err(self.boot_failed(e, why));
+            return Err(match hook_failed.get() {
+                true => self.boot_failed_as(e, why, reason::CLONE_HOOK_FAILED),
+                false => self.boot_failed(e, why),
+            });
         }
         if e.snapshot()
             .warm_slot
@@ -441,7 +464,7 @@ impl Manager {
             };
             Some(ev.data(json!({ "pid": pid })))
         });
-        if rec.template_birth.is_none() {
+        if rec.template_birth.as_ref().is_none_or(|b| b.is_service()) {
             self.spawn_probes(e, &live, generation, asked);
         }
         self.save_execution_publication(e)?;
@@ -533,12 +556,17 @@ impl Manager {
     /// A boot the machine's spec fails (ADR 0011): the machine left in `error` with why, a
     /// `boot_failed` event, and the 409 that carries the machine. Its process is already gone.
     pub(super) fn boot_failed(&self, e: &Entry, why: String) -> MError {
+        self.boot_failed_as(e, why, reason::BOOT_FAILED)
+    }
+
+    /// `error` with a distinct reason, so a caller tells a hook failure from a workload exit.
+    pub(super) fn boot_failed_as(&self, e: &Entry, why: String, why_kind: &'static str) -> MError {
         e.set_state(state::ERROR, |r| {
             r.error = why;
-            r.error_reason = reason::BOOT_FAILED.into();
+            r.error_reason = why_kind.into();
             r.stopped_at = Some(Utc::now());
             r.pid = 0;
-            Some(Ev::warning(reason::BOOT_FAILED, r.error.clone()))
+            Some(Ev::warning(why_kind, r.error.clone()))
         });
         let _ = self.save(e);
         MError::BootFailed(Box::new(self.view(e)))
@@ -711,6 +739,7 @@ pub(super) fn resolved_guest_config(
         template_profile: None,
         sandbox_device: None,
         assigned_run_generation: None,
+        clone_hooks: None,
     };
     if let Some(v) = &r.volume {
         cfg.mounts.push(guest::Mount {
@@ -745,7 +774,7 @@ pub(super) fn config_drive(
 ) -> Result<Vec<u8>> {
     let (mut cfg, files) = resolved_guest_config(r, gateway)?;
     cfg.mounts.extend(modules);
-    if let Some(birth) = &r.template_birth {
+    if let Some(birth) = r.template_birth.as_ref().filter(|b| !b.is_service()) {
         cfg = if birth.profile == guest::SANDBOX_READY_V1 {
             templates::sandbox::builder_config(
                 r.volume
@@ -755,6 +784,9 @@ pub(super) fn config_drive(
         } else {
             templates::builder_config()
         };
+    } else if let Some(birth) = &r.template_birth {
+        cfg.template_profile = Some(birth.profile.clone());
+        cfg.clone_hooks = birth.hooks.clone();
     } else if let Some(origin) = r
         .clone_origin
         .as_ref()

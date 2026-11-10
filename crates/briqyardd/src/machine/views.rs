@@ -40,7 +40,7 @@ impl Manager {
         let (ready, probes_status) = {
             let run = e.probe.lock().unwrap();
             (
-                running && run.ready && r.template_birth.is_none(),
+                running && run.ready && r.template_birth.as_ref().is_none_or(|b| b.is_service()),
                 run.status.clone(),
             )
         };

@@ -22,6 +22,16 @@ pub struct TemplateBirth {
     pub namespace: String,
     pub image: String,
     pub init_sha256: String,
+    /// `service-ready-v1` only: the immutable park and resume hooks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<guest::CloneHooks>,
+}
+
+impl TemplateBirth {
+    /// A service builder boots and runs like a machine; the other profiles are quarantined.
+    pub fn is_service(&self) -> bool {
+        self.profile == guest::SERVICE_READY_V1
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,6 +75,9 @@ impl Manager {
         } else {
             vec![]
         };
+        if available && cfg.templates.service_ready {
+            profiles.push(guest::SERVICE_READY_V1.into());
+        }
         if self.sandbox_available() {
             profiles.push(guest::SANDBOX_READY_V1.into());
         }
@@ -79,6 +92,11 @@ impl Manager {
         let Some(profile) = &req.template_build else {
             return Ok(None);
         };
+        if profile != guest::SERVICE_READY_V1 && req.clone_hooks.is_some() {
+            return Err(invalid(
+                "clone_hooks belong to the service-ready-v1 profile",
+            ));
+        }
         if profile == guest::SANDBOX_READY_V1 {
             return self.sandbox_birth(req, role).map(Some);
         }
@@ -91,6 +109,9 @@ impl Manager {
             return Err(invalid(
                 "reviewed init-ready recipe/init/jailer is unavailable",
             ));
+        }
+        if profile == guest::SERVICE_READY_V1 {
+            return self.service_birth(req, role).map(Some);
         }
         if req.image != ALPINE
             || req.size.vcpus != 1
@@ -131,7 +152,48 @@ impl Manager {
             namespace: req.namespace.clone(),
             image: req.image.clone(),
             init_sha256: bound.clone(),
+            hooks: None,
         }))
+    }
+
+    /// A service builder is an ordinary running machine whose memory is sealed after its
+    /// park hook. What a clone cannot rebuild is refused here, before anything is created.
+    fn service_birth(
+        &self,
+        req: &api::CreateMachineRequest,
+        role: Option<Role>,
+    ) -> Result<TemplateBirth, MError> {
+        let hooks = req
+            .clone_hooks
+            .clone()
+            .ok_or_else(|| invalid("service-ready-v1 requires clone_hooks"))?;
+        hooks.validate().map_err(|e| invalid(e.to_string()))?;
+        if !classes::normalized(&req.runtime_class).is_empty() {
+            return Err(invalid(
+                "a service template builder runs in the default runtime class",
+            ));
+        }
+        if req.image.is_empty()
+            || role.is_some()
+            || req.fork.is_some()
+            || req.restore.is_some()
+            || req.volume.is_some()
+            || req.sandbox_seed.is_some()
+            || req.start == Some(false)
+            || !matches!(req.sleep.as_str(), "" | "never")
+        {
+            return Err(invalid(
+                "a service template builder is an image without volume, fork, restore or sleep",
+            ));
+        }
+        Ok(TemplateBirth {
+            schema: 1,
+            profile: guest::SERVICE_READY_V1.into(),
+            namespace: req.namespace.clone(),
+            image: req.image.clone(),
+            init_sha256: self.inner.cfg.templates.init_ready_init_sha256.clone(),
+            hooks: Some(hooks),
+        })
     }
 
     pub(in crate::machine) fn check_template_image(&self, r: &Record) -> Result<()> {
@@ -140,6 +202,21 @@ impl Manager {
         };
         if birth.profile == guest::SANDBOX_READY_V1 {
             return self.check_sandbox_builder(r);
+        }
+        if birth.is_service() {
+            anyhow::ensure!(
+                birth.schema == 1
+                    && birth.namespace == r.namespace
+                    && birth.image == r.image
+                    && birth.init_sha256 == self.inner.images.init_sha256()
+                    && birth.hooks.as_ref().is_some_and(|h| h.validate().is_ok())
+                    && classes::normalized(&r.runtime_class).is_empty()
+                    && r.volume.is_none()
+                    && r.pending.is_none()
+                    && r.clone_origin.is_none(),
+                "service template provenance mismatch"
+            );
+            return Ok(());
         }
         let cfg = &r.image_config;
         anyhow::ensure!(
@@ -186,7 +263,7 @@ impl Manager {
                 ));
             }
         }
-        if r.template_birth.is_some() {
+        if r.template_birth.as_ref().is_some_and(|b| !b.is_service()) {
             return Err(MError::Conflict(
                 "sealed template builder permits status, memory seal and destroy only".into(),
             ));

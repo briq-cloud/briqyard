@@ -702,3 +702,9 @@ Copy completion must be within one second; a slower trial is inconclusive and fa
 At least one crash control must lose bytes; the summary counts include each timed trial.
 `hack/measure-freeze.sh`, dispatched with native workflow input `measure_freeze=true`,
 records relative latency and stalls on shared hosted x86_64; its artifacts include all raw samples.
+
+`BRIQYARD_TEST_SERVICE=1 hack/service-template.sh e2e` (ADR 0127, disposable host only) turns on
+`templates.service_ready` and runs `hack/service_template.py`: seal refusal with an open socket, seal, three clones with
+distinct identity, template deletion fencing, and a resume failure that quarantines one clone. `... bench` times cold
+start against clone on a busybox fixture (interleaved, p50 and max) and eight simultaneous clones. Its checks are not
+in the `e2e.sh` counts.

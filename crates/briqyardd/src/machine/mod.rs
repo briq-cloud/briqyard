@@ -471,7 +471,10 @@ fn commits_memory(r: &Record) -> bool {
         || (r.state == state::CREATING && r.start)
         || r.clone_origin.as_ref().is_some_and(|origin| {
             r.state == state::DESTROYING
+                // A clone whose resume hook failed holds nothing once its VMM exited; its
+                // backing stays for the caller to read and destroy.
                 || (origin.stage != templates::CloneStage::Reserved
+                    && !(r.error_reason == reason::CLONE_HOOK_FAILED && origin.mapping_exited)
                     && (origin.stage != templates::CloneStage::Active || !origin.mapping_exited))
         })
 }

@@ -34,7 +34,7 @@ fn reasons_and_page_limits() {
     all.sort();
     all.dedup();
     assert_eq!(all.len(), reason::ALL.len());
-    assert_eq!(all.len(), 40);
+    assert_eq!(all.len(), 41);
     assert!(all
         .iter()
         .all(|r| r.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')));

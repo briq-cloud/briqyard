@@ -150,6 +150,9 @@ impl Harness {
     pub(in crate::machine) fn thaw_count(&self) -> u32 {
         self.host.fs_thaws.load(Relaxed)
     }
+    pub(in crate::machine) fn service_fault(&self, fault: u32) {
+        self.host.service_fault.store(fault, Relaxed);
+    }
     pub(in crate::machine) fn fs_sync_fault(&self, fault: u32) {
         self.host.fs_sync_fault.store(fault, Relaxed);
     }

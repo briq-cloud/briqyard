@@ -81,6 +81,7 @@ impl Manager {
             namespace: req.namespace.clone(),
             image: req.image.clone(),
             init_sha256: recipe.init_sha256.clone(),
+            hooks: None,
         })
     }
     pub(in crate::machine) fn check_sandbox_builder(&self, r: &Record) -> Result<()> {

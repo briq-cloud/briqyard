@@ -63,6 +63,7 @@ impl Barrier {
             ram_marker: clone_identity::ram_marker(),
             stage: stage.into(),
             identity,
+            failure: None,
         }
     }
     fn response(&self) -> Response {

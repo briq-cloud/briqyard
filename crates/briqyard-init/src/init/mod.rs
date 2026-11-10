@@ -57,6 +57,23 @@ struct State {
     requested: Mutex<bool>,
     clone_gate: tokio::sync::Mutex<clone::Gate>,
     activate: Notify,
+    paths: Paths,
+}
+
+/// Where the init writes what tests redirect: the workload's console and the clone's
+/// identity file.
+struct Paths {
+    console: PathBuf,
+    clone_json: PathBuf,
+}
+
+impl Default for Paths {
+    fn default() -> Self {
+        Paths {
+            console: "/dev/console".into(),
+            clone_json: "/run/briqyard/clone.json".into(),
+        }
+    }
 }
 
 impl State {
@@ -82,6 +99,7 @@ mod pty;
 mod reap;
 mod sandbox_device;
 mod serve;
+mod service;
 #[cfg(all(test, target_os = "linux"))]
 mod testutil;
 mod user;
@@ -174,7 +192,9 @@ async fn run() -> ExitReport {
         Ok(g) => g,
         Err(e) => return failed(125, format!("template: {e:#}")),
     };
-    let template = cfg.template_profile.is_some();
+    let service = cfg.template_profile.as_deref() == Some(guest::SERVICE_READY_V1);
+    // A service boots and runs like any other; only a builder waits at a barrier.
+    let template = cfg.template_profile.is_some() && !service;
     if cfg.template_profile.as_deref() == Some(guest::SANDBOX_READY_V1)
         && Path::new(destination::RECEIPT).try_exists().unwrap_or(true)
     {
@@ -182,6 +202,11 @@ async fn run() -> ExitReport {
     }
     if template && !files.is_empty() {
         return failed(125, "template config drive contains boot files".into());
+    }
+    if service {
+        if let Err(e) = service::prepare_cgroup() {
+            return failed(125, format!("service freezer: {e:#}"));
+        }
     }
     if let Err(e) = setup_mounts(&cfg) {
         return failed(125, format!("mounts: {e:#}"));
@@ -221,6 +246,7 @@ async fn run() -> ExitReport {
         requested: Mutex::new(false),
         clone_gate: tokio::sync::Mutex::new(gate),
         activate: Notify::new(),
+        paths: Paths::default(),
     });
     if template {
         tokio::spawn(serve(st.clone()));
@@ -241,6 +267,9 @@ async fn run() -> ExitReport {
         Ok(c) => c,
         Err(e) => return failed(126, format!("command: {e:#}")),
     };
+    if service {
+        service::join_cgroup(&mut cmd);
+    }
     let mut child = {
         let mut tracked = TRACKED.lock().unwrap();
         match cmd.spawn() {

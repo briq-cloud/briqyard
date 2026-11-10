@@ -314,23 +314,26 @@ impl Manager {
             restoring: None,
         };
         if let Some(birth) = template_birth {
+            let service = birth.is_service();
             rec.template_birth = Some(birth);
-            rec.egress = api::Egress {
-                mode: api::egress::NONE.into(),
-                ..Default::default()
-            };
-            rec.sleep = "never".into();
-            rec.backup = Schedule::default();
-            rec.entrypoint = Some(vec![]);
-            if rec
-                .template_birth
-                .as_ref()
-                .is_some_and(|b| b.profile == guest::SANDBOX_READY_V1)
-            {
-                // The builder's data drive is exactly the request's (checked against the recipe).
-                rec.cmd = Some(vec![]);
-            } else {
-                rec.cmd = Some(templates::builder_config().cmd);
+            if !service {
+                rec.egress = api::Egress {
+                    mode: api::egress::NONE.into(),
+                    ..Default::default()
+                };
+                rec.sleep = "never".into();
+                rec.backup = Schedule::default();
+                rec.entrypoint = Some(vec![]);
+                if rec
+                    .template_birth
+                    .as_ref()
+                    .is_some_and(|b| b.profile == guest::SANDBOX_READY_V1)
+                {
+                    // The builder's data drive is exactly the request's (checked against the recipe).
+                    rec.cmd = Some(vec![]);
+                } else {
+                    rec.cmd = Some(templates::builder_config().cmd);
+                }
             }
         }
         self.check_egress(&rec.egress, &rec.namespace, &rec.id)?;

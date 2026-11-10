@@ -258,6 +258,25 @@ impl Manager {
         let template_marker = self
             .check_template_seal(&e, req.memory, req.template)
             .await?;
+        let service =
+            template_marker.is_some() && r.template_birth.as_ref().is_some_and(|b| b.is_service());
+        let out = self.snapshot_sealed(id, &e, r, req, template_marker).await;
+        if service {
+            // Parked by the seal: it never serves again, sealed or not.
+            self.stop_parked(&e).await;
+        }
+        out
+    }
+
+    /// Everything of a snapshot after the seal checks; the lifecycle lock is held.
+    async fn snapshot_sealed(
+        &self,
+        id: &str,
+        e: &Arc<Entry>,
+        r: Record,
+        req: api::SnapshotRequest,
+        template_marker: Option<String>,
+    ) -> Result<api::Snapshot, MError> {
         if r.state == state::DESTROYING {
             return Err(MError::BadState(r.state));
         }
@@ -291,14 +310,14 @@ impl Manager {
                 copy_consistency = if req.template {
                     consistency::achieved("synced", None)
                 } else {
-                    self.sync_copy(&e, req.consistency).await
+                    self.sync_copy(e, req.consistency).await
                 };
-                self.snapshot_with_memory(&e, &r, &datasets, &snap).await?;
+                self.snapshot_with_memory(e, &r, &datasets, &snap).await?;
                 (Some(memory_spec(&r)), r.vmm_version.clone())
             }
             false => {
                 copy_consistency = self
-                    .frozen_copy(&e, &datasets, &snap, "snapshot", req.consistency)
+                    .frozen_copy(e, &datasets, &snap, "snapshot", req.consistency)
                     .await?;
                 (None, String::new())
             }
@@ -317,7 +336,7 @@ impl Manager {
             created_at: Utc::now(),
             disks: disks.iter().map(|d| d.to_string()).collect(),
             boot_identity: if memory.is_some() {
-                self.memory_identity(&e, &r)
+                self.memory_identity(e, &r)
             } else {
                 None
             },
@@ -350,9 +369,9 @@ impl Manager {
             .data(json!({ "consistency": s.copy_consistency.consistency, "consistency_reason": s.copy_consistency.consistency_reason, "snapshot": s.id, "name": s.name, "disks": s.disks, "memory": s.memory.is_some() }));
             e.note_locked(&mut rec, ev);
         }
-        self.save(&e)?;
+        self.save(e)?;
         if let Some(marker) = template_marker {
-            self.seal_named_artifact(&e, &mut s, marker)?;
+            self.seal_named_artifact(e, &mut s, marker)?;
         }
         Ok(s.view(id))
     }
@@ -522,7 +541,7 @@ impl Manager {
 
     /// Ends a running machine's process under its lock: `stopping`, then `stopped` on
     /// request once Firecracker is gone. The watcher finds nothing left to settle.
-    async fn stop_locked(&self, e: &Arc<Entry>, why: String) -> Result<()> {
+    pub(super) async fn stop_locked(&self, e: &Arc<Entry>, why: String) -> Result<()> {
         e.set_state(state::STOPPING, |_| {
             Some(
                 Ev::normal(reason::STOPPING, format!("stopping ({why})"))

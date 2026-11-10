@@ -159,10 +159,21 @@
         backup: { oneOf: [{ $ref: "#/components/schemas/BackupPolicy" }, { type: "null" }], description: "absent: the host's `backup.default_every` and `default_keep` (none unless configured); null: none. A restore or a fork takes this, not its source's" }
         probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "absent: none, or for a restore the backup's" }
         start: { type: boolean, default: true, description: "its create starts it once its disks are made; the answer comes at `creating`: `/wait` for `running` or `ready`" }
-        template_build: { type: string, enum: [init-ready-v1, sandbox-ready-v1], description: "operator-reviewed pinned public pre-main builder; requires matching init digest and jailer; already-running services are unsupported" }
+        template_build: { type: string, enum: [init-ready-v1, sandbox-ready-v1, service-ready-v1], description: "operator-reviewed pinned public pre-main builder; requires matching init digest and jailer. `service-ready-v1` (ADR 0127, off unless `templates.service_ready`) is an ordinary running service with `clone_hooks`: sealing it parks it, snapshots it and stops it" }
+        clone_hooks: { $ref: "#/components/schemas/CloneHooks" }
         sandbox_seed: { $ref: "#/components/schemas/SandboxSeed" }
         fork: { $ref: "#/components/schemas/ForkSpec" }
         restore: { $ref: "#/components/schemas/RestoreSpec" }
+    CloneHooks:
+      type: object
+      required: [park, resume]
+      additionalProperties: false
+      description: "`service-ready-v1` only (ADR 0127). Argv arrays the guest init runs as the workload's user, in its environment"
+      properties:
+        park: { type: array, items: { type: string }, description: "run before the seal; exit 0 means no outbound session is left open and files are flushed. The seal also refuses any established non-loopback TCP socket" }
+        resume: { type: array, items: { type: string }, description: "run in each clone while the workload is frozen, with `/run/briqyard/clone.json` (generation, hostname, ip, machine_id); the workload thaws on exit 0. A failure or timeout ends that clone as `error`, reason `clone_hook_failed`, never thawed" }
+        park_timeout_s: { type: integer, minimum: 1, maximum: 300, default: 30 }
+        resume_timeout_s: { type: integer, minimum: 1, maximum: 300, default: 30 }
     Exit:
       type: object
       properties:
@@ -189,7 +200,7 @@
         stopped_reason: { type: string, enum: [user, idle, exit, host], description: "why it is stopped: asked, the sleep window ran out, its process ended, or the daemon stopped it (a shutdown, a leftover of a crashed daemon; wakeable like idle)" }
         exit: { $ref: "#/components/schemas/Exit" }
         error: { type: string }
-        error_reason: { type: string, enum: [pull_failed, create_failed, boot_failed, start_failed], description: "in `error`: the event that put it there. `pull_failed` (its image could not be pulled) and `create_failed` (its disks could not be made, its create's start was refused, or the daemon restarted during a fork's or a restore's create; one from an image is taken up again) leave no disks: destroy it and create again" }
+        error_reason: { type: string, enum: [pull_failed, create_failed, boot_failed, start_failed, clone_hook_failed], description: "in `error`: the event that put it there. `clone_hook_failed`: a service clone's resume hook failed or timed out (ADR 0127). `pull_failed` (its image could not be pulled) and `create_failed` (its disks could not be made, its create's start was refused, or the daemon restarted during a fork's or a restore's create; one from an image is taken up again) leave no disks: destroy it and create again" }
         ip: { type: string }
         hostname: { type: string, description: "`<name>.internal`, follows the name" }
         machine_host: { type: string, description: "`<id>.vm.internal`, this exact machine" }
@@ -377,7 +388,7 @@
       type: object
       properties:
         consistency: { type: string, enum: [unsynced], description: "A disk copy of a running source is frozen by default. A busy source pays more: about 450-600 ms added on our 4-vCPU bench, versus about 42 ms idle. These are relative figures, not hardware guarantees. Set consistency: \"unsynced\" explicitly to skip guest sync and freeze and accept unsynced copies." }
-        template: { type: boolean, default: false, description: "seal a reviewed init-ready builder with memory=true; ordinary machines cannot be promoted" }
+        template: { type: boolean, default: false, description: "seal a reviewed init-ready builder, or a running service-ready-v1 builder (ADR 0127: parked, then stopped after the seal), with memory=true; ordinary machines cannot be promoted" }
         name: { type: string, description: "to find it by again: a-z, 0-9, _ and -, at most 64, not starting with s_; unique on the machine" }
         memory: { type: boolean, description: "its memory too, on a running machine, paused while it is written: a restore resumes its processes where they were" }
     Snapshot:

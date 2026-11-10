@@ -1,15 +1,26 @@
 //! A guest born at a barrier never accepts ordinary work until identity and activation.
 use super::*;
-use guest::{CloneConfigure, CloneIdentity, CloneStatus, INIT_READY_V1};
+use guest::{CloneConfigure, CloneIdentity, CloneStatus, INIT_READY_V1, SERVICE_READY_V1};
 
 pub(super) enum Gate {
     Ordinary,
     Builder,
+    /// A running `service-ready-v1` service, before its park.
+    Service,
+    /// A service whose park hook ran: workload frozen, eth0 down, identity removed.
+    Parked,
+    /// A service clone whose resume hook failed: the workload is never thawed.
+    HookFailed {
+        identity: CloneIdentity,
+        failure: String,
+    },
     Configured {
         request: Box<CloneConfigure>,
         identity: CloneIdentity,
         active: bool,
         activating: bool,
+        /// A service clone: activation runs the resume hook instead of starting main.
+        service: bool,
     },
     Sandbox(destination::Barrier),
     Failed,
@@ -32,12 +43,26 @@ impl Gate {
             {
                 Ok(Self::Builder)
             }
+            Some(SERVICE_READY_V1)
+                if cfg
+                    .clone_hooks
+                    .as_ref()
+                    .is_some_and(|h| h.validate().is_ok())
+                    && cfg.sandbox_device.is_none() =>
+            {
+                Ok(Self::Service)
+            }
             Some(_) => Err(anyhow!("unsupported or non-quarantined template config")),
         }
     }
     pub(super) fn allows(&self, op: &str) -> bool {
         match self {
             Self::Ordinary => !op.starts_with("clone_") && op != "destination_bind_v1",
+            Self::Service => {
+                (!op.starts_with("clone_") && op != "destination_bind_v1")
+                    || op == guest::SERVICE_PARK_OP
+            }
+            Self::HookFailed { .. } => op == "ping",
             Self::Sandbox(barrier) => barrier.allows(op),
             Self::Configured { active: true, .. } => true,
             _ => matches!(
@@ -73,11 +98,21 @@ impl Gate {
         }
     }
     pub(super) fn status(&self) -> Option<CloneStatus> {
+        let mut failure = None;
         let (stage, identity) = match self {
             Self::Ordinary => return None,
             Self::Sandbox(b) => return Some(b.status()),
             Self::Builder => ("builder", None),
+            Self::Service => ("running", None),
+            Self::Parked => ("parked", None),
             Self::Failed => ("failed", None),
+            Self::HookFailed {
+                identity,
+                failure: why,
+            } => {
+                failure = Some(why.clone());
+                ("hook_failed", Some(identity.clone()))
+            }
             Self::Configured {
                 identity,
                 active,
@@ -94,12 +129,25 @@ impl Gate {
                 Some(identity.clone()),
             ),
         };
+        let service = matches!(
+            self,
+            Self::Service
+                | Self::Parked
+                | Self::HookFailed { .. }
+                | Self::Configured { service: true, .. }
+        );
         Some(CloneStatus {
             protocol: 1,
-            profile: INIT_READY_V1.into(),
+            profile: if service {
+                SERVICE_READY_V1
+            } else {
+                INIT_READY_V1
+            }
+            .into(),
             ram_marker: clone_identity::ram_marker(),
             stage: stage.into(),
             identity,
+            failure,
         })
     }
 }
@@ -123,9 +171,10 @@ pub(super) async fn configure(st: &State, request: Option<CloneConfigure>) -> Re
         Gate::Configured {
             request: previous, ..
         } if previous.as_ref() == &request => return response(&gate),
-        Gate::Builder => {}
+        Gate::Builder | Gate::Parked => {}
         _ => return Response::error("clone generation conflict or unavailable barrier"),
     }
+    let service = matches!(*gate, Gate::Parked);
     // Partial configuration is terminal; never rerun RNG/key reset on an uncertain guest.
     *gate = Gate::Failed;
     match clone_identity::configure(&request).await {
@@ -135,6 +184,7 @@ pub(super) async fn configure(st: &State, request: Option<CloneConfigure>) -> Re
                 identity,
                 active: false,
                 activating: false,
+                service,
             };
             response(&gate)
         }
@@ -142,7 +192,11 @@ pub(super) async fn configure(st: &State, request: Option<CloneConfigure>) -> Re
     }
 }
 
-pub(super) async fn activate(st: &State, generation: &str, realtime_sec: Option<u64>) -> Response {
+pub(super) async fn activate(
+    st: &Arc<State>,
+    generation: &str,
+    realtime_sec: Option<u64>,
+) -> Response {
     let mut gate = st.clone_gate.lock().await;
     if let Gate::Sandbox(b) = &mut *gate {
         return b.activate(st, generation, realtime_sec);
@@ -152,9 +206,11 @@ pub(super) async fn activate(st: &State, generation: &str, realtime_sec: Option<
             identity,
             activating,
             active,
+            service,
             ..
         } if identity.generation == generation => {
-            if !*active && !*activating {
+            let first = !*active && !*activating;
+            if first {
                 if let Some(seconds) = realtime_sec {
                     if let Err(err) = clone_identity::set_clock(seconds) {
                         return Response::error(format!("clone activation clock: {err:#}"));
@@ -162,7 +218,15 @@ pub(super) async fn activate(st: &State, generation: &str, realtime_sec: Option<
                 }
             }
             *activating = true;
-            st.activate.notify_one();
+            if *service {
+                // The workload exists, frozen: the resume hook runs, then it thaws. A replay
+                // never runs the hook twice.
+                if first {
+                    tokio::spawn(service::resume(st.clone()));
+                }
+            } else {
+                st.activate.notify_one();
+            }
             response(&gate)
         }
         _ => Response::error("clone activation requires acknowledged identity generation"),
@@ -189,6 +253,7 @@ mod tests {
             ..cfg
         };
         assert!(Gate::from_config(&cfg).is_err());
+        // The service profile needs valid hooks, and no sandbox device.
         let cfg = Config {
             template_profile: Some("service-ready-v1".into()),
             ..Default::default()
@@ -218,6 +283,7 @@ mod tests {
             identity,
             active: false,
             activating: false,
+            service: false,
         };
         request
     }

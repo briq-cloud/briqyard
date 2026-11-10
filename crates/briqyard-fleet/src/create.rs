@@ -68,7 +68,7 @@ pub(super) async fn create_machine(
     if req
         .template_build
         .as_deref()
-        .is_some_and(|p| !matches!(p, "init-ready-v1" | "sandbox-ready-v1"))
+        .is_some_and(|p| !matches!(p, "init-ready-v1" | "sandbox-ready-v1" | "service-ready-v1"))
     {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -136,6 +136,8 @@ pub(super) async fn create_machine(
         require_named_memory: needs_named_memory,
         named_memory_profile: if sandbox_profile {
             "sandbox-ready-v1".into()
+        } else if req.template_build.as_deref() == Some("service-ready-v1") {
+            "service-ready-v1".into()
         } else {
             "init-ready-v1".into()
         },
