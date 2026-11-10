@@ -167,7 +167,7 @@ def e2e():
     # 3: an established external socket refuses the seal and the source serves again.
     cli('exec', SRC, '--', 'sh', '-c',
         'ip=$(ip -4 -o addr show eth0 | awk \'{print $4}\' | cut -d/ -f1); '
-        '(setsid nc -l -p 9999 >/dev/null 2>&1 </dev/null &); sleep 1; '
+        '(setsid sh -c \"sleep 3600 | nc -l -p 9999 >/dev/null 2>&1\" </dev/null >/dev/null 2>&1 &); sleep 1; '
         '(setsid sh -c "sleep 3600 | nc $ip 9999 >/dev/null 2>&1" </dev/null >/dev/null 2>&1 &); sleep 1')
     try:
         api('POST', '/machines/%s/snapshots' % SRC, {'name': 'loaded', 'memory': True, 'template': True})
