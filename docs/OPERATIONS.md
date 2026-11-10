@@ -13,6 +13,7 @@ the template recipe exactly. A different size needs its own compatible template.
 templates:
   enabled: true
   warm_pools: true
+  service_ready: false   # default; true adds the service-ready-v1 profile (ADR 0127)
   init_ready_init_sha256: "<qualified-init-sha256>"
   warm_policy:
     budget: {memory_mb: 8192, cpu_millis: 4000, root_disk_gb: 64}

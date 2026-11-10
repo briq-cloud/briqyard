@@ -213,7 +213,7 @@ enum MachineCmd {
     },
     /// A new machine from a snapshot of this one, taken now: briqyard machine fork ID [--name N] [--namespace T]
     Fork {
-        /// Sealed named memory template (init-ready-v1); running services are unsupported
+        /// Sealed named memory template (init-ready-v1 or service-ready-v1)
         #[arg(long)]
         snapshot: Option<String>,
         #[arg(long)]
@@ -606,7 +606,7 @@ enum SnapshotCmd {
         name: Option<String>,
         #[arg(long)]
         memory: bool,
-        /// Seal a reviewed pre-main builder; does not clone already-running services
+        /// Seal a reviewed builder: a pre-main one, or a service-ready-v1 service (parked, then stopped)
         #[arg(long, requires = "memory")]
         template: bool,
         id: String,

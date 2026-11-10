@@ -72,3 +72,22 @@ prove that a pending launch has ended. Such an intent can remain charged until p
 process evidence or a verified host boot boundary is available; automatic cleanup is
 not promised. A timeout never proves exit. Explicit destruction retains the full
 reservation until its cleanup completes.
+
+## Running services (`service-ready-v1`, ADR 0127)
+
+Off unless `templates.service_ready = true` beside `templates.enabled`. The builder is an
+ordinary running machine of any image with no volume, plus the two hooks:
+
+```sh
+briqyard machine run --namespace example --name loaded --sleep never --image IMAGE \
+  --template-build service-ready-v1 \
+  --clone-park /app/park --clone-resume /app/resume
+briqyard machine snapshot create LOADED_ID --memory --template --name loaded
+briqyard machine fork LOADED_ID --snapshot loaded --name clone
+```
+
+Sealing runs `park`, refuses any established non-loopback TCP connection, freezes the
+workload, and stops the source afterwards. A refusal leaves the service running. Each clone
+runs `resume` while frozen; `/run/briqyard/clone.json` holds its generation, hostname, ip and
+machine_id. A failed resume leaves that clone in `error`, reason `clone_hook_failed`.
+Applications reseed their own random generators and re-create outbound sessions.
