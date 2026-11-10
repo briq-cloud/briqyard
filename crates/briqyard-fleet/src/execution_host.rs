@@ -215,6 +215,10 @@ impl HostTransport {
         } else {
             self.timeout.min(Duration::from_secs(10))
         };
+        // Recheck the transport invariant at the credential-bearing request.
+        if url.scheme() != "https" {
+            return Err(Error::Configuration);
+        }
         let mut request = self.client.request(method, url).timeout(timeout).header(
             header::AUTHORIZATION,
             if route.installer() {

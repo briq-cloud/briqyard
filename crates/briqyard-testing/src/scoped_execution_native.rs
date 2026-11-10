@@ -30,6 +30,17 @@ fn sign(key: &Ed25519KeyPair, kind: &str, body: Value) -> String {
         URL_SAFE_NO_PAD.encode(key.sign(input.as_bytes()).as_ref())
     )
 }
+fn initial_idle_admission(generation: u64) -> String {
+    format!("idle-{generation}")
+}
+
+#[test]
+fn native_scenarios_have_distinct_initial_protection_admissions() {
+    // Manager idle-protection receipts survive authority registration replacement.
+    let admissions: std::collections::HashSet<_> = (1..=4).map(initial_idle_admission).collect();
+    assert_eq!(admissions.len(), 4);
+}
+
 fn provision(dir: &Path) -> Result<()> {
     let mut keys = vec![];
     for (name, role, issuer, authority) in [
@@ -296,16 +307,17 @@ async fn main() -> Result<()> {
     let expiry = if renewable { issued + 60 } else { now + 40 };
     let allocation_expiry = if renewable { now + 18 } else { expiry };
     let idle_expiry = if renewable { now + 120 } else { expiry + 15 };
+    let idle_admission = initial_idle_admission(generation);
     std::fs::write(
         dir.join("protection-deadline"),
         (idle_expiry * 1000).to_string(),
     )?;
-    channel.install("protect", json!({"id":"protection","ownership":"ownership","committed":{"admission":"idle","expires_at_ms":idle_expiry*1000}})).await?;
+    channel.install("protect", json!({"id":"protection","ownership":"ownership","committed":{"admission":idle_admission,"expires_at_ms":idle_expiry*1000}})).await?;
     let central = key(&dir.join("central.pk8"))?;
     let mut grant_body = json!({"v":1,"iss":"central","aud":"runtime","iat":issued,"nbf":issued,"exp":expiry,
         "id":"delegation","principal":"key:native","source":{"kind":"api_key","id":"native","expires_at":expiry+60},
         "team":namespace,"subject":"native-primary","target":discovery["primary"],"resource_set":discovery["resource_set"],
-        "idle":{"admission":"idle","expires_at":idle_expiry},"metadata_revision":"native-metadata",
+        "idle":{"admission":idle_admission,"expires_at":idle_expiry},"metadata_revision":"native-metadata",
         "operations":["exec"],"limits":{"max_duration_seconds":20,"max_input_bytes":1024,"max_output_bytes":briqyard_api::execution::MAX_CAPTURE_BYTES,"output_mode":"capture_per_stream_v1"}});
     if renewable {
         grant_body["limits"]["max_duration_seconds"] = json!(60);
