@@ -370,6 +370,16 @@ async fn main() -> Result<()> {
         let began = std::time::Instant::now();
         if args[1] != "renewable" {
             let response = channel.request("gateway", "exec", &request).await?;
+            let observed = briqyard_api::execution::clock::ClockSample::read()
+                .and_then(|sample| sample.interval())
+                .context("response clock unqualified")?;
+            std::fs::write(
+                dir.join(format!("response-observation-{}", args[1])),
+                serde_json::to_vec(&briqyard_api::execution::channel::ClockObservation {
+                    now: observed.now,
+                    uncertainty: observed.uncertainty,
+                })?,
+            )?;
             ensure!(
                 !response.status().is_success(),
                 "source refusal completed a quiet command"

@@ -26,11 +26,15 @@ struct Configuration {
     host_administrator_file: PathBuf,
     fleet_administrator_file: PathBuf,
 }
+#[derive(Clone)]
 struct Central {
-    app: StdMutex<Option<Router>>,
+    app: Arc<StdMutex<Option<Router>>>,
     credential: String,
-    key: Ed25519KeyPair,
-    callbacks: AtomicUsize,
+    key: Arc<Ed25519KeyPair>,
+    callbacks: Arc<AtomicUsize>,
+    initial_expiry: Arc<StdMutex<Option<u64>>>,
+    revoke_ack: Arc<StdMutex<Option<std::time::Instant>>>,
+    tasks: Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>,
     scenario: String,
     directory: PathBuf,
 }
@@ -63,9 +67,6 @@ impl Central {
     }
     async fn extend(&self, id: &str, previous: u64) -> Result<()> {
         self.callbacks.fetch_add(1, Ordering::SeqCst);
-        if self.scenario == "renewable-refused" {
-            anyhow::bail!("fixture source reauthorization refused");
-        }
         // This callback re-enters the actual service while its original dispatch
         // RPC remains open. No issuer mutex may span this call.
         let status: ActiveStatus =
@@ -76,10 +77,16 @@ impl Central {
         );
         let active = status.evidence.context("missing active evidence")?;
         ensure!(active.sequence == previous, "sequence changed");
+        *self.initial_expiry.lock().unwrap() = Some(active.lease_expires_at);
+        if self.scenario == "renewable-refused" {
+            anyhow::bail!("fixture source reauthorization refused");
+        }
+
         if self.scenario == "renewable-revoked" {
             let reply = self.call("revoke", json!({"id":"native-revoke","host_instance":active.binding.host_instance,
                 "request":{"id":active.binding.delegation,"version":active.binding.delegation_version}})).await?;
             ensure!(reply["state"] == "ready", "revocation not committed");
+            *self.revoke_ack.lock().unwrap() = Some(std::time::Instant::now());
             return Ok(());
         }
 
@@ -177,6 +184,27 @@ impl renewal::ContinuationProvider for Central {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<(), renewal::ContinuationError>> + Send + 'a>,
     > {
+        if self.scenario == "renewable-revoked" {
+            // The independent central attempt may finish after the dispatch
+            // response cancels its callback waiter. Retain and join that exact
+            // task; cancellation never creates another revocation request.
+            let central = self.clone();
+            let id = id.to_owned();
+            let (send, receive) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let result = central
+                    .extend(&id, previous)
+                    .await
+                    .map_err(|_| renewal::ContinuationError::Unconfirmed);
+                let _ = send.send(result);
+            });
+            self.tasks.lock().unwrap().push(task);
+            return Box::pin(async {
+                receive
+                    .await
+                    .unwrap_or(Err(renewal::ContinuationError::Unconfirmed))
+            });
+        }
         Box::pin(async move {
             self.extend(id, previous)
                 .await
@@ -207,11 +235,16 @@ async fn renewable_service_callback_host_guest() -> Result<()> {
         let cfg = &configuration.execution;
         let (credentials, keys, tls) = cfg.channel.load().map_err(anyhow::Error::msg)?;
         let central = Arc::new(Central {
-            app: StdMutex::new(None),
+            app: Arc::new(StdMutex::new(None)),
             credential: credentials.central_installer.clone(),
-            key: Ed25519KeyPair::from_pkcs8(&std::fs::read(dir.join("central.pk8"))?)
-                .map_err(|_| anyhow::anyhow!("fixture key"))?,
-            callbacks: AtomicUsize::new(0),
+            key: Arc::new(
+                Ed25519KeyPair::from_pkcs8(&std::fs::read(dir.join("central.pk8"))?)
+                    .map_err(|_| anyhow::anyhow!("fixture key"))?,
+            ),
+            callbacks: Arc::new(AtomicUsize::new(0)),
+            initial_expiry: Arc::new(StdMutex::new(None)),
+            revoke_ack: Arc::new(StdMutex::new(None)),
+            tasks: Arc::new(StdMutex::new(Vec::new())),
             scenario: scenario.into(),
             directory: dir.clone(),
         });
@@ -284,6 +317,17 @@ async fn renewable_service_callback_host_guest() -> Result<()> {
             ])
             .kill_on_drop(true);
         let outcome = tokio::time::timeout(Duration::from_secs(100), command.status()).await;
+        let completed = std::time::Instant::now();
+        let tasks = std::mem::take(&mut *central.tasks.lock().unwrap());
+        for mut task in tasks {
+            if tokio::time::timeout(Duration::from_secs(10), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = task.await;
+            }
+        }
         handle.shutdown();
         server.abort();
         let _ = server.await;
@@ -294,6 +338,38 @@ async fn renewable_service_callback_host_guest() -> Result<()> {
                 .success(),
             "native driver failed"
         );
+        if index > 0 {
+            let expiry = central
+                .initial_expiry
+                .lock()
+                .unwrap()
+                .context("no live initial lease observed")?;
+            let observed: briqyard_api::execution::channel::ClockObservation =
+                serde_json::from_slice(&std::fs::read(
+                    dir.join(format!("response-observation-{scenario}")),
+                )?)?;
+            let upper = observed.now.saturating_add(observed.uncertainty);
+            if scenario == "renewable-refused" {
+                ensure!(
+                    upper >= expiry,
+                    "source refusal returned before earliest qualified lease expiry"
+                );
+            } else {
+                let ack = central
+                    .revoke_ack
+                    .lock()
+                    .unwrap()
+                    .context("no successful durable revoke ACK")?;
+                ensure!(
+                    completed.saturating_duration_since(ack) < Duration::from_secs(5),
+                    "quiet command did not terminate promptly after revoke ACK"
+                );
+                ensure!(
+                    upper.saturating_add(8) < expiry,
+                    "revocation termination was not distinct from initial lease expiry"
+                );
+            }
+        }
         let callbacks = central.callbacks.load(Ordering::SeqCst);
         ensure!(
             callbacks >= if index == 0 { 2 } else { 1 },
