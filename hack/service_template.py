@@ -122,8 +122,9 @@ def make(body):
     return m
 
 
-def clone_body(name, snap):
-    return {'namespace': NS, 'name': name, 'fork': {'machine_id': SRC, 'snapshot': snap}}
+def clone_body(name, snap, mem=512):
+    return {'namespace': NS, 'name': name, 'size': {'vcpus': 1, 'memory_mb': mem},
+            'fork': {'machine_id': SRC, 'snapshot': snap}}
 
 
 SRC = ''
@@ -262,7 +263,7 @@ def bench():
         cold.append(time.monotonic() - t)
         api('DELETE', '/machines/' + m['id'])
         t = time.monotonic()
-        m = make(clone_body('clone%d' % i, 'loaded'))
+        m = make(clone_body('clone%d' % i, 'loaded', mem))
         m = get(m['id'])
         serves(m['ip'])
         clone.append(time.monotonic() - t)
@@ -275,7 +276,7 @@ def bench():
 
     def one(k):
         t = time.monotonic()
-        m = make(clone_body('par%d' % k, 'loaded'))
+        m = make(clone_body('par%d' % k, 'loaded', mem))
         m = get(m['id'])
         serves(m['ip'])
         out[k] = (m, time.monotonic() - t)
