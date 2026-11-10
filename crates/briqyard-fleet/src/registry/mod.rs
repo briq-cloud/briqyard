@@ -6,6 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+mod admission_holds;
 mod shared;
 mod tokens;
 pub use shared::*;
@@ -159,6 +160,11 @@ pub struct Hold {
     took_disk_mb: u64,
     /// When the host answered the create: a report received after that counts the machine.
     made: Option<DateTime<Utc>>,
+    /// The placement admission requirement this holds capacity for (ADR 0128); `None`: a create.
+    owner: Option<String>,
+    /// When an admission's hold is given back if no dispatch has taken it over; the heartbeat
+    /// prunes it.
+    deadline: Option<DateTime<Utc>>,
 }
 
 /// Reads a saved `disk_free_mb`: the number a fleet before this one wrote, where 0 stood for "no
@@ -194,13 +200,14 @@ impl HostRec {
         }
     }
 
-    fn memory_policy_unresolved(&self) -> bool {
+    pub fn memory_policy_unresolved(&self) -> bool {
         self.memory_policy
             .is_some_and(|p| p != api::MemoryPolicy::CURRENT)
             || self
                 .holds
                 .iter()
-                .any(|hold| hold.memory_policy != self.memory_policy)
+                // A decision waiting for its dispatch is not a create in flight (ADR 0128).
+                .any(|hold| hold.owner.is_none() && hold.memory_policy != self.memory_policy)
     }
 
     pub fn free_memory_mb(&self) -> u32 {
@@ -213,7 +220,7 @@ impl HostRec {
             .saturating_sub(self.used.cpu_millis())
     }
 
-    fn has_cpu(&self, need: u32) -> bool {
+    pub fn has_cpu(&self, need: u32) -> bool {
         self.capacity.cpu_millis.is_some() && self.free_cpu_millis() >= need
     }
 
@@ -226,6 +233,17 @@ impl HostRec {
             *free -= hold.took_disk_mb;
         }
         self.holds.push(hold);
+    }
+
+    /// Removes hold `i` and gives back what it took.
+    fn give_back(&mut self, i: usize) -> Hold {
+        let hold = self.holds.remove(i);
+        self.used.cpu_millis = Some(self.used.cpu_millis().saturating_sub(hold.cpu_millis));
+        self.used.memory_mb = self.used.memory_mb.saturating_sub(hold.memory_mb);
+        if let Some(free) = self.disk_free_mb.as_mut() {
+            *free += hold.took_disk_mb;
+        }
+        hold
     }
 
     /// The host's own figures, received at `at`: they replace what the fleet had, and the holds
@@ -320,23 +338,44 @@ impl HostRec {
     }
 
     /// Whether its machines may see the CPU's virtualization extensions (ADR 0088).
-    fn serves_nested(&self) -> bool {
+    pub fn serves_nested(&self) -> bool {
         self.runtime_classes.iter().any(|c| c.nested)
     }
 
     /// Whether a new namespace may be placed here: ready, under the ceiling, no pressure.
-    fn takes_new_namespaces(&self, policy: &Policy) -> bool {
+    pub fn takes_new_namespaces(&self, policy: &Policy) -> bool {
         self.has_memory_for_namespaces(policy) && self.pressure().is_none()
     }
 
     /// Ready and under the fill ceiling: what `takes_new_namespaces` asks but the conditions.
-    fn has_memory_for_namespaces(&self, policy: &Policy) -> bool {
+    pub fn has_memory_for_namespaces(&self, policy: &Policy) -> bool {
         self.state == "ready" && self.fill() < policy.fill_ceiling
+    }
+
+    /// Whether the host offers what `policy` requires of a placement: the egress sibling
+    /// capability, the named-memory profile, the runtime class.
+    pub fn has_capabilities(&self, policy: &Policy) -> bool {
+        (!policy.require_egress_siblings || self.egress_siblings_v1)
+            && (!policy.require_named_memory
+                || (self.named_memory_fork_v1
+                    && self
+                        .named_memory_profiles
+                        .iter()
+                        .any(|p| p == &policy.named_memory_profile)))
+            && api::serves_class(&self.runtime_classes, &policy.runtime_class)
+    }
+
+    /// Whether `physical_mb` of memory, `need_disk_mb` of disk and `need_cpu_millis` of CPU are
+    /// free on the host.
+    pub fn has_room(&self, physical_mb: u32, need_disk_mb: u64, need_cpu_millis: u32) -> bool {
+        self.free_memory_mb() >= physical_mb
+            && self.has_disk(need_disk_mb)
+            && self.has_cpu(need_cpu_millis)
     }
 
     /// Whether `need_disk_mb` fits in its pool: a host that reports no disk figure is not held
     /// to it.
-    fn has_disk(&self, need_disk_mb: u64) -> bool {
+    pub fn has_disk(&self, need_disk_mb: u64) -> bool {
         self.disk_free_mb.is_none_or(|free| free >= need_disk_mb)
     }
 }
@@ -392,6 +431,9 @@ pub struct Policy {
     pub fill_ceiling: f64,
     /// A host silent for this long is down.
     pub down_after: Duration,
+    /// How long a placement admission holds capacity for a requirement not dispatched yet (ADR
+    /// 0128).
+    pub admission_hold: Duration,
 }
 
 impl Default for Policy {
@@ -403,6 +445,7 @@ impl Default for Policy {
             runtime_class: String::new(),
             fill_ceiling: 0.85,
             down_after: Duration::seconds(60),
+            admission_hold: Duration::minutes(10),
         }
     }
 }
@@ -535,7 +578,7 @@ impl Registry {
             moves.values().any(|m| m.namespace == *t)
                 || admissions
                     .values()
-                    .any(|a| a.namespace == *t && a.pending_seed())
+                    .any(|a| a.namespace == *t && a.pending())
                 || routes
                     .values()
                     .any(|route| route.namespace == *t && !route.accepted)
@@ -567,6 +610,8 @@ impl Registry {
     /// that no unsettled request, move or admission names. Idempotent; the heartbeat runs it, and
     /// so does the start, on the registry as loaded.
     pub fn prune(&mut self, now: DateTime<Utc>) {
+        crate::sandbox_admissions::expire(self, now, REPLAY_WINDOW);
+        self.expire_holds(now);
         crate::create_replay::prune(self, now, REPLAY_WINDOW);
         crate::sandbox_admissions::prune(self, now, REPLAY_WINDOW);
         let named: std::collections::HashSet<&str> = self
@@ -576,7 +621,7 @@ impl Registry {
             .chain(
                 self.sandbox_admissions
                     .values()
-                    .filter(|a| a.pending_seed())
+                    .filter(|a| a.pending())
                     .map(|a| a.namespace.as_str()),
             )
             .chain(
@@ -697,18 +742,10 @@ impl Registry {
                     .values()
                     .filter(|h| {
                         h.takes_new_namespaces(policy)
-                            && (!policy.require_egress_siblings || h.egress_siblings_v1)
-                            && (!policy.require_named_memory
-                                || (h.named_memory_fork_v1
-                                    && h.named_memory_profiles
-                                        .iter()
-                                        .any(|p| p == &policy.named_memory_profile)))
+                            && h.has_capabilities(policy)
                             && (region.is_empty() || h.region == region)
-                            && api::serves_class(&h.runtime_classes, &policy.runtime_class)
                             && h.reservation_mb(need_mb)
-                                .is_some_and(|need| h.free_memory_mb() >= need)
-                            && h.has_disk(need_disk_mb)
-                            && h.has_cpu(need_cpu_millis)
+                                .is_some_and(|need| h.has_room(need, need_disk_mb, need_cpu_millis))
                     })
                     // A default machine goes where nothing runs a hypervisor of its own when
                     // such a host has room (ADR 0088); then the most free memory.
@@ -791,12 +828,7 @@ impl Registry {
         let Some(i) = h.holds.iter().position(|x| x.id == id) else {
             return;
         };
-        let hold = h.holds.remove(i);
-        h.used.cpu_millis = Some(h.used.cpu_millis().saturating_sub(hold.cpu_millis));
-        h.used.memory_mb = h.used.memory_mb.saturating_sub(hold.memory_mb);
-        if let Some(free) = h.disk_free_mb.as_mut() {
-            *free += hold.took_disk_mb;
-        }
+        h.give_back(i);
     }
 
     /// Pins a namespace to a host that holds it now, when it has no pin: a namespace made on a

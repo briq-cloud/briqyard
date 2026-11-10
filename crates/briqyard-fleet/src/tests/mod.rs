@@ -36,6 +36,7 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
             runtime_class: String::new(),
             fill_ceiling: cfg.placement.fill_ceiling,
             down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
+            admission_hold: Duration::seconds(cfg.placement.admission_hold_sec as i64),
         },
         cfg,
         reg: RegLock::new(reg),
@@ -246,6 +247,7 @@ mod listings;
 mod locate;
 mod metrics;
 mod placement;
+mod placement_admission;
 mod regions;
 mod retention;
 mod sessions;

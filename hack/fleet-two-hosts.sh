@@ -45,7 +45,7 @@ cleanup() {
     eval "$SECOND_HOST_START" || true
     for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done
   fi
-  for t in "$T-a" "$T-b" "$T-fork"; do
+  for t in "$T-a" "$T-b" "$T-fork" "$T-p1" "$T-p2" "$T-p3"; do
     for id in $(briqyard machine ls --namespace "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
     briqyard namespace rm "$t" >/dev/null 2>&1 || true
   done
@@ -176,4 +176,32 @@ check "a fork into a new namespace lands on its source's host" '[ "$(briqyard ma
 # A move across hosts is not supported yet: refused before anything happens, naming both hosts.
 out=$(briqyard machine move "$A2" --namespace "$T-b" 2>&1 || true)
 check "a move into a namespace on the other host is refused, the machine untouched" 'echo "$out" | grep -q "not supported yet" && echo "$out" | grep -q "$HB" && [ "$(briqyard machine get "$A2" | jq -r "[.state, .host, .namespace] | join(\" \")")" = "running $HA $T-a" ]'
+if [ -n "${REGION_A:-}" ] && [ -n "${REGION_B:-}" ]; then
+  echo "== placement admission across two regions (ADR 0128)"
+  region_of() { hosts | jq -r ".[] | select(.id == \"$1\") | .region"; }
+  adm()  { curl -sS -X "$1" ${auth[@]+"${auth[@]}"} -H 'Content-Type: application/json' -w '\n%{http_code}' "$BRIQYARD_URL/v1/namespaces/$2/admissions/$3" ${4:+-d "$4"}; }
+  code() { tail -n1; }
+  body() { sed '$d'; }
+  REQS='[{"role":"consumer","size":{"vcpus":1,"memory_mb":256}}]'
+  AB="{\"regions\":[\"$REGION_A\",\"$REGION_B\"],\"requirements\":$REQS}"
+  BA="{\"regions\":[\"$REGION_B\",\"$REGION_A\"],\"requirements\":$REQS}"
+  check "the fleet says it answers admissions" '[ "$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/status" | jq -r .placement_admission_v1)" = true ]'
+  out=$(adm PUT "$T-p1" req-p1 "$AB"); D1=$(echo "$out" | body)
+  check "the preferred region is placed first, on a host of it" '[ "$(echo "$out" | code)" = 200 ] && [ "$(echo "$D1" | jq -r .region)" = "$REGION_A" ] && [ "$(region_of "$(echo "$D1" | jq -r .host)")" = "$REGION_A" ]'
+  out=$(adm PUT "$T-p2" req-p2 "$BA")
+  check "another namespace prefers the other region" '[ "$(echo "$out" | code)" = 200 ] && [ "$(echo "$out" | body | jq -r .region)" = "$REGION_B" ]'
+  check "the same id and body answer the same decision" '[ "$(adm PUT "$T-p1" req-p1 "$AB" | body | jq -S -c .)" = "$(echo "$D1" | jq -S -c .)" ]'
+  check "the same id and another body is refused" '[ "$(adm PUT "$T-p1" req-p1 "$BA" | code)" = 409 ]'
+  out=$(adm PUT "$T-p3" req-p3 "{\"regions\":[\"no-such-region\",\"$REGION_A\"],\"requirements\":$REQS}")
+  check "a first region no host serves is refused, nothing stored" '[ "$(echo "$out" | code)" != 200 ] && [ "$(briqyard namespace get "$T-p3" 2>&1 | grep -c "not found\|404")" -ge 1 ]'
+  # The create under the decision goes to the decision's host.
+  P1=$(curl -fsS -X POST ${auth[@]+"${auth[@]}"} -H 'Content-Type: application/json' -H 'x-briqyard-placement-request-id: req-p1' "$BRIQYARD_URL/v1/machines" \
+    -d "{\"namespace\":\"$T-p1\",\"name\":\"p\",\"image\":\"alpine:3.20\",\"cmd\":[\"sleep\",\"3600\"],\"size\":{\"vcpus\":1,\"memory_mb\":256},\"region\":\"$REGION_A\"}" | jq -r .id)
+  check "the create goes to the host of the decision" '[ "$(briqyard machine get "$P1" | jq -r .host)" = "$(echo "$D1" | jq -r .host)" ]'
+  check "an admission cannot be cancelled once dispatched" '[ "$(adm DELETE "$T-p1" req-p1 | code)" = 409 ]'
+  check "an unused one can be cancelled" '[ "$(adm DELETE "$T-p2" req-p2 | code)" = 204 ]'
+  briqyard machine destroy "$P1" >/dev/null || true
+else
+  skip "placement admission across two regions (REGION_A and REGION_B are not set)"
+fi
 suite_summary

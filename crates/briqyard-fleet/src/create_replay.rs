@@ -133,7 +133,7 @@ pub(super) fn host_unresolved(reg: &Registry, host: &str) -> bool {
         || reg
             .sandbox_admissions
             .values()
-            .any(|a| a.pending_seed() && a.host.as_deref() == Some(host))
+            .any(|a| a.pending() && a.host.as_deref() == Some(host))
         || reg
             .sandbox_requests
             .values()
@@ -146,7 +146,7 @@ pub(super) fn relocation_unresolved(reg: &Registry, namespace: &str, host: Optio
         || reg
             .sandbox_admissions
             .values()
-            .any(|a| a.namespace == namespace && a.pending_seed() && a.host.as_deref() != host)
+            .any(|a| a.namespace == namespace && a.pending() && a.host.as_deref() != host)
         || reg.sandbox_requests.values().any(|route| {
             route.namespace == namespace && !route.accepted && Some(route.host.as_str()) != host
         })

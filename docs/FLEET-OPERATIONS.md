@@ -242,6 +242,60 @@ The alerts to watch them are in the monitoring stack (below): creates refused fo
 disk (add a host in the region), for pressure (free the namespace's host), a largest slot under the
 largest size you offer.
 
+### Placement admission across regions (ADR 0128)
+
+A control plane that offers a region preference asks the fleet once, before any host is asked to
+create anything. `GET /v1/status` says the fleet answers (`placement_admission_v1: true`); an
+older fleet answers 404 to the route, which is never capacity.
+
+```bash
+curl -X PUT -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  $FLEET/v1/namespaces/acme/admissions/req_1 -d '{
+    "regions": ["bhs", "gra"],
+    "requirements": [
+      {"role": "gateway",  "size": {"vcpus": 1, "memory_mb": 256}},
+      {"role": "consumer", "size": {"vcpus": 2, "memory_mb": 2048}, "volume_gb": 20}
+    ]}'
+# {"region":"bhs","host":"h_…","binding":"new","mode":"cold","regions":[{"region":"bhs","outcome":"placed"}]}
+```
+
+The fleet takes the regions in order and stops at the first one with a host that can take the
+**sum** of the requirements (memory, CPU, disk; ready, fresh, under `fill_ceiling`, no condition).
+A namespace that already has a host gets that host (`binding: existing`) or a 503: a stack is
+never split. It pins the namespace, holds the capacity of each requirement, saves the decision,
+then answers. The same id and body answer the same decision for 24 hours, whatever the fleet
+looks like since; another body, or an id a seed admission holds, is 409.
+
+| Answer | Meaning | What to do |
+|---|---|---|
+| 200 | the decision; `regions` lists what each region walked came to | create under it (below) |
+| 503 `capacity`, `reason: regions_full` | every region walked was full | add capacity, or retry later; counted as `unschedulable` in each of them |
+| 503 `capacity`, `reason: region_unconfirmed` | a host that may have had room is down, stale or upgrading; the next region is **not** tried | fix the host (`briqyard host ls`), then retry |
+| 400, 409 `capability_unsupported`, 503 `capacity` without a `reason` | the first region cannot serve the requirements at all, as a create in it alone | the same as for a create |
+
+A refusal stores nothing. Dispatch under the decision with the same id: the gateway `PUT` as the
+query parameter `placement_request_id`, the machine create as the header
+`x-briqyard-placement-request-id`. Each must be the requirement admitted (size, volume, class,
+profile) and in the admitted region, else 409 and nothing is forwarded. Before it asks the
+host, the fleet checks the host's room for that requirement and takes over the requirement's hold,
+so the memory is counted once; if the room is gone since, 503 `capacity` and the decision stays.
+A quota `PUT` with the id is checked the same way and consumes no requirement.
+
+`DELETE` on the route cancels the admission and releases its holds, only before any dispatch
+(409 after, the gateway's included). The pin stays and follows the heartbeat's rule.
+
+- **Holds.** Each requirement is held for `placement.admission_hold_sec` (default 600). The
+  heartbeat gives back what no dispatch took over; the decision stands.
+- **Fence.** While a requirement is not dispatched, the admission pins its namespace to the host
+  as a pending seed admission does: the heartbeat, `forget`, `namespace unpin` and `namespace rm`
+  all leave it or refuse. After 24 hours from its last change the fence and the holds go, the id
+  becomes a tombstone (409 `admission expired`) and, one window later, is forgotten.
+- **Seeds.** A seed in `sandbox_seeds` is used only on its own host, inside a region walked; one
+  that fails its check makes the placement `cold`.
+- **Rollback.** An older fleet loads a registry with placement records but does not fence
+  them, and cannot load one that holds an `expired` tombstone. Roll back below this release
+  only when no admission is pending and the tombstones have been pruned (two windows, 48 hours).
+
 ### Adding and removing hosts
 
 The fleet buys no server (ADR 0042): you, or a scaler of yours reading the signals above, buy
