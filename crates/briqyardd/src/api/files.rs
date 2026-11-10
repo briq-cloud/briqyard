@@ -3,6 +3,7 @@
 use super::*;
 use briqyard_api::{files as wire, guest};
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 
@@ -93,6 +94,7 @@ async fn upload(
 ) -> Result<wire::FileWriteResponse, MError> {
     let mut stream = body.into_data_stream();
     let mut total = 0u64;
+    let mut hash = Sha256::new();
     while let Some(chunk) = idle(stream.next()).await? {
         let chunk = chunk.map_err(|e| MError::Invalid(format!("file body: {e}")))?;
         let next = wire::streamed_size(total, chunk.len() as u64, size).map_err(MError::Invalid)?;
@@ -102,6 +104,7 @@ async fn upload(
                 .map_err(guest_io)?;
             idle(conn.write_all(piece)).await?.map_err(guest_io)?;
         }
+        hash.update(&chunk);
         total = next;
     }
     if size.is_some_and(|size| size != total) {
@@ -120,8 +123,9 @@ async fn upload(
         )));
     }
     if response.size != Some(total)
-        || response.sha256.len() != 64
-        || !response.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        || !response
+            .sha256
+            .eq_ignore_ascii_case(&hex::encode(hash.finalize()))
     {
         return Err(MError::Other(anyhow::anyhow!(
             "guest returned invalid upload result"
@@ -272,7 +276,7 @@ mod tests {
                         &guest::encode_frame(&guest::Response {
                             kind: "ok".into(),
                             size: Some(5),
-                            sha256: "a".repeat(64),
+                            sha256: hex::encode(Sha256::digest(b"bytes")),
                             ..Default::default()
                         })
                         .unwrap(),
@@ -284,8 +288,72 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(written.size, 5);
-            assert_eq!(written.sha256, "a".repeat(64));
+            assert_eq!(written.sha256, hex::encode(Sha256::digest(b"bytes")));
             task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_refuses_an_ack_not_matching_the_sent_bytes() {
+        let digest = hex::encode(Sha256::digest(b"bytes"));
+        for (size, sha256) in [
+            (Some(5), "a".repeat(64)),
+            (Some(4), digest.clone()),
+            (None, digest.clone()),
+            (Some(5), "g".repeat(64)),
+            (Some(5), digest[..63].to_string()),
+        ] {
+            let (mut host, mut guest) = tokio::io::duplex(1024);
+            guest
+                .write_all(
+                    &guest::encode_frame(&guest::Response {
+                        kind: "ok".into(),
+                        size,
+                        sha256,
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let result = upload(&mut host, Body::from("bytes"), Some(5)).await;
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid upload result"));
+            drop(host);
+            let mut received = Vec::new();
+            guest.read_to_end(&mut received).await.unwrap();
+            // The guest may already have committed: refusal never reopens or resends.
+            assert_eq!(received, b"\0\0\0\x05bytes\0\0\0\0");
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_hashes_empty_and_multiple_binary_body_chunks() {
+        for data in [vec![], vec![0, 255, 128, 1, 2, 3, 4]] {
+            let digest = hex::encode(Sha256::digest(&data)).to_uppercase();
+            let (mut host, mut guest) = tokio::io::duplex(1024);
+            guest
+                .write_all(
+                    &guest::encode_frame(&guest::Response {
+                        kind: "ok".into(),
+                        size: Some(data.len() as u64),
+                        sha256: digest.clone(),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let chunks = data
+                .chunks(2)
+                .map(|chunk| Ok::<_, std::io::Error>(chunk.to_vec()))
+                .collect::<Vec<_>>();
+            let body = Body::from_stream(futures::stream::iter(chunks));
+            let result = upload(&mut host, body, None).await.unwrap();
+            assert_eq!(result.size, data.len() as u64);
+            assert_eq!(result.sha256, digest);
         }
     }
 
@@ -380,7 +448,7 @@ mod tests {
                     &guest::encode_frame(&guest::Response {
                         kind: "ok".into(),
                         size: Some(size as u64),
-                        sha256: "a".repeat(64),
+                        sha256: hex::encode(Sha256::digest(vec![7; size])),
                         ..Default::default()
                     })
                     .unwrap(),
