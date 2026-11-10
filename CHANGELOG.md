@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.3 — 2026-11-10
+
+### Upgrade notes
+
+- Scoped listeners remain disabled without explicit authenticated provisioning. Their durable journals bind ownership, delegation versions, immutable projections and one-shot admissions; uncertain operations recover through status without dispatch replay.
+- Opening scoped host state establishes permanent `scoped-execution-v1` / schema 5 compatibility authority. Renewable operations require `scoped-execution-v2` / schema 6. Older binaries must not open retained scoped state; managed handover and rollback enforce these requirements.
+- The guest init changes to support renewable execution. Compare the candidate's exact `SHA256SUMS` and reseal seeds with the new init before using that capability. Existing running guests retain their original init and execution capabilities.
+
+### Features
+
+- add durable scoped command channel (#206) ([e503c6bf](https://github.com/briq-cloud/briqyard/commit/e503c6bf0f14f5ad3b2240c160d7d85bcc02a94a))
+
+- bind immutable projections and renewal versions (#208) ([9f4a2470](https://github.com/briq-cloud/briqyard/commit/9f4a24704706e5fc150a9aac7e3d2e5fa0131b78))
+
+- expose authenticated live installation identity (#209) ([2faf6f2b](https://github.com/briq-cloud/briqyard/commit/2faf6f2bf2a0c80fb86fb617013f5f30932a1ae3))
+
+- provision isolated authenticated runtime listeners (#210) ([4023b3ff](https://github.com/briq-cloud/briqyard/commit/4023b3fffe5e4188a8640fea0ba03bb91c82dc33))
+
+- add dormant renewable operation continuation (#211) ([42e965a5](https://github.com/briq-cloud/briqyard/commit/42e965a5fabf7d0078ad2206cdd2dce10d06ea93))
+
 ## 0.2.2 — 2026-11-09
 
 ### Upgrade notes
