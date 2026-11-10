@@ -200,7 +200,7 @@ def e2e():
     for o, m in zip(out, cl):
         c = json.loads(o['clone']) if o.get('clone') else {}
         check('clone.json matches the clone ' + m['name'],
-              c.get('ip') == m['ip'] and c.get('hostname') == o['hostname'] and c.get('machine_id') == o['machine_id'], str(c))
+              str(c.get('ip', '')).split('/')[0] == m['ip'] and c.get('hostname') == o['hostname'] and c.get('machine_id') == o['machine_id'], str(c))
     # 6: the template cannot be deleted while clones exist.
     try:
         api('DELETE', '/machines/%s/snapshots/%s' % (SRC, snap['id']))
