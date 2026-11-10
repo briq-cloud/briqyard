@@ -173,6 +173,7 @@ where
                     version: briqyard_api::version::GUEST_VERSION.into(),
                     file_stream_v1: true,
                     exec_stream_v1: true,
+                    exec_renewable_v1: true,
                     assigned_run: st.assigned_run.clone(),
                     clone_status,
                     sha256,
@@ -186,7 +187,7 @@ where
             )
             .await;
         }
-        "exec" | "exec_stream_v1" => exec_op(&st, input, stream, req).await,
+        "exec" | "exec_stream_v1" | "exec_renewable_v1" => exec_op(&st, input, stream, req).await,
         "put_stream" | "get_stream" => files::serve(input, stream, req).await,
         "put" => {
             // A frozen filesystem can block writes until thaw; never park a runtime

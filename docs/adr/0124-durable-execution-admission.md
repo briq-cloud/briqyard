@@ -21,7 +21,7 @@ a different signed allocation cannot replace the same ID. This acknowledges quot
 only. It does not install ownership metadata, freeze membership or acknowledge protection,
 and is insufficient to make a delegation ready for dispatch.
 
-The host consumes that admission durably before its first guest frame. Both boundaries
+The host consumes that admission durably before its first execution frame. Both boundaries
 use `briqyard-api/execution-admission`; guest builds do not enable this feature.
 
 | Boundary | Required evidence |
@@ -83,7 +83,7 @@ through initial dispatch. Submitted credentials cannot construct this snapshot.
 Remote resource members are refused until distributed resource fencing exists.
 All frozen resources remain in use while the command connection lives.
 
-The host holds its journal fence through the initial guest write. Stop/move/restore use
+The host holds its journal fence through the initial command write. Stop/move/restore use
 the same lifecycle locks. After the write, explicit lifecycle operations may terminate an
 accepted command; its receipt remains consumed regardless of the resulting connection error.
 
@@ -605,3 +605,239 @@ The native channel fixture records its protection deadline before installation a
 waits for the qualified lower clock bound, including the mutation uncertainty
 margin, before namespace teardown. Successful guest completion does not release
 topology protection early. Cleanup remains bounded and emits fixed stage failures.
+
+## Dormant renewable operation primitives
+
+`limits.execution_mode` optionally names `renewable_exec_v1`. Omission preserves
+legacy signed bytes and deadlines. Null and unknown modes refuse. Execution and
+output modes attenuate independently and must each match the grant; every numeric
+limit is nonincreasing. Renewable guest duration is at most 60 seconds. The existing
+issuer explicitly refuses this mode. Host support below is available only through
+the authenticated internal channel; fleet issuance remains disabled.
+
+The new central-signed token type is `briqyard-execution-continuation+jwt`, with the
+existing Ed25519 header, key roles, token bound and strict decoding. Its claims are:
+
+| Field | Binding or bound |
+| --- | --- |
+| `v, iss, aud, iat, nbf, exp` | Existing version, issuer, audience and qualified interval rules |
+| `checked_at` | Independent source/session authorization; no later than `iat`; `exp <= checked_at + 60` |
+| `previous_sequence, sequence` | Exact retained sequence and its successor; safe integers |
+| `binding` | Exact immutable active operation identity below |
+| `protection` | Exact `InstalledProtection` ACK already persisted by this host; same ownership generation, resource vector and revision; coverage through `exp` |
+
+`ActiveOperationBinding` contains `operation_id`, `admission`, original
+`grant_digest`, `permit_digest`, `request_digest`, `authority`, `authority_epoch`,
+`host_instance`, `ownership`, `ownership_generation`, `policy_revision`,
+`delegation`, `delegation_version`, `principal`, `source`, `team`, `subject`,
+`metadata_revision`, `target`, `resource_set`, `limits`, `guest_timeout_ms`,
+`started_at_ms` and `operation_deadline_ms`. It binds the exact run and frozen
+resource closure. The source's absolute expiry also bounds every lease.
+The guest timeout remains positive and at most 60,000 ms. The immutable operation
+envelope is at most 80,000 ms from consumption: ten seconds for dispatch, sixty for
+the guest and ten for terminal I/O. This envelope is not an authorization lease.
+Continuation cannot change it or extend execution by restarting either timer.
+
+The host journal records a consumed operation only after its exact admission was
+consumed and its initial dispatch was marked. A separate trusted first-frame ACK
+changes it to active. Neither unused reservations nor status polling establish
+activity. Only active operations accept continuation, before the old lease's upper
+clock bound expires, with a strictly higher expiry and exact next sequence. The
+source check time cannot regress. The complete protection ACK must already exist
+before the new sequence and expiry are fsynced. No allocation is read or debited;
+quota-window expiry does not itself end a consumed operation's authorization lease.
+
+Completion, delegation revocation and ownership invalidation serialize with lease
+updates in the same journal. Terminal evidence never becomes active again. Reopen
+marks all previously consumed/active records recovered, regardless of wall time;
+there is no command replay or lease recovery. Active-operation evidence and its
+admission survive pruning of expired permits. The existing 16 MiB / 16,384-record
+bounds apply; exhaustion refuses instead of deleting rejection evidence.
+
+`guestc::active_lease` is a separate live guard. It accepts only active
+committed evidence and applies the exact next fsynced ACK before extending a timer.
+Its immutable monotonic operation deadline never moves. A new ACK must arrive
+before the old wall and monotonic deadlines; expiry, revocation, completion,
+cancellation and clock loss cannot resume work. An independent timer and registered
+notification wake quiet guest I/O at lease expiry or revocation. Fresh qualification guards each poll and terminal result. The guarded future
+is created once and never replayed across updates.
+
+## Host renewable execution
+
+The installer installs an immutable `HostOperationPolicy` at
+`POST /internal/execution/v1/policy`: `host_instance`, `ownership`,
+`ownership_generation`, `delegation`, `delegation_version`, `grant_digest` and
+`policy_revision`. It binds policy identity to the exact installed grant. A
+changed record for the same grant refuses. Preparation and dispatch require it.
+
+`POST /internal/execution/v1/continue` requires installer credentials and
+`{admission, continuation}`. The host requires exact live evidence before verifying
+the central signature. Under the admission write guard it fsyncs the new sequence
+and already-installed protection, then applies that evidence to the live timer.
+Only a fresh successful observation after application returns an active ACK. A
+commit crossing the old lease's expiry ends the operation instead of resuming it.
+
+`POST /internal/execution/v1/active` requires execution credentials and
+`{admission}`. Both endpoints return
+`{state, observed_at: {now, uncertainty}, evidence}`; state is `active`, `terminal`
+or `unknown`. `observed_at` is a fresh qualified host clock interval. The evidence's
+`checked_at` remains the last signed source authorization. Polling does not advance
+it or the sequence. Durable active records without a matching live owner become
+unresolved terminal evidence. A retained owner awaiting completion fsync remains
+distinct from abandoned ownership, even after its terminal frame ends the timer.
+No status path creates or reconnects a guest session.
+
+The new guest operation `exec_renewable_v1` validates a positive timeout of at most
+60,000 ms and emits an exact `accepted` frame only after successful process spawn.
+The guest timeout starts before spawn. The host retains its initial admission,
+ownership, lifecycle and lease fences through that ACK and the active journal
+fsync. Activation retains the original monotonic admission deadline and the
+consumption-time monotonic operation cap; a newer wall sample cannot reconstruct
+elapsed authority. It then publishes the exact live lease and releases the admission read
+guard, allowing continuation and revocation while output is collected. Legacy
+operations keep their existing operation, fixed deadline and lock scope.
+
+Guest upgrades do not replace an init already running in an adopted microVM.
+A `pong` therefore advertises `exec_renewable_v1` explicitly, defaulting to false
+when omitted. Streaming support or a daemon version is insufficient. The trusted
+installer's discovery control accepts `require_renewable` (default false) and
+retains it in the immutable discovery intent and host request. Renewable callers
+must request it before reserving execution capacity. Under the resource lifecycle
+locks, discovery checks only the primary's live capability; dependencies need no
+renewable protocol. Legacy discovery and fixed-deadline execution remain available.
+Renewable dispatch repeats the bounded read-only ping under the exact run's
+lifecycle fence before admission consumption or command creation. Neither check
+holds the journal mutex across guest I/O; both revalidate run and journal identity
+before using the result. No compatibility probe starts a command.
+
+A live owner exists only for that one connected execution. Every I/O poll checks a
+fresh qualified clock; a separate timer and notification interrupt quiet I/O.
+Revocation, ownership invalidation and authority changes persist terminal state
+and end the matching live lease before control ACK. Dropping the execution ends
+and removes its live owner. Recovery retains terminal evidence without replay.
+Dispatch is bounded to ten seconds; guest timeout remains independent; terminal
+collection has ten additional seconds, all within the immutable 80-second envelope.
+
+Before renewable consumption, the original idle-protection receipt gains
+`operation_envelope_ms: 80000`. Its strict schema and reconstructible assignment
+requirement `scoped-execution-v2` / schema 6 prevent an older runtime from accepting
+the store. Startup drains the full 80 seconds and still requires qualified wall
+clock proof before protected guests can resume. Legacy receipts retain schema 5
+and their existing 60-second drain. Stamped receipts retain the stronger barrier.
+
+## Fleet operation continuation
+
+The authority installs and retains the exact host policy ACK before a renewable
+delegation becomes ready. It preserves signed execution mode and numeric limits.
+A named renewable issuer entry point supports the integrated coordinator; the
+legacy issuer entry point continues to refuse renewable permits.
+
+The authority fsyncs one-shot dispatch intent before returning an immutable
+in-memory dispatch owner. It releases the sole issuer journal turn only around
+that one host dispatch, and reacquires it for the terminal digest. Status may record
+consumption concurrently. Duplicate IDs and restart recovery are status-only;
+no path reconstructs dispatch from a durable intent. A cancelled owner disappears
+from the live registry and cannot request continuation.
+
+Installer-only authority routes use one independently provisioned, pinned host:
+
+| Action | Request | Successful reply |
+| --- | --- | --- |
+| `operation_active` | `{id}` | Fresh host `ActiveStatus` for the exact saved operation |
+| `operation_protect` | `{id, operation_id, previous_sequence, committed: {admission, expires_at_ms}}` | Full exact `ProtectionAck` |
+| `operation_continue` | `{id, operation_id, previous_sequence, continuation}` | Fresh host `ActiveStatus` after exact signed timer application |
+
+Protection attempts bind immutable operation identity, sequence and exact committed
+protection deadline. Existing matching protection is inspected without reissuing an
+uncertain installation. Its reservation may conservatively outlast the operation;
+only signed lease expiry authorizes execution and it remains bounded by the
+immutable operation deadline. New protection uses a separate typed intent key.
+The continuation token digest is fsynced before its sole delivery. A duplicate is
+status-only; changed attempts or tokens refuse. A lost ACK never licenses redelivery,
+a new grant, delegation renewal or another quota debit.
+
+An optional provisioned `ContinuationProvider` requests fresh central authorization
+for a live renewable command when its lease has at most twenty seconds remaining.
+Commands expected to finish within initial admission do not arm this driver. Each
+observed sequence permits one callback attempt. No issuer turn is held across the
+callback, which may re-enter the three authority routes. Failure retains the
+original lease and never replays the callback or command.
+
+The fixed HTTPS provider uses `execution.continuation: {url, credential_file}`.
+The URL has a non-root path, no userinfo, query or fragment. The private credential
+is separate from the bundle and all six existing credential values. There are no
+redirects, proxies or retries. Request and response are bounded to 4 KiB and the
+whole request to ten seconds. It posts `{operation_id, previous_sequence}` and
+accepts only `{state: "continued" | "recovered" | "not-needed"}`. Source checks,
+committed idle authorization and central signing remain the callback service's
+responsibility; unsigned callback success itself never extends a host timer.
+
+Provisioning defaults to no callback and refuses renewable issuance in that state.
+The production constructor negotiates renewal only with an explicitly configured,
+validated callback. Deployment requires independent review, Linux lifecycle/crash/clock
+qualification, compatibility evidence and CI. Mac checks do not supply native evidence.
+
+
+## Activation observation and authorization clocks
+
+The continuation driver may run before its sole dispatch RPC reaches the host.
+It waits only for authenticated active evidence, bounded by the original signed
+expiry and ten-second dispatch budget. Unknown observation never authorizes a
+callback or a new dispatch. Terminal evidence ends the wait. Host active status
+takes the admission write turn so it cannot reconcile the consumed record while
+initial acceptance and durable active publication still hold the read turn.
+
+Installer `POST /internal/authority/v1/authorization_clock` accepts only `{}` and
+returns `{authority:{now,uncertainty},host:{now,uncertainty}}`. The host sample uses
+installer `GET /internal/execution/v1/clock` on the same pinned dedicated transport.
+Both are qualified clock observations, independent of source authorization and
+renewable capability. Neither reads or changes a journal. Missing or stale local
+clock qualification refuses the request. A signer may conservatively use these
+lower bounds; observation alone never extends signed authorization freshness.
+
+The existing disposable native proof uses the production Service constructor with
+an explicitly injected callback. It covers central callback reentry, exact host
+protection and continuation ACK, a quiet
+60-second guest timeout across the original quota window, one-unit quota budgets,
+status-only duplicates, source refusal/lease expiry and active revocation. It also
+runs the monotonic activation and completion-owner regressions. There is no separate
+test-only capability override. A compiled fixture or Mac checks do not satisfy native
+qualification; deployment with renewal requires separately reviewed native evidence.
+
+The native fixture requests at most 60 seconds of protection per initial or
+continuation admission, matching the production installer. Longer commands renew
+that bounded protection; the fixture does not bypass the installer with a single
+120-second receipt. Renewable discovery also requests the live guest capability.
+
+
+## Bounded installation diagnostics
+
+Installer refusals retain the existing HTTP status and fail-closed checks. Structured
+warnings name only fixed installer error classes, verifier variants and host refusal
+stages. They never include requests, signed credentials, destinations or error text.
+The disposable native fixture collects these categories through a byte- and line-bound
+allowlist parser. Unknown events and fields are discarded. The diagnostic does not
+retry an installation or establish readiness; a refusal still ends that attempt.
+
+The same bounded parser extracts fixed native-fixture assertion and callback
+failure labels from private stderr before cleanup. Callback errors are classified
+against source-owned strings before recording; unknown errors produce only an
+`unknown` label. No underlying error or response text reaches the CI log. These
+labels distinguish fixture failures from intentional negative installation checks.
+
+
+The disposable native scenarios use distinct delegation identities as registration
+and ownership generations change. Host registration clears current delegation
+readiness but retains identity history and tombstones. Reusing a delegation for a
+new ownership generation correctly refuses installation. A local regression runs
+all four scenario identities through one retained host journal and verifies both
+that old-ID rebinding refuses and each fresh identity installs. This fixes the
+fixture; it does not relax the production history or revocation fences.
+
+Native recovery distinguishes an exec duplicate from retained status observation.
+Exec still requires a currently eligible exact grant before it returns an existing
+admission; expired or revoked grants refuse, even for a known operation ID. The
+authenticated gateway observation route retains status after that authority ends
+without another prepare, quota debit or guest dispatch. The native scenarios check
+both eligible duplicates and expired/revoked refusal, then recover through observation;
+the guest counter independently proves one launch for each scenario.

@@ -1,0 +1,160 @@
+{
+  "active": {
+    "binding": {
+      "admission": "admission-1",
+      "authority": "authority-1",
+      "authority_epoch": "epoch-1",
+      "delegation": "delegation",
+      "delegation_version": 1,
+      "grant_digest": "kYUdT04Zf03Ld1vaK3PHM6eFuMk5y0SCR8pEn8ijz6Y",
+      "guest_timeout_ms": 60000,
+      "host_instance": "host-instance-1",
+      "limits": {
+        "execution_mode": "renewable_exec_v1",
+        "max_duration_seconds": 60,
+        "max_input_bytes": 1024,
+        "max_output_bytes": 4096
+      },
+      "metadata_revision": "metadata-1",
+      "operation_deadline_ms": 1090000,
+      "operation_id": "operation",
+      "ownership": "owner",
+      "ownership_generation": 1,
+      "permit_digest": "KB1ShwsW4EX4DWh8tb3QRc1_gjX2pSrqu-OxTjmAH7g",
+      "policy_revision": "policy",
+      "principal": "key:credential-1",
+      "request_digest": "JI62LZRgXllOLwxSJ-Rl-s3imrIXbnmBKmYjKlnGe-Q",
+      "resource_set": {
+        "resources": [
+          {
+            "host": "host-1",
+            "machine": "machine-1",
+            "namespace": "team-1",
+            "placement": "placement-1",
+            "run": "run-1"
+          }
+        ],
+        "revision": "resources-1"
+      },
+      "source": {
+        "expires_at": 1100,
+        "id": "credential-1",
+        "kind": "api_key"
+      },
+      "started_at_ms": 1010000,
+      "subject": "subject-1",
+      "target": {
+        "host": "host-1",
+        "machine": "machine-1",
+        "namespace": "team-1",
+        "placement": "placement-1",
+        "run": "run-1"
+      },
+      "team": "team-1"
+    },
+    "checked_at": 1000,
+    "lease_expires_at": 1040,
+    "phase": "active",
+    "protection": {
+      "admission": "idle-active",
+      "expires_at_ms": 1050000,
+      "generation": 1,
+      "installation": "owner",
+      "resource_revision": "resources-1",
+      "resources": [
+        {
+          "host": "host-1",
+          "machine": "machine-1",
+          "namespace": "team-1",
+          "placement": "placement-1",
+          "run": "run-1"
+        }
+      ]
+    },
+    "sequence": 0
+  },
+  "central_public_key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+  "continuation": {
+    "aud": "runtime",
+    "binding": {
+      "admission": "admission-1",
+      "authority": "authority-1",
+      "authority_epoch": "epoch-1",
+      "delegation": "delegation",
+      "delegation_version": 1,
+      "grant_digest": "kYUdT04Zf03Ld1vaK3PHM6eFuMk5y0SCR8pEn8ijz6Y",
+      "guest_timeout_ms": 60000,
+      "host_instance": "host-instance-1",
+      "limits": {
+        "execution_mode": "renewable_exec_v1",
+        "max_duration_seconds": 60,
+        "max_input_bytes": 1024,
+        "max_output_bytes": 4096
+      },
+      "metadata_revision": "metadata-1",
+      "operation_deadline_ms": 1090000,
+      "operation_id": "operation",
+      "ownership": "owner",
+      "ownership_generation": 1,
+      "permit_digest": "KB1ShwsW4EX4DWh8tb3QRc1_gjX2pSrqu-OxTjmAH7g",
+      "policy_revision": "policy",
+      "principal": "key:credential-1",
+      "request_digest": "JI62LZRgXllOLwxSJ-Rl-s3imrIXbnmBKmYjKlnGe-Q",
+      "resource_set": {
+        "resources": [
+          {
+            "host": "host-1",
+            "machine": "machine-1",
+            "namespace": "team-1",
+            "placement": "placement-1",
+            "run": "run-1"
+          }
+        ],
+        "revision": "resources-1"
+      },
+      "source": {
+        "expires_at": 1100,
+        "id": "credential-1",
+        "kind": "api_key"
+      },
+      "started_at_ms": 1010000,
+      "subject": "subject-1",
+      "target": {
+        "host": "host-1",
+        "machine": "machine-1",
+        "namespace": "team-1",
+        "placement": "placement-1",
+        "run": "run-1"
+      },
+      "team": "team-1"
+    },
+    "checked_at": 1030,
+    "exp": 1070,
+    "iat": 1030,
+    "iss": "central",
+    "nbf": 1030,
+    "previous_sequence": 0,
+    "protection": {
+      "admission": "idle-extension",
+      "expires_at_ms": 1080000,
+      "generation": 1,
+      "installation": "owner",
+      "resource_revision": "resources-1",
+      "resources": [
+        {
+          "host": "host-1",
+          "machine": "machine-1",
+          "namespace": "team-1",
+          "placement": "placement-1",
+          "run": "run-1"
+        }
+      ]
+    },
+    "sequence": 1,
+    "v": 1
+  },
+  "continuation_token": "eyJhbGciOiJFZERTQSIsImtpZCI6ImNlbnRyYWwtdGVzdCIsInR5cCI6ImJyaXF5YXJkLWV4ZWN1dGlvbi1jb250aW51YXRpb24rand0IiwidiI6MX0.eyJ2IjoxLCJpc3MiOiJjZW50cmFsIiwiYXVkIjoicnVudGltZSIsImlhdCI6MTAzMCwibmJmIjoxMDMwLCJleHAiOjEwNzAsImNoZWNrZWRfYXQiOjEwMzAsInByZXZpb3VzX3NlcXVlbmNlIjowLCJzZXF1ZW5jZSI6MSwiYmluZGluZyI6eyJvcGVyYXRpb25faWQiOiJvcGVyYXRpb24iLCJhZG1pc3Npb24iOiJhZG1pc3Npb24tMSIsImdyYW50X2RpZ2VzdCI6ImtZVWRUMDRaZjAzTGQxdmFLM1BITTZlRnVNazV5MFNDUjhwRW44aWp6NlkiLCJwZXJtaXRfZGlnZXN0IjoiS0IxU2h3c1c0RVg0RFdoOHRiM1FSYzFfZ2pYMnBTcnF1LU94VGptQUg3ZyIsInJlcXVlc3RfZGlnZXN0IjoiSkk2MkxaUmdYbGxPTHd4U0otUmwtczNpbXJJWGJubUJLbVlqS2xuR2UtUSIsImF1dGhvcml0eSI6ImF1dGhvcml0eS0xIiwiYXV0aG9yaXR5X2Vwb2NoIjoiZXBvY2gtMSIsImhvc3RfaW5zdGFuY2UiOiJob3N0LWluc3RhbmNlLTEiLCJvd25lcnNoaXAiOiJvd25lciIsIm93bmVyc2hpcF9nZW5lcmF0aW9uIjoxLCJwb2xpY3lfcmV2aXNpb24iOiJwb2xpY3kiLCJkZWxlZ2F0aW9uIjoiZGVsZWdhdGlvbiIsImRlbGVnYXRpb25fdmVyc2lvbiI6MSwicHJpbmNpcGFsIjoia2V5OmNyZWRlbnRpYWwtMSIsInNvdXJjZSI6eyJraW5kIjoiYXBpX2tleSIsImlkIjoiY3JlZGVudGlhbC0xIiwiZXhwaXJlc19hdCI6MTEwMH0sInRlYW0iOiJ0ZWFtLTEiLCJzdWJqZWN0Ijoic3ViamVjdC0xIiwibWV0YWRhdGFfcmV2aXNpb24iOiJtZXRhZGF0YS0xIiwidGFyZ2V0Ijp7Imhvc3QiOiJob3N0LTEiLCJtYWNoaW5lIjoibWFjaGluZS0xIiwibmFtZXNwYWNlIjoidGVhbS0xIiwicnVuIjoicnVuLTEiLCJwbGFjZW1lbnQiOiJwbGFjZW1lbnQtMSJ9LCJyZXNvdXJjZV9zZXQiOnsicmV2aXNpb24iOiJyZXNvdXJjZXMtMSIsInJlc291cmNlcyI6W3siaG9zdCI6Imhvc3QtMSIsIm1hY2hpbmUiOiJtYWNoaW5lLTEiLCJuYW1lc3BhY2UiOiJ0ZWFtLTEiLCJydW4iOiJydW4tMSIsInBsYWNlbWVudCI6InBsYWNlbWVudC0xIn1dfSwibGltaXRzIjp7ImV4ZWN1dGlvbl9tb2RlIjoicmVuZXdhYmxlX2V4ZWNfdjEiLCJtYXhfZHVyYXRpb25fc2Vjb25kcyI6NjAsIm1heF9pbnB1dF9ieXRlcyI6MTAyNCwibWF4X291dHB1dF9ieXRlcyI6NDA5Nn0sImd1ZXN0X3RpbWVvdXRfbXMiOjYwMDAwLCJzdGFydGVkX2F0X21zIjoxMDEwMDAwLCJvcGVyYXRpb25fZGVhZGxpbmVfbXMiOjEwOTAwMDB9LCJwcm90ZWN0aW9uIjp7Imluc3RhbGxhdGlvbiI6Im93bmVyIiwiZ2VuZXJhdGlvbiI6MSwiYWRtaXNzaW9uIjoiaWRsZS1leHRlbnNpb24iLCJleHBpcmVzX2F0X21zIjoxMDgwMDAwLCJyZXNvdXJjZXMiOlt7Imhvc3QiOiJob3N0LTEiLCJtYWNoaW5lIjoibWFjaGluZS0xIiwibmFtZXNwYWNlIjoidGVhbS0xIiwicnVuIjoicnVuLTEiLCJwbGFjZW1lbnQiOiJwbGFjZW1lbnQtMSJ9XSwicmVzb3VyY2VfcmV2aXNpb24iOiJyZXNvdXJjZXMtMSJ9fQ.ikKeHBsE4Ok0ogc8UrOPYEQZLToZ3FZ1wpMZ5ZoDxeOhJ8xhiv_NLtacrzcOdreLqad49Zdym7crtG6OggjrBQ",
+  "description": "TEST ONLY: central Ed25519 seed is 32 bytes of 0x01. Never provision these keys.",
+  "now": 1035,
+  "uncertainty": 1
+}

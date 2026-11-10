@@ -34,7 +34,7 @@ CAPABILITIES = {
     "assigned-run-capabilities": "assigned-run-v1",
     "assigned-run-lifecycle-capabilities": "assigned-run-lifecycle-v1",
     "assigned-update-capabilities": "assigned-update-v3",
-    "scoped-execution-capabilities": "scoped-execution-v1",
+    "scoped-execution-capabilities": "scoped-execution-v2",
 }
 FULL_DAEMON = "#!/bin/sh\ncase $1 in\n" + "".join(
     command + ") printf '" + answer + "\\n';;\n" for command, answer in CAPABILITIES.items()
@@ -61,7 +61,7 @@ class BootstrapRelease(unittest.TestCase):
         daemon.write_text('''#!/usr/bin/env python3
 from pathlib import Path
 import os, sys, yaml
-protocols = {"assignment-capabilities": "destination-assignment-v1", "assigned-run-capabilities": "assigned-run-v1", "assigned-run-lifecycle-capabilities": "assigned-run-lifecycle-v1", "assigned-update-capabilities": "assigned-update-v3", "scoped-execution-capabilities": "scoped-execution-v1"}
+protocols = {"assignment-capabilities": "destination-assignment-v1", "assigned-run-capabilities": "assigned-run-v1", "assigned-run-lifecycle-capabilities": "assigned-run-lifecycle-v1", "assigned-update-capabilities": "assigned-update-v3", "scoped-execution-capabilities": "scoped-execution-v2"}
 if sys.argv[1] in protocols:
     print(protocols[sys.argv[1]])
     sys.exit(0)
@@ -615,7 +615,7 @@ class AssignmentCompatibility(unittest.TestCase):
                 for answer, accepted in (("printf 'assigned-run-lifecycle-v1\\n'", True),
                                          ("printf 'assigned-run-lifecycle-v1\\nextra'", False),
                                          ("printf 'assigned-run-lifecycle-v1\\n'; exit 1", False)):
-                    self.binary.write_text(old.replace("*) exit 2;;", "assigned-run-lifecycle-capabilities) " + answer + ";;\nassigned-update-capabilities) printf 'assigned-update-v3\\n';;\nscoped-execution-capabilities) printf 'scoped-execution-v1\\n';;\n*) exit 2;;"))
+                    self.binary.write_text(old.replace("*) exit 2;;", "assigned-run-lifecycle-capabilities) " + answer + ";;\nassigned-update-capabilities) printf 'assigned-update-v3\\n';;\nscoped-execution-capabilities) printf 'scoped-execution-v2\\n';;\n*) exit 2;;"))
                     self.assertEqual(self.check().returncode == 0, accepted)
                 if not collection.startswith("meta/"):
                     self.assertFalse((self.data / "state/meta").exists())
@@ -646,13 +646,15 @@ class AssignmentCompatibility(unittest.TestCase):
                 self.assertEqual(self.check().returncode, 0)
 
     def test_scoped_floor_and_surviving_protection_require_new_probe(self):
-        for collection, value in (("meta/required-assignment-protocol.json", {"schema": 5, "protocol": "scoped-execution-v1"}),
+        for collection, value in (("meta/required-assignment-protocol.json", {"schema": 6, "protocol": "scoped-execution-v2"}),
+                                  ("meta/required-assignment-protocol.json", {"schema": 5, "protocol": "scoped-execution-v1"}),
+                                  ("execution-idle-protection/accepted.json", {"admission":"accepted","operation_envelope_ms":80000}),
                                   ("execution-idle-protection/accepted.json", {"admission":"accepted"}),
                                   ("execution-namespace-fence/state.json", {"protected_until_ms":{"n":100}})):
             with self.subTest(collection=collection):
                 shutil.rmtree(self.data, ignore_errors=True)
                 self.evidence(collection,value)
-                branch = "scoped-execution-capabilities) printf 'scoped-execution-v1\\n';;\n"
+                branch = "scoped-execution-capabilities) printf 'scoped-execution-v2\\n';;\n"
                 self.binary.write_text(FULL_DAEMON.replace(branch,""))
                 self.assertNotEqual(self.check().returncode,0)
                 self.binary.write_text(FULL_DAEMON)

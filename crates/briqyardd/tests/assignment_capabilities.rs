@@ -8,7 +8,7 @@ fn capability_commands_preserve_legacy_stdout_without_opening_state() {
         for (command, expected) in [
             (
                 "scoped-execution-capabilities",
-                b"scoped-execution-v1\n".as_slice(),
+                b"scoped-execution-v2\n".as_slice(),
             ),
             (
                 "assigned-update-capabilities",

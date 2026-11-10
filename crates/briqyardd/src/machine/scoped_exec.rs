@@ -41,6 +41,14 @@ pub struct ScopedExecutionContext<'a> {
     pub scope: ExecutionResourceScope<'a>,
 }
 
+/// The authenticated handler transfers its exact initial admission fence. It is
+/// released only after guest acceptance, durable active ACK and registry publication.
+pub struct RenewableDispatch<'a> {
+    pub guard: tokio::sync::RwLockReadGuard<'a, ()>,
+    pub registry: Arc<crate::guestc::active_operations::ActiveOperations>,
+    pub policy: access::admission::HostOperationPolicy,
+}
+
 impl Manager {
     pub async fn execution_public_members(
         &self,
@@ -315,6 +323,39 @@ impl Manager {
         self.scoped_target(&e, ledger.instance())
     }
 
+    /// Caller retains the primary lifecycle lock, but never the journal mutex during I/O.
+    pub(super) async fn require_renewable_guest(
+        &self,
+        entry: &Entry,
+        target: &Target,
+        instance: &str,
+    ) -> Result<(), MError> {
+        if self.scoped_target(entry, instance)? != *target {
+            return Err(MError::Conflict("execution target changed".into()));
+        }
+        let sock = entry
+            .live
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| invalid("no live execution identity"))?
+            .vsock
+            .clone();
+        let pong = tokio::time::timeout(Duration::from_secs(10), self.inner.guest.ping(&sock))
+            .await
+            .map_err(|_| MError::Conflict("renewable guest capability timeout".into()))?
+            .map_err(not_running_if_unreachable)?;
+        if self.scoped_target(entry, instance)? != *target {
+            return Err(MError::Conflict("execution target changed".into()));
+        }
+        if pong.kind != "pong" || !pong.exec_renewable_v1 {
+            return Err(MError::Conflict(
+                "running guest does not support exec_renewable_v1".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn scoped_journal(&self, journal: &Journal) -> Result<(), MError> {
         if journal.role() != &access::admission::Role::Host(self.inner.host_id.clone()) {
             return Err(invalid("execution journal belongs to another host"));
@@ -378,6 +419,52 @@ impl Manager {
         installed: ScopedExecutionContext<'_>,
         journal: &tokio::sync::Mutex<Journal>,
         clock_uncertainty_seconds: u64,
+    ) -> Result<api::ExecResult, MError> {
+        self.scoped_exec_inner(
+            request,
+            credentials,
+            trust,
+            installed,
+            journal,
+            clock_uncertainty_seconds,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn renewable_scoped_exec(
+        &self,
+        request: api::ExecRequest,
+        credentials: ScopedCredentials<'_>,
+        trust: &Trust<'_>,
+        installed: ScopedExecutionContext<'_>,
+        journal: &tokio::sync::Mutex<Journal>,
+        clock_uncertainty_seconds: u64,
+        renewable: RenewableDispatch<'_>,
+    ) -> Result<api::ExecResult, MError> {
+        self.scoped_exec_inner(
+            request,
+            credentials,
+            trust,
+            installed,
+            journal,
+            clock_uncertainty_seconds,
+            Some(renewable),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn scoped_exec_inner(
+        &self,
+        request: api::ExecRequest,
+        credentials: ScopedCredentials<'_>,
+        trust: &Trust<'_>,
+        installed: ScopedExecutionContext<'_>,
+        journal: &tokio::sync::Mutex<Journal>,
+        clock_uncertainty_seconds: u64,
+        renewable: Option<RenewableDispatch<'_>>,
     ) -> Result<api::ExecResult, MError> {
         let ScopedExecutionContext {
             binding: context,
@@ -443,6 +530,27 @@ impl Manager {
             context,
         )
         .map_err(|_| invalid("execution credentials refused"))?;
+        if bundle.permit().limits.execution_mode.is_some() != renewable.is_some() {
+            return Err(invalid(
+                "scoped execution mode requires its exact dispatch path",
+            ));
+        }
+        if renewable.is_some() {
+            let instance = ledger.instance().to_owned();
+            drop(ledger);
+            self.require_renewable_guest(entry, context.target, &instance)
+                .await?;
+            ledger = journal.lock().await;
+            self.scoped_journal(&ledger)?;
+            if ledger.instance() != instance {
+                return Err(invalid("execution journal instance changed"));
+            }
+            for (resource, e) in resources.iter().zip(&entries) {
+                if self.scoped_target(e, ledger.instance())? != **resource {
+                    return Err(MError::Conflict("execution target changed".into()));
+                }
+            }
+        }
         let digest = access::exec_request_digest(&request, &bundle.permit().limits)
             .map_err(|_| invalid("execution request exceeds its authority"))?;
         if digest != context.request_digest {
@@ -483,9 +591,91 @@ impl Manager {
         }
         // This fsync is the final no-replay boundary. Every subsequent failure is an
         // uncertain consumed outcome, including cancellation before any guest frame.
+        let initial_active = if let Some(control) = &renewable {
+            let sample = access::clock::ClockSample::read()
+                .ok_or_else(|| invalid("qualified execution clock unavailable"))?;
+            let started_at_ms: u64 = sample
+                .wall
+                .as_millis()
+                .try_into()
+                .map_err(|_| invalid("execution clock range"))?;
+            let policy = &control.policy;
+            if ledger
+                .operation_policy(&bundle.permit().grant_digest)
+                .map_err(|_| invalid("operation policy unavailable"))?
+                != Some(policy)
+                || policy.host_instance != ledger.instance()
+            {
+                return Err(invalid("operation policy unavailable"));
+            }
+            let binding = access::ActiveOperationBinding {
+                operation_id: bundle.permit().admission.clone(),
+                admission: bundle.permit().admission.clone(),
+                grant_digest: bundle.permit().grant_digest.clone(),
+                permit_digest: access::token_digest(credentials.permit),
+                request_digest: digest,
+                authority: bundle.permit().authority.clone(),
+                authority_epoch: bundle.permit().authority_epoch.clone(),
+                host_instance: ledger.instance().into(),
+                ownership: policy.ownership.clone(),
+                ownership_generation: policy.ownership_generation,
+                policy_revision: policy.policy_revision.clone(),
+                delegation: policy.delegation.clone(),
+                delegation_version: policy.delegation_version,
+                principal: bundle.grant().principal.clone(),
+                source: bundle.grant().source.clone(),
+                team: bundle.grant().team.clone(),
+                subject: bundle.grant().subject.clone(),
+                metadata_revision: bundle.grant().metadata_revision.clone(),
+                target: context.target.clone(),
+                resource_set: context.resource_set.clone(),
+                limits: bundle.permit().limits.clone(),
+                guest_timeout_ms: request.timeout_ms,
+                started_at_ms,
+                operation_deadline_ms: started_at_ms
+                    .checked_add(access::MAX_OPERATION_MILLIS)
+                    .ok_or_else(|| invalid("operation envelope range"))?,
+            };
+            let protection = ledger
+                .protection(&bundle.grant().idle.admission)
+                .map_err(|_| invalid("operation protection unavailable"))?
+                .cloned()
+                .ok_or_else(|| invalid("operation protection unavailable"))?;
+            self.inner
+                .idle_protection
+                .lock()
+                .unwrap()
+                .require_renewable(&self.inner.store, &protection.admission)
+                .map_err(|_| invalid("renewable recovery protection unavailable"))?;
+            let operation_deadline = tokio::time::Instant::from_std(sample.monotonic)
+                + Duration::from_millis(
+                    binding
+                        .operation_deadline_ms
+                        .checked_sub(
+                            sample
+                                .upper_ms()
+                                .ok_or_else(|| invalid("operation clock range"))?,
+                        )
+                        .ok_or_else(|| invalid("operation envelope elapsed"))?,
+                );
+            Some((binding, protection, operation_deadline))
+        } else {
+            None
+        };
         ledger
             .consume(&bundle, execution_clock(clock_uncertainty_seconds)?)
             .map_err(|_| MError::Conflict("execution admission refused; query status".into()))?;
+        let operation_deadline = initial_active.as_ref().map(|(_, _, deadline)| *deadline);
+        if let Some((binding, protection, _)) = initial_active {
+            ledger
+                .record_consumed_operation(
+                    &bundle,
+                    binding,
+                    protection,
+                    execution_clock(clock_uncertainty_seconds)?,
+                )
+                .map_err(|_| invalid("consumed operation persistence unresolved"))?;
+        }
         let in_use = entries
             .iter()
             .map(|e| InUse::new(e.clone()))
@@ -510,30 +700,82 @@ impl Manager {
             return Err(invalid("execution authority expired"));
         }
         let greq = guest::Request {
-            op: "exec".into(),
+            op: if renewable.is_some() {
+                "exec_renewable_v1"
+            } else {
+                "exec"
+            }
+            .into(),
             cmd: request.cmd,
             env: request.env,
             cwd: request.cwd,
             stdin: request.stdin.into_bytes(),
-            timeout_ms: request.timeout_ms.min(remaining_ms),
+            timeout_ms: if renewable.is_some() {
+                request.timeout_ms
+            } else {
+                request.timeout_ms.min(remaining_ms)
+            },
             ..Default::default()
         };
         let handshake_deadline = deadline
             .instant
             .min(tokio::time::Instant::now() + Duration::from_secs(10));
-        let mut conn = tokio::time::timeout_at(
-            handshake_deadline,
-            self.inner
-                .guest
-                .scoped_session(&live.vsock, greq, deadline.clone()),
-        )
+        let mut conn = tokio::time::timeout_at(handshake_deadline, async {
+            if renewable.is_some() {
+                self.inner
+                    .guest
+                    .renewable_session(&live.vsock, greq, deadline.clone())
+                    .await
+            } else {
+                self.inner
+                    .guest
+                    .scoped_session(&live.vsock, greq, deadline.clone())
+                    .await
+            }
+        })
         .await
         .map_err(|_| MError::NotRunning("scoped command dispatch unresolved".into()))?
         .map_err(not_running_if_unreachable)?;
+        let mut active_owner = None;
+        let mut active_lease = None;
+        let mut terminal_deadline = deadline.instant;
+        if let Some(control) = renewable {
+            let evidence = ledger
+                .acknowledge_active_operation(
+                    &bundle.permit().admission,
+                    execution_clock(clock_uncertainty_seconds)?,
+                )
+                .map_err(|_| invalid("active operation acknowledgement unresolved"))?;
+            let sample = access::clock::ClockSample::read()
+                .ok_or_else(|| invalid("qualified execution clock unavailable"))?;
+            let lease = guestc::active_lease::ActiveLease::from_committed_bounded(
+                evidence,
+                &sample,
+                deadline.instant,
+                operation_deadline.ok_or_else(|| invalid("operation deadline missing"))?,
+            )
+            .map_err(not_running_if_unreachable)?;
+            active_owner = Some(
+                control
+                    .registry
+                    .register(&bundle.permit().admission, lease.clone())
+                    .map_err(not_running_if_unreachable)?,
+            );
+            terminal_deadline =
+                tokio::time::Instant::now() + Duration::from_millis(request.timeout_ms + 10_000);
+            conn = Box::new(guestc::active_operations::ActiveConnection {
+                conn,
+                lease: lease.clone(),
+            });
+            active_lease = Some(lease);
+            // Every initial-generation check, first guest ACK, durable ACK and live
+            // publication preceded this release. Control changes may now progress.
+            drop(control.guard);
+        }
         // The allocation and lifecycle fences covered the initial guest frame.
         drop(ledger);
         drop(turns);
-        let out = tokio::time::timeout_at(deadline.instant, async {
+        let collect = async {
             let limits = &bundle.permit().limits;
             match limits.output_mode {
                 Some(api::execution::OutputMode::CapturePerStreamV1) => {
@@ -541,12 +783,20 @@ impl Manager {
                 }
                 None => guestc::collect_limited(&mut conn, limits.max_output_bytes).await,
             }
-        })
-        .await
-        .map_err(|_| {
-            MError::NotRunning("execution authorization expired; outcome unresolved".into())
-        })?
-        .map_err(not_running_if_unreachable)?;
+        };
+        let guarded = async {
+            if let Some(lease) = &active_lease {
+                lease.run(collect).await?
+            } else {
+                collect.await
+            }
+        };
+        let out = tokio::time::timeout_at(terminal_deadline, guarded)
+            .await
+            .map_err(|_| {
+                MError::NotRunning("execution deadline expired; outcome unresolved".into())
+            })?
+            .map_err(not_running_if_unreachable)?;
         // Drop the guest connection at the authorization deadline on all error paths.
         // Cleanup of detached work is not inferred from closing this connection.
         drop(conn);
@@ -556,6 +806,7 @@ impl Manager {
             .await
             .finish(bundle.permit(), execution_clock(clock_uncertainty_seconds)?)
             .map_err(|_| MError::Conflict("execution completion persistence unresolved".into()))?;
+        drop(active_owner);
         Ok(api::ExecResult {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),

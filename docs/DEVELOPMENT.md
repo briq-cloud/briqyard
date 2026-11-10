@@ -32,6 +32,8 @@ On a fresh disposable native CI runner, build the normal native artifacts plus:
 
 ```bash
 cargo build --release -p briqyard-testing --features scoped-native --bin scoped-execution-native
+cargo test --release -p briqyard-fleet --no-run --message-format=json |
+  jq -r 'select(.reason == "compiler-artifact" and .target.name == "briqyard-fleet" and .profile.test and .executable != null) | .executable' > target/scoped-native-fleet-test
 bash hack/native-ci.sh "$PWD"
 bash hack/scoped-execution-native.sh
 ```
@@ -48,9 +50,33 @@ wrong roles and a grant omitting the native gateway must refuse. The trap remove
 namespace, stops the authority and restores the daemon configuration. It retains the host's
 compatibility floor; the runner must be disposable.
 
+The same gate then runs `execution_service::native::renewable_service_callback_host_guest`
+from the compiled fleet test binary. The fixture uses the configured production constructor with an injected callback.
+An unconfigured production constructor refuses renewable issuance. The callback re-enters the real
+Service to observe, protect and install an exact signed continuation while dispatch is open.
+A quiet guest reaches its full 60-second timeout across the original allocation window with
+one unit per quota bucket. Duplicate continuations and dispatch IDs are status-only. Source
+refusal expires the initial lease; active revocation wakes quiet I/O. An ordinary scoped
+fixture counter verifies exactly three guest starts. The gate also runs the original
+monotonic-activation and completion-owner regression tests. This exercises the generic
+callback port; fixed HTTPS callback delivery has separate transport tests.
+
+A second daemon cannot safely share a development VM: startup requires the official unit
+identity and host networking uses fixed tables. Do not run this disposable harness against
+an owner's development daemon or override its runner check. Linux unit regressions may run
+under the shared VM lock without changing the daemon. The disposable gate is still required
+before enabling production renewal.
+
 This finite proof does not replace crash/recovery, lifecycle invalidation, concurrent
 revocation, streaming/files or the full qualification suite. A compiled harness alone is
 not native qualification evidence.
+
+On failure, the scoped fixture emits fixed installation refusal stages and verifier
+categories. The collector reads at most 64 KiB and 128 lines per source, ignores
+unknown events and fields, and never forwards raw authority or host logs. Authority
+and callback diagnostics remain private until the existing cleanup trap removes them.
+Run its parser regressions with `python3 hack/test_scoped_execution_diagnostics.py`.
+
 
 ## On a Linux host with KVM
 

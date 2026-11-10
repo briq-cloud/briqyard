@@ -48,10 +48,29 @@ pub(super) enum ExecOutcome {
     Existing(Status),
 }
 
+pub(super) struct PendingDispatch {
+    pub dispatch: Dispatch,
+    limits: Limits,
+    initial_expiry: u64,
+}
+impl PendingDispatch {
+    pub fn renewable(&self) -> bool {
+        self.limits.execution_mode.is_some()
+    }
+    pub fn initial_expiry(&self) -> u64 {
+        self.initial_expiry
+    }
+}
+pub(super) enum PreparedExecution {
+    Existing(Status),
+    Dispatch(Box<PendingDispatch>),
+}
+
 pub(super) struct Coordinator<'a> {
     pub issuer: &'a mut DurableIssuer,
     pub host: &'a HostTransport,
     pub host_id: &'a str,
+    pub renewable: bool,
 }
 
 impl Coordinator<'_> {
@@ -125,12 +144,12 @@ impl Coordinator<'_> {
 
     /// One call per new ID. Any existing ID, including a crash before issuance,
     /// returns local status only. No retry chooses a new host or resends a frame.
-    pub async fn exec(
+    pub async fn prepare_dispatch(
         &mut self,
         control: Control,
         trust: &Trust<'_>,
         mut fresh_clock: impl FnMut() -> Result<Clock, Error>,
-    ) -> Result<ExecOutcome, Error> {
+    ) -> Result<PreparedExecution, Error> {
         let clock = fresh_clock()?;
         let journal = self.issuer.installation_journal();
         let projection = journal
@@ -150,7 +169,7 @@ impl Coordinator<'_> {
             {
                 return Err(Error::Conflict);
             }
-            return Ok(ExecOutcome::Existing(Status {
+            return Ok(PreparedExecution::Existing(Status {
                 phase: old.phase,
                 unconfirmed: old.unconfirmed
                     || matches!(
@@ -242,6 +261,14 @@ impl Coordinator<'_> {
             return Err(Error::Binding);
         }
         let limits = checked.grant().limits.clone();
+        if limits.execution_mode.is_some()
+            && (!self.renewable
+                || installed.operation_policy.is_none()
+                || installed.operation_policy_ack != installed.operation_policy)
+        {
+            return Err(Error::Binding);
+        }
+
         let digest = exec_request_digest(&control.request, &limits).map_err(|_| Error::Binding)?;
         let exp = checked
             .allocations()
@@ -251,7 +278,8 @@ impl Coordinator<'_> {
             .min(protection.request.expires_at_ms / 1000)
             .min(clock.now.saturating_add(60));
         if exp <= clock.now.saturating_add(clock.uncertainty)
-            || control.request.timeout_ms > exp.saturating_sub(clock.now).saturating_mul(1000)
+            || (limits.execution_mode.is_none()
+                && control.request.timeout_ms > exp.saturating_sub(clock.now).saturating_mul(1000))
         {
             return Err(Error::Binding);
         }
@@ -332,9 +360,30 @@ impl Coordinator<'_> {
             request_digest: &digest,
         };
         let issue_clock = fresh_clock()?;
-        let token = self
-            .issuer
-            .issue_with_preflight(
+        let preflight = |token: &str| {
+            let mut bundle = bundle.clone();
+            bundle.permit = token.into();
+            let prepare = Prepare {
+                bundle: bundle.clone(),
+                request_digest: digest.clone(),
+                admission: control.id.clone(),
+            };
+            let dispatch = Dispatch {
+                bundle,
+                admission: control.id.clone(),
+                request: control.request.clone(),
+            };
+            if serde_json::to_vec(&prepare).map_or(true, |b| b.len() > MAX_BODY_BYTES)
+                || serde_json::to_vec(&dispatch).map_or(true, |b| b.len() > MAX_BODY_BYTES)
+            {
+                return Err(IssueError::Verify(
+                    briqyard_api::execution::VerifyError::Encoding,
+                ));
+            }
+            Ok(())
+        };
+        let token = if limits.execution_mode.is_some() {
+            self.issuer.issue_renewable_with_preflight(
                 IssueCredentials {
                     grant: &bundle.grant,
                     allocations: &tokens,
@@ -343,30 +392,22 @@ impl Coordinator<'_> {
                 trust,
                 issue_clock,
                 &context,
-                |token| {
-                    let mut bundle = bundle.clone();
-                    bundle.permit = token.into();
-                    let prepare = Prepare {
-                        bundle: bundle.clone(),
-                        request_digest: digest.clone(),
-                        admission: control.id.clone(),
-                    };
-                    let dispatch = Dispatch {
-                        bundle,
-                        admission: control.id.clone(),
-                        request: control.request.clone(),
-                    };
-                    if serde_json::to_vec(&prepare).map_or(true, |b| b.len() > MAX_BODY_BYTES)
-                        || serde_json::to_vec(&dispatch).map_or(true, |b| b.len() > MAX_BODY_BYTES)
-                    {
-                        return Err(IssueError::Verify(
-                            briqyard_api::execution::VerifyError::Encoding,
-                        ));
-                    }
-                    Ok(())
-                },
+                preflight,
             )
-            .map_err(|_| Error::Binding)?;
+        } else {
+            self.issuer.issue_with_preflight(
+                IssueCredentials {
+                    grant: &bundle.grant,
+                    allocations: &tokens,
+                },
+                permit.clone(),
+                trust,
+                issue_clock,
+                &context,
+                preflight,
+            )
+        }
+        .map_err(|_| Error::Binding)?;
         self.issuer
             .installation_journal()
             .bind_operation_permit(
@@ -410,15 +451,27 @@ impl Coordinator<'_> {
             admission: control.id.clone(),
             request: control.request,
         };
-        let result: ExecResult = match self.host.call(Route::Dispatch, &dispatch).await {
+        Ok(PreparedExecution::Dispatch(Box::new(PendingDispatch {
+            dispatch,
+            limits,
+            initial_expiry: exp,
+        })))
+    }
+
+    pub fn finish_dispatch(
+        &mut self,
+        pending: Box<PendingDispatch>,
+        result: Result<ExecResult, crate::execution_host::Error>,
+        mut fresh_clock: impl FnMut() -> Result<Clock, Error>,
+    ) -> Result<ExecOutcome, Error> {
+        let control_id = pending.dispatch.admission;
+        let result = match result {
             Ok(result) => result,
-            Err(_) => {
-                return self
-                    .unconfirmed(&control.id, fresh_clock().map_err(|_| Error::Unconfirmed)?)
-            }
+            Err(_) => return self.unconfirmed(&control_id, fresh_clock()?),
         };
+        let limits = pending.limits;
         if !output_within_limits(&result, &limits) {
-            return self.unconfirmed(&control.id, fresh_clock().map_err(|_| Error::Unconfirmed)?);
+            return self.unconfirmed(&control_id, fresh_clock().map_err(|_| Error::Unconfirmed)?);
         }
         // Retain only a commitment to the bounded terminal response.
         let bytes = serde_json::to_vec(&result).map_err(|_| Error::Binding)?;
@@ -426,7 +479,7 @@ impl Coordinator<'_> {
         self.issuer
             .installation_journal()
             .record_operation_evidence(
-                &control.id,
+                &control_id,
                 OperationPhase::Finished,
                 Some(outcome),
                 fresh_clock().map_err(|_| Error::Unconfirmed)?,
@@ -441,7 +494,26 @@ impl Coordinator<'_> {
         })
     }
 
-    fn unconfirmed(&mut self, id: &str, clock: Clock) -> Result<ExecOutcome, Error> {
+    #[cfg(test)]
+    pub async fn exec(
+        &mut self,
+        control: Control,
+        trust: &Trust<'_>,
+        mut fresh_clock: impl FnMut() -> Result<Clock, Error>,
+    ) -> Result<ExecOutcome, Error> {
+        match self
+            .prepare_dispatch(control, trust, &mut fresh_clock)
+            .await?
+        {
+            PreparedExecution::Existing(status) => Ok(ExecOutcome::Existing(status)),
+            PreparedExecution::Dispatch(pending) => {
+                let result = self.host.call(Route::Dispatch, &pending.dispatch).await;
+                self.finish_dispatch(pending, result, fresh_clock)
+            }
+        }
+    }
+
+    fn unconfirmed<T>(&mut self, id: &str, clock: Clock) -> Result<T, Error> {
         self.issuer
             .installation_journal()
             .mark_operation_unconfirmed(id, clock)
@@ -474,6 +546,7 @@ mod output_tests {
             max_duration_seconds: 1,
             max_input_bytes: 0,
             max_output_bytes: 4,
+            execution_mode: None,
             output_mode: Some(OutputMode::CapturePerStreamV1),
         };
         let mut result = ExecResult {

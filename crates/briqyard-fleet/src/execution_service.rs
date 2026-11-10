@@ -2,7 +2,7 @@
 use crate::{
     execution_host::HostTransport,
     execution_install::{CommittedIdle, DelegationControl, Installer, Outcome, SignedDelegation},
-    execution_operation::{Control, Coordinator, ExecOutcome},
+    execution_operation::{Control, Coordinator, ExecOutcome, PreparedExecution},
 };
 use axum::{
     body::{to_bytes, Body},
@@ -20,6 +20,8 @@ use briqyard_api::execution::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{sync::Arc, time::Instant};
 use tokio::sync::Mutex;
+
+pub(crate) mod renewal;
 
 use briqyard_api::execution::clock::ClockSource;
 #[cfg(test)]
@@ -56,6 +58,36 @@ struct Service {
     credentials: Credentials,
     trust: TrustConfig,
     clock: Arc<dyn ClockSource>,
+    continuation: Option<Arc<dyn renewal::ContinuationProvider>>,
+    renewable: bool,
+    live: Arc<LiveOperations>,
+}
+
+#[derive(Default)]
+struct LiveOperations(std::sync::Mutex<std::collections::BTreeSet<String>>);
+struct LiveOperation {
+    registry: Arc<LiveOperations>,
+    id: String,
+}
+impl Drop for LiveOperation {
+    fn drop(&mut self) {
+        self.registry.0.lock().unwrap().remove(&self.id);
+    }
+}
+impl LiveOperations {
+    fn enter(self: &Arc<Self>, id: &str) -> Result<LiveOperation, StatusCode> {
+        let mut live = self.0.lock().unwrap();
+        if live.len() >= 16_384 || !live.insert(id.into()) {
+            return Err(StatusCode::CONFLICT);
+        }
+        Ok(LiveOperation {
+            registry: self.clone(),
+            id: id.into(),
+        })
+    }
+    fn contains(&self, id: &str) -> bool {
+        self.0.lock().unwrap().contains(id)
+    }
 }
 
 fn valid_credentials(c: &Credentials) -> bool {
@@ -85,6 +117,31 @@ pub(super) fn router(
     trust: TrustConfig,
     clock: Arc<dyn ClockSource>,
 ) -> Result<Router, &'static str> {
+    router_with_continuation(
+        issuer,
+        host,
+        host_id,
+        credentials,
+        administrator,
+        trust,
+        clock,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn router_with_continuation(
+    issuer: briqyard_api::execution::DurableIssuer,
+    host: HostTransport,
+    host_id: String,
+    credentials: Credentials,
+    administrator: &str,
+    trust: TrustConfig,
+    clock: Arc<dyn ClockSource>,
+    continuation: Option<Arc<dyn renewal::ContinuationProvider>>,
+) -> Result<Router, &'static str> {
+    // Only explicitly provisioned callbacks negotiate renewable operation authority.
+    let renewable = continuation.is_some();
     if host_id.is_empty()
         || host_id != host.host_id()
         || credentials.host_administrator != host.administrator_token()
@@ -104,6 +161,9 @@ pub(super) fn router(
         credentials,
         trust,
         clock,
+        continuation,
+        renewable,
+        live: Arc::new(LiveOperations::default()),
     });
     Ok(Router::new()
         .route("/internal/authority/v1/:action", post(handle))
@@ -248,6 +308,7 @@ async fn handle(
     let installer_role = matches!(
         action.as_str(),
         "identity"
+            | "authorization_clock"
             | "register"
             | "discover"
             | "ownership"
@@ -256,6 +317,9 @@ async fn handle(
             | "invalidate"
             | "revoke"
             | "installation_status"
+            | "operation_active"
+            | "operation_protect"
+            | "operation_continue"
     );
     let gateway_role = matches!(
         action.as_str(),
@@ -299,6 +363,7 @@ fn value<T: Serialize>(v: T) -> Result<serde_json::Value, StatusCode> {
     serde_json::to_value(v).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 fn install_error(error: crate::execution_install::InstallError) -> StatusCode {
+    tracing::warn!(target: "execution_installation", diagnostic = "execution_installation", stage = "authority_installation", category = ?error, "execution installation refused");
     if matches!(
         error,
         crate::execution_install::InstallError::ClockUnavailable
@@ -323,6 +388,35 @@ async fn run(
     action: &str,
     body: &[u8],
 ) -> Result<serde_json::Value, StatusCode> {
+    if matches!(
+        action,
+        "operation_active" | "operation_protect" | "operation_continue"
+    ) {
+        return renewal::run(service, action, body).await;
+    }
+    if action == "authorization_clock" {
+        let _: Empty = parse(body)?;
+        clock(service.clock.as_ref())?;
+        let host: briqyard_api::execution::channel::ClockObservation = service
+            .host
+            .call(crate::execution_host::Route::Clock, &())
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        let authority = clock(service.clock.as_ref())?;
+        if host.now == 0 || host.uncertainty > 5 {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        return value(briqyard_api::execution::channel::AuthorizationClock {
+            authority: briqyard_api::execution::channel::ClockObservation {
+                now: authority.now,
+                uncertainty: authority.uncertainty,
+            },
+            host,
+        });
+    }
+    if action == "exec" {
+        return execute(service, parse(body)?).await;
+    }
     let mut issuer = service.issuer.lock().await;
     if action == "identity" {
         let _: Empty = parse(body)?;
@@ -480,45 +574,13 @@ async fn run(
                     .map_err(|_| StatusCode::CONFLICT)?,
             )
         }
-        "exec" => {
-            let dto: Execution = parse(body)?;
-            let mut coordinator = Coordinator {
-                issuer: &mut issuer,
-                host: &service.host,
-                host_id,
-            };
-            let outcome = coordinator
-                .exec(
-                    Control {
-                        id: dto.id,
-                        delegation_intent: dto.delegation_intent,
-                        grant: dto.grant,
-                        projection_digest: dto.projection_digest,
-                        request: dto.request,
-                    },
-                    &service.trust.borrowed(),
-                    || {
-                        clock(service.clock.as_ref())
-                            .map_err(|_| crate::execution_operation::Error::Unconfirmed)
-                    },
-                )
-                .await
-                .map_err(operation_error)?;
-            match outcome {
-                ExecOutcome::Completed { status, result } => value(
-                    serde_json::json!({"state":"completed", "status":{"phase":status.phase,"unconfirmed":status.unconfirmed}, "result":result}),
-                ),
-                ExecOutcome::Existing(status) => value(
-                    serde_json::json!({"state":"existing", "status":{"phase":status.phase,"unconfirmed":status.unconfirmed}}),
-                ),
-            }
-        }
         "operation_status" | "observe" => {
             let dto: Id = parse(body)?;
             let mut coordinator = Coordinator {
                 issuer: &mut issuer,
                 host: &service.host,
                 host_id,
+                renewable: service.renewable,
             };
             let status = if action == "observe" {
                 Some(
@@ -537,6 +599,88 @@ async fn run(
             })
         }
         _ => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+async fn execute(service: &Service, dto: Execution) -> Result<serde_json::Value, StatusCode> {
+    let mut issuer = service.issuer.lock().await;
+    let prepared = Coordinator {
+        issuer: &mut issuer,
+        host: &service.host,
+        host_id: &service.host_id,
+        renewable: service.renewable,
+    }
+    .prepare_dispatch(
+        Control {
+            id: dto.id,
+            delegation_intent: dto.delegation_intent,
+            grant: dto.grant,
+            projection_digest: dto.projection_digest,
+            request: dto.request,
+        },
+        &service.trust.borrowed(),
+        || {
+            clock(service.clock.as_ref())
+                .map_err(|_| crate::execution_operation::Error::Unconfirmed)
+        },
+    )
+    .await
+    .map_err(operation_error)?;
+    let outcome = match prepared {
+        PreparedExecution::Existing(status) => ExecOutcome::Existing(status),
+        PreparedExecution::Dispatch(pending) => {
+            // The durable dispatch intent is one-shot. Cancellation or loss of this
+            // owner can only leave unknown evidence; no code reconstructs this RPC.
+            let _owner = service.live.enter(&pending.dispatch.admission)?;
+            drop(issuer);
+            let result = if pending.dispatch.bundle.permit.is_empty() {
+                return Err(StatusCode::CONFLICT);
+            } else if pending.renewable()
+                && pending.dispatch.request.timeout_ms
+                    > pending
+                        .initial_expiry()
+                        .saturating_sub(clock(service.clock.as_ref())?.now.saturating_add(5))
+                        .saturating_mul(1000)
+            {
+                let dispatch = service
+                    .host
+                    .call(crate::execution_host::Route::Dispatch, &pending.dispatch);
+                tokio::pin!(dispatch);
+                let driver = renewal::drive(
+                    service,
+                    &pending.dispatch.admission,
+                    pending.initial_expiry(),
+                );
+                tokio::pin!(driver);
+                tokio::select! {
+                    result = &mut dispatch => result,
+                    _ = &mut driver => dispatch.await,
+                }
+            } else {
+                service
+                    .host
+                    .call(crate::execution_host::Route::Dispatch, &pending.dispatch)
+                    .await
+            };
+            issuer = service.issuer.lock().await;
+            Coordinator {
+                issuer: &mut issuer,
+                host: &service.host,
+                host_id: &service.host_id,
+                renewable: service.renewable,
+            }
+            .finish_dispatch(pending, result, || {
+                clock(service.clock.as_ref())
+                    .map_err(|_| crate::execution_operation::Error::Unconfirmed)
+            })
+            .map_err(operation_error)?
+        }
+    };
+    match outcome {
+        ExecOutcome::Completed { status, result } => value(serde_json::json!({"state":"completed",
+            "status":{"phase":status.phase,"unconfirmed":status.unconfirmed},"result":result})),
+        ExecOutcome::Existing(status) => value(serde_json::json!({"state":"existing",
+            "status":{"phase":status.phase,"unconfirmed":status.unconfirmed}})),
     }
 }
 
@@ -689,3 +833,6 @@ fn installation_reply(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod native;

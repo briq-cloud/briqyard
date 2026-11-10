@@ -63,7 +63,9 @@ impl Manager {
             execution_fence::ExecutionFence::load(&store).context("execution namespace fences")?;
         // Keep native startup ownership, existing VMMs and kernel networking intact.
         // Backing recovery can reconcile processes, so the barrier precedes it too.
-        execution_fence.drain_at_start().await?;
+        execution_fence
+            .drain_at_start(idle_protection.recovery_millis())
+            .await?;
         let events = Events::open(&store.dir("events")).context("events")?;
         images.events = Some(events.clone());
         let advertise = advertise_address(

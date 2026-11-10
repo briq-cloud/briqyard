@@ -53,7 +53,7 @@ mod scoped_exec;
 pub use execution_resources::ExecutionResourceScope;
 use memory::host_memory;
 pub use scoped_exec::{
-    ExecutionProtectionReceipt, ExecutionProtectionRequest, ScopedCredentials,
+    ExecutionProtectionReceipt, ExecutionProtectionRequest, RenewableDispatch, ScopedCredentials,
     ScopedExecutionContext,
 };
 mod persist;

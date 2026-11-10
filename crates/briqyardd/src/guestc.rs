@@ -9,11 +9,23 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+pub mod active_lease;
+pub mod active_operations;
 #[cfg(test)]
 mod capture_tests;
 mod deadline;
 pub use deadline::CommandDeadline;
 use deadline::ExpiringConnection;
+
+/// An accepted frame proves successful spawn on this exact command connection.
+async fn renewable_acceptance(conn: &mut (impl AsyncRead + Unpin)) -> Result<()> {
+    let response: Response = read_frame(conn).await?;
+    anyhow::ensure!(
+        serde_json::to_value(response)? == serde_json::to_value(Response::new("accepted"))?,
+        "renewable guest acceptance unavailable"
+    );
+    Ok(())
+}
 
 /// An exec's connection to the init, past its request: its output frames to read, its input
 /// frames to write (ADR 0029). Closing it ends the command.
@@ -47,6 +59,15 @@ pub trait Guest: Send + Sync {
         _deadline: CommandDeadline,
     ) -> Result<Box<dyn Conn>> {
         Err(anyhow!("scoped guest dispatch unavailable"))
+    }
+    /// Strict post-spawn acknowledgement, required only by renewable execution.
+    async fn renewable_session(
+        &self,
+        _vsock: &Path,
+        _req: Request,
+        _deadline: CommandDeadline,
+    ) -> Result<Box<dyn Conn>> {
+        Err(anyhow!("renewable guest dispatch unavailable"))
     }
     async fn exec_stream_v1(&self, _vsock: &Path, _req: Request) -> Result<Box<dyn Conn>> {
         Err(anyhow!("exec stream v1 unavailable"))
@@ -178,6 +199,27 @@ impl Guest for Vsock {
         conn.deadline.check()?;
         write_request(&mut conn, &req).await?;
         Ok(Box::new(conn))
+    }
+    async fn renewable_session(
+        &self,
+        vsock: &Path,
+        req: Request,
+        deadline: CommandDeadline,
+    ) -> Result<Box<dyn Conn>> {
+        anyhow::ensure!(
+            req.op == "exec_renewable_v1" && req.timeout_ms > 0 && req.timeout_ms <= 60_000,
+            "invalid renewable guest dispatch"
+        );
+        let conn = tokio::time::timeout_at(deadline.instant, dial(vsock))
+            .await
+            .context("renewable guest handshake expired")??;
+        let mut conn = ExpiringConnection { conn, deadline };
+        write_request(&mut conn, &req).await?;
+        renewable_acceptance(&mut conn).await?;
+        conn.deadline.check()?;
+        // Initial lease remains checked until acceptance. The manager installs the
+        // renewable per-I/O guard before releasing the initial dispatch fence.
+        Ok(Box::new(conn.conn))
     }
     async fn exec_stream_v1(&self, vsock: &Path, mut req: Request) -> Result<Box<dyn Conn>> {
         req.op = "exec_stream_v1".into();
@@ -635,6 +677,31 @@ impl Frozen {
 mod tests {
     use super::*;
     use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn renewable_acceptance_requires_new_guest_ack_and_preserves_terminal_frame() {
+        for kind in ["accepted", "exit", "error"] {
+            let (mut server, mut client) = tokio::io::duplex(4096);
+            server
+                .write_all(&guest::encode_frame(&Response::new(kind)).unwrap())
+                .await
+                .unwrap();
+            server
+                .write_all(&guest::encode_frame(&Response::exit(0, false)).unwrap())
+                .await
+                .unwrap();
+            drop(server);
+            let accepted = renewable_acceptance(&mut client).await;
+            assert_eq!(accepted.is_ok(), kind == "accepted");
+            if accepted.is_ok() {
+                let terminal: Response = read_frame(&mut client).await.unwrap();
+                assert_eq!(terminal.kind, "exit");
+            }
+        }
+        let (server, mut client) = tokio::io::duplex(4096);
+        drop(server);
+        assert!(renewable_acceptance(&mut client).await.is_err());
+    }
 
     /// A stand-in for Firecracker's vsock socket with the init behind it: answers the
     /// `CONNECT` line with `handshake`, reads one request frame, writes `answers` as they

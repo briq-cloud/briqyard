@@ -102,3 +102,42 @@ pub struct AdmissionStatus {
     pub dispatched: bool,
     pub journal: Option<admission::Status>,
 }
+
+/// Installer-only signed authorization; no unsigned time or destination fields.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinueOperation {
+    pub admission: String,
+    pub continuation: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveState {
+    Active,
+    Terminal,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveStatus {
+    pub observed_at: ClockObservation,
+    pub state: ActiveState,
+    pub evidence: Option<admission::ActiveOperation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClockObservation {
+    pub now: u64,
+    pub uncertainty: u64,
+}
+
+/// Fresh qualified intervals sampled by the fixed authority and its pinned host.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationClock {
+    pub authority: ClockObservation,
+    pub host: ClockObservation,
+}

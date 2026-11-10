@@ -3,10 +3,16 @@
 //! Opening rotates the service instance and clears installed authority. Reinstallation
 //! requires the trusted control channel's acknowledgement of this exact new instance.
 use super::*;
+mod active;
+pub use active::{ActiveOperation, ActivePhase};
 mod authority_install;
 mod delegation_install;
 mod installation_flow;
 mod operation;
+mod operation_policy;
+mod renewal_attempt;
+pub use operation_policy::HostOperationPolicy;
+pub use renewal_attempt::RenewalAttempt;
 mod projection;
 pub use authority_install::{AuthorityIntent, AuthorityPayload};
 pub use delegation_install::DelegationIntent;
@@ -103,6 +109,12 @@ struct State {
     operation_intents: BTreeMap<String, OperationIntent>,
     #[serde(default)]
     uncertain_installations: BTreeSet<String>,
+    #[serde(default)]
+    active_operations: BTreeMap<String, ActiveOperation>,
+    #[serde(default)]
+    operation_policies: BTreeMap<String, HostOperationPolicy>,
+    #[serde(default)]
+    renewal_attempts: BTreeMap<String, RenewalAttempt>,
 }
 
 /// Authenticated installer input. These records are never constructed from a grant.
@@ -306,6 +318,9 @@ impl Journal {
                 delegation_intents: BTreeMap::new(),
                 operation_intents: BTreeMap::new(),
                 uncertain_installations: BTreeSet::new(),
+                active_operations: BTreeMap::new(),
+                operation_policies: BTreeMap::new(),
+                renewal_attempts: BTreeMap::new(),
             },
         };
         if state
@@ -314,6 +329,9 @@ impl Journal {
             .map(Vec::len)
             .sum::<usize>()
             > MAX_RECORDS
+            || state.renewal_attempts.len() > MAX_RECORDS
+            || state.operation_policies.len() > MAX_RECORDS
+            || state.active_operations.len() > MAX_RECORDS
             || state.admissions.len() > MAX_RECORDS
             || state.allocations.len() > MAX_RECORDS
             || state.discovery_intents.len() > MAX_RECORDS
@@ -333,6 +351,11 @@ impl Journal {
         // No allocation silently survives a service incarnation. Old admissions remain
         // status-only evidence. A restored journal must acquire new fenced authority.
         state.allocations.clear();
+        for operation in state.active_operations.values_mut() {
+            if matches!(operation.phase, ActivePhase::Consumed | ActivePhase::Active) {
+                operation.phase = ActivePhase::Recovered;
+            }
+        }
         for (authority, epoch) in &state.fences {
             let retired = state.retired.entry(authority.clone()).or_default();
             if !retired.contains(epoch) {
@@ -393,6 +416,11 @@ impl Journal {
         let mut next = self.state.clone();
         next.registration_highwater = record.generation;
         next.registration = Some(record);
+        for operation in next.active_operations.values_mut() {
+            if matches!(operation.phase, ActivePhase::Consumed | ActivePhase::Active) {
+                operation.phase = ActivePhase::Revoked;
+            }
+        }
         next.ownership.clear();
         next.delegations.clear();
         next.prepared.clear();
@@ -483,6 +511,13 @@ impl Journal {
         next.ownership_highwater
             .insert(installation.into(), generation);
         next.ownership.remove(installation);
+        for operation in next.active_operations.values_mut() {
+            if operation.binding.ownership == installation
+                && matches!(operation.phase, ActivePhase::Consumed | ActivePhase::Active)
+            {
+                operation.phase = ActivePhase::Revoked;
+            }
+        }
         next.delegations.retain(|_, d| d.ownership != installation);
         next.protections
             .retain(|_, p| p.installation != installation);
@@ -545,6 +580,13 @@ impl Journal {
         }
         next.delegation_tombstones.insert(id.into(), version);
         next.delegations.remove(id);
+        for operation in next.active_operations.values_mut() {
+            if operation.binding.delegation == id
+                && matches!(operation.phase, ActivePhase::Consumed | ActivePhase::Active)
+            {
+                operation.phase = ActivePhase::Revoked;
+            }
+        }
         next.clock_floor = clock.now;
         self.commit(next)
     }
@@ -833,6 +875,14 @@ impl Journal {
         if !matches!(self.role(), Role::Host(_)) {
             return Err(Error::Binding);
         }
+        if self
+            .state
+            .active_operations
+            .get(&permit.admission)
+            .is_some_and(|o| o.phase != ActivePhase::Active)
+        {
+            return Err(Error::Binding);
+        }
         let mut next = self.state.clone();
         let saved = next
             .admissions
@@ -842,6 +892,11 @@ impl Journal {
             return Err(Error::Binding);
         }
         saved.status = Status::Finished;
+        if let Some(operation) = next.active_operations.get_mut(&permit.admission) {
+            if matches!(operation.phase, ActivePhase::Consumed | ActivePhase::Active) {
+                operation.phase = ActivePhase::Finished;
+            }
+        }
         next.clock_floor = clock.now;
         self.commit(next)
     }
@@ -854,7 +909,8 @@ impl Journal {
             .checked_sub(clock.uncertainty)
             .ok_or(Error::Binding)?;
         let mut next = self.state.clone();
-        next.admissions.retain(|_, a| a.permit.exp > earliest);
+        next.admissions
+            .retain(|id, a| a.permit.exp > earliest || next.active_operations.contains_key(id));
         next.allocations.retain(|_, a| a.allocation.exp > earliest);
         next.prepared.retain(|_, a| a.expires_at > earliest);
         next.delegations.retain(|_, a| a.expires_at > earliest);
@@ -916,6 +972,9 @@ impl Journal {
             .map(Vec::len)
             .sum::<usize>()
             > MAX_RECORDS
+            || next.renewal_attempts.len() > MAX_RECORDS
+            || next.operation_policies.len() > MAX_RECORDS
+            || next.active_operations.len() > MAX_RECORDS
             || next.admissions.len() > MAX_RECORDS
             || next.allocations.len() > MAX_RECORDS
             || next.retired.values().map(Vec::len).sum::<usize>() > MAX_RECORDS

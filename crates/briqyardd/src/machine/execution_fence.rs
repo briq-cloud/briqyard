@@ -55,14 +55,17 @@ impl ExecutionFence {
     pub(super) fn last_observed_ms(&self) -> u64 {
         self.record.max_observed_ms.max(1)
     }
-    pub(super) async fn drain_at_start(&self) -> Result<()> {
-        if !self.has_protection() {
+    pub(super) async fn drain_at_start(&self, runtime_millis: u64) -> Result<()> {
+        if !self.has_protection() && runtime_millis == 0 {
             return Ok(());
         }
-        // Every admitted command has <=60s remaining. Across restart, wait that
-        // complete monotonic interval before trusting wall evidence to release it.
+        // Retained receipts distinguish the 60s legacy bound from the 80s
+        // renewable envelope. Never trust a wall step to shorten either drain.
         // A wall forward step cannot shorten this retained command lifetime.
-        tokio::time::sleep(Duration::from_secs(api::execution::MAX_COMMAND_SECONDS)).await;
+        tokio::time::sleep(Duration::from_millis(
+            runtime_millis.max(api::execution::MAX_COMMAND_SECONDS * 1000),
+        ))
+        .await;
         let delay = self.startup_delay(execution_mutations::execution_now_ms()?)?;
         if !delay.is_zero() {
             tracing::info!(
@@ -445,7 +448,9 @@ mod tests {
         let snapshot = fence.snapshot(&store, &names(&["a"]), now).unwrap();
         fence.protect(&store, &snapshot, now + 30_000, now).unwrap();
         // Tokio advances the monotonic timer; the wall clock remains before expiry.
-        let error = fence.drain_at_start().await.unwrap_err();
+        let start = tokio::time::Instant::now();
+        let error = fence.drain_at_start(80_000).await.unwrap_err();
+        assert!(tokio::time::Instant::now() - start >= Duration::from_millis(80_000));
         assert!(
             error.to_string().contains("has not drained")
                 || error

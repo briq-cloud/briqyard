@@ -294,6 +294,18 @@ impl Manager {
         scope: ExecutionResourceScope<'_>,
         journal: &tokio::sync::Mutex<Journal>,
     ) -> Result<ResourceSet, MError> {
+        self.discover_execution_resources(scope, journal, false)
+            .await
+    }
+
+    /// The primary alone must speak the requested command protocol; dependencies
+    /// retain their existing run and closure checks.
+    pub async fn discover_execution_resources(
+        &self,
+        scope: ExecutionResourceScope<'_>,
+        journal: &tokio::sync::Mutex<Journal>,
+        require_renewable: bool,
+    ) -> Result<ResourceSet, MError> {
         self.validate_execution_scope(scope)?;
         let initial = self.execution_namespace_snapshot(scope.required)?;
         let members = self.resolve_execution_members(scope)?;
@@ -306,7 +318,7 @@ impl Manager {
             tokio::time::timeout(Duration::from_secs(10), scoped_exec::local_turns(&locks))
                 .await
                 .map_err(|_| MError::Conflict("execution resources remain busy".into()))?;
-        let ledger = journal.lock().await;
+        let mut ledger = journal.lock().await;
         self.scoped_journal(&ledger)?;
         let again = self.resolve_execution_members(scope)?;
         if again != members {
@@ -322,6 +334,25 @@ impl Manager {
             if !resources.contains(seed) {
                 return Err(MError::Conflict("installed execution seed changed".into()));
             }
+        }
+        if require_renewable {
+            let instance = ledger.instance().to_owned();
+            drop(ledger);
+            let primary = entries
+                .iter()
+                .find(|e| e.snapshot().id == scope.primary.machine)
+                .ok_or_else(|| MError::Conflict("execution primary missing".into()))?;
+            self.require_renewable_guest(primary, scope.primary, &instance)
+                .await?;
+            ledger = journal.lock().await;
+            self.scoped_journal(&ledger)?;
+            if ledger.instance() != instance {
+                return Err(MError::Conflict(
+                    "execution journal instance changed".into(),
+                ));
+            }
+            let revision = execution_mutations::execution_resource_revision(&resources, &initial)?;
+            self.validate_execution_set_locked(scope, &resources, &revision, ledger.instance())?;
         }
         let final_snapshot = self.execution_namespace_snapshot(&resources)?;
         if final_snapshot != initial {

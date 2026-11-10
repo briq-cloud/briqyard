@@ -1,7 +1,7 @@
 //! Host installation and dispatch on a dedicated opt-in authenticated TLS listener.
 use crate::machine::{
-    ExecutionProtectionRequest, ExecutionResourceScope, Manager, ScopedCredentials,
-    ScopedExecutionContext,
+    ExecutionProtectionRequest, ExecutionResourceScope, Manager, RenewableDispatch,
+    ScopedCredentials, ScopedExecutionContext,
 };
 use axum::{
     extract::{DefaultBodyLimit, State},
@@ -28,6 +28,8 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
+mod renewal;
+
 type Answer<T> = Result<Json<T>, StatusCode>;
 type Channel = State<Arc<HostExecutionChannel>>;
 
@@ -49,6 +51,7 @@ pub struct HostExecutionChannel {
     manager: Manager,
     journal: Mutex<Journal>,
     admission: RwLock<()>,
+    active: Arc<crate::guestc::active_operations::ActiveOperations>,
     installer_token: String,
     execution_token: String,
     keys: Vec<VerificationKey>,
@@ -86,6 +89,7 @@ impl HostExecutionChannel {
             manager,
             journal: Mutex::new(journal),
             admission: RwLock::new(()),
+            active: Arc::new(crate::guestc::active_operations::ActiveOperations::default()),
             installer_token,
             execution_token,
             keys,
@@ -170,6 +174,7 @@ fn registered_keys(
 pub fn router(state: Arc<HostExecutionChannel>) -> Router {
     Router::new()
         .route("/internal/execution/v1/instance", get(instance))
+        .route("/internal/execution/v1/clock", get(authorization_clock))
         .route("/internal/execution/v1/register", post(register))
         .route("/internal/execution/v1/discover", post(discover))
         .route("/internal/execution/v1/ownership", post(ownership))
@@ -180,8 +185,23 @@ pub fn router(state: Arc<HostExecutionChannel>) -> Router {
         .route("/internal/execution/v1/prepare", post(prepare))
         .route("/internal/execution/v1/dispatch", post(dispatch))
         .route("/internal/execution/v1/status", post(status))
+        .route("/internal/execution/v1/policy", post(renewal::policy))
+        .route(
+            "/internal/execution/v1/continue",
+            post(renewal::continue_operation),
+        )
+        .route("/internal/execution/v1/active", post(renewal::active))
         .layer(DefaultBodyLimit::max(access::MAX_BODY_BYTES))
         .with_state(state)
+}
+
+async fn authorization_clock(State(st): Channel, headers: HeaderMap) -> Answer<ClockObservation> {
+    st.authorize(&headers, true)?;
+    let sample = st.clock()?;
+    Ok(Json(ClockObservation {
+        now: sample.now,
+        uncertainty: sample.uncertainty,
+    }))
 }
 
 async fn instance(State(st): Channel, headers: HeaderMap) -> Answer<Instance> {
@@ -202,9 +222,16 @@ async fn register(
     let _write = st.admission.write().await;
     let mut journal = st.journal.lock().await;
     st.registered_keys(&record)?;
+    let changed = journal.registration().map_err(|_| StatusCode::CONFLICT)? != Some(&record);
     journal
         .register_host(record.clone(), st.clock()?)
-        .map_err(|_| StatusCode::CONFLICT)?;
+        .map_err(|_| {
+            st.active.end_all();
+            StatusCode::CONFLICT
+        })?;
+    if changed {
+        st.active.end_all();
+    }
     Ok(Json(ack(journal.instance(), record.generation, &record)?))
 }
 
@@ -256,12 +283,13 @@ async fn discover(
     let required = public.iter().map(|p| p.target.clone()).collect::<Vec<_>>();
     let resource_set = st
         .manager
-        .execution_resources(
+        .discover_execution_resources(
             ExecutionResourceScope {
                 primary: &primary,
                 required: &required,
             },
             &st.journal,
+            req.require_renewable,
         )
         .await
         .map_err(|_| StatusCode::CONFLICT)?;
@@ -365,6 +393,28 @@ async fn protect(
     }))
 }
 
+#[derive(Clone, Copy, Debug)]
+enum DelegationRefusal {
+    OwnershipRead,
+    OwnershipMissing,
+    RegistrationRead,
+    RegistrationMissing,
+    Generation,
+    OwnershipLive,
+    RegisteredKeys,
+    Verification,
+    ProtectionRead,
+    ProtectionMissing,
+    ProtectionBinding,
+    JournalInstall,
+    PolicyInstall,
+}
+
+fn delegation_conflict(stage: DelegationRefusal) -> StatusCode {
+    tracing::warn!(target: "execution_installation", diagnostic = "execution_installation", stage = ?stage, "execution installation refused");
+    StatusCode::CONFLICT
+}
+
 async fn delegation(
     State(st): Channel,
     headers: HeaderMap,
@@ -377,30 +427,32 @@ async fn delegation(
         .lock()
         .await
         .installed_ownership(&req.installation)
-        .map_err(|_| StatusCode::CONFLICT)?
+        .map_err(|_| delegation_conflict(DelegationRefusal::OwnershipRead))?
         .cloned()
-        .ok_or(StatusCode::CONFLICT)?;
+        .ok_or_else(|| delegation_conflict(DelegationRefusal::OwnershipMissing))?;
     let registration = st
         .journal
         .lock()
         .await
         .registration()
-        .map_err(|_| StatusCode::CONFLICT)?
+        .map_err(|_| delegation_conflict(DelegationRefusal::RegistrationRead))?
         .cloned()
-        .ok_or(StatusCode::CONFLICT)?;
+        .ok_or_else(|| delegation_conflict(DelegationRefusal::RegistrationMissing))?;
     if owner.generation != req.generation {
-        return Err(StatusCode::CONFLICT);
+        return Err(delegation_conflict(DelegationRefusal::Generation));
     }
     st.manager
         .verify_execution_ownership(&owner, &st.journal)
         .await
-        .map_err(|_| StatusCode::CONFLICT)?;
+        .map_err(|_| delegation_conflict(DelegationRefusal::OwnershipLive))?;
     let allocation_tokens = req
         .allocations
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let keys = st.registered_keys(&registration)?;
+    let keys = st
+        .registered_keys(&registration)
+        .map_err(|_| delegation_conflict(DelegationRefusal::RegisteredKeys))?;
     let checked = access::verify_delegation(
         &req.grant,
         &allocation_tokens,
@@ -417,15 +469,18 @@ async fn delegation(
             authority_epoch: &registration.epoch,
         },
     )
-    .map_err(|_| StatusCode::CONFLICT)?;
+    .map_err(|error| {
+        tracing::warn!(target: "execution_installation", diagnostic = "execution_installation", stage = "host_verification", category = ?error, "execution installation refused");
+        delegation_conflict(DelegationRefusal::Verification)
+    })?;
     let protection = st
         .journal
         .lock()
         .await
         .protection(&checked.grant().idle.admission)
-        .map_err(|_| StatusCode::CONFLICT)?
+        .map_err(|_| delegation_conflict(DelegationRefusal::ProtectionRead))?
         .cloned()
-        .ok_or(StatusCode::CONFLICT)?;
+        .ok_or_else(|| delegation_conflict(DelegationRefusal::ProtectionMissing))?;
     if checked.grant().id != req.id
         || protection.installation != req.installation
         || protection.generation != req.generation
@@ -436,7 +491,7 @@ async fn delegation(
             checked.grant().exp,
         )
     {
-        return Err(StatusCode::CONFLICT);
+        return Err(delegation_conflict(DelegationRefusal::ProtectionBinding));
     }
     let record = HostDelegation {
         id: req.id,
@@ -452,7 +507,7 @@ async fn delegation(
         .lock()
         .await
         .install_delegation(record.clone(), st.clock()?)
-        .map_err(|_| StatusCode::CONFLICT)?;
+        .map_err(|_| delegation_conflict(DelegationRefusal::JournalInstall))?;
     Ok(Json(record))
 }
 
@@ -478,7 +533,12 @@ async fn invalidate(
     let order = journal.revocation_order();
     journal
         .invalidate_ownership(&req.installation, req.generation, order)
-        .map_err(|_| StatusCode::CONFLICT)?;
+        .map_err(|_| {
+            st.active.end_all();
+            StatusCode::CONFLICT
+        })?;
+    st.active
+        .revoke_where(|admission| journal.active_operation(admission).ok().flatten().cloned());
     Ok(Json(Instance {
         host_instance: journal.instance().into(),
     }))
@@ -495,7 +555,12 @@ async fn revoke(
     let order = journal.revocation_order();
     journal
         .revoke_delegation(&req.id, req.version, order)
-        .map_err(|_| StatusCode::CONFLICT)?;
+        .map_err(|_| {
+            st.active.end_all();
+            StatusCode::CONFLICT
+        })?;
+    st.active
+        .revoke_where(|admission| journal.active_operation(admission).ok().flatten().cloned());
     Ok(Json(Instance {
         host_instance: journal.instance().into(),
     }))
@@ -620,6 +685,9 @@ async fn prepare(
     {
         return Err(StatusCode::CONFLICT);
     }
+    if checked.permit().limits.execution_mode.is_some() {
+        renewal::installed_policy(&*st.journal.lock().await, &req.bundle, &delegation)?;
+    }
     let host_instance = st.journal.lock().await.instance().to_owned();
     let record = PreparedAdmission {
         admission: req.admission,
@@ -650,7 +718,7 @@ async fn dispatch(
     Json(req): Json<Dispatch>,
 ) -> Answer<api::ExecResult> {
     st.authorize(&headers, false)?;
-    let _read = st.admission.read().await;
+    let admission_guard = st.admission.read().await;
     let (owner, registration, delegation) = installed(&st, &req.bundle).await?;
     st.manager
         .verify_execution_ownership(&owner, &st.journal)
@@ -703,33 +771,62 @@ async fn dispatch(
     {
         return Err(StatusCode::CONFLICT);
     }
+    let renewable_policy = if checked.permit().limits.execution_mode.is_some() {
+        Some(renewal::installed_policy(
+            &*st.journal.lock().await,
+            &req.bundle,
+            &delegation,
+        )?)
+    } else {
+        None
+    };
     st.journal
         .lock()
         .await
         .mark_dispatched(&req.admission, st.clock()?)
         .map_err(|_| StatusCode::CONFLICT)?;
-    st.manager
-        .scoped_exec(
-            req.request,
-            ScopedCredentials {
-                grant: &req.bundle.grant,
-                permit: &req.bundle.permit,
-                allocations: &tokens,
-            },
-            &st.trust(&keys),
-            ScopedExecutionContext {
-                binding: &context,
-                scope: ExecutionResourceScope {
-                    primary: &owner.primary,
-                    required: &owner.public_seeds,
+    let credentials = ScopedCredentials {
+        grant: &req.bundle.grant,
+        permit: &req.bundle.permit,
+        allocations: &tokens,
+    };
+    let installed = ScopedExecutionContext {
+        binding: &context,
+        scope: ExecutionResourceScope {
+            primary: &owner.primary,
+            required: &owner.public_seeds,
+        },
+    };
+    let result = if let Some(policy) = renewable_policy {
+        st.manager
+            .renewable_scoped_exec(
+                req.request,
+                credentials,
+                &st.trust(&keys),
+                installed,
+                &st.journal,
+                st.clock_uncertainty_seconds,
+                RenewableDispatch {
+                    guard: admission_guard,
+                    registry: st.active.clone(),
+                    policy,
                 },
-            },
-            &st.journal,
-            st.clock_uncertainty_seconds,
-        )
-        .await
-        .map(Json)
-        .map_err(|_| StatusCode::CONFLICT)
+            )
+            .await
+    } else {
+        let _legacy_fence = admission_guard;
+        st.manager
+            .scoped_exec(
+                req.request,
+                credentials,
+                &st.trust(&keys),
+                installed,
+                &st.journal,
+                st.clock_uncertainty_seconds,
+            )
+            .await
+    };
+    result.map(Json).map_err(|_| StatusCode::CONFLICT)
 }
 
 async fn status(

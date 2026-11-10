@@ -106,6 +106,9 @@ jobs:
           cargo build --release --locked -p briqyard-init --target x86_64-unknown-linux-musl
           if [ -f hack/scoped-execution-native.sh ]; then
             cargo build --release --locked -p briqyard-testing --features scoped-native --bin scoped-execution-native
+            cargo test --release --locked -p briqyard-fleet --no-run --message-format=json |
+              jq -r 'select(.reason == "compiler-artifact" and .target.name == "briqyard-fleet" and .profile.test and .executable != null) | .executable' > target/scoped-native-fleet-test
+            test "$(wc -l < target/scoped-native-fleet-test)" = 1
             echo 'scoped=true' >> "$GITHUB_OUTPUT"
           elif [ -n "$SOURCE_REF" ]; then
             echo 'scoped=false' >> "$GITHUB_OUTPUT"

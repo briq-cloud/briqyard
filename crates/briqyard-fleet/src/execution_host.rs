@@ -11,6 +11,7 @@ const MAX_BODY: usize = api::execution::MAX_BODY_BYTES;
 #[derive(Clone, Copy)]
 pub(super) enum Route {
     Instance,
+    Clock,
     Register,
     Discover,
     Ownership,
@@ -21,12 +22,16 @@ pub(super) enum Route {
     Prepare,
     Dispatch,
     Status,
+    Policy,
+    Continue,
+    Active,
 }
 
 impl Route {
     fn path(self) -> &'static str {
         match self {
             Self::Instance => "instance",
+            Self::Clock => "clock",
             Self::Register => "register",
             Self::Discover => "discover",
             Self::Ownership => "ownership",
@@ -37,6 +42,9 @@ impl Route {
             Self::Prepare => "prepare",
             Self::Dispatch => "dispatch",
             Self::Status => "status",
+            Self::Policy => "policy",
+            Self::Continue => "continue",
+            Self::Active => "active",
         }
     }
 
@@ -48,7 +56,10 @@ impl Route {
     }
 
     fn installer(self) -> bool {
-        !matches!(self, Self::Prepare | Self::Dispatch | Self::Status)
+        !matches!(
+            self,
+            Self::Prepare | Self::Dispatch | Self::Status | Self::Active
+        )
     }
 }
 
@@ -84,6 +95,7 @@ pub(super) struct HostTransport {
     execution: header::HeaderValue,
     administrator: String,
     host_id: String,
+    timeout: Duration,
 }
 
 impl HostTransport {
@@ -172,6 +184,7 @@ impl HostTransport {
             execution: bearer(execution)?,
             administrator: host.administrator.into(),
             host_id: host.id.into(),
+            timeout,
         })
     }
 
@@ -192,16 +205,21 @@ impl HostTransport {
     ) -> Result<R, Error> {
         let mut url = self.origin.clone();
         url.set_path(&format!("/internal/execution/v1/{}", route.path()));
-        let method = if matches!(route, Route::Instance) {
+        let method = if matches!(route, Route::Instance | Route::Clock) {
             Method::GET
         } else {
             Method::POST
         };
-        // Keep the transport invariant next to the credential-bearing request too.
+        let timeout = if matches!(route, Route::Dispatch) {
+            self.timeout
+        } else {
+            self.timeout.min(Duration::from_secs(10))
+        };
+        // Recheck the transport invariant at the credential-bearing request.
         if url.scheme() != "https" {
             return Err(Error::Configuration);
         }
-        let mut request = self.client.request(method, url).header(
+        let mut request = self.client.request(method, url).timeout(timeout).header(
             header::AUTHORIZATION,
             if route.installer() {
                 &self.installer
@@ -209,7 +227,7 @@ impl HostTransport {
                 &self.execution
             },
         );
-        if !matches!(route, Route::Instance) {
+        if !matches!(route, Route::Instance | Route::Clock) {
             let body = serde_json::to_vec(input).map_err(|_| Error::Request)?;
             if body.len() > MAX_BODY {
                 return Err(Error::Request);
@@ -277,6 +295,13 @@ pub(super) mod tests {
             headers[header::AUTHORIZATION].to_str().unwrap().into(),
         ));
         match uri.path() {
+            "/internal/execution/v1/clock" => {
+                axum::Json(api::execution::channel::ClockObservation {
+                    now: 1000,
+                    uncertainty: 1,
+                })
+                .into_response()
+            }
             "/internal/execution/v1/instance" => axum::Json(api::execution::channel::Instance {
                 host_instance: instance.lock().unwrap().clone(),
             })
@@ -465,6 +490,9 @@ pub(super) mod tests {
                 .await,
             Err(Error::Unconfirmed)
         );
+        for route in [Route::Policy, Route::Continue, Route::Active] {
+            let _ = transport.call::<_, serde_json::Value>(route, &()).await;
+        }
         assert_eq!(
             *server.calls.lock().unwrap(),
             [
@@ -486,6 +514,18 @@ pub(super) mod tests {
                 ),
                 (
                     "/internal/execution/v1/status".into(),
+                    "Bearer execution".into()
+                ),
+                (
+                    "/internal/execution/v1/policy".into(),
+                    "Bearer installer".into()
+                ),
+                (
+                    "/internal/execution/v1/continue".into(),
+                    "Bearer installer".into()
+                ),
+                (
+                    "/internal/execution/v1/active".into(),
                     "Bearer execution".into()
                 ),
             ]

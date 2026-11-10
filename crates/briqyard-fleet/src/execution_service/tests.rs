@@ -574,3 +574,121 @@ fn credential_configuration_refuses_reuse_and_empty_values() {
         }));
     }
 }
+
+#[tokio::test]
+async fn operation_renewal_routes_require_installer_and_remain_disabled_by_default() {
+    let (app, _dir) = fixture(Arc::new(FixedClock(Some(Clock {
+        now: 1000,
+        uncertainty: 1,
+    }))));
+    for action in [
+        "operation_active",
+        "operation_protect",
+        "operation_continue",
+    ] {
+        for (credential, expected) in [
+            ("gateway-only", StatusCode::UNAUTHORIZED),
+            ("central-installer", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/internal/authority/v1/{action}"))
+                        .header(header::AUTHORIZATION, format!("Bearer {credential}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+}
+#[test]
+fn one_live_dispatch_owner_cannot_be_reconstructed_from_retained_status() {
+    let live = Arc::new(LiveOperations::default());
+    let owner = live.enter("operation").unwrap();
+    assert!(live.contains("operation"));
+    assert!(live.enter("operation").is_err());
+    drop(owner);
+    assert!(!live.contains("operation"));
+}
+
+#[tokio::test]
+async fn authorization_clock_is_installer_only_qualified_and_independent_of_renewable_gate() {
+    let server = crate::execution_host::tests::server();
+    let (app, _dir, _) = fixture_with_host(
+        Arc::new(FixedClock(Some(Clock {
+            now: 1000,
+            uncertainty: 1,
+        }))),
+        server.host.clone(),
+    );
+    for token in [
+        "",
+        "gateway-only",
+        "fleet-admin",
+        "host-installer",
+        "host-execution",
+    ] {
+        assert_eq!(
+            request(&app, "authorization_clock", token, b"{}".to_vec())
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        request(
+            &app,
+            "authorization_clock",
+            "central-installer",
+            br#"{"host":"other"}"#.to_vec()
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let response = request(
+        &app,
+        "authorization_clock",
+        "central-installer",
+        b"{}".to_vec(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap()).unwrap();
+    assert_eq!(
+        result,
+        serde_json::json!({"authority":{"now":1000,"uncertainty":1},"host":{"now":1000,"uncertainty":1}})
+    );
+    assert_eq!(
+        *server.calls.lock().unwrap(),
+        vec![(
+            "/internal/execution/v1/clock".into(),
+            "Bearer host-installer".into()
+        )]
+    );
+    for clock in [
+        Arc::new(FixedClock(None)) as Arc<dyn ClockSource>,
+        Arc::new(StaleClock),
+    ] {
+        let (app, _dir, _) = fixture_with_host(clock, server.host.clone());
+        assert_eq!(
+            request(
+                &app,
+                "authorization_clock",
+                "central-installer",
+                b"{}".to_vec()
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+    assert_eq!(server.calls.lock().unwrap().len(), 1);
+}

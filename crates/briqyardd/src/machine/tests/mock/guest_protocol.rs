@@ -164,6 +164,7 @@ impl guestc::Guest for Mock {
             version: self.init_version.lock().unwrap().clone(),
             file_stream_v1: self.file_stream_v1.load(Relaxed),
             exec_stream_v1: self.exec_stream_v1.load(Relaxed),
+            exec_renewable_v1: self.exec_renewable_v1.load(Relaxed),
             assigned_run: assigned_run.clone(),
             main_pid: if assigned_run.is_some() {
                 42

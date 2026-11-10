@@ -71,9 +71,30 @@ pub(super) fn provision(
         &execution.host_url,
         &credentials.host_installer,
         &credentials.host_execution,
-        std::time::Duration::from_secs(75),
+        std::time::Duration::from_secs(85),
     )
     .map_err(|_| anyhow!("invalid execution host transport"))?;
+    let continuation = execution
+        .continuation
+        .as_ref()
+        .map(|config| {
+            use std::os::unix::fs::MetadataExt;
+            let callback = std::fs::metadata(&config.credential_file)
+                .map_err(|_| "continuation credential unavailable")?;
+            let bundle = std::fs::metadata(&channel.credentials)
+                .map_err(|_| "execution credential bundle unavailable")?;
+            if callback.dev() == bundle.dev() && callback.ino() == bundle.ino() {
+                return Err("continuation credential must be a separate file");
+            }
+
+            crate::execution_continuation::HttpsContinuation::new(config, &credentials).map(
+                |provider| {
+                    Arc::new(provider) as Arc<dyn execution_service::renewal::ContinuationProvider>
+                },
+            )
+        })
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
     let journal = api::execution::admission::Journal::open(
         &channel.journal,
         api::execution::admission::Role::Authority(execution.authority.clone()),
@@ -91,7 +112,7 @@ pub(super) fn provision(
                 && key.public_key.as_slice() == issuer.public_key()),
         "execution signing identity mismatch"
     );
-    let router = execution_service::router(
+    let router = execution_service::router_with_continuation(
         issuer,
         transport,
         execution.host_id.clone(),
@@ -109,6 +130,7 @@ pub(super) fn provision(
             audience: channel.audience.clone(),
         },
         Arc::new(api::execution::clock::KernelClock),
+        continuation,
     )
     .map_err(anyhow::Error::msg)?;
     Ok((
@@ -291,6 +313,7 @@ mod tests {
             authority: "region".into(),
             key_id: "authority-key".into(),
             signing_key: signing_file,
+            continuation: None,
         };
         let pin = api::tls::fingerprint(cert.cert.der());
         let host = |admin| TrustedHost {
@@ -303,6 +326,16 @@ mod tests {
         assert!(
             !execution.channel.journal.exists(),
             "independent comparisons precede opening/rotating a journal"
+        );
+        let mut aliased = execution.clone();
+        aliased.continuation = Some(crate::config::Continuation {
+            url: "https://example.invalid/continue".into(),
+            credential_file: execution.channel.credentials.clone(),
+        });
+        assert!(provision(&aliased, host("host-admin"), "fleet-admin").is_err());
+        assert!(
+            !execution.channel.journal.exists(),
+            "callback configuration cannot rotate journal authority"
         );
         let (_, app) = provision(&execution, host("host-admin"), "fleet-admin").unwrap();
         for route in ["/v1/machines", "/v1/hosts", "/metrics", "/healthz"] {

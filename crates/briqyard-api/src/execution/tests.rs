@@ -555,3 +555,41 @@ fn interoperable_capture_fixture() {
         Some(OutputMode::CapturePerStreamV1)
     );
 }
+
+#[test]
+fn renewable_execution_mode_and_all_limits_attenuate_independently_of_capture() {
+    for (grant_mode, permit_mode, duration, valid) in [
+        (true, true, 60, true),
+        (true, true, 61, false),
+        (true, false, 60, false),
+        (false, true, 60, false),
+    ] {
+        for capture in [false, true] {
+            let mut f = fixture();
+            for (kind, enabled) in [("grant", grant_mode), ("permit", permit_mode)] {
+                f[kind]["limits"]["max_duration_seconds"] = duration.into();
+                if enabled {
+                    f[kind]["limits"]["execution_mode"] = "renewable_exec_v1".into();
+                }
+                if capture {
+                    f[kind]["limits"]["output_mode"] = "capture_per_stream_v1".into();
+                }
+            }
+            resign(&mut f, "grant");
+            assert_eq!(check(&f, 1010, 1).is_ok(), valid);
+        }
+    }
+    for name in [
+        "max_input_bytes",
+        "max_output_bytes",
+        "max_duration_seconds",
+    ] {
+        let mut f = fixture();
+        for kind in ["grant", "permit"] {
+            f[kind]["limits"]["execution_mode"] = "renewable_exec_v1".into();
+        }
+        f["permit"]["limits"][name] = (f["grant"]["limits"][name].as_u64().unwrap() + 1).into();
+        resign(&mut f, "grant");
+        assert!(check(&f, 1010, 1).is_err(), "{name}");
+    }
+}

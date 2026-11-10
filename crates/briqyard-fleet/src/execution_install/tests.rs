@@ -23,6 +23,13 @@ fn target(machine: &str) -> Target {
 
 #[tokio::test]
 async fn typed_pinned_installation_persists_each_exact_ack() {
+    installation_case(false).await;
+}
+#[tokio::test]
+async fn renewable_installation_requires_exact_policy_ack_and_allows_full_guest_timeout() {
+    installation_case(true).await;
+}
+async fn installation_case(renewable: bool) {
     use axum::{extract::State, http::Uri, response::IntoResponse, Router};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use sha2::{Digest, Sha256};
@@ -43,7 +50,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
     }
 
     async fn endpoint(
-        State(calls): State<Arc<AtomicUsize>>,
+        State((calls, renewable)): State<(Arc<AtomicUsize>, bool)>,
         uri: Uri,
         body: axum::body::Bytes,
     ) -> axum::response::Response {
@@ -123,6 +130,9 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
             .into_response();
         }
         if path.ends_with("/discover") {
+            let request: briqyard_api::execution::DiscoveryRequest =
+                serde_json::from_slice(&body).unwrap();
+            assert_eq!(request.require_renewable, renewable);
             return axum::Json(DiscoveryReceipt {
                 host_instance: "host-instance".into(),
                 primary: target("a"),
@@ -147,6 +157,10 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
                 revision: "revision-1".into(),
             })
             .into_response();
+        }
+        if path.ends_with("/policy") {
+            let policy: HostOperationPolicy = serde_json::from_slice(&body).unwrap();
+            return axum::Json(policy).into_response();
         }
         if path.ends_with("/delegation") {
             calls.fetch_add(1, Ordering::SeqCst);
@@ -204,7 +218,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         .serve(
             Router::new()
                 .fallback(endpoint)
-                .with_state(server_calls)
+                .with_state((server_calls, renewable))
                 .into_make_service(),
         )
         .await
@@ -249,6 +263,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         Outcome::Ready
     );
     let control = OwnershipControl {
+        require_renewable: renewable,
         host_instance: "host-instance".into(),
         installation: "install".into(),
         generation: 1,
@@ -337,7 +352,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
             URL_SAFE_NO_PAD.encode(central.sign(input.as_bytes()).as_ref())
         )
     };
-    let grant_body = serde_json::json!({
+    let mut grant_body = serde_json::json!({
         "v":1,"iss":"central","aud":"runtime","iat":1000,"nbf":1000,"exp":1050,
         "id":"delegation","principal":"key:credential","source":{"kind":"api_key","id":"credential","expires_at":1100},
         "team":"team","subject":"public-a","target":target("a"),
@@ -345,6 +360,10 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         "idle":{"admission":"admission","expires_at":1060},"metadata_revision":"metadata-1",
         "operations":["exec"],"limits":{"max_duration_seconds":20,"max_input_bytes":1024,"max_output_bytes":4096}
     });
+    if renewable {
+        grant_body["limits"]["execution_mode"] = "renewable_exec_v1".into();
+        grant_body["limits"]["max_duration_seconds"] = 60.into();
+    }
     let grant = sign(GRANT_TYPE, grant_body.clone());
     let allocation = sign(
         ALLOCATION_TYPE,
@@ -614,10 +633,11 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         issuer: &mut issuer,
         host: &transport,
         host_id: &host.id,
+        renewable,
     };
     let request = || briqyard_api::ExecRequest {
         cmd: vec!["printf".into(), "ok".into()],
-        timeout_ms: 1000,
+        timeout_ms: if renewable { 60_000 } else { 1000 },
         wake: false,
         ..Default::default()
     };
@@ -749,6 +769,136 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         coordinator.status("oversized").unwrap().unwrap().phase,
         briqyard_api::execution::admission::OperationPhase::Intent
     );
+    // The one-shot dispatch object is owned by the live call only. Journal
+    // observation can advance to consumed while its terminal result is pending.
+    let pending = match coordinator
+        .prepare_dispatch(operation("split-owned"), &trust, || Ok(clock))
+        .await
+        .unwrap()
+    {
+        crate::execution_operation::PreparedExecution::Dispatch(pending) => pending,
+        _ => panic!("new operation must prepare once"),
+    };
+    assert!(matches!(
+        coordinator
+            .prepare_dispatch(operation("split-owned"), &trust, || Ok(clock))
+            .await
+            .unwrap(),
+        crate::execution_operation::PreparedExecution::Existing(_)
+    ));
+    coordinator
+        .issuer
+        .installation_journal()
+        .record_operation_evidence(
+            "split-owned",
+            briqyard_api::execution::admission::OperationPhase::Consumed,
+            None,
+            clock,
+        )
+        .unwrap();
+    if renewable {
+        use briqyard_api::execution::admission::{InstalledProtection, RenewalAttempt};
+        use briqyard_api::execution::{
+            ActiveOperationBinding, OperationContinuation, CONTINUATION_TYPE,
+        };
+        let j = coordinator.issuer.installation_journal();
+        let op = j.operation_intent("split-owned").unwrap().unwrap().clone();
+        let delegation = j
+            .delegation_intent(&op.delegation)
+            .unwrap()
+            .unwrap()
+            .clone();
+        let policy = delegation.operation_policy_ack.as_ref().unwrap();
+        let binding = ActiveOperationBinding {
+            operation_id: op.id.clone(),
+            admission: op.id.clone(),
+            grant_digest: op.permit.grant_digest.clone(),
+            permit_digest: op.permit_digest.clone().unwrap(),
+            request_digest: op.request_digest.clone(),
+            authority: op.permit.authority.clone(),
+            authority_epoch: op.authority_epoch.clone(),
+            host_instance: op.host_instance.clone(),
+            ownership: policy.ownership.clone(),
+            ownership_generation: policy.ownership_generation,
+            policy_revision: policy.policy_revision.clone(),
+            delegation: policy.delegation.clone(),
+            delegation_version: policy.delegation_version,
+            principal: delegation.request.principal.clone(),
+            source: delegation.trusted_source.clone().unwrap(),
+            team: "team".into(),
+            subject: "public-a".into(),
+            metadata_revision: op.permit.metadata_revision.clone(),
+            target: op.permit.target.clone(),
+            resource_set: briqyard_api::execution::ResourceSet {
+                revision: "revision-1".into(),
+                resources: vec![target("a"), target("gateway")],
+            },
+            limits: op.permit.limits.clone(),
+            guest_timeout_ms: 60_000,
+            started_at_ms: 1_010_000,
+            operation_deadline_ms: 1_090_000,
+        };
+        let attempt = RenewalAttempt {
+            id: "continuation-attempt".into(),
+            operation_id: op.id.clone(),
+            previous_sequence: 0,
+            binding: binding.clone(),
+            protection_intent: "protection".into(),
+            protection_admission: "admission".into(),
+            protection_expires_at_ms: 1_060_001,
+            continuation_digest: None,
+        };
+        assert!(j.begin_renewal_attempt(attempt.clone(), clock).unwrap());
+        assert!(!j.begin_renewal_attempt(attempt.clone(), clock).unwrap());
+        let mut crossed = attempt.clone();
+        crossed.id = "crossed-attempt".into();
+        assert!(j.begin_renewal_attempt(crossed, clock).is_err());
+        let claims = OperationContinuation {
+            v: 1,
+            iss: "central".into(),
+            aud: "runtime".into(),
+            iat: 1008,
+            nbf: 1008,
+            exp: 1060,
+            checked_at: 1008,
+            previous_sequence: 0,
+            sequence: 1,
+            binding: binding.clone(),
+            protection: InstalledProtection {
+                installation: binding.ownership.clone(),
+                generation: binding.ownership_generation,
+                admission: "admission".into(),
+                expires_at_ms: 1_060_001,
+                resources: binding.resource_set.resources.clone(),
+                resource_revision: binding.resource_set.revision.clone(),
+            },
+        };
+        let token = sign(CONTINUATION_TYPE, serde_json::to_value(&claims).unwrap());
+        let verified =
+            briqyard_api::execution::verify_continuation(&token, &trust, clock, &binding).unwrap();
+        assert!(j
+            .bind_renewal_delivery(&attempt.id, &verified, token_digest(&token), clock)
+            .unwrap());
+        assert!(!j
+            .bind_renewal_delivery(&attempt.id, &verified, token_digest(&token), clock)
+            .unwrap());
+        assert!(j
+            .bind_renewal_delivery(&attempt.id, &verified, token_digest("changed-token"), clock)
+            .is_err());
+        let mut later = attempt;
+        later.id = "late-protection".into();
+        later.previous_sequence = 1;
+        later.protection_expires_at_ms = binding.operation_deadline_ms + 1_000;
+        // Conservative protection may outlast execution; it never moves binding's cap.
+        assert!(j.begin_renewal_attempt(later, clock).unwrap());
+    }
+    let result = transport.call(Route::Dispatch, &pending.dispatch).await;
+    assert!(matches!(
+        coordinator
+            .finish_dispatch(pending, result, || Ok(clock))
+            .unwrap(),
+        crate::execution_operation::ExecOutcome::Completed { .. }
+    ));
     let mut installer = Installer {
         journal: issuer.installation_journal(),
         host: &transport,
@@ -843,6 +993,30 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         .journal
         .acknowledge_delegation_intent("renewed", expected, clock)
         .unwrap();
+    if let Some(policy) = installer
+        .journal
+        .delegation_intent("renewed")
+        .unwrap()
+        .unwrap()
+        .operation_policy
+        .clone()
+    {
+        assert!(!installer
+            .journal
+            .delegation_intent_ready("renewed")
+            .unwrap());
+        let mut wrong = policy.clone();
+        wrong.policy_revision.push('x');
+        assert!(installer
+            .journal
+            .acknowledge_operation_policy("renewed", wrong, clock)
+            .is_err());
+        installer
+            .journal
+            .acknowledge_operation_policy("renewed", policy, clock)
+            .unwrap();
+    }
+
     assert!(installer
         .journal
         .delegation_intent_ready("renewed")
@@ -864,7 +1038,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
             .intent,
         "renewed"
     );
-    assert_eq!(calls.load(Ordering::SeqCst), 11);
+    assert_eq!(calls.load(Ordering::SeqCst), 13);
     installer
         .journal
         .begin_authority_intent(
@@ -883,6 +1057,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
         issuer: &mut issuer,
         host: &transport,
         host_id: &host.id,
+        renewable,
     };
     assert!(matches!(
         coordinator
@@ -890,7 +1065,7 @@ async fn typed_pinned_installation_persists_each_exact_ack() {
             .await,
         Err(crate::execution_operation::Error::Binding)
     ));
-    assert_eq!(calls.load(Ordering::SeqCst), 11);
+    assert_eq!(calls.load(Ordering::SeqCst), 13);
     let mut installer = Installer {
         journal: issuer.installation_journal(),
         host: &transport,

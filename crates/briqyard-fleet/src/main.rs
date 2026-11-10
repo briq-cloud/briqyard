@@ -10,6 +10,7 @@ mod config;
 mod create;
 mod create_replay;
 // Only the explicitly configured execution listener mounts these internal services.
+mod execution_continuation;
 #[allow(dead_code)]
 mod execution_host;
 #[allow(dead_code)]

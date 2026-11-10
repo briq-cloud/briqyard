@@ -1322,6 +1322,20 @@ The fleet's `execution` contains that object under `channel`, plus `host_id`,
 private parent. The host must already be in the trusted registry with its certificate
 pin. The daemon endpoint uses a certificate matching that pin.
 
+The optional `execution.continuation` contains a fixed HTTPS `url` and absolute
+`credential_file`. The URL must have a non-root path without userinfo, query or
+fragment. The file holds a dedicated bearer, without a newline, at 0600. It must
+be separate from the credentials bundle and differ from all six credential values.
+The callback receives only `{operation_id, previous_sequence}`; its strict success
+reply is `{state: "continued" | "recovered" | "not-needed"}`. Requests have a
+ten-second deadline and 4 KiB request/reply limits, without redirects or retries.
+Omission preserves legacy execution and refuses renewable issuance. Configuring a
+validated callback enables negotiation of `renewable_exec_v1`; commands still need
+the signed mode, exact installed state and qualified clocks. Install this configuration
+only after the disposable native renewal proof and deployment qualification pass.
+The callback cannot mint or extend authority by returning success: each extension
+still requires the independently verified signed continuation and protection receipt.
+
 Credentials JSON has `host_installer`, `host_execution`, `central_installer`, `gateway`,
 `host_administrator` and `fleet_administrator`. The four scoped values must be distinct
 from one another and both administrator values. Keep the file and private keys at

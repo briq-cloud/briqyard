@@ -58,6 +58,7 @@ mod tests {
             max_duration_seconds: 20,
             max_input_bytes: 1024,
             max_output_bytes: 4096,
+            execution_mode: None,
             output_mode: None,
         }
     }
