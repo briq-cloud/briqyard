@@ -234,6 +234,7 @@ impl ActiveLease {
                     result = &mut checked_work => {
                         let sample = clock().ok_or_else(|| anyhow::anyhow!("qualified execution clock unavailable"))?;
                         let mut state = self.inner.state.lock().unwrap();
+                        anyhow::ensure!(!state.ended, "active execution lease ended");
                         state.ended = true;
                         anyhow::ensure!(tokio::time::Instant::now() < state.deadline,
                             "active execution lease expired");
@@ -376,6 +377,24 @@ mod tests {
         assert!(lease
             .apply_committed(renewed, &clock(base)().unwrap())
             .is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn committed_revocation_during_terminal_poll_rejects_success() {
+        let base = tokio::time::Instant::now();
+        let lease = ActiveLease::from_committed(evidence(), &clock(base)().unwrap()).unwrap();
+        let revoker = lease.clone();
+        let result = lease
+            .run_qualified(
+                async move {
+                    let mut revoked = evidence();
+                    revoked.phase = ActivePhase::Revoked;
+                    revoker.revoke_committed(&revoked).unwrap();
+                },
+                clock(base),
+            )
+            .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test(start_paused = true)]
