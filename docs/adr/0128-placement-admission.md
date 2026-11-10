@@ -22,11 +22,11 @@ Catching `capacity` around the machine POST and trying the next region is refuse
 
 **A placement admission is a durable decision, made once, under the registry lock, before any host is asked to create.** `PUT /v1/namespaces/{ns}/admissions/{id}`, authenticated like seed admission (`capability_unsupported` without a configured token). `id` is the caller's request identity (`valid_sandbox_request_id`), unique per namespace.
 
-It is a record of the same table as seed admissions, with a `kind` (`#[serde(default)]` to `seed`, so every record written before loads; `placement`). The placement body is its own type: the seed `Request` denies unknown fields and requires a seed. An older fleet reads the record as a seed's (its unknown fields are ignored) and does not fence it, and cannot load one in the new `expired` phase, so a rollback below this change waits until none is pending and the tombstones have been pruned (`FLEET-OPERATIONS.md` says so). One key `(namespace, id)`, one meaning: a `PUT` of either kind to an id held by the other, or to a cancelled id, is 409; a cancel of an unknown id writes a tombstone both kinds find. Pruning, the header check and the fences below read that one table. The seed route (`sandbox-admissions`) and its contract do not change.
+It is a record of the same table as seed admissions, with a `kind` (`#[serde(default)]` to `seed`, so every record written before loads; `placement`). The placement body is its own type: the seed `Request` denies unknown fields and requires a seed. An older fleet reads the record as a seed's (its unknown fields are ignored). A cold record, or one past `pending`, fences nothing there. A record with mode `sandbox-seed`, phase `pending` and a host satisfies the older fleet's `pending_seed()`: it fences its namespace and host there, the older prune never forgets it, and a dispatch under it answers 409 `admission cancelled` (the record has no seed request). The older fleet also cannot load the new `expired` phase. So a rollback below this change waits until no placement admission is pending and the tombstones have been pruned (`FLEET-OPERATIONS.md` says so). One key `(namespace, id)`, one meaning: a `PUT` of either kind to an id held by the other, or to a cancelled id, is 409; a cancel of an unknown id writes a tombstone both kinds find. Pruning, the header check and the fences below read that one table. The seed route (`sandbox-admissions`) and its contract do not change.
 
 ```json
 {
-  "regions":      ["beauharnois", "gra"],
+  "regions":      ["region-a", "region-b"],
   "requirements": [
     {"role": "gateway",  "size": {…}, "runtime_class": "default"},
     {"role": "consumer", "size": {…}, "volume_gb": 20, "runtime_class": "default",
@@ -39,8 +39,8 @@ It is a record of the same table as seed admissions, with a `kind` (`#[serde(def
 `regions` is non-empty, without repeats, in the caller's order: an allowlist and a preference, nothing else. `requirements` lists everything the namespace's first dispatches will ask for, the gateway included, at most one `gateway` and one `consumer`, with the fields the create already carries (size, volume, runtime class, memory profile, `egress.siblings`, seeds). The fleet reuses the predicates `place` and `create_machine` apply today; it does not copy them.
 
 ```json
-{"region": "beauharnois", "host": "h_…", "binding": "new", "mode": "cold",
- "regions": [{"region": "beauharnois", "outcome": "placed"}]}
+{"region": "region-a", "host": "h_…", "binding": "new", "mode": "cold",
+ "regions": [{"region": "region-a", "outcome": "placed"}]}
 ```
 
 `binding` is `new` (the admission pinned the namespace) or `existing` (it already was). `sandbox_seeds` belong to the `consumer` requirement only, and so do `mode` (`sandbox-seed` or `cold`, as in ADR 0076) and `seed`, the selector used. `regions` lists the outcome of each region walked; it is evidence, not a promise.
@@ -86,7 +86,7 @@ Why the first region may not be `ineligible`: a preference must not weaken what 
 
 **Cancel is `DELETE` on the same path, only before any dispatch.** It releases the holds and tombstones the id. The pin stays, as seed cancel keeps it: another member or a gateway not yet reported by its host may need it, and the heartbeat's rule releases it once nothing names the namespace. After any role was dispatched: 409 `admission already dispatched`. An uncertain dispatch keeps its decision; the control plane adopts in the admitted region only.
 
-**A pending admission expires after the replay window** (24 h, ADR 0119) counted from its last change (the decision, or its latest dispatch). This covers a partly dispatched one too, a gateway dispatched and a consumer never: the fence and the remaining hold are released, the id tombstoned, and the pin follows the heartbeat's rule for a namespace the host lists. A requirement already dispatched is not undone; its machine is the caller's to destroy. Operator unpin and delete refuse only until then. A late dispatch with that id is 409 `admission expired` until the tombstone is pruned (another window, ADR 0119), then 409 `placement admission missing`, and a `PUT` of the pruned id walks afresh like a new id. The control plane may then admit under a new id; nothing was dispatched under the old one, so a fresh walk is correct.
+**A pending admission expires after the replay window** (24 h, ADR 0119) counted from its last change (the decision, its first dispatch, or a role newly dispatched; a retried role or a repeated quota `PUT` is not a change). It applies to placement admissions only: a seed admission pending stays a fence until its create is dispatched or it is cancelled, as before. This covers a partly dispatched one too, a gateway dispatched and a consumer never: the fence and the remaining hold are released, the id tombstoned, and the pin follows the heartbeat's rule for a namespace the host lists. A requirement already dispatched is not undone; its machine is the caller's to destroy. Operator unpin and delete refuse only until then. A late dispatch with that id is 409 `admission expired` until the tombstone is pruned (another window, ADR 0119), then 409 `placement admission missing`, and a `PUT` of the pruned id walks afresh like a new id. The control plane may then admit under a new id; nothing was dispatched under the old one, so a fresh walk is correct.
 
 **Concurrent first members share one binding.** Two admissions for one namespace serialize on the registry lock: the first pins it, the second answers `existing` and is accounted on that host. If the second's requirements do not fit, 503 `capacity`.
 
@@ -155,7 +155,7 @@ Registry-level unit tests, then `hack/fleet-two-hosts.sh` extended with two regi
 
 Made while implementing, none of which changes a decision above:
 
-- **Rollback.** The first draft said an older fleet cannot load a registry with a `placement` record. It can: `kind` and `placement` are unknown fields to it, and the record reads as a seed admission it does not fence. What it cannot load is the `expired` phase this change adds. The Decisions paragraph and `FLEET-OPERATIONS.md` now say so.
+- **Rollback.** The first draft said an older fleet cannot load a registry with a `placement` record. It can: `kind` and `placement` are unknown fields to it, and the record reads as a seed admission: not fenced when cold or past `pending`, fenced (and answering 409 `admission cancelled` to a dispatch) when it is `sandbox-seed` and `pending`. What it cannot load is the `expired` phase this change adds. The Decisions paragraph and `FLEET-OPERATIONS.md` now say so.
 - **Config.** The hold's deadline is `placement.admission_hold_sec` (seconds, default 600), next to `down_after_sec`.
 - **The create's memory profile** is the field the create already carries for it, `template_build`; a seeded consumer is matched on its selector instead (a seed create names `sandbox_seed`).
 - **A dispatch converts the hold** by taking the requirement's hold off the host before the room check and putting the ordinary create (or gateway) hold in its place under the same lock; on a failed check the admission hold is restored.

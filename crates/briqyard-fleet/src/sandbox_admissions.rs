@@ -70,6 +70,15 @@ impl Admission {
             None => self.phase == Phase::Pending && self.mode == Mode::SandboxSeed,
         }
     }
+    /// The time its window counts from, and a way to move it back, for the tests of the windows.
+    #[cfg(test)]
+    pub fn at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.at
+    }
+    #[cfg(test)]
+    pub fn backdate(&mut self, by: chrono::Duration) {
+        self.at = self.at.map(|at| at - by);
+    }
     fn tombstone(namespace: String, request_id: String, phase: Phase) -> Self {
         Admission {
             namespace,

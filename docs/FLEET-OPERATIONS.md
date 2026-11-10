@@ -250,13 +250,13 @@ older fleet answers 404 to the route, which is never capacity.
 
 ```bash
 curl -X PUT -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  $FLEET/v1/namespaces/acme/admissions/req_1 -d '{
-    "regions": ["bhs", "gra"],
+  $FLEET/v1/namespaces/ns-example/admissions/req_1 -d '{
+    "regions": ["region-a", "region-b"],
     "requirements": [
       {"role": "gateway",  "size": {"vcpus": 1, "memory_mb": 256}},
       {"role": "consumer", "size": {"vcpus": 2, "memory_mb": 2048}, "volume_gb": 20}
     ]}'
-# {"region":"bhs","host":"h_…","binding":"new","mode":"cold","regions":[{"region":"bhs","outcome":"placed"}]}
+# {"region":"region-a","host":"h_…","binding":"new","mode":"cold","regions":[{"region":"region-a","outcome":"placed"}]}
 ```
 
 The fleet takes the regions in order and stops at the first one with a host that can take the
@@ -292,9 +292,12 @@ A quota `PUT` with the id is checked the same way and consumes no requirement.
   becomes a tombstone (409 `admission expired`) and, one window later, is forgotten.
 - **Seeds.** A seed in `sandbox_seeds` is used only on its own host, inside a region walked; one
   that fails its check makes the placement `cold`.
-- **Rollback.** An older fleet loads a registry with placement records but does not fence
-  them, and cannot load one that holds an `expired` tombstone. Roll back below this release
-  only when no admission is pending and the tombstones have been pruned (two windows, 48 hours).
+- **Rollback.** An older fleet loads a registry with placement records and reads them as seed
+  admissions. A `cold` record fences nothing there; a `sandbox-seed` record that is `pending`
+  fences its namespace and host, is never forgotten, and answers a dispatch with 409
+  `admission cancelled`. It cannot load an `expired` tombstone. Roll back below this release
+  only when no placement admission is pending and the tombstones have been pruned (two windows,
+  48 hours).
 
 ### Adding and removing hosts
 

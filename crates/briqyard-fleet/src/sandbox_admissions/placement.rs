@@ -742,25 +742,34 @@ pub(crate) fn dispatch(
         }
     }
     if let Some(a) = reg.sandbox_admissions.get_mut(&k) {
+        // The window counts from the last change: the first dispatch, or a role newly marked.
+        // A retry, or a quota `PUT` repeated, changes nothing and does not extend it.
+        let mut changed = a.phase != Phase::Dispatched;
         a.phase = Phase::Dispatched;
-        a.at = Some(Utc::now());
         if let (Some(p), Some(role)) = (a.placement.as_mut(), role) {
             if !p.dispatched.contains(&role) {
                 p.dispatched.push(role);
+                changed = true;
             }
+        }
+        if changed {
+            a.at = Some(Utc::now());
         }
     }
     Ok(())
 }
 
-/// Ends the pending admissions left alone for `window` since their last change: the fence and
-/// the holds go, the id stays as a tombstone for another window (ADR 0128, ADR 0119). A role
-/// already dispatched is not undone.
+/// Ends the pending placement admissions left alone for `window` since their last change: the
+/// fence and the holds go, the id stays as a tombstone for another window (ADR 0128, ADR 0119).
+/// A role already dispatched is not undone. A seed admission is never expired: it fences until
+/// its create is dispatched or it is cancelled, as before placement admission.
 pub(super) fn expire(reg: &mut Registry, now: DateTime<Utc>, window: chrono::Duration) {
     let due: Vec<String> = reg
         .sandbox_admissions
         .iter()
-        .filter(|(_, a)| a.pending() && a.at.is_some_and(|at| now - at >= window))
+        .filter(|(_, a)| {
+            a.kind == Kind::Placement && a.pending() && a.at.is_some_and(|at| now - at >= window)
+        })
         .map(|(k, _)| k.clone())
         .collect();
     for k in due {

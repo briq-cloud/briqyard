@@ -123,9 +123,17 @@ async fn create_under(
     )
     .await
 }
-/// The registry as it would be saved, to compare before and after.
+/// The registry as it would be saved, with the holds it does not save (the count on each host),
+/// to compare before and after.
 fn snapshot(f: &Fleet) -> String {
-    serde_json::to_string(&*f.st.reg.lock().unwrap()).unwrap()
+    let reg = f.st.reg.lock().unwrap();
+    let mut held: Vec<(&String, usize)> = reg
+        .hosts
+        .iter()
+        .map(|(id, h)| (id, h.holds.len()))
+        .collect();
+    held.sort();
+    format!("{}{held:?}", serde_json::to_string(&*reg).unwrap())
 }
 fn host_used(f: &Fleet, id: &str) -> u32 {
     f.st.reg.lock().unwrap().hosts[id].used.memory_mb
@@ -412,7 +420,9 @@ async fn dispatch_after_the_hold_expired_and_the_host_filled() {
     let (s, text) = put_gateway(&f, "ns", "bhs", "req_one").await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{text}");
     assert_eq!(json(&text)["code"], "capacity");
-    // Role not marked, decision and pin kept, nothing sent to the host.
+    // Role not marked, decision and pin kept, nothing sent to the host. The lapsed hold is not
+    // brought back, and the requirement's other hold is as it was.
+    assert_eq!(holds(&f, &host), 0);
     assert_eq!(pinned(&f.st, "ns").as_deref(), Some(host.as_str()));
     assert!(f
         .st
@@ -427,6 +437,128 @@ async fn dispatch_after_the_hold_expired_and_the_host_filled() {
     assert!(ds.iter().all(|d| d.stub.creates.lock().unwrap().is_empty()));
     // Cancelling is still possible, nothing was dispatched.
     assert_eq!(cancel(&f, "ns", "req_one").await, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn a_dispatch_without_room_puts_the_hold_it_took_back_and_marks_no_role() {
+    let (f, ds) = fleet_in_regions(&["bhs", "gra"]).await;
+    let (_, b) = admit(&f, "ns", "req_one", both(&["bhs", "gra"])).await;
+    let host = b["host"].as_str().unwrap().to_string();
+    let used = host_used(&f, &host);
+    assert_eq!(holds(&f, &host), 2);
+    // Another tenant fills the host while both holds are still there.
+    let full = {
+        let mut reg = f.st.reg.lock().unwrap();
+        let h = reg.hosts.get_mut(&host).unwrap();
+        h.used.memory_mb = h.capacity.memory_mb + 1_000;
+        h.used.memory_mb
+    };
+    let (s, text) = put_gateway(&f, "ns", "bhs", "req_one").await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{text}");
+    assert_eq!(json(&text)["code"], "capacity");
+    // The gateway's hold was taken off for the check and is back, as it was: both holds,
+    // the same figure, no role marked, nothing sent.
+    assert_eq!(holds(&f, &host), 2);
+    assert_eq!(host_used(&f, &host), full);
+    assert!(ds.iter().all(|d| d.stub.creates.lock().unwrap().is_empty()));
+    // The host frees up: the same dispatch now takes over the hold it kept.
+    f.st.reg
+        .lock()
+        .unwrap()
+        .hosts
+        .get_mut(&host)
+        .unwrap()
+        .used
+        .memory_mb = used;
+    let (s, text) = put_gateway(&f, "ns", "bhs", "req_one").await;
+    assert_eq!(s, StatusCode::OK, "{text}");
+    assert_eq!(holds(&f, &host), 1);
+}
+
+#[tokio::test]
+async fn a_repeated_dispatch_does_not_extend_the_window() {
+    let (f, _ds) = fleet_in_regions(&["bhs", "gra"]).await;
+    let at = |f: &Fleet, ns: &str| {
+        let reg = f.st.reg.lock().unwrap();
+        reg.sandbox_admissions
+            .values()
+            .find(|a| a.namespace == ns)
+            .unwrap()
+            .at()
+            .unwrap()
+    };
+    let backdate = |f: &Fleet, ns: &str| {
+        let mut reg = f.st.reg.lock().unwrap();
+        reg.sandbox_admissions
+            .values_mut()
+            .find(|a| a.namespace == ns)
+            .unwrap()
+            .backdate(chrono::Duration::hours(20));
+    };
+    let quota = |ns: &'static str| {
+        let f = &f;
+        async move {
+            let (s, _, text) = call(
+                &f.st,
+                "PUT",
+                &format!("/v1/namespaces/{ns}/quota?region=bhs&placement_request_id=req_one"),
+                "api",
+                Some(json!({})),
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK, "{text}");
+        }
+    };
+    let old = Utc::now() - chrono::Duration::hours(19);
+    // A quota carrying the id: the first one changes the phase, the next ones change nothing.
+    assert_eq!(
+        admit(&f, "ns", "req_one", both(&["bhs", "gra"])).await.0,
+        StatusCode::OK
+    );
+    backdate(&f, "ns");
+    quota("ns").await;
+    assert!(at(&f, "ns") > old, "the first dispatch starts the window");
+    backdate(&f, "ns");
+    quota("ns").await;
+    assert!(at(&f, "ns") < old, "a repeated quota extended the window");
+    // So a periodic quota cannot keep a partly dispatched admission from expiring.
+    f.st.reg
+        .lock()
+        .unwrap()
+        .prune(Utc::now() + chrono::Duration::hours(5));
+    assert!(!crate::sandbox_admissions::namespace_pending(
+        &f.st.reg.lock().unwrap(),
+        "ns"
+    ));
+    // A role newly marked starts it again; its retry does not.
+    assert_eq!(
+        admit(&f, "ns2", "req_one", both(&["bhs", "gra"])).await.0,
+        StatusCode::OK
+    );
+    backdate(&f, "ns2");
+    let (s, text) = put_gateway(&f, "ns2", "bhs", "req_one").await;
+    assert_eq!(s, StatusCode::OK, "{text}");
+    assert!(at(&f, "ns2") > old, "a new role starts the window");
+    backdate(&f, "ns2");
+    let (s, text) = put_gateway(&f, "ns2", "bhs", "req_one").await;
+    assert_eq!(s, StatusCode::OK, "{text}");
+    assert!(at(&f, "ns2") < old, "a retried role extended the window");
+}
+
+#[tokio::test]
+async fn a_create_under_an_expired_admission_is_409_and_forwards_nothing() {
+    let (f, ds) = fleet_in_regions(&["bhs", "gra"]).await;
+    let (_, b) = admit(&f, "ns", "req_one", both(&["bhs", "gra"])).await;
+    let host = b["host"].as_str().unwrap().to_string();
+    f.st.reg
+        .lock()
+        .unwrap()
+        .prune(Utc::now() + chrono::Duration::hours(25));
+    let (s, _, text) = create_under(&f, "ns", "bhs", "req_one", 256).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{text}");
+    assert!(text.contains("admission expired"), "{text}");
+    assert_eq!(holds(&f, &host), 0);
+    assert!(ds.iter().all(|d| d.stub.creates.lock().unwrap().is_empty()));
 }
 
 #[tokio::test]
@@ -952,7 +1084,9 @@ async fn a_gateway_put_with_an_id_ends_cancellation_and_a_quota_put_only_that() 
 #[tokio::test]
 async fn dispatch_that_differs_from_the_admission_is_409_and_forwards_nothing() {
     let (f, ds) = fleet_in_regions(&["bhs", "gra"]).await;
-    let (_, _) = admit(&f, "ns", "req_one", both(&["bhs", "gra"])).await;
+    let (_, b) = admit(&f, "ns", "req_one", both(&["bhs", "gra"])).await;
+    let host = b["host"].as_str().unwrap().to_string();
+    let before = snapshot(&f);
     let (s, text) = put_gateway(&f, "ns", "gra", "req_one").await;
     assert_eq!(s, StatusCode::CONFLICT, "{text}");
     let (s, text) = put_gateway(&f, "ns", "bhs", "req_unknown").await;
@@ -998,6 +1132,9 @@ async fn dispatch_that_differs_from_the_admission_is_409_and_forwards_nothing() 
         .next()
         .unwrap()
         .pending());
+    // Both holds are still there, and nothing else changed.
+    assert_eq!(holds(&f, &host), 2);
+    assert_eq!(snapshot(&f), before);
 }
 
 #[tokio::test]
