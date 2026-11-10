@@ -290,6 +290,7 @@ impl Installer<'_> {
             || protection_intent.request.installation != owner.installation
             || protection_intent.request.generation != owner.generation
         {
+            tracing::warn!(target: "execution_installation", diagnostic = "execution_installation", stage = "authority_dependencies", "execution installation refused");
             return Err(InstallError::Binding);
         }
         let tokens = signed
@@ -313,7 +314,10 @@ impl Installer<'_> {
                 authority_epoch: &reg.epoch,
             },
         )
-        .map_err(|_| InstallError::Binding)?;
+        .map_err(|error| {
+            tracing::warn!(target: "execution_installation", diagnostic = "execution_installation", stage = "authority_verification", category = ?error, "execution installation refused");
+            InstallError::Binding
+        })?;
         let signed_idle = checked.grant().idle.expires_at;
         let receipt_ms = protection_intent.request.expires_at_ms;
         if checked.grant().id != control.id
@@ -322,6 +326,7 @@ impl Installer<'_> {
             || receipt_ms / 1000 != signed_idle
             || signed_idle < checked.grant().exp
         {
+            tracing::warn!(target: "execution_installation", diagnostic = "execution_installation", stage = "authority_signed_binding", "execution installation refused");
             return Err(InstallError::Binding);
         }
         let request = InstallDelegation {

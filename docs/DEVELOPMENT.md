@@ -71,6 +71,13 @@ This finite proof does not replace crash/recovery, lifecycle invalidation, concu
 revocation, streaming/files or the full qualification suite. A compiled harness alone is
 not native qualification evidence.
 
+On failure, the scoped fixture emits fixed installation refusal stages and verifier
+categories. The collector reads at most 64 KiB and 128 lines per source, ignores
+unknown events and fields, and never forwards raw authority or host logs. Authority
+and callback diagnostics remain private until the existing cleanup trap removes them.
+Run its parser regressions with `python3 hack/test_scoped_execution_diagnostics.py`.
+
+
 ## On a Linux host with KVM
 
 ```bash

@@ -243,6 +243,12 @@ impl renewal::ContinuationProvider for Central {
 #[tokio::test]
 #[ignore = "requires the disposable scoped-execution-native.sh fixture, real Linux KVM guests"]
 async fn renewable_service_callback_host_guest() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("off,execution_installation=warn")
+        .json()
+        .with_writer(std::io::stderr)
+        .try_init();
+
     ensure!(
         cfg!(target_os = "linux")
             && std::env::var("RUNNER_ENVIRONMENT").as_deref() == Ok("github-hosted"),

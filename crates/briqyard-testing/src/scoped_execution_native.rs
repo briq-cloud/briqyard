@@ -84,6 +84,145 @@ fn initial_protection_covers_grants_within_the_qualified_lower_budget() {
     }
 }
 
+fn native_grant_body(
+    issued: u64,
+    expiry: u64,
+    idle_expiry: u64,
+    idle_admission: &str,
+    namespace: &str,
+    discovery: &Value,
+    renewable: bool,
+) -> Value {
+    let mut body = json!({"v":1,"iss":"central","aud":"runtime","iat":issued,"nbf":issued,"exp":expiry,
+        "id":"delegation","principal":"key:native","source":{"kind":"api_key","id":"native","expires_at":expiry+60},
+        "team":namespace,"subject":"native-primary","target":discovery["primary"],"resource_set":discovery["resource_set"],
+        "idle":{"admission":idle_admission,"expires_at":idle_expiry},"metadata_revision":"native-metadata",
+        "operations":["exec"],"limits":{"max_duration_seconds":20,"max_input_bytes":1024,"max_output_bytes":briqyard_api::execution::MAX_CAPTURE_BYTES,"output_mode":"capture_per_stream_v1"}});
+    if renewable {
+        body["limits"]["max_duration_seconds"] = json!(60);
+        body["limits"]["execution_mode"] = json!("renewable_exec_v1");
+    }
+    body
+}
+
+fn native_allocations(
+    central: &Ed25519KeyPair,
+    issued: u64,
+    allocation_expiry: u64,
+    now: u64,
+    expiry: u64,
+    identity: &Value,
+    renewable: bool,
+) -> Vec<String> {
+    ["requests", "exec_calls"].into_iter().map(|bucket| sign(central, ALLOCATION_TYPE,
+        json!({"v":1,"iss":"central","aud":"runtime","iat":issued,"nbf":issued,"exp":allocation_expiry,
+            "id":bucket,"epoch":"native-allocation","authority":"native","authority_epoch":identity["authority_epoch"],
+            "principal":"key:native","bucket":bucket,"window_start":now-20,"window_end":if renewable {now+20} else {expiry+30},"units":if renewable {1} else {10}}))).collect()
+}
+
+#[test]
+fn native_signed_credentials_match_the_complete_discovered_closure() {
+    use briqyard_api::execution::{
+        verify_delegation, Clock, DelegationContext, DiscoveryReceipt, KeyRole, Trust,
+        VerificationKey, VerifyError,
+    };
+    let central = Ed25519KeyPair::from_seed_unchecked(&[1; 32]).unwrap();
+    let keys = [VerificationKey {
+        kid: "native-central".into(),
+        role: KeyRole::Central,
+        issuer: "central".into(),
+        authority: None,
+        public_key: central.public_key().as_ref().try_into().unwrap(),
+    }];
+    let trust = Trust {
+        keys: &keys,
+        central_issuer: "central",
+        authority_issuer: "authority",
+        audience: "runtime",
+    };
+    let target = |machine: &str| {
+        json!({
+            "host":"host-native", "machine":machine, "namespace":"scoped-native-1000",
+            "run":briqyard_api::execution::process_run_id("boot-native", 123, 456, "host-instance"),
+            "placement":"version-1"
+        })
+    };
+    let discovery = json!({
+        "host_instance":"host-instance", "primary":target("primary"),
+        "public_seeds":[target("primary"), target("sibling")],
+        "public_resources":[{"id":"native-primary","target":target("primary")},
+                            {"id":"native-sibling","target":target("sibling")}],
+        "resource_set":{"revision":"a".repeat(64),
+                        "resources":[target("gateway"), target("primary"), target("sibling")]}
+    });
+    let receipt: DiscoveryReceipt = serde_json::from_value(discovery.clone()).unwrap();
+    let identity = json!({"authority_epoch":"authority-instance"});
+    let context = DelegationContext {
+        principal: "key:native",
+        team: "scoped-native-1000",
+        subject: "native-primary",
+        target: &receipt.primary,
+        resource_set: &receipt.resource_set,
+        metadata_revision: "native-metadata",
+        authority: "native",
+        authority_epoch: "authority-instance",
+    };
+    for renewable in [false, true] {
+        let now = 1000;
+        let issued = 995;
+        let expiry = if renewable { issued + 60 } else { now + 40 };
+        let allocation_expiry = if renewable { now + 18 } else { expiry };
+        let idle_expiry = initial_idle_expiry_from_qualified_issue(issued, expiry, renewable);
+        let body = native_grant_body(
+            issued,
+            expiry,
+            idle_expiry,
+            "idle-1",
+            context.team,
+            &discovery,
+            renewable,
+        );
+        let allocations = native_allocations(
+            &central,
+            issued,
+            allocation_expiry,
+            now,
+            expiry,
+            &identity,
+            renewable,
+        );
+        let tokens: Vec<_> = allocations.iter().map(String::as_str).collect();
+        let grant = sign(&central, GRANT_TYPE, body.clone());
+        for uncertainty in [0, 2, 5] {
+            let clock = Clock { now, uncertainty };
+            let checked = verify_delegation(&grant, &tokens, &trust, clock, &context).unwrap();
+            assert_eq!(checked.grant().resource_set, receipt.resource_set);
+            assert_eq!(checked.grant().idle.expires_at, idle_expiry);
+            assert_eq!(checked.allocations().len(), 2);
+            assert!(checked
+                .allocations()
+                .iter()
+                .all(|a| a.exp == allocation_expiry));
+            // This is the harness's intentional negative, before the real install.
+            let mut omitted = body.clone();
+            omitted["resource_set"]["resources"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|t| t["machine"] != "gateway");
+            assert!(matches!(
+                verify_delegation(
+                    &sign(&central, GRANT_TYPE, omitted),
+                    &tokens,
+                    &trust,
+                    clock,
+                    &context
+                ),
+                Err(VerifyError::Binding)
+            ));
+        }
+    }
+}
+
 fn provision(dir: &Path) -> Result<()> {
     let mut keys = vec![];
     for (name, role, issuer, authority) in [
@@ -357,19 +496,24 @@ async fn main() -> Result<()> {
     )?;
     channel.install("protect", json!({"id":"protection","ownership":"ownership","committed":{"admission":idle_admission,"expires_at_ms":idle_expiry*1000}})).await?;
     let central = key(&dir.join("central.pk8"))?;
-    let mut grant_body = json!({"v":1,"iss":"central","aud":"runtime","iat":issued,"nbf":issued,"exp":expiry,
-        "id":"delegation","principal":"key:native","source":{"kind":"api_key","id":"native","expires_at":expiry+60},
-        "team":namespace,"subject":"native-primary","target":discovery["primary"],"resource_set":discovery["resource_set"],
-        "idle":{"admission":idle_admission,"expires_at":idle_expiry},"metadata_revision":"native-metadata",
-        "operations":["exec"],"limits":{"max_duration_seconds":20,"max_input_bytes":1024,"max_output_bytes":briqyard_api::execution::MAX_CAPTURE_BYTES,"output_mode":"capture_per_stream_v1"}});
-    if renewable {
-        grant_body["limits"]["max_duration_seconds"] = json!(60);
-        grant_body["limits"]["execution_mode"] = json!("renewable_exec_v1");
-    }
-    let allocations: Vec<_> = ["requests", "exec_calls"].into_iter().map(|bucket| sign(&central, ALLOCATION_TYPE,
-        json!({"v":1,"iss":"central","aud":"runtime","iat":issued,"nbf":issued,"exp":allocation_expiry,
-            "id":bucket,"epoch":"native-allocation","authority":"native","authority_epoch":identity["authority_epoch"],
-            "principal":"key:native","bucket":bucket,"window_start":now-20,"window_end":if renewable {now+20} else {expiry+30},"units":if renewable {1} else {10}}))).collect();
+    let grant_body = native_grant_body(
+        issued,
+        expiry,
+        idle_expiry,
+        &idle_admission,
+        namespace,
+        &discovery,
+        renewable,
+    );
+    let allocations = native_allocations(
+        &central,
+        issued,
+        allocation_expiry,
+        now,
+        expiry,
+        &identity,
+        renewable,
+    );
     let projection = Projection::new(b"native guest proof".to_vec())?;
     let grant = sign(&central, GRANT_TYPE, grant_body.clone());
     let delegation = |id: &str, signed: &str| {

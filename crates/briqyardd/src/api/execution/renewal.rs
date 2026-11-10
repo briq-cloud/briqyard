@@ -46,7 +46,7 @@ pub(super) async fn policy(
         .lock()
         .await
         .install_operation_policy(record.clone(), st.clock()?)
-        .map_err(|_| StatusCode::CONFLICT)?;
+        .map_err(|_| delegation_conflict(DelegationRefusal::PolicyInstall))?;
     Ok(Json(record))
 }
 

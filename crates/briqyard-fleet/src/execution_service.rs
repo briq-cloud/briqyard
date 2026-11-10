@@ -363,6 +363,7 @@ fn value<T: Serialize>(v: T) -> Result<serde_json::Value, StatusCode> {
     serde_json::to_value(v).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 fn install_error(error: crate::execution_install::InstallError) -> StatusCode {
+    tracing::warn!(target: "execution_installation", diagnostic = "execution_installation", stage = "authority_installation", category = ?error, "execution installation refused");
     if matches!(
         error,
         crate::execution_install::InstallError::ClockUnavailable

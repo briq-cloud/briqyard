@@ -393,6 +393,28 @@ async fn protect(
     }))
 }
 
+#[derive(Clone, Copy, Debug)]
+enum DelegationRefusal {
+    OwnershipRead,
+    OwnershipMissing,
+    RegistrationRead,
+    RegistrationMissing,
+    Generation,
+    OwnershipLive,
+    RegisteredKeys,
+    Verification,
+    ProtectionRead,
+    ProtectionMissing,
+    ProtectionBinding,
+    JournalInstall,
+    PolicyInstall,
+}
+
+fn delegation_conflict(stage: DelegationRefusal) -> StatusCode {
+    tracing::warn!(target: "execution_installation", diagnostic = "execution_installation", stage = ?stage, "execution installation refused");
+    StatusCode::CONFLICT
+}
+
 async fn delegation(
     State(st): Channel,
     headers: HeaderMap,
@@ -405,30 +427,32 @@ async fn delegation(
         .lock()
         .await
         .installed_ownership(&req.installation)
-        .map_err(|_| StatusCode::CONFLICT)?
+        .map_err(|_| delegation_conflict(DelegationRefusal::OwnershipRead))?
         .cloned()
-        .ok_or(StatusCode::CONFLICT)?;
+        .ok_or_else(|| delegation_conflict(DelegationRefusal::OwnershipMissing))?;
     let registration = st
         .journal
         .lock()
         .await
         .registration()
-        .map_err(|_| StatusCode::CONFLICT)?
+        .map_err(|_| delegation_conflict(DelegationRefusal::RegistrationRead))?
         .cloned()
-        .ok_or(StatusCode::CONFLICT)?;
+        .ok_or_else(|| delegation_conflict(DelegationRefusal::RegistrationMissing))?;
     if owner.generation != req.generation {
-        return Err(StatusCode::CONFLICT);
+        return Err(delegation_conflict(DelegationRefusal::Generation));
     }
     st.manager
         .verify_execution_ownership(&owner, &st.journal)
         .await
-        .map_err(|_| StatusCode::CONFLICT)?;
+        .map_err(|_| delegation_conflict(DelegationRefusal::OwnershipLive))?;
     let allocation_tokens = req
         .allocations
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let keys = st.registered_keys(&registration)?;
+    let keys = st
+        .registered_keys(&registration)
+        .map_err(|_| delegation_conflict(DelegationRefusal::RegisteredKeys))?;
     let checked = access::verify_delegation(
         &req.grant,
         &allocation_tokens,
@@ -445,15 +469,18 @@ async fn delegation(
             authority_epoch: &registration.epoch,
         },
     )
-    .map_err(|_| StatusCode::CONFLICT)?;
+    .map_err(|error| {
+        tracing::warn!(target: "execution_installation", diagnostic = "execution_installation", stage = "host_verification", category = ?error, "execution installation refused");
+        delegation_conflict(DelegationRefusal::Verification)
+    })?;
     let protection = st
         .journal
         .lock()
         .await
         .protection(&checked.grant().idle.admission)
-        .map_err(|_| StatusCode::CONFLICT)?
+        .map_err(|_| delegation_conflict(DelegationRefusal::ProtectionRead))?
         .cloned()
-        .ok_or(StatusCode::CONFLICT)?;
+        .ok_or_else(|| delegation_conflict(DelegationRefusal::ProtectionMissing))?;
     if checked.grant().id != req.id
         || protection.installation != req.installation
         || protection.generation != req.generation
@@ -464,7 +491,7 @@ async fn delegation(
             checked.grant().exp,
         )
     {
-        return Err(StatusCode::CONFLICT);
+        return Err(delegation_conflict(DelegationRefusal::ProtectionBinding));
     }
     let record = HostDelegation {
         id: req.id,
@@ -480,7 +507,7 @@ async fn delegation(
         .lock()
         .await
         .install_delegation(record.clone(), st.clock()?)
-        .map_err(|_| StatusCode::CONFLICT)?;
+        .map_err(|_| delegation_conflict(DelegationRefusal::JournalInstall))?;
     Ok(Json(record))
 }
 

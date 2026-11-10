@@ -27,6 +27,17 @@ trap 'printf "scoped native: failed phase=%s\n" "$PHASE" >&2' ERR
 cleanup() {
   local rc=$?
   set +e
+  if [ "$rc" != 0 ]; then
+    # Bound both entries and bytes; the parser emits closed categories only.
+    sudo journalctl -u briqyardd --no-pager -n 128 -o cat |
+      python3 hack/scoped-execution-diagnostics.py
+    if sudo test -f "$D/authority-diagnostics.jsonl"; then
+      sudo cat "$D/authority-diagnostics.jsonl" | python3 hack/scoped-execution-diagnostics.py
+    fi
+    if sudo test -f "$D/callback-diagnostics.jsonl"; then
+      sudo cat "$D/callback-diagnostics.jsonl" | python3 hack/scoped-execution-diagnostics.py
+    fi
+  fi
   if [ -n "$AUTHORITY_PID" ]; then
     local authority_child
     authority_child=$(sudo cat "$D/authority.pid" 2>/dev/null)
@@ -92,7 +103,7 @@ BRIQYARD_TOKEN=$(sudo cat "$D/host-admin")
 export BRIQYARD_TOKEN
 sudo systemctl restart briqyardd
 PHASE=authority_start
-sudo bash -c 'echo "$$" > "$1/authority.pid"; exec /usr/local/bin/briqyard-fleet --config "$1/authority.yaml" authority' _ "$D" > /dev/null 2>&1 &
+sudo env BRIQYARD_LOG=off,execution_installation=warn bash -c 'umask 077; echo "$$" > "$1/authority.pid"; exec /usr/local/bin/briqyard-fleet --config "$1/authority.yaml" authority > "$1/authority-diagnostics.jsonl" 2>&1' _ "$D" &
 AUTHORITY_PID=$!
 # A single bounded startup observation; no exec request is retried.
 PHASE=host_ready
@@ -119,7 +130,7 @@ PHASE=renewable_service_callback_guest
 sudo env RUNNER_ENVIRONMENT=github-hosted BRIQYARD_NATIVE_DIRECTORY="$D" \
   BRIQYARD_NATIVE_DRIVER="$DRIVER" BRIQYARD_NATIVE_NAMESPACE="$T" \
   BRIQYARD_NATIVE_MACHINE="$M" BRIQYARD_NATIVE_SIBLING="$S" \
-  timeout 210 "$FLEET_TEST" --ignored --exact execution_service::native::renewable_service_callback_host_guest --nocapture
+  bash -c 'umask 077; exec timeout 210 "$1" --ignored --exact execution_service::native::renewable_service_callback_host_guest --nocapture 2> "$2/callback-diagnostics.jsonl"' _ "$FLEET_TEST" "$D"
 PHASE=renewable_side_effects
 [ "$(briqyard machine exec "$M" -- wc -l /tmp/scoped-renewable-counter | awk '{print $1}')" = 3 ]
 PHASE=host_regressions

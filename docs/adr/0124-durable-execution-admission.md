@@ -808,3 +808,13 @@ The native fixture requests at most 60 seconds of protection per initial or
 continuation admission, matching the production installer. Longer commands renew
 that bounded protection; the fixture does not bypass the installer with a single
 120-second receipt. Renewable discovery also requests the live guest capability.
+
+
+## Bounded installation diagnostics
+
+Installer refusals retain the existing HTTP status and fail-closed checks. Structured
+warnings name only fixed installer error classes, verifier variants and host refusal
+stages. They never include requests, signed credentials, destinations or error text.
+The disposable native fixture collects these categories through a byte- and line-bound
+allowlist parser. Unknown events and fields are discarded. The diagnostic does not
+retry an installation or establish readiness; a refusal still ends that attempt.
