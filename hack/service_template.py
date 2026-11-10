@@ -180,7 +180,7 @@ def e2e():
         check('source serves again after the refusal', 'hostname=' in http(b['ip'], timeout=3))
     except Exception as e:
         check('source serves again after the refusal', False, str(e))
-    cli('exec', SRC, '--', 'sh', '-c', 'pkill nc; true')
+    cli('exec', SRC, '--', 'sh', '-c', 'pkill nc; pkill -f "sleep 360[0]"; sleep 1; true')
     # 3b: a process outside the workload cgroup (an exec session's) refuses the seal.
     cli('exec', SRC, '--', 'sh', '-c', '(setsid sleep 601 </dev/null >/dev/null 2>&1 &); sleep 1')
     try:
