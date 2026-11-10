@@ -15,11 +15,10 @@ impl CommandDeadline {
         expires_at: u64,
         sample: &briqyard_api::execution::clock::ClockSample,
     ) -> Result<Self> {
-        let expires = Duration::from_secs(expires_at)
-            .checked_sub(sample.uncertainty)
-            .ok_or_else(|| anyhow!("invalid execution deadline"))?;
+        let expires = Duration::from_secs(expires_at);
         let remaining = expires
-            .checked_sub(sample.wall)
+            .checked_sub(sample.uncertainty)
+            .and_then(|upper| upper.checked_sub(sample.wall))
             .ok_or_else(|| anyhow!("execution authorization expired"))?;
         anyhow::ensure!(
             !remaining.is_zero()
@@ -54,10 +53,9 @@ impl CommandDeadline {
     ) -> Result<Self> {
         let expires = std::time::UNIX_EPOCH
             .checked_add(Duration::from_secs(expires_at))
-            .and_then(|t| t.checked_sub(Duration::from_secs(uncertainty)))
             .ok_or_else(|| anyhow!("invalid execution deadline"))?;
         let remaining = expires
-            .duration_since(wall)
+            .duration_since(wall + Duration::from_secs(uncertainty))
             .map_err(|_| anyhow!("execution authorization expired"))?;
         if remaining.is_zero()
             || remaining > Duration::from_secs(briqyard_api::execution::MAX_COMMAND_SECONDS)
@@ -74,6 +72,13 @@ impl CommandDeadline {
     pub fn remaining(&self) -> Result<Duration> {
         let sample = briqyard_api::execution::clock::ClockSample::read()
             .ok_or_else(|| anyhow!("qualified execution clock unavailable"))?;
+        self.remaining_at(&sample, tokio::time::Instant::now())
+    }
+    fn remaining_at(
+        &self,
+        sample: &briqyard_api::execution::clock::ClockSample,
+        now: tokio::time::Instant,
+    ) -> Result<Duration> {
         let upper = std::time::UNIX_EPOCH + sample.wall + sample.uncertainty;
         let wall = self
             .expires
@@ -81,7 +86,7 @@ impl CommandDeadline {
             .map_err(|_| anyhow!("execution authorization expired"))?;
         let monotonic = self
             .instant
-            .checked_duration_since(tokio::time::Instant::now())
+            .checked_duration_since(now)
             .ok_or_else(|| anyhow!("execution authorization expired"))?;
         let remaining = wall.min(monotonic);
         if remaining.is_zero() {
@@ -148,6 +153,34 @@ mod tests {
     use crate::guestc::write_request;
     use briqyard_api::guest::Request;
     use tokio::io::AsyncReadExt;
+    #[test]
+    fn repeated_checks_subtract_uncertainty_once_without_extending_monotonic_time() {
+        let sample = briqyard_api::execution::clock::ClockSample {
+            wall: Duration::from_secs(1000),
+            monotonic: std::time::Instant::now(),
+            uncertainty: Duration::from_secs(2),
+        };
+        let deadline = CommandDeadline::from_sample(1010, &sample).unwrap();
+        let origin = tokio::time::Instant::from_std(sample.monotonic);
+        assert_eq!(
+            deadline.remaining_at(&sample, origin).unwrap(),
+            Duration::from_secs(8)
+        );
+        let later = briqyard_api::execution::clock::ClockSample {
+            wall: Duration::from_secs(1001),
+            monotonic: sample.monotonic + Duration::from_secs(1),
+            uncertainty: Duration::from_secs(1),
+        };
+        assert_eq!(
+            deadline
+                .remaining_at(&later, origin + Duration::from_secs(1))
+                .unwrap(),
+            Duration::from_secs(7)
+        );
+        assert!(deadline
+            .remaining_at(&later, origin + Duration::from_secs(8))
+            .is_err());
+    }
     #[test]
     fn qualified_sample_anchors_both_clocks_and_keeps_fractional_deadline() {
         let sample = briqyard_api::execution::clock::ClockSample {

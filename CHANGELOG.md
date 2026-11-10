@@ -20,6 +20,10 @@
 
 - add dormant renewable operation continuation (#211) ([42e965a5](https://github.com/briq-cloud/briqyard/commit/42e965a5fabf7d0078ad2206cdd2dce10d06ea93))
 
+### Fixes
+
+- Apply clock uncertainty once per scoped command deadline check. Retain the signed wall expiry separately from the initial monotonic cap, preventing premature quiet-command termination without extending authorization.
+
 ## 0.2.2 — 2026-11-09
 
 ### Upgrade notes
