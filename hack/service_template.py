@@ -12,7 +12,7 @@ BASE = os.getenv('BRIQYARD_URL', 'http://127.0.0.1:7420')
 HEAD = {'Content-Type': 'application/json'}
 if os.getenv('BRIQYARD_TOKEN'):
     HEAD['Authorization'] = 'Bearer ' + os.environ['BRIQYARD_TOKEN']
-IMAGE = os.getenv('FIXTURE_IMAGE', 'docker.io/library/alpine:3')
+IMAGE = os.getenv('FIXTURE_IMAGE', 'docker.io/library/busybox:1.36')
 NS = 'svc-tpl-%d' % os.getpid()
 
 
