@@ -402,6 +402,7 @@ mod tests {
                 if r.host_instance == owner.host_instance && journal.authority_intent_ready(id).unwrap()).then(|| id.clone()))
             .unwrap();
         let control = OwnershipControl {
+            require_renewable: false,
             host_instance: owner.host_instance.clone(),
             installation: owner.installation.clone(),
             generation: owner.generation,

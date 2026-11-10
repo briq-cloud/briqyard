@@ -242,6 +242,9 @@ pub struct PublicResource {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DiscoveryRequest {
+    /// Require the live primary guest renewable protocol before binding resources.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_renewable: bool,
     pub host_instance: String,
     pub primary_id: String,
     pub seeds: Vec<PublicSeed>,

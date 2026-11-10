@@ -173,6 +173,7 @@ where
                     version: briqyard_api::version::GUEST_VERSION.into(),
                     file_stream_v1: true,
                     exec_stream_v1: true,
+                    exec_renewable_v1: true,
                     assigned_run: st.assigned_run.clone(),
                     clone_status,
                     sha256,

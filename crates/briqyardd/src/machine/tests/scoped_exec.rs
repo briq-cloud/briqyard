@@ -197,7 +197,49 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
         primary: &target,
         required: &required,
     };
+    // A retained ordinary guest predates launch identities and may support streaming
+    // while lacking the distinct renewable spawn/ACK protocol.
+    entry.rec.lock().unwrap().launch_identity = None;
+    h.host.exec_stream_v1.store(true, Relaxed);
+    let before_discovery = std::fs::read(path.join("journal.json")).unwrap();
+    let error =
+        h.m.discover_execution_resources(scope, &journal, true)
+            .await
+            .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not support exec_renewable_v1"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read(path.join("journal.json")).unwrap(),
+        before_discovery
+    );
+    assert!(!h.host.calls().iter().any(|c| c.starts_with("exec ")));
+    h.host.exec_renewable_v1.store(true, Relaxed);
+    let pings = h
+        .host
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("ping "))
+        .count();
+    let capable =
+        h.m.discover_execution_resources(scope, &journal, true)
+            .await
+            .unwrap();
+    assert_eq!(
+        h.host
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("ping "))
+            .count(),
+        pings + 1,
+        "dependencies must not require the primary's command protocol"
+    );
+    h.host.exec_renewable_v1.store(false, Relaxed);
     let complete = h.m.execution_resources(scope, &journal).await.unwrap();
+    assert_eq!(complete, capable);
     assert_eq!(complete.resources.len(), 3);
     assert!(complete
         .resources
@@ -473,6 +515,70 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
         .unwrap();
     assert_eq!(entry.snapshot().state, state::RUNNING);
     let before_consume = std::fs::read(path.join("journal.json")).unwrap();
+    // Discovery evidence cannot substitute for the live dispatch capability check.
+    // A renewable bundle is valid, but refusal must precede any journal debit or
+    // guest command even when streaming remains available on the retained guest.
+    let mut renewable_grant = grant.clone();
+    renewable_grant.limits.execution_mode = Some(ExecutionMode::RenewableExecV1);
+    let renewable_grant_token = sign(&renewable_grant, GRANT_TYPE, 1, "central-test");
+    let mut renewable_permit = permit.clone();
+    renewable_permit.limits.execution_mode = Some(ExecutionMode::RenewableExecV1);
+    renewable_permit.grant_digest = token_digest(&renewable_grant_token);
+    renewable_permit.request_digest =
+        access::exec_request_digest(&request, &renewable_permit.limits).unwrap();
+    let renewable_permit_token = sign(&renewable_permit, PERMIT_TYPE, 2, "authority-test");
+    let renewable_context = DispatchContext {
+        request_digest: &renewable_permit.request_digest,
+        ..context
+    };
+    let admission = tokio::sync::RwLock::new(());
+    let host_instance = journal.lock().await.instance().to_owned();
+    let dispatch_error =
+        h.m.renewable_scoped_exec(
+            request.clone(),
+            ScopedCredentials {
+                grant: &renewable_grant_token,
+                permit: &renewable_permit_token,
+                allocations: &tokens,
+            },
+            &trust,
+            ScopedExecutionContext {
+                binding: &renewable_context,
+                scope,
+            },
+            &journal,
+            0,
+            RenewableDispatch {
+                guard: admission.read().await,
+                registry: std::sync::Arc::default(),
+                policy: access::admission::HostOperationPolicy {
+                    host_instance,
+                    ownership: "owner".into(),
+                    ownership_generation: 1,
+                    delegation: "delegation".into(),
+                    delegation_version: 1,
+                    grant_digest: renewable_permit.grant_digest.clone(),
+                    policy_revision: "policy".into(),
+                },
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        dispatch_error
+            .to_string()
+            .contains("does not support exec_renewable_v1"),
+        "{dispatch_error}"
+    );
+    assert_eq!(
+        std::fs::read(path.join("journal.json")).unwrap(),
+        before_consume
+    );
+    assert_eq!(
+        journal.lock().await.status(&permit.admission).unwrap(),
+        None
+    );
+    assert!(!h.host.calls().iter().any(|c| c.starts_with("exec ")));
     let call = || ScopedCredentials {
         grant: &grant_token,
         permit: &permit_token,

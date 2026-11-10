@@ -323,6 +323,39 @@ impl Manager {
         self.scoped_target(&e, ledger.instance())
     }
 
+    /// Caller retains the primary lifecycle lock, but never the journal mutex during I/O.
+    pub(super) async fn require_renewable_guest(
+        &self,
+        entry: &Entry,
+        target: &Target,
+        instance: &str,
+    ) -> Result<(), MError> {
+        if self.scoped_target(entry, instance)? != *target {
+            return Err(MError::Conflict("execution target changed".into()));
+        }
+        let sock = entry
+            .live
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| invalid("no live execution identity"))?
+            .vsock
+            .clone();
+        let pong = tokio::time::timeout(Duration::from_secs(10), self.inner.guest.ping(&sock))
+            .await
+            .map_err(|_| MError::Conflict("renewable guest capability timeout".into()))?
+            .map_err(not_running_if_unreachable)?;
+        if self.scoped_target(entry, instance)? != *target {
+            return Err(MError::Conflict("execution target changed".into()));
+        }
+        if pong.kind != "pong" || !pong.exec_renewable_v1 {
+            return Err(MError::Conflict(
+                "running guest does not support exec_renewable_v1".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn scoped_journal(&self, journal: &Journal) -> Result<(), MError> {
         if journal.role() != &access::admission::Role::Host(self.inner.host_id.clone()) {
             return Err(invalid("execution journal belongs to another host"));
@@ -501,6 +534,22 @@ impl Manager {
             return Err(invalid(
                 "scoped execution mode requires its exact dispatch path",
             ));
+        }
+        if renewable.is_some() {
+            let instance = ledger.instance().to_owned();
+            drop(ledger);
+            self.require_renewable_guest(entry, context.target, &instance)
+                .await?;
+            ledger = journal.lock().await;
+            self.scoped_journal(&ledger)?;
+            if ledger.instance() != instance {
+                return Err(invalid("execution journal instance changed"));
+            }
+            for (resource, e) in resources.iter().zip(&entries) {
+                if self.scoped_target(e, ledger.instance())? != **resource {
+                    return Err(MError::Conflict("execution target changed".into()));
+                }
+            }
         }
         let digest = access::exec_request_digest(&request, &bundle.permit().limits)
             .map_err(|_| invalid("execution request exceeds its authority"))?;

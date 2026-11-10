@@ -50,7 +50,7 @@ async fn installation_case(renewable: bool) {
     }
 
     async fn endpoint(
-        State(calls): State<Arc<AtomicUsize>>,
+        State((calls, renewable)): State<(Arc<AtomicUsize>, bool)>,
         uri: Uri,
         body: axum::body::Bytes,
     ) -> axum::response::Response {
@@ -130,6 +130,9 @@ async fn installation_case(renewable: bool) {
             .into_response();
         }
         if path.ends_with("/discover") {
+            let request: briqyard_api::execution::DiscoveryRequest =
+                serde_json::from_slice(&body).unwrap();
+            assert_eq!(request.require_renewable, renewable);
             return axum::Json(DiscoveryReceipt {
                 host_instance: "host-instance".into(),
                 primary: target("a"),
@@ -215,7 +218,7 @@ async fn installation_case(renewable: bool) {
         .serve(
             Router::new()
                 .fallback(endpoint)
-                .with_state(server_calls)
+                .with_state((server_calls, renewable))
                 .into_make_service(),
         )
         .await
@@ -260,6 +263,7 @@ async fn installation_case(renewable: bool) {
         Outcome::Ready
     );
     let control = OwnershipControl {
+        require_renewable: renewable,
         host_instance: "host-instance".into(),
         installation: "install".into(),
         generation: 1,

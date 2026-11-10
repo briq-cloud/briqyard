@@ -95,6 +95,9 @@ pub fn validate_discovery_receipt(
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OwnershipControl {
+    /// Trusted installer requirement, retained in the immutable discovery intent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_renewable: bool,
     pub host_instance: String,
     pub installation: String,
     pub generation: u64,
@@ -107,6 +110,7 @@ pub struct OwnershipControl {
 impl OwnershipControl {
     pub fn discovery_request(&self) -> DiscoveryRequest {
         DiscoveryRequest {
+            require_renewable: self.require_renewable,
             host_instance: self.host_instance.clone(),
             primary_id: self.primary_id.clone(),
             seeds: self.seeds.clone(),
@@ -429,6 +433,7 @@ mod tests {
     }
     fn control(instance: &str) -> OwnershipControl {
         OwnershipControl {
+            require_renewable: false,
             host_instance: instance.into(),
             installation: "install".into(),
             generation: 1,
@@ -524,6 +529,46 @@ mod tests {
                 clock(),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn renewable_requirement_defaults_false_and_is_retained_by_discovery() {
+        let legacy = control("instance");
+        let wire = serde_json::to_value(&legacy).unwrap();
+        assert!(wire.get("require_renewable").is_none());
+        let mut required: OwnershipControl = serde_json::from_value(wire).unwrap();
+        assert!(!required.require_renewable);
+        required.require_renewable = true;
+        assert!(required.discovery_request().require_renewable);
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal =
+            Journal::open(&dir.path().join("issuer"), Role::Authority("region".into())).unwrap();
+        registered(&mut journal, "instance");
+        assert!(journal
+            .begin_discovery_intent(
+                "discovery",
+                "host",
+                "registration",
+                required.clone(),
+                clock()
+            )
+            .unwrap());
+        assert!(
+            journal
+                .discovery_intent("discovery")
+                .unwrap()
+                .unwrap()
+                .request
+                .require_renewable
+        );
+        required.require_renewable = false;
+        assert!(journal
+            .begin_discovery_intent("discovery", "host", "registration", required, clock())
+            .is_err());
+        let request: DiscoveryRequest =
+            serde_json::from_value(serde_json::to_value(legacy.discovery_request()).unwrap())
+                .unwrap();
+        assert!(!request.require_renewable);
     }
 
     #[test]

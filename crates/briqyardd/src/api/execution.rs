@@ -283,12 +283,13 @@ async fn discover(
     let required = public.iter().map(|p| p.target.clone()).collect::<Vec<_>>();
     let resource_set = st
         .manager
-        .execution_resources(
+        .discover_execution_resources(
             ExecutionResourceScope {
                 primary: &primary,
                 required: &required,
             },
             &st.journal,
+            req.require_renewable,
         )
         .await
         .map_err(|_| StatusCode::CONFLICT)?;

@@ -21,7 +21,7 @@ a different signed allocation cannot replace the same ID. This acknowledges quot
 only. It does not install ownership metadata, freeze membership or acknowledge protection,
 and is insufficient to make a delegation ready for dispatch.
 
-The host consumes that admission durably before its first guest frame. Both boundaries
+The host consumes that admission durably before its first execution frame. Both boundaries
 use `briqyard-api/execution-admission`; guest builds do not enable this feature.
 
 | Boundary | Required evidence |
@@ -83,7 +83,7 @@ through initial dispatch. Submitted credentials cannot construct this snapshot.
 Remote resource members are refused until distributed resource fencing exists.
 All frozen resources remain in use while the command connection lives.
 
-The host holds its journal fence through the initial guest write. Stop/move/restore use
+The host holds its journal fence through the initial command write. Stop/move/restore use
 the same lifecycle locks. After the write, explicit lifecycle operations may terminate an
 accepted command; its receipt remains consumed regardless of the resulting connection error.
 
@@ -696,6 +696,19 @@ consumption-time monotonic operation cap; a newer wall sample cannot reconstruct
 elapsed authority. It then publishes the exact live lease and releases the admission read
 guard, allowing continuation and revocation while output is collected. Legacy
 operations keep their existing operation, fixed deadline and lock scope.
+
+Guest upgrades do not replace an init already running in an adopted microVM.
+A `pong` therefore advertises `exec_renewable_v1` explicitly, defaulting to false
+when omitted. Streaming support or a daemon version is insufficient. The trusted
+installer's discovery control accepts `require_renewable` (default false) and
+retains it in the immutable discovery intent and host request. Renewable callers
+must request it before reserving execution capacity. Under the resource lifecycle
+locks, discovery checks only the primary's live capability; dependencies need no
+renewable protocol. Legacy discovery and fixed-deadline execution remain available.
+Renewable dispatch repeats the bounded read-only ping under the exact run's
+lifecycle fence before admission consumption or command creation. Neither check
+holds the journal mutex across guest I/O; both revalidate run and journal identity
+before using the result. No compatibility probe starts a command.
 
 A live owner exists only for that one connected execution. Every I/O poll checks a
 fresh qualified clock; a separate timer and notification interrupt quiet I/O.

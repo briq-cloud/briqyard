@@ -312,6 +312,22 @@ mod tests {
         assert!(serde_json::from_value::<Resize>(json!({"cols": 100})).is_err());
     }
     #[test]
+    fn renewable_guest_capability_is_explicit_and_independent_of_streaming() {
+        let old: crate::guest::Response =
+            serde_json::from_str(r#"{"type":"pong","version":"99.0.0","exec_stream_v1":true}"#)
+                .unwrap();
+        assert!(serde_json::to_value(old)
+            .unwrap()
+            .get("exec_renewable_v1")
+            .is_none());
+        let current: crate::guest::Response =
+            serde_json::from_str(r#"{"type":"pong","exec_renewable_v1":true}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(current).unwrap()["exec_renewable_v1"],
+            true
+        );
+    }
+    #[test]
     fn exec_stream_capability_defaults_to_false() {
         let old: crate::guest::Response =
             serde_json::from_str(r#"{"type":"pong","version":"99.0.0"}"#).unwrap();

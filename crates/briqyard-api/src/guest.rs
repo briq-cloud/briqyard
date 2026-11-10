@@ -224,6 +224,9 @@ pub struct Response {
     pub file_stream_v1: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub exec_stream_v1: bool,
+    /// Distinct spawn-acknowledged renewable execution protocol on the live init.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exec_renewable_v1: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub cancelled: bool,
     /// Stable failure category for a versioned streaming terminal error.
