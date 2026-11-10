@@ -11,7 +11,9 @@ legacy stopped records need no invented process or boot receipt. Unknown authori
 fails closed. Assigned, template and source-created machines keep their own lifecycle.
 
 One crash-durable machine record contains the pending next-start target, cleared
-current suspend eligibility and the receipt. There is no pull or boot. The data disk and backups stay unchanged. A no-op target still requires settlement and advances the version.
+current suspend eligibility and the receipt. Optional `probes` replaces the probes in
+that same durable record; omitted preserves them and `{}` clears them. Probe validation
+precedes all effects. Omitted probes retain the existing request commitment bytes. There is no pull or boot. The data disk and backups stay unchanged. A no-op target still requires settlement and advances the version.
 Historical snapshots remain available. Ordinary PATCH semantics remain unchanged.
 
 Accepted nonces remain reserved. A canonical request commitment includes the machine,

@@ -473,3 +473,20 @@ fn stopped_update_requires_complete_explicit_fields() {
     )
     .is_ok());
 }
+
+#[test]
+fn stopped_update_probes_omitted_preserve_the_legacy_commitment_shape() {
+    let legacy = serde_json::json!({"claim_nonce":"n","image":"alpine","env":{}});
+    let req: StoppedUpdateRequest = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(req.probes.is_none());
+    assert_eq!(
+        serde_json::to_string(&req).unwrap(),
+        r#"{"claim_nonce":"n","image":"alpine","env":{}}"#
+    );
+    assert_eq!(serde_json::to_value(&req).unwrap(), legacy);
+    let clear: StoppedUpdateRequest = serde_json::from_value(
+        serde_json::json!({"claim_nonce":"n","image":"alpine","env":{},"probes":{}}),
+    )
+    .unwrap();
+    assert!(clear.probes.unwrap().is_empty());
+}
