@@ -42,7 +42,7 @@ A seal (`snapshot` with `memory` and `template`) does, in the guest init:
 5. Sync, pause and snapshot. The source is then stopped, sealed or not: a parked source never
    serves again. A source that keeps running is out of scope.
 
-A failure before step 4 completes (a refusal in step 3 included) restores the service. A failure after it stops the source.
+A refusal in step 3 or a failed freeze restores the service. A failure in step 4 is terminal: the guest answers `park_unrecoverable`, leaves the workload frozen and does not try to put the network, names and identity files (machine-id, SSH host keys, random seeds) back, and the daemon stops the source. The daemon allows the park hook's timeout plus 30 s for the freeze, the checks and the identity removal.
 
 A clone restores strictly, then crosses 0072's identity barrier unchanged
 (`clone_configure_v1`). `clone_activate_v1` for a service writes `/run/briqyard/clone.json`
@@ -51,10 +51,9 @@ thaws it on exit 0. Readiness is the resume exit plus a live main process.
 
 ## Failure
 
-A resume that exits non-zero or times out is terminal for that clone: the workload is never
-thawed, its VMM is ended, and the machine is `error` with reason `clone_hook_failed`, so a
-caller can tell it from a workload exit. Capacity is released after the VMM exit is
-confirmed, as for any clone. Other clones are unaffected; there is no fleet transaction.
+A resume that exits non-zero or times out is terminal for that clone: the runtime does not thaw the workload on a hook failure, its VMM is ended, and the machine is `error` with reason `clone_hook_failed`, so a
+caller can tell it from a workload exit. Capacity of a clone whose resume hook failed is released once its VMM exit is
+confirmed; any other activation failure keeps the reservation until the clone is destroyed. Other clones are unaffected; there is no fleet transaction.
 
 The clone's network is activated before `resume` runs, so the clone has its address, and
 its egress policy (none for a template clone), from activation until its VMM ends: a window
@@ -86,6 +85,17 @@ resume, resets the kernel RNG and gives each clone a fresh MAC, address, hostnam
 machine-id and wall clock. The application closes and re-creates outbound sessions, reseeds
 its own random generators, regenerates tokens and identifiers derived from the host, and
 tolerates a clock jump. The runtime claims no userspace randomness safety.
+
+If the thaw after a successful `resume` is requested but not confirmed within 10 s, the clone
+is also `clone_hook_failed`, with the message `thaw unconfirmed, the workload may have run`.
+
+## Open before enabling the flag
+
+- Exec admission race: an exec admitted just before park can spawn after the process scan.
+  Needs an in-flight exec counter that park waits on.
+- Daemon kill between the guest's acknowledgement and the activation, on real Firecracker.
+- An 8-clone run on a larger host.
+- Native VMGenID, MAC and clock qualification (below).
 
 ## Not qualified
 

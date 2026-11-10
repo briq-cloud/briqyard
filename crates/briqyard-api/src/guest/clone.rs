@@ -9,6 +9,11 @@ pub const SERVICE_READY_V1: &str = "service-ready-v1";
 pub const SERVICE_PARK_OP: &str = "service_park_v1";
 /// The `error_code` of a park or resume hook that failed or timed out.
 pub const CLONE_HOOK_FAILED: &str = "clone_hook_failed";
+/// The `error_code` of a park that failed after the freeze, leaving the guest frozen and
+/// without its identity: the caller stops the source.
+pub const PARK_UNRECOVERABLE: &str = "park_unrecoverable";
+/// What the guest may spend after the hook ends: the freezer settling, the identity removal.
+pub const PARK_QUIESCE_S: u64 = 20;
 
 /// The two argv hooks of a service template. Opt-in at creation and immutable.
 /// Both run in the guest as the workload's user, in its environment and working directory.

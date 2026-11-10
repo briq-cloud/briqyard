@@ -92,15 +92,15 @@ impl Manager {
         let Some(profile) = &req.template_build else {
             return Ok(None);
         };
-        if profile == guest::SANDBOX_READY_V1 {
-            return self.sandbox_birth(req, role).map(Some);
-        }
-        let bound = &self.inner.cfg.templates.init_ready_init_sha256;
         if profile != guest::SERVICE_READY_V1 && req.clone_hooks.is_some() {
             return Err(invalid(
                 "clone_hooks belong to the service-ready-v1 profile",
             ));
         }
+        if profile == guest::SANDBOX_READY_V1 {
+            return self.sandbox_birth(req, role).map(Some);
+        }
+        let bound = &self.inner.cfg.templates.init_ready_init_sha256;
         if !self
             .named_memory_profiles()
             .iter()

@@ -285,8 +285,9 @@ fn refusal(code: &str, message: String) -> Response {
     }
 }
 
-/// Runs the park hook, then quiesces. Everything up to the freeze is undone by thawing: a
-/// failed park leaves the service running as it was.
+/// Runs the park hook, then quiesces. A refusal up to and including the checks thaws the
+/// workload: the service keeps running as it was. A failure after them is terminal
+/// (`PARK_UNRECOVERABLE`) and the daemon stops the source.
 pub(super) async fn park(st: &Arc<State>) -> Response {
     let mut gate = st.clone_gate.lock().await;
     if !matches!(*gate, clone::Gate::Service) {
@@ -345,17 +346,13 @@ pub(super) async fn park(st: &Arc<State>) -> Response {
         }
     }
     // Nothing can reconnect from here: the workload is frozen.
-    let machine_id = fs::read("/etc/machine-id").unwrap_or_default();
     if let Err(e) = clone_identity::prepare_builder().await {
-        // Best effort back to a serving service: the addressing and names it booted with.
-        let _ = fs::write("/proc/sys/net/ipv6/conf/eth0/disable_ipv6", b"0");
-        setup_names(&st.cfg);
-        let restored = setup_network(&st.cfg).await.is_ok();
-        let _ = fs::write("/etc/machine-id", machine_id);
-        let _ = set_frozen(false);
-        return Response::error(format!(
-            "park identity removal failed (network restored: {restored}): {e:#}"
-        ));
+        // Terminal: the network, names and identity files are partly gone and are not put
+        // back. The workload stays frozen and the daemon stops this source.
+        return refusal(
+            guest::PARK_UNRECOVERABLE,
+            format!("park identity removal failed after the freeze: {e:#}"),
+        );
     }
     *gate = clone::Gate::Parked;
     Response {
@@ -383,7 +380,9 @@ pub(super) async fn resume(st: Arc<State>) {
             .await
             .map_err(|e| e.to_string())?;
         set_frozen(false).map_err(|e| format!("thaw: {e:#}"))?;
-        wait_frozen(false).await.map_err(|e| format!("thaw: {e:#}"))
+        wait_frozen(false)
+            .await
+            .map_err(|e| format!("thaw unconfirmed, the workload may have run: {e:#}"))
     }
     .await;
     let mut gate = st.clone_gate.lock().await;
@@ -453,6 +452,13 @@ mod tests {
         );
     }
 
+    /// The tests that spawn processes run one at a time: they hold timing assumptions and
+    /// the binary's other timing tests share the machine.
+    static SPAWNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        SPAWNS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn hooked_state(park: &[&str], resume: &[&str], seconds: u32) -> Arc<State> {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect();
         testutil::state_with(Config {
@@ -470,6 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn hook_exit_code_and_stderr_tail_are_reported() {
+        let _one = one_at_a_time();
         let st = hooked_state(&["true"], &["true"], 5);
         run_hook(&st, "park", &["true".into()], 5).await.unwrap();
         let failure = run_hook(
@@ -486,6 +493,7 @@ mod tests {
 
     #[tokio::test]
     async fn hook_timeout_kills_the_whole_group() {
+        let _one = one_at_a_time();
         let st = hooked_state(&["true"], &["true"], 1);
         let marker = std::env::temp_dir().join(format!("hook-orphan-{}", std::process::id()));
         let script = format!("(sleep 2; touch {}) & sleep 30", marker.display());
@@ -503,6 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn park_failure_leaves_the_gate_running() {
+        let _one = one_at_a_time();
         let st = hooked_state(&["false"], &["true"], 5);
         let response = park(&st).await;
         assert_eq!(response.kind, "error");
@@ -531,6 +540,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_resume_never_thaws_and_reports_why() {
+        let _one = one_at_a_time();
         let st = hooked_state(&["true"], &["sh", "-c", "echo no >&2; exit 1"], 5);
         let identity = guest::CloneIdentity {
             generation: "clone-1".into(),

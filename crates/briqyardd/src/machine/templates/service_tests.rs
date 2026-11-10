@@ -83,6 +83,18 @@ async fn a_builder_in_another_runtime_class_is_refused_before_anything_is_create
 }
 
 #[tokio::test]
+async fn hooks_on_another_profile_are_refused() {
+    let h = harness(true).await;
+    let mut req = builder_request(&h);
+    req.template_build = Some(guest::SANDBOX_READY_V1.into());
+    let error = h.m.create_made(req).await.unwrap_err();
+    assert!(
+        error.to_string().contains("clone_hooks belong to"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn the_profile_is_off_unless_the_flag_is_on() {
     let off = harness(false).await;
     assert_eq!(off.m.named_memory_profiles(), ["init-ready-v1"]);

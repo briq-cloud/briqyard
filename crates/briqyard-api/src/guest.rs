@@ -26,7 +26,7 @@ mod clone;
 mod destination;
 pub use clone::{
     CloneConfigure, CloneHooks, CloneIdentity, CloneStatus, CLONE_HOOK_FAILED, INIT_READY_V1,
-    SERVICE_PARK_OP, SERVICE_READY_V1,
+    PARK_QUIESCE_S, PARK_UNRECOVERABLE, SERVICE_PARK_OP, SERVICE_READY_V1,
 };
 pub use destination::{DestinationBind, DestinationFile, SANDBOX_READY_V1};
 

@@ -103,7 +103,8 @@ impl Manager {
         {
             return Err(invalid("service is not running unparked"));
         }
-        let limit = Duration::from_secs(u64::from(hooks.park_timeout_s) + 15);
+        let limit =
+            Duration::from_secs(u64::from(hooks.park_timeout_s) + guest::PARK_QUIESCE_S + 10);
         let request = guest::Request {
             op: guest::SERVICE_PARK_OP.into(),
             ..Default::default()
@@ -115,6 +116,10 @@ impl Manager {
             .await;
         let parked = match answer {
             Ok(a) if a.kind == "error" => {
+                if a.error_code == guest::PARK_UNRECOVERABLE {
+                    // Frozen and without its identity: it never serves again.
+                    self.stop_parked(e).await;
+                }
                 return Err(MError::Conflict(format!(
                     "service park refused ({}): {}",
                     if a.error_code.is_empty() {
