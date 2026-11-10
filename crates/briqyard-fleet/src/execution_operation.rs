@@ -12,8 +12,8 @@ use briqyard_api::{
         admission::{AuthorityPayload, OperationIntent, OperationPhase, PreparedAdmission},
         channel::{AdmissionStatus, BundleRequest, Dispatch, Prepare, StatusRequest},
         exec_request_digest, token_digest, verify_delegation, AllocationRef, Clock,
-        DelegationContext, DispatchContext, DurableIssuer, IssueCredentials, IssueError, Operation,
-        Permit, Trust, MAX_BODY_BYTES,
+        DelegationContext, DispatchContext, DurableIssuer, IssueCredentials, IssueError, Limits,
+        Operation, OutputMode, Permit, Trust, MAX_BODY_BYTES,
     },
     ExecRequest, ExecResult,
 };
@@ -242,7 +242,6 @@ impl Coordinator<'_> {
             return Err(Error::Binding);
         }
         let limits = checked.grant().limits.clone();
-        let max_output_bytes = limits.max_output_bytes;
         let digest = exec_request_digest(&control.request, &limits).map_err(|_| Error::Binding)?;
         let exp = checked
             .allocations()
@@ -288,7 +287,7 @@ impl Coordinator<'_> {
             operation: Operation::Exec,
             request_digest: digest.clone(),
             metadata_revision: owner.metadata_revision.clone(),
-            limits,
+            limits: limits.clone(),
         };
         let bundle = BundleRequest {
             installation: owner.installation.clone(),
@@ -418,12 +417,7 @@ impl Coordinator<'_> {
                     .unconfirmed(&control.id, fresh_clock().map_err(|_| Error::Unconfirmed)?)
             }
         };
-        let output_bytes = result
-            .stdout
-            .len()
-            .checked_add(result.stderr.len())
-            .ok_or(Error::Unconfirmed)?;
-        if output_bytes as u64 > max_output_bytes {
+        if !output_within_limits(&result, &limits) {
             return self.unconfirmed(&control.id, fresh_clock().map_err(|_| Error::Unconfirmed)?);
         }
         // Retain only a commitment to the bounded terminal response.
@@ -453,5 +447,52 @@ impl Coordinator<'_> {
             .mark_operation_unconfirmed(id, clock)
             .map_err(|_| Error::Journal)?;
         Err(Error::Unconfirmed)
+    }
+}
+
+fn output_within_limits(result: &ExecResult, limits: &Limits) -> bool {
+    match limits.output_mode {
+        Some(OutputMode::CapturePerStreamV1) => {
+            limits.max_output_bytes.checked_mul(3).is_some_and(|cap| {
+                result.stdout.len() as u64 <= cap && result.stderr.len() as u64 <= cap
+            })
+        }
+        None => result
+            .stdout
+            .len()
+            .checked_add(result.stderr.len())
+            .is_some_and(|bytes| bytes as u64 <= limits.max_output_bytes),
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    #[test]
+    fn capture_allows_utf8_expansion_per_stream_but_legacy_counts_combined_bytes() {
+        let mut limits = Limits {
+            max_duration_seconds: 1,
+            max_input_bytes: 0,
+            max_output_bytes: 4,
+            output_mode: Some(OutputMode::CapturePerStreamV1),
+        };
+        let mut result = ExecResult {
+            stdout: String::from_utf8_lossy(&[0xff; 4]).into_owned(),
+            stderr: String::from_utf8_lossy(&[0xff; 4]).into_owned(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        assert!(output_within_limits(&result, &limits));
+        result.stderr.push('x');
+        assert!(!output_within_limits(&result, &limits));
+        result.stdout = "\0".repeat(4);
+        result.stderr = "\0".repeat(4);
+        assert!(output_within_limits(&result, &limits));
+        limits.output_mode = None;
+        assert!(!output_within_limits(&result, &limits));
+        result.stderr.clear();
+        assert!(output_within_limits(&result, &limits));
+        result.stdout.push('x');
+        assert!(!output_within_limits(&result, &limits));
     }
 }

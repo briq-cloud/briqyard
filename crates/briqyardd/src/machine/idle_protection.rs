@@ -209,7 +209,10 @@ impl Manager {
         let last = bounded_last_use(r.last_used_at, end);
         // The lower bound on wall time must have passed the protected deadline.
         let lower = if end.is_some() {
-            now - chrono::TimeDelta::milliseconds(CLOCK_SKEW_MS as i64)
+            let Some(lower) = qualified_lower() else {
+                return false;
+            };
+            lower
         } else {
             now
         };
@@ -224,10 +227,15 @@ impl Manager {
         if protection.poisoned {
             return false;
         }
-        protection.end(&r.id).is_none_or(|deadline| {
-            now - chrono::TimeDelta::milliseconds(CLOCK_SKEW_MS as i64) > deadline
-        })
+        protection
+            .end(&r.id)
+            .is_none_or(|deadline| qualified_lower().is_some_and(|lower| lower > deadline))
     }
+}
+
+fn qualified_lower() -> Option<DateTime<Utc>> {
+    let ms = execution::clock::ClockSample::read()?.lower_ms()?;
+    DateTime::from_timestamp_millis(ms.try_into().ok()?)
 }
 
 fn bounded_last_use(

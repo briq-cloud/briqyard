@@ -193,7 +193,7 @@ impl Manager {
         &self,
         request: ExecutionProtectionRequest<'_>,
         journal: &tokio::sync::Mutex<Journal>,
-        clock_uncertainty_seconds: u64,
+        _clock_uncertainty_seconds: u64,
     ) -> Result<ExecutionProtectionReceipt, MError> {
         self.validate_execution_scope(request.scope)?;
         let targets = request.resources;
@@ -236,14 +236,16 @@ impl Manager {
         if entry.snapshot().metadata.get("briq_id").map(String::as_str) != Some(request.subject) {
             return Err(MError::Conflict("execution subject changed".into()));
         }
-        execution_clock(clock_uncertainty_seconds)?;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| invalid("execution clock unavailable"))?
-            .as_millis();
+        let sample = access::clock::ClockSample::read()
+            .ok_or_else(|| invalid("qualified execution clock unavailable"))?;
+        let now_ms = u128::from(
+            sample
+                .upper_ms()
+                .ok_or_else(|| invalid("execution clock range"))?,
+        );
         let expires_at_ms = request.expires_at_ms;
-        if u128::from(expires_at_ms) <= now_ms + u128::from(clock_uncertainty_seconds) * 1000
-            || u128::from(expires_at_ms) > now_ms + 60_000
+        if u128::from(expires_at_ms) <= now_ms
+            || u128::from(expires_at_ms) > now_ms + u128::from(access::MAX_COMMAND_SECONDS) * 1000
         {
             return Err(invalid("execution protection interval exceeds policy"));
         }
@@ -427,7 +429,11 @@ impl Manager {
         if entry.snapshot().metadata.get("briq_id").map(String::as_str) != Some(context.subject) {
             return Err(MError::Conflict("execution subject changed".into()));
         }
-        let clock = execution_clock(clock_uncertainty_seconds)?;
+        let sample = access::clock::ClockSample::read()
+            .ok_or_else(|| invalid("qualified execution clock unavailable"))?;
+        let clock = sample
+            .interval()
+            .ok_or_else(|| invalid("execution clock range"))?;
         let bundle = access::verify_bundle(
             credentials.grant,
             credentials.permit,
@@ -442,7 +448,7 @@ impl Manager {
         if digest != context.request_digest {
             return Err(invalid("execution request commitment mismatch"));
         }
-        let deadline = guestc::CommandDeadline::new(bundle.permit().exp, clock.uncertainty)
+        let mut deadline = guestc::CommandDeadline::from_sample(bundle.permit().exp, &sample)
             .map_err(not_running_if_unreachable)?;
         let snapshot = self.execution_namespace_snapshot(&context.resource_set.resources)?;
         self.validate_execution_set_locked(
@@ -478,7 +484,7 @@ impl Manager {
         // This fsync is the final no-replay boundary. Every subsequent failure is an
         // uncertain consumed outcome, including cancellation before any guest frame.
         ledger
-            .consume(&bundle, clock)
+            .consume(&bundle, execution_clock(clock_uncertainty_seconds)?)
             .map_err(|_| MError::Conflict("execution admission refused; query status".into()))?;
         let in_use = entries
             .iter()
@@ -492,7 +498,7 @@ impl Manager {
             .ok_or_else(|| MError::NotRunning("execution run ended".into()))?;
         // Recheck after synchronous durable I/O; timeout_at alone polls its inner
         // future before deciding that its deadline has passed.
-        deadline.check().map_err(|_| {
+        deadline.refresh().map_err(|_| {
             MError::Conflict("execution admission consumed after expiry; outcome unresolved".into())
         })?;
         let remaining_ms = deadline
@@ -527,10 +533,15 @@ impl Manager {
         // The allocation and lifecycle fences covered the initial guest frame.
         drop(ledger);
         drop(turns);
-        let out = tokio::time::timeout_at(
-            deadline.instant,
-            guestc::collect_limited(&mut conn, bundle.permit().limits.max_output_bytes),
-        )
+        let out = tokio::time::timeout_at(deadline.instant, async {
+            let limits = &bundle.permit().limits;
+            match limits.output_mode {
+                Some(api::execution::OutputMode::CapturePerStreamV1) => {
+                    guestc::collect_capture(&mut conn, limits.max_output_bytes).await
+                }
+                None => guestc::collect_limited(&mut conn, limits.max_output_bytes).await,
+            }
+        })
         .await
         .map_err(|_| {
             MError::NotRunning("execution authorization expired; outcome unresolved".into())
@@ -553,15 +564,10 @@ impl Manager {
         })
     }
 }
-fn execution_clock(uncertainty: u64) -> Result<access::Clock, MError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| invalid("execution clock unavailable"))?
-        .as_secs();
-    if uncertainty > 5 {
-        return Err(invalid("execution clock uncertainty exceeds policy"));
-    }
-    Ok(access::Clock { now, uncertainty })
+fn execution_clock(_uncertainty: u64) -> Result<access::Clock, MError> {
+    access::clock::ClockSample::read()
+        .and_then(|sample| sample.interval())
+        .ok_or_else(|| invalid("qualified execution clock unavailable"))
 }
 
 // Other lifecycle operations may hold a machine while starting its gateway. Never

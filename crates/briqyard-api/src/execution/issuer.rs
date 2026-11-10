@@ -22,6 +22,15 @@ pub enum IssueError {
     Journal(#[from] admission::Error),
 }
 impl DurableIssuer {
+    pub fn from_pkcs8(
+        journal: admission::Journal,
+        bytes: &[u8],
+        kid: String,
+    ) -> Result<Self, admission::Error> {
+        let key = Ed25519KeyPair::from_pkcs8(bytes).map_err(|_| admission::Error::Binding)?;
+        Self::new(journal, key, kid)
+    }
+
     pub fn new(
         journal: admission::Journal,
         key: Ed25519KeyPair,
@@ -31,6 +40,10 @@ impl DurableIssuer {
             return Err(admission::Error::Binding);
         }
         Ok(Self { journal, key, kid })
+    }
+    pub fn public_key(&self) -> &[u8] {
+        use ring::signature::KeyPair;
+        self.key.public_key().as_ref()
     }
     pub fn instance(&self) -> &str {
         self.journal.instance()

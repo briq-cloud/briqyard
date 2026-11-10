@@ -252,6 +252,9 @@ impl Journal {
     }
 
     pub fn authority_intent_ready(&self, id: &str) -> Result<bool, Error> {
+        if self.installation_uncertain("authority", id) {
+            return Ok(false);
+        }
         let Some(intent) = self.authority_intent(id)? else {
             return Ok(false);
         };

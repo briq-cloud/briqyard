@@ -962,10 +962,12 @@ def required(config):
             needed = 3
         elif marker == {"schema": 4, "protocol": "assigned-update-v3"} and type(marker["schema"]) is int:
             needed = 4
+        elif marker == {"schema": 5, "protocol": "scoped-execution-v1"} and type(marker["schema"]) is int:
+            needed = 5
         else:
             raise ValueError("invalid assignment protocol floor")
     runs = ("assigned-run-intents", "assigned-runs", "assigned-run-readers")
-    for kind in ("unbound-assignments", "unbound-requests", "machines", "assigned-run-updates") + runs:
+    for kind in ("unbound-assignments", "unbound-requests", "machines", "assigned-run-updates", "execution-idle-protection", "execution-namespace-fence") + runs:
         try:
             entries = list((root / kind).iterdir())
         except FileNotFoundError:
@@ -978,7 +980,9 @@ def required(config):
             record = json.loads(entry.read_bytes())
             if not isinstance(record, dict):
                 raise ValueError("invalid assignment state record")
-            if kind == "assigned-run-updates":
+            if kind in ("execution-idle-protection", "execution-namespace-fence"):
+                needed = max(needed, 5)
+            elif kind == "assigned-run-updates":
                 if type(record.get("schema")) is not int or record["schema"] not in (1, 2, 3):
                     raise ValueError("unsupported assigned update evidence schema")
                 needed = max(needed, 4 if record["schema"] == 3 else 3)
@@ -1042,6 +1046,7 @@ try:
     probe(sys.argv[1], "assigned-run-capabilities", b"assigned-run-v1\n")
     probe(sys.argv[1], "assigned-run-lifecycle-capabilities", b"assigned-run-lifecycle-v1\n")
     probe(sys.argv[1], "assigned-update-capabilities", b"assigned-update-v3\n")
+    probe(sys.argv[1], "scoped-execution-capabilities", b"scoped-execution-v1\n")
 except Exception:
     print("assignment compatibility inspection/probe refused replacement", file=sys.stderr)
     sys.exit(1)

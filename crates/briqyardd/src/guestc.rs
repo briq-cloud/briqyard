@@ -9,6 +9,8 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+#[cfg(test)]
+mod capture_tests;
 mod deadline;
 pub use deadline::CommandDeadline;
 use deadline::ExpiringConnection;
@@ -378,6 +380,37 @@ pub async fn collect<R: AsyncRead + Unpin>(s: &mut R) -> Result<ExecOutput> {
 /// operation closes the connection on exhaustion rather than silently exceeding its cap.
 pub async fn collect_limited<R: AsyncRead + Unpin>(s: &mut R, limit: u64) -> Result<ExecOutput> {
     collect_with_limit(s, Some(limit)).await
+}
+
+/// Retains the first raw bytes of each stream and drains through terminal exit.
+/// The caller must keep the connection and collection under its execution deadline.
+pub async fn collect_capture<R: AsyncRead + Unpin>(s: &mut R, limit: u64) -> Result<ExecOutput> {
+    if limit == 0 || limit > briqyard_api::execution::MAX_CAPTURE_BYTES {
+        return Err(anyhow!("invalid execution capture limit"));
+    }
+    let limit = limit as usize;
+    let mut out = ExecOutput {
+        stdout: Vec::with_capacity(limit),
+        stderr: Vec::with_capacity(limit),
+        code: 0,
+        timed_out: false,
+    };
+    loop {
+        let r: Response = read_frame(s).await?;
+        let buf = match r.kind.as_str() {
+            "stdout" => &mut out.stdout,
+            "stderr" => &mut out.stderr,
+            "exit" => {
+                out.code = r.code;
+                out.timed_out = r.timed_out;
+                return Ok(out);
+            }
+            "error" => return Err(answered("exec", &r.message)),
+            _ => continue,
+        };
+        let count = r.data.len().min(limit - buf.len());
+        buf.extend_from_slice(&r.data[..count]);
+    }
 }
 
 async fn collect_with_limit<R: AsyncRead + Unpin>(

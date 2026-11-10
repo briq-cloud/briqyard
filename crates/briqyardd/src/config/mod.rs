@@ -21,6 +21,7 @@ pub use api::LoadedConfigIdentity;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub execution: Option<briqyard_api::execution::provision::Config>,
     /// Derived at load time; cannot be supplied by configuration.
     #[serde(skip)]
     pub loaded_identity: LoadedConfigIdentity,
@@ -116,6 +117,7 @@ pub use sections::*;
 impl Default for Config {
     fn default() -> Self {
         Self {
+            execution: None,
             loaded_identity: LoadedConfigIdentity::Unobserved,
             listen: "127.0.0.1:7420".into(),
             api_tls: true,

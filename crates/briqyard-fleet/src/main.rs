@@ -3,12 +3,13 @@
 //! registry of hosts from their heartbeats, and bootstraps the servers added to it. It buys no
 //! server: it says what ran out (ADR 0042), and something outside adds hosts.
 
+mod authority;
 mod backup;
 mod bootstrap;
 mod config;
 mod create;
 mod create_replay;
-// Dormant until the trusted authority and internal listener are qualified.
+// Only the explicitly configured execution listener mounts these internal services.
 #[allow(dead_code)]
 mod execution_host;
 #[allow(dead_code)]
@@ -67,6 +68,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Serve only the scoped authority listener, using a separate strict configuration.
+    Authority,
     /// Make an age identity for the registry's backup (ADR 0032): written to OUT (0600), its
     /// recipient printed, for `backup.recipient`. Keep OUT off the fleet's host.
     Keygen {
@@ -325,6 +328,9 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
 }
 
 async fn run(args: Args) -> Result<()> {
+    if matches!(args.cmd, Some(Cmd::Authority)) {
+        return authority::run(&args.config).await;
+    }
     let path = if args.config.exists() {
         Some(args.config.as_path())
     } else if args.config.as_path() == std::path::Path::new("/etc/briqyard/fleet.yaml") {
@@ -342,6 +348,7 @@ async fn run(args: Args) -> Result<()> {
         Some(Cmd::Restore { identity, from }) => {
             return restore(&cfg, &state_path, &identity, &from).await
         }
+        Some(Cmd::Authority) => unreachable!("authority dispatched before fleet configuration"),
         None => {}
     }
     // The registry holds every host's token and pool key: the fleet's alone.
@@ -399,6 +406,11 @@ async fn run(args: Args) -> Result<()> {
     tokio::spawn(forget_retired(state.clone()));
     tokio::spawn(bootstrap::run(state.clone()));
     // The peer address is what a host's own calls are checked against (`the_host`).
+    let execution = if let Some(execution) = &cfg.execution {
+        Some(provision_execution(&state, execution)?)
+    } else {
+        None
+    };
     let app = app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
     // Kept in systemd's store across a restart: calls made meanwhile wait (ADR 0051).
     let listeners = api::listeners::Listeners::from_env();
@@ -410,6 +422,20 @@ async fn run(args: Args) -> Result<()> {
         .tcp("api", addr)
         .with_context(|| format!("listen {}", cfg.listen))?;
     listener.set_nonblocking(true)?;
+    let execution = execution
+        .map(|(tls, router)| -> Result<_> {
+            let listener = listeners.tcp(
+                "execution",
+                cfg.execution
+                    .as_ref()
+                    .expect("configured execution")
+                    .channel
+                    .listen,
+            )?;
+            listener.set_nonblocking(true)?;
+            Ok((listener, tls, router))
+        })
+        .transpose()?;
     if let Err(e) = listeners.release_unused() {
         tracing::warn!(err = %e, "listeners no longer used left in the store");
     }
@@ -433,27 +459,63 @@ async fn run(args: Args) -> Result<()> {
         version = briqyard_version::VERSION,
         "briqyard-fleet listening"
     );
-    match &cfg.tls {
-        config::Tls::Files { cert, key } => {
-            let read = |p: &PathBuf| {
-                std::fs::read(p).with_context(|| format!("tls: read {}", p.display()))
-            };
-            let server = api::tls::server_config(&read(cert)?, &read(key)?)
-                .with_context(|| format!("tls: {} and {}", cert.display(), key.display()))?;
-            let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server));
-            axum_server::from_tcp_rustls(listener, config)
-                .handle(handle)
-                .serve(app)
-                .await?
+    let admin_handle = handle.clone();
+    let admin = async {
+        match &cfg.tls {
+            config::Tls::Files { cert, key } => {
+                let read = |p: &PathBuf| {
+                    std::fs::read(p).with_context(|| format!("tls: read {}", p.display()))
+                };
+                let server = api::tls::server_config(&read(cert)?, &read(key)?)
+                    .with_context(|| format!("tls: {} and {}", cert.display(), key.display()))?;
+                let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server));
+                axum_server::from_tcp_rustls(listener, config)
+                    .handle(admin_handle)
+                    .serve(app)
+                    .await?
+            }
+            config::Tls::Unset | config::Tls::Off => {
+                axum_server::from_tcp(listener)
+                    .handle(admin_handle)
+                    .serve(app)
+                    .await?
+            }
         }
-        config::Tls::Unset | config::Tls::Off => {
-            axum_server::from_tcp(listener)
+        Ok::<(), anyhow::Error>(())
+    };
+    if let Some((listener, tls, router)) = execution {
+        let scoped = async {
+            axum_server::from_tcp_rustls(listener, tls)
                 .handle(handle)
-                .serve(app)
-                .await?
-        }
+                .serve(router.into_make_service())
+                .await
+                .map_err(anyhow::Error::from)
+        };
+        tokio::try_join!(admin, scoped)?;
+    } else {
+        admin.await?;
     }
+
     Ok(())
+}
+
+fn provision_execution(
+    state: &Arc<AppState>,
+    execution: &config::Execution,
+) -> Result<(axum_server::tls_rustls::RustlsConfig, Router)> {
+    let host = state
+        .reg
+        .lock()
+        .unwrap()
+        .hosts
+        .get(&execution.host_id)
+        .cloned()
+        .context("execution host absent from registry")?;
+    authority::provision(
+        execution,
+        execution_host::TrustedHost::from(&host),
+        &state.cfg.token,
+    )
 }
 
 /// `briqyard-fleet restore`: the registry from its backup, written where the fleet keeps it,

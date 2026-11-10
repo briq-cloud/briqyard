@@ -471,6 +471,15 @@ dependencies = [
 [[package]]
 name = "briqyard-testing"
 version = "0.2.2"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "briqyard-api",
+ "reqwest",
+ "ring",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "briqyard-version"

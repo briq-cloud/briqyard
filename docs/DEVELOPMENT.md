@@ -26,6 +26,32 @@ dispatch can select `two_hosts_only` for targeted validation
 
 The `scale` job of the `more-suites` matrix runs `hack/native-ci-scale.sh` on its own runner (9 checks, [ADR 0099](adr/0099-leaf-goes-with-its-vmm.md), [ADR 0109](adr/0109-scale-on-its-own-runner.md)): 6500 idle machine cgroups with no record and 60 of stopped machines, a daemon restart; the daemon must open its barrier, report memory protection healthy, accept a create and retire the leaves in background after serving within 480 s. It runs from the workflow revision, so a manual dispatch with an older `ref` runs it against that source.
 
+## Scoped execution native proof
+
+On a fresh disposable native CI runner, build the normal native artifacts plus:
+
+```bash
+cargo build --release -p briqyard-testing --features scoped-native --bin scoped-execution-native
+bash hack/native-ci.sh "$PWD"
+bash hack/scoped-execution-native.sh
+```
+
+The native workflow runs this proof after its ordinary suites on the same disposable fixture.
+`native-ci.sh` supplies the checked bootstrap/development installer.
+It installs separate authenticated TLS host and authority listeners, local signing keys,
+and distinct role credentials. Two public Alpine guests and a registered namespace gateway
+form the discovered closure. Central-signed grant/allocation installation precedes projection
+lookup and synchronous scoped guest execution. A counter, duplicate operation and second
+scoped read check no replay; a direct authenticated host-status request checks its journal.
+Manual dispatch of older refs without this harness skips only the scoped proof. Wrong pins,
+wrong roles and a grant omitting the native gateway must refuse. The trap removes the owned
+namespace, stops the authority and restores the daemon configuration. It retains the host's
+compatibility floor; the runner must be disposable.
+
+This finite proof does not replace crash/recovery, lifecycle invalidation, concurrent
+revocation, streaming/files or the full qualification suite. A compiled harness alone is
+not native qualification evidence.
+
 ## On a Linux host with KVM
 
 ```bash

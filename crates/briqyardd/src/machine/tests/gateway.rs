@@ -54,6 +54,11 @@ async fn gateway_idle_stop_respects_protection_and_user_stop() {
         .accept(&h.m.inner.store, "gateway_admission", &[target], expiry)
         .unwrap();
     h.m.sleep_gateway(&entry).await;
+    #[cfg(not(target_os = "linux"))]
+    assert!(
+        !h.m.idle_stop_allowed(&entry.snapshot(), Utc::now() + chrono::Duration::days(1)),
+        "an unqualified forward wall step cannot release a gateway"
+    );
     assert_eq!(entry.snapshot().state, state::RUNNING);
     h.m.stop_entry(&entry, stop::USER, Duration::from_secs(1), false, None)
         .await

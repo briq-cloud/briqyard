@@ -352,7 +352,7 @@ clock at each security transition, including after network calls; the earlier cl
 not reused as evidence of remaining authority. The positive request timeout fits both the signed
 limit and remaining permit lifetime. Failed, missing or malformed replies are
 unconfirmed; host status absence is never evidence of non-execution. A confirmed first result
-must fit the permit's combined UTF-8 stdout and stderr limit. It returns bounded guest output
+must fit the permit's signed output mode and byte limit. It returns bounded guest output
 transiently and persists only its outcome hash. An over-limit response is unconfirmed. Later
 calls return status without guest output. This source candidate keeps scoped access dormant pending
 the host lifecycle and Linux qualification gates below.
@@ -462,3 +462,146 @@ registration, ownership or admission. This response is neither installation
 readiness nor a trust bootstrap: authority verification keys and control generations
 must still arrive through independent trusted provisioning. A host restart or
 epoch change requires reconciliation and fencing before any installation is ready.
+
+## Explicit listener activation candidate
+
+The daemon and fleet now accept optional `execution` configuration. This supersedes
+this ADR's earlier statements that listener provisioning is missing. Configuration
+absence leaves the scoped router unmounted. Administrator routers remain separate.
+Activation still requires independent security review and native qualification.
+
+Each scoped listener requires explicit PEM certificate/key files and serves TLS,
+including on loopback. It uses a dedicated port and the existing systemd listener
+store and bounded shutdown. Both sockets are registered before unused sockets close.
+The fleet captures one configured HTTPS execution endpoint for a registered host;
+the registry's host identity, certificate pin and administrator token still govern it.
+The ordinary host URL is unchanged. Redirects, proxies and dispatch retries stay off.
+
+Credentials are a private JSON file read once at startup. Host installer, host
+execution, central installer and gateway credentials must all differ, and each must
+differ from both administrator credentials. Local administrator configuration and
+registry state independently verify the two administrator comparisons. TLS, key and
+credential reads have fixed byte bounds; symlinks and non-regular files refuse.
+The fleet validates its PKCS8 signing key against the configured authority identity,
+issuer, key ID and public key before mounting its listener.
+
+Host services share a clock qualifier. Linux `adjtimex` with modes zero observes the
+kernel clock without changing it. Non-TIME_OK, unsynchronised/error status, syscall
+failure, invalid fractions, negative error values and arithmetic overflow refuse.
+`maxerror` and `esterror` remain microseconds with `STA_NANO`; only offset and time
+fraction change units. Error adds maximum error, absolute offset, estimated error,
+monotonic syscall bracket, one second of freshness and outward quantization. The
+existing five-second ceiling applies after whole-second rounding. Unsupported
+systems have no production fallback. Every observation must remain consistent with
+the first wall/monotonic anchor retained for the process lifetime. Accepted samples
+never reset that anchor: repeated individually small steps cannot accumulate time
+authority. Excess cumulative drift refuses until restart, whose retained-protection
+drain still applies. Fresh observations guard admission, protection,
+consumption, completion, protected broadening and the final idle stop decision.
+Explicit revocation and removal use retained ordering evidence without granting time
+based authority. Lost clock qualification cannot release retained protection.
+
+A command maps the qualified wall/monotonic sample to its original deadline.
+`MAX_COMMAND_SECONDS` (60) bounds both the host command deadline and protection
+interval; a longer remaining permit refuses even if its signed limit is larger.
+A refresh after durable consume may shorten that deadline; it never extends it.
+Guest I/O refuses after clock loss or expiry. Recovery retains a full 60-second
+monotonic maximum command lifetime before checking fresh qualified wall evidence.
+Thus a wall forward step at restart cannot release topology while a previously
+accepted bounded command retains access. This adds recovery latency after scoped
+protection has been used, including when execution configuration is removed.
+
+The existing permanent assignment floor gains schema 5, `scoped-execution-v1`.
+Ordinary namespace generations and mutation tickets do not raise this floor.
+Nonempty retained namespace protection or any idle-protection receipt reconstructs
+it after marker loss, including when execution configuration is absent.
+Previous readers reject this unknown schema instead of silently ignoring a separate
+marker. The floor is fsynced before the first scoped listener journal or durable
+protection/fence write. Surviving receipts or namespace fences reconstruct a missing
+floor at Store open. Candidate probes, bootstrap replacement and automatic rollback
+all require the exact new capability, even with empty sampled state or old config.
+Removing configuration does not erase receipts, startup drains or compatibility.
+
+The first finite activation retains journal admission receipts, installation and
+operation intents, immutable versions, high-water marks and tombstones. No listener
+runs pruning or journal replacement. Each journal is bounded to 16 MiB and 16,384
+records per bounded collection; host idle protection retains 4,096 receipts / 32 MiB,
+and namespace fences retain 16,384 namespaces / 4,096 pending tickets / 4 MiB.
+Capacity refuses before acknowledgement or dispatch; uncertain failures do not
+refund quota. Exhaustion needs explicit recovery design, not deletion of evidence.
+
+Remaining native proof: real guest dispatch through both authenticated TLS listeners;
+closure changes racing accepted commands; clock loss/steps with adopted guests;
+partition and process crash at every durable boundary; handover of both listeners;
+and downgrade/old-configuration rollback against the exact candidate binaries.
+Mac unit checks or a mock guest do not qualify these paths.
+
+## Standalone authority process
+
+`briqyard-fleet --config <file> authority` branches before normal fleet configuration,
+registry state, AppState construction or background tasks. Its separate strict
+configuration requires `execution`, `host_tls_fingerprint`,
+`host_administrator_file` and `fleet_administrator_file`. No fields have defaults.
+Fleet management, registry, placement, bootstrap, backup, administrator listener
+and metrics fields are rejected. The configured file must already exist.
+
+The process holds one immutable trusted host identity, configured execution URL,
+certificate pin and independently read administrator references. Host transport
+uses the same narrow identity input when the normal fleet derives it from its
+registry. No synthetic registry or administrator config is constructed. The shared
+service, installer, coordinator, issuer and journal remain the only execution path.
+The sole listener uses explicit TLS, systemd socket retention and bounded shutdown.
+No administrator routes, polling, management tasks, fallback or replay are started.
+Never share live registry or journal files between writers.
+
+Administrator references are distinct private files containing exact raw ASCII
+bearers without whitespace or a trailing newline. Both must match the credential
+bundle's administrator comparisons before a journal opens. Reads have a 4 KiB bound,
+require current ownership and private regular files, and reject symlinks.
+
+Installer admission methods accept a fresh qualified-clock callback. They sample
+before intent persistence, after host-instance waits, before transmitting persisted
+work, before host acknowledgement persistence and after its fsync. Clock loss after
+a host call leaves the immutable intent pending. Clock loss after ACK fsync retains
+the ACK and adds a permanent uncertain-installation refusal before reporting failure.
+Readiness and all dependent installations then remain false; a recovered clock never
+makes that ID resend or ready. These refusal keys share the existing journal's
+16 MiB bound and a 16,384-key ceiling. A refusal write failure poisons the live journal;
+a restart rotates its epoch and cannot revive old readiness. Installation status
+requires fresh qualification before advertising ready. Explicit invalidation and
+revocation retain their clock-independent ordering path.
+
+Every qualified wall interval is translated to one process-lifetime monotonic origin.
+The retained intersection of all accepted intervals may narrow but never widen or
+reset after clock loss. Overlap with the first sample alone is insufficient: two
+later samples could occupy opposite sides and release protection before a retained
+command timer expires. A contradictory sample refuses qualification without changing
+the retained evidence. Restart still requires the full monotonic command drain.
+
+The standalone mode and clock callbacks remain candidates until independent review
+and native qualification. They do not supply real-guest, closure-race, partition,
+crash or clock-step evidence for the authenticated end-to-end execution path.
+
+## Synchronous output capture
+
+The optional signed `limits.output_mode` accepts only `capture_per_stream_v1`.
+Omission preserves the original wire bytes and combined raw-output exhaustion rule.
+Permit attenuation requires identical output modes and nonincreasing limits.
+In capture mode `max_output_bytes` is a positive raw-byte retention cap per stream,
+at most 4 MiB. The host retains each stream's first bytes, then drains all later
+frames until terminal exit under the same expiring connection and absolute deadline.
+Exhausting retention alone is neither success nor failure; EOF, guest error or
+authorization expiry before exit still leaves an unresolved operation.
+The four-field execution result is unchanged; lossy UTF-8 conversion happens after
+raw capture. The authority bounds each decoded UTF-8 stream to three times its
+signed raw cap. Legacy replies keep their combined decoded-byte validation.
+
+Host dispatch replies alone have a 64 MiB JSON transport bound. Two 4 MiB streams
+fit even when each control byte expands to six JSON bytes; lossy UTF-8 expands each
+invalid byte to at most three. Requests, installation, metadata and status replies
+keep their 8 MiB bounds. This changes no activation or qualification gate.
+
+The native channel fixture records its protection deadline before installation and
+waits for the qualified lower clock bound, including the mutation uncertainty
+margin, before namespace teardown. Successful guest completion does not release
+topology protection early. Cleanup remains bounded and emits fixed stage failures.

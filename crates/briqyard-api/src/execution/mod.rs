@@ -1,4 +1,4 @@
-//! Version-one scoped execution wire types. No route accepts these credentials yet.
+//! Version-one scoped execution wire types. Dedicated opt-in host-service routes accept these credentials.
 //! Verification is host-only and is insufficient without durable admission consumption,
 //! allocation fencing and lifecycle-serialized dispatch to the exact live run.
 
@@ -16,6 +16,10 @@ pub mod channel;
 mod issuer;
 #[cfg(feature = "execution-admission")]
 pub use issuer::*;
+#[cfg(feature = "execution-admission")]
+pub mod clock;
+#[cfg(all(feature = "execution-admission", feature = "tls"))]
+pub mod provision;
 #[cfg(feature = "execution-verifier")]
 mod request;
 #[cfg(feature = "execution-verifier")]
@@ -25,11 +29,15 @@ pub const GRANT_TYPE: &str = "briqyard-execution-grant+jwt";
 pub const ALLOCATION_TYPE: &str = "briqyard-execution-allocation+jwt";
 pub const PERMIT_TYPE: &str = "briqyard-execution-permit+jwt";
 pub const MAX_TOKEN_BYTES: usize = 16_384;
-/// JSON can expand each control byte to six bytes. The initial 1 MiB input/output
-/// allowance needs room for that encoding and the signed credential envelope.
+/// Request and control JSON bounds include credentials and escaped input.
 pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// Two retained 4 MiB streams, including JSON control-byte escaping and UTF-8 lossiness.
+pub const MAX_EXEC_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_CAPTURE_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_ALLOCATIONS: usize = 16;
 pub const MAX_RESOURCES: usize = 64;
+/// Absolute host boundary, also retained monotonically during recovery.
+pub const MAX_COMMAND_SECONDS: u64 = 60;
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -85,12 +93,31 @@ pub struct IdleProtection {
     pub expires_at: u64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum OutputMode {
+    #[serde(rename = "capture_per_stream_v1")]
+    CapturePerStreamV1,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     pub max_duration_seconds: u64,
     pub max_input_bytes: u64,
     pub max_output_bytes: u64,
+    /// Omission preserves legacy combined-output exhaustion semantics.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_output_mode"
+    )]
+    pub output_mode: Option<OutputMode>,
+}
+
+fn deserialize_output_mode<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<OutputMode>, D::Error> {
+    OutputMode::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

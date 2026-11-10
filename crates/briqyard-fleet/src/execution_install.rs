@@ -42,6 +42,7 @@ pub(super) enum InstallError {
     Transport(TransportError),
     HostMismatch,
     Binding,
+    ClockUnavailable,
 }
 
 impl From<JournalError> for InstallError {
@@ -82,21 +83,25 @@ impl Installer<'_> {
         &mut self,
         id: &str,
         record: HostRegistration,
-        clock: Clock,
+        mut fresh: impl FnMut() -> Result<Clock, InstallError> + Send,
     ) -> Result<Outcome, InstallError> {
+        fresh()?;
         self.instance(&record.host_instance).await?;
+        fresh()?;
         if !self.journal.begin_authority_intent(
             id,
             self.host_id,
             &record.host_instance,
             AuthorityPayload::Registration(record.clone()),
-            clock,
+            fresh()?,
         )? {
-            return self.outcome(id);
+            return self.current_outcome("authority", id, &mut fresh);
         }
+        fresh()?;
         let ack: InstallationAck = self.host.call(Route::Register, &record).await?;
-        self.journal.acknowledge_authority_intent(id, ack, clock)?;
-        self.outcome(id)
+        self.journal
+            .acknowledge_authority_intent(id, ack, fresh()?)?;
+        self.current_outcome("authority", id, &mut fresh)
     }
 
     pub async fn discover(
@@ -104,8 +109,9 @@ impl Installer<'_> {
         id: &str,
         registration: &str,
         control: OwnershipControl,
-        clock: Clock,
+        mut fresh: impl FnMut() -> Result<Clock, InstallError> + Send,
     ) -> Result<Outcome, InstallError> {
+        fresh()?;
         let request = control.discovery_request();
         if serde_json::to_vec(&request)
             .map_err(|_| InstallError::Binding)?
@@ -115,32 +121,30 @@ impl Installer<'_> {
             return Err(InstallError::Binding);
         }
         self.instance(&control.host_instance).await?;
-        if !self
-            .journal
-            .begin_discovery_intent(id, self.host_id, registration, control, clock)?
-        {
-            return Ok(if self.journal.discovery_intent_ready(id)? {
-                Outcome::Ready
-            } else {
-                Outcome::Pending
-            });
+        fresh()?;
+        if !self.journal.begin_discovery_intent(
+            id,
+            self.host_id,
+            registration,
+            control,
+            fresh()?,
+        )? {
+            return self.current_outcome("discovery", id, &mut fresh);
         }
+        fresh()?;
         let receipt: DiscoveryReceipt = self.host.call(Route::Discover, &request).await?;
         self.journal
-            .acknowledge_discovery_intent(id, receipt, clock)?;
-        Ok(if self.journal.discovery_intent_ready(id)? {
-            Outcome::Ready
-        } else {
-            Outcome::Pending
-        })
+            .acknowledge_discovery_intent(id, receipt, fresh()?)?;
+        self.current_outcome("discovery", id, &mut fresh)
     }
 
     pub async fn ownership(
         &mut self,
         id: &str,
         discovery: &str,
-        clock: Clock,
+        mut fresh: impl FnMut() -> Result<Clock, InstallError> + Send,
     ) -> Result<Outcome, InstallError> {
+        fresh()?;
         if !self.journal.discovery_intent_ready(discovery)? {
             return Err(InstallError::Binding);
         }
@@ -172,18 +176,21 @@ impl Installer<'_> {
             return Err(InstallError::Binding);
         }
         self.instance(&record.host_instance).await?;
+        fresh()?;
         if !self.journal.begin_authority_intent(
             id,
             self.host_id,
             &record.host_instance,
             AuthorityPayload::Ownership(Box::new(record.clone())),
-            clock,
+            fresh()?,
         )? {
-            return self.outcome(id);
+            return self.current_outcome("authority", id, &mut fresh);
         }
+        fresh()?;
         let ack: InstallationAck = self.host.call(Route::Ownership, &record).await?;
-        self.journal.acknowledge_authority_intent(id, ack, clock)?;
-        self.outcome(id)
+        self.journal
+            .acknowledge_authority_intent(id, ack, fresh()?)?;
+        self.current_outcome("authority", id, &mut fresh)
     }
 
     pub async fn protect(
@@ -191,8 +198,9 @@ impl Installer<'_> {
         id: &str,
         ownership: &str,
         committed: CommittedIdle,
-        clock: Clock,
+        mut fresh: impl FnMut() -> Result<Clock, InstallError> + Send,
     ) -> Result<Outcome, InstallError> {
+        let clock = fresh()?;
         if clock.uncertainty > 5
             || committed.expires_at_ms
                 <= clock
@@ -229,22 +237,16 @@ impl Installer<'_> {
             self.host_id,
             ownership,
             request.clone(),
-            clock,
+            fresh()?,
         )? {
-            return Ok(if self.journal.protection_intent_ready(id)? {
-                Outcome::Ready
-            } else {
-                Outcome::Pending
-            });
+            return self.current_outcome("protection", id, &mut fresh);
         }
         self.instance(&host_instance).await?;
+        fresh()?;
         let ack: ProtectionAck = self.host.call(Route::Protect, &request).await?;
-        self.journal.acknowledge_protection_intent(id, ack, clock)?;
-        Ok(if self.journal.protection_intent_ready(id)? {
-            Outcome::Ready
-        } else {
-            Outcome::Pending
-        })
+        self.journal
+            .acknowledge_protection_intent(id, ack, fresh()?)?;
+        self.current_outcome("protection", id, &mut fresh)
     }
 
     pub async fn delegation(
@@ -254,8 +256,9 @@ impl Installer<'_> {
         control: DelegationControl,
         signed: SignedDelegation,
         trust: &Trust<'_>,
-        clock: Clock,
+        mut fresh: impl FnMut() -> Result<Clock, InstallError> + Send,
     ) -> Result<Outcome, InstallError> {
+        let clock = fresh()?;
         let registration_intent = self
             .journal
             .authority_intent(registration)?
@@ -364,23 +367,16 @@ impl Installer<'_> {
         };
         if !self
             .journal
-            .begin_delegation_intent(intent_id, intent, clock)?
+            .begin_delegation_intent(intent_id, intent, fresh()?)?
         {
-            return Ok(if self.journal.delegation_intent_ready(intent_id)? {
-                Outcome::Ready
-            } else {
-                Outcome::Pending
-            });
+            return self.current_outcome("delegation", intent_id, &mut fresh);
         }
         self.instance(&host_instance).await?;
+        fresh()?;
         let ack: HostDelegation = self.host.call(Route::Delegation, &request).await?;
         self.journal
-            .acknowledge_delegation_intent(intent_id, ack, clock)?;
-        Ok(if self.journal.delegation_intent_ready(intent_id)? {
-            Outcome::Ready
-        } else {
-            Outcome::Pending
-        })
+            .acknowledge_delegation_intent(intent_id, ack, fresh()?)?;
+        self.current_outcome("delegation", intent_id, &mut fresh)
     }
 
     pub async fn invalidate(
@@ -435,6 +431,29 @@ impl Installer<'_> {
         self.outcome(id)
     }
 
+    fn current_outcome(
+        &mut self,
+        kind: &str,
+        id: &str,
+        fresh: &mut (impl FnMut() -> Result<Clock, InstallError> + Send),
+    ) -> Result<Outcome, InstallError> {
+        if fresh().is_err() {
+            self.journal.refuse_installation_readiness(kind, id)?;
+            return Err(InstallError::ClockUnavailable);
+        }
+        let ready = match kind {
+            "authority" => self.journal.authority_intent_ready(id)?,
+            "discovery" => self.journal.discovery_intent_ready(id)?,
+            "protection" => self.journal.protection_intent_ready(id)?,
+            "delegation" => self.journal.delegation_intent_ready(id)?,
+            _ => return Err(InstallError::Binding),
+        };
+        Ok(if ready {
+            Outcome::Ready
+        } else {
+            Outcome::Pending
+        })
+    }
     fn outcome(&self, id: &str) -> Result<Outcome, InstallError> {
         Ok(if self.journal.authority_intent_ready(id)? {
             Outcome::Ready

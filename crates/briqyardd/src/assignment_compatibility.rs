@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
 
+pub const EXECUTION_CAPABILITY: &[u8] = b"scoped-execution-v1\n";
 pub const CAPABILITY: &[u8] = b"destination-assignment-v1\n";
 pub const RUN_CAPABILITY: &[u8] = b"assigned-run-v1\n";
 pub const UPDATE_CAPABILITY: &[u8] = b"assigned-update-v3\n";
@@ -15,6 +16,7 @@ pub enum Requirement {
     AssignedRun,
     AssignedRunLifecycle,
     AssignedUpdates,
+    ScopedExecution,
 }
 pub const RUN_COLLECTIONS: [&str; 3] = [
     "assigned-run-intents",
@@ -52,6 +54,7 @@ fn floor(root: &Path) -> Result<Requirement> {
         (2, "assigned-run-v1") => Ok(Requirement::AssignedRun),
         (3, "assigned-run-lifecycle-v1") => Ok(Requirement::AssignedRunLifecycle),
         (4, "assigned-update-v3") => Ok(Requirement::AssignedUpdates),
+        (5, "scoped-execution-v1") => Ok(Requirement::ScopedExecution),
         _ => anyhow::bail!("unsupported assignment compatibility floor"),
     }
 }
@@ -71,7 +74,11 @@ pub fn requirement(root: &Path) -> Result<Requirement> {
     for kind in ["unbound-assignments", "unbound-requests", "machines"]
         .into_iter()
         .chain(RUN_COLLECTIONS)
-        .chain(["assigned-run-updates"])
+        .chain([
+            "assigned-run-updates",
+            "execution-idle-protection",
+            "execution-namespace-fence",
+        ])
     {
         let entries = match std::fs::read_dir(root.join(kind)) {
             Ok(entries) => entries,
@@ -101,6 +108,21 @@ pub fn requirement(root: &Path) -> Result<Requirement> {
 }
 /// Inspect both committed evidence and a pending write using the same exact schemas.
 pub fn record_requirement(kind: &str, value: &Value) -> Result<Requirement> {
+    if kind == "execution-idle-protection" {
+        return Ok(Requirement::ScopedExecution);
+    }
+    if kind == "execution-namespace-fence" {
+        // Ordinary lifecycle mutations also persist namespace generations and
+        // pending tickets. Only retained command protection activates this floor.
+        let protected = value["protected_until_ms"]
+            .as_object()
+            .context("invalid execution namespace protection evidence")?;
+        return Ok(if protected.is_empty() {
+            Requirement::None
+        } else {
+            Requirement::ScopedExecution
+        });
+    }
     if kind == "machines" {
         if let Some(run) = value.get("assigned_run").filter(|v| !v.is_null()) {
             let requirement = run_schema(run)?;
@@ -173,12 +195,14 @@ pub fn ensure_floor_at(root: &Path, minimum: Requirement) -> Result<()> {
             &meta.join(FLOOR),
             &serde_json::to_vec(&Floor {
                 schema: match minimum {
+                    Requirement::ScopedExecution => 5,
                     Requirement::AssignedUpdates => 4,
                     Requirement::AssignedRunLifecycle => 3,
                     Requirement::AssignedRun => 2,
                     _ => 1,
                 },
                 protocol: match minimum {
+                    Requirement::ScopedExecution => "scoped-execution-v1",
                     Requirement::AssignedUpdates => "assigned-update-v3",
                     Requirement::AssignedRunLifecycle => "assigned-run-lifecycle-v1",
                     Requirement::AssignedRun => "assigned-run-v1",
@@ -230,6 +254,13 @@ pub async fn check_required_candidate(
         deadline,
     )
     .await?;
+    probe(
+        executable,
+        "scoped-execution-capabilities",
+        EXECUTION_CAPABILITY,
+        deadline,
+    )
+    .await?;
     Ok(())
 }
 async fn probe(
@@ -273,6 +304,54 @@ async fn probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ordinary_namespace_fences_preserve_default_compatibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        let mut record = serde_json::json!({"generations":{"ordinary":1},
+            "protected_until_ms":{}, "pending":{}, "max_observed_ms":1});
+        store
+            .put_durable("execution-namespace-fence", "state", &record)
+            .unwrap();
+        assert_eq!(requirement(dir.path()).unwrap(), Requirement::None);
+        assert!(!dir.path().join("meta").join(FLOOR).exists());
+        record["protected_until_ms"] = serde_json::json!({"ordinary":60000});
+        store
+            .put_durable("execution-namespace-fence", "state", &record)
+            .unwrap();
+        assert_eq!(floor(dir.path()).unwrap(), Requirement::ScopedExecution);
+        std::fs::remove_file(dir.path().join("meta").join(FLOOR)).unwrap();
+        assert_eq!(
+            requirement(dir.path()).unwrap(),
+            Requirement::ScopedExecution
+        );
+    }
+    #[test]
+    fn scoped_floor_precedes_protection_and_reconstructs_without_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        store
+            .put_durable(
+                "execution-idle-protection",
+                "accepted",
+                &serde_json::json!({"admission":"accepted"}),
+            )
+            .unwrap();
+        assert_eq!(floor(dir.path()).unwrap(), Requirement::ScopedExecution);
+        let bytes = std::fs::read(dir.path().join("meta").join(FLOOR)).unwrap();
+        let old: Floor = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(old.schema, 5);
+        // Previous binaries' exhaustive schemas 1..4 refuse this same marker.
+        assert!(!(1..=4).contains(&old.schema));
+        std::fs::remove_file(dir.path().join("meta").join(FLOOR)).unwrap();
+        assert_eq!(
+            requirement(dir.path()).unwrap(),
+            Requirement::ScopedExecution
+        );
+        drop(store);
+        crate::store::Store::open(dir.path()).unwrap();
+        assert_eq!(floor(dir.path()).unwrap(), Requirement::ScopedExecution);
+    }
     #[tokio::test]
     async fn candidate_must_exit_successfully_with_exact_bounded_capability() {
         use std::os::unix::fs::PermissionsExt;
@@ -510,7 +589,7 @@ mod tests {
             ("sleep 2", false),
             ("printf 'assigned-run-lifecycle-v1\\n'", true),
         ] {
-            std::fs::write(&executable, format!("#!/bin/sh\ncase $1 in\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\nassigned-run-lifecycle-capabilities) {body};;\nassigned-update-capabilities) printf 'assigned-update-v3\\n';;\n*) exit 2;;\nesac\n")).unwrap();
+            std::fs::write(&executable, format!("#!/bin/sh\ncase $1 in\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\nassigned-run-lifecycle-capabilities) {body};;\nassigned-update-capabilities) printf 'assigned-update-v3\\n';;\nscoped-execution-capabilities) printf 'scoped-execution-v1\\n';;\n*) exit 2;;\nesac\n")).unwrap();
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
             let result = check_required_candidate(
                 dir.path(),

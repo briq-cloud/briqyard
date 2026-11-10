@@ -96,11 +96,23 @@ jobs:
           shared-key: native
           save-if: false
       - name: Build the head
+        id: build
+        env:
+          SOURCE_REF: ${{ inputs.ref }}
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y musl-tools pkg-config libssl-dev bc jq openssl postgresql-client openssh-server python3-yaml
           cargo build --release --locked --workspace --exclude briqyard-init
           cargo build --release --locked -p briqyard-init --target x86_64-unknown-linux-musl
+          if [ -f hack/scoped-execution-native.sh ]; then
+            cargo build --release --locked -p briqyard-testing --features scoped-native --bin scoped-execution-native
+            echo 'scoped=true' >> "$GITHUB_OUTPUT"
+          elif [ -n "$SOURCE_REF" ]; then
+            echo 'scoped=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Scoped native harness missing from current source' >&2
+            exit 1
+          fi
       - name: Install isolated native host and fleet
         run: bash .native-harness/hack/native-ci.sh "$GITHUB_WORKSPACE"
       - name: e2e
@@ -132,21 +144,37 @@ jobs:
           if [ "${statuses[1]}" != 0 ]; then rc=${statuses[1]}; fi
           echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
           exit "$rc"
+      - name: Scoped execution through authenticated channels
+        if: ${{ !cancelled() && steps.build.outputs.scoped == 'true' && steps.fleet.outcome != 'skipped' }}
+        id: scoped
+        timeout-minutes: 15
+        run: |
+          mkdir -p native-logs
+          set -o pipefail
+          start=$SECONDS
+          set +e
+          bash hack/scoped-execution-native.sh 2>&1 | tee native-logs/scoped-execution.log
+          statuses=("${PIPESTATUS[@]}")
+          rc=${statuses[0]}
+          if [ "${statuses[1]}" != 0 ]; then rc=${statuses[1]}; fi
+          echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
+          exit "$rc"
       - name: Suite counts
         if: always()
         env:
           E2E_SECONDS: ${{ steps.e2e.outputs.duration }}
           FLEET_SECONDS: ${{ steps.fleet.outputs.duration }}
+          SCOPED_SECONDS: ${{ steps.scoped.outputs.duration }}
         run: |
-          for suite in e2e fleet-smoke; do
+          for suite in e2e fleet-smoke scoped-execution; do
             echo "### $suite" >> "$GITHUB_STEP_SUMMARY"
             if [ -f "native-logs/$suite.log" ]; then
-              grep -E '^passed |^ENDED EARLY|^NOT A FULL RUN' "native-logs/$suite.log" >> "$GITHUB_STEP_SUMMARY" || echo 'No final summary' >> "$GITHUB_STEP_SUMMARY"
+              grep -E '^passed |^ENDED EARLY|^NOT A FULL RUN|^scoped native:' "native-logs/$suite.log" >> "$GITHUB_STEP_SUMMARY" || echo 'No final summary' >> "$GITHUB_STEP_SUMMARY"
             else
               echo 'Did not start' >> "$GITHUB_STEP_SUMMARY"
             fi
           done
-          echo "Durations: e2e ${E2E_SECONDS:-incomplete}s; fleet-smoke ${FLEET_SECONDS:-incomplete}s" >> "$GITHUB_STEP_SUMMARY"
+          echo "Durations: e2e ${E2E_SECONDS:-incomplete}s; fleet-smoke ${FLEET_SECONDS:-incomplete}s; scoped ${SCOPED_SECONDS:-incomplete}s" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -157,7 +185,9 @@ jobs:
         if: always()
         with:
           name: native-fleet-smoke-log
-          path: native-logs/fleet-smoke.log
+          path: |
+            native-logs/fleet-smoke.log
+            native-logs/scoped-execution.log
           if-no-files-found: ignore
   more-suites:
     if: ${{ github.event.pull_request.draft != true && !inputs.two_hosts_only && !inputs.measure_freeze }}

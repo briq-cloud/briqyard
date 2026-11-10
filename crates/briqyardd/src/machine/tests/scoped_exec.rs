@@ -171,13 +171,17 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
         "../../../../briqyard-api/tests/fixtures/execution-v1.json"
     ))
     .unwrap();
-    let now = Utc::now().timestamp() as u64;
+    let now = access::clock::ClockSample::read()
+        .expect("scoped manager tests require a qualified Linux clock")
+        .interval()
+        .unwrap()
+        .now;
     let mut grant: Grant = serde_json::from_value(fixture["grant"].clone()).unwrap();
     grant.target = target.clone();
     grant.subject = "bq-test".into();
     grant.resource_set = complete;
-    grant.iat = now - 1;
-    grant.nbf = now - 1;
+    grant.iat = now - 10;
+    grant.nbf = now - 10;
     grant.exp = now + 30;
     grant.source.expires_at = now + 3600;
     grant.idle.expires_at = now + 30;
@@ -192,8 +196,8 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
     permit.target = target.clone();
     permit.grant_digest = token_digest(&grant_token);
     permit.request_digest = access::exec_request_digest(&request, &permit.limits).unwrap();
-    permit.iat = now;
-    permit.nbf = now;
+    permit.iat = now - 10;
+    permit.nbf = now - 10;
     permit.exp = now + 25;
     let mut tokens = Vec::new();
     permit.allocations.clear();
@@ -203,8 +207,8 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
         allocation.id = id.into();
         allocation.bucket = bucket.into();
         allocation.units = 1;
-        allocation.iat = now - 1;
-        allocation.nbf = now - 1;
+        allocation.iat = now - 10;
+        allocation.nbf = now - 10;
         allocation.exp = now + 30;
         allocation.window_start = now - 60;
         allocation.window_end = now + 60;
@@ -386,7 +390,10 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
         )
         .await
         .unwrap_err();
-    assert!(dispatch_error.to_string().contains("closure"));
+    assert!(
+        dispatch_error.to_string().contains("closure"),
+        "{dispatch_error}"
+    );
     assert_eq!(
         std::fs::read(path.join("journal.json")).unwrap(),
         before_subset

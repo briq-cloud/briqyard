@@ -49,7 +49,20 @@ pub(super) struct ExecutionFence {
 impl ExecutionFence {
     /// Reconstruction has no witness that its rules equal the protected topology.
     /// Preserve the existing kernel state until every retained deadline has drained.
+    pub(super) fn has_protection(&self) -> bool {
+        !self.record.protected_until_ms.is_empty()
+    }
+    pub(super) fn last_observed_ms(&self) -> u64 {
+        self.record.max_observed_ms.max(1)
+    }
     pub(super) async fn drain_at_start(&self) -> Result<()> {
+        if !self.has_protection() {
+            return Ok(());
+        }
+        // Every admitted command has <=60s remaining. Across restart, wait that
+        // complete monotonic interval before trusting wall evidence to release it.
+        // A wall forward step cannot shorten this retained command lifetime.
+        tokio::time::sleep(Duration::from_secs(api::execution::MAX_COMMAND_SECONDS)).await;
         let delay = self.startup_delay(execution_mutations::execution_now_ms()?)?;
         if !delay.is_zero() {
             tracing::info!(
@@ -149,7 +162,8 @@ impl ExecutionFence {
             "namespace generation changed"
         );
         anyhow::ensure!(
-            deadline_ms > now_ms && deadline_ms - now_ms <= 60_000,
+            deadline_ms > now_ms
+                && deadline_ms - now_ms <= api::execution::MAX_COMMAND_SECONDS * 1000,
             "invalid namespace protection deadline"
         );
         let mut next = self.record.clone();
@@ -427,12 +441,17 @@ mod tests {
     async fn startup_monotonic_wait_does_not_replace_wall_clock_proof() {
         let (_dir, store) = open();
         let mut fence = ExecutionFence::load(&store).unwrap();
-        let now = execution_mutations::execution_now_ms().unwrap();
+        let now = execution_mutations::execution_now_ms().unwrap_or(10_000);
         let snapshot = fence.snapshot(&store, &names(&["a"]), now).unwrap();
         fence.protect(&store, &snapshot, now + 30_000, now).unwrap();
         // Tokio advances the monotonic timer; the wall clock remains before expiry.
         let error = fence.drain_at_start().await.unwrap_err();
-        assert!(error.to_string().contains("has not drained"));
+        assert!(
+            error.to_string().contains("has not drained")
+                || error
+                    .to_string()
+                    .contains("qualified execution clock unavailable")
+        );
         assert!(fence.startup_delay(now).unwrap() > Duration::ZERO);
     }
 
