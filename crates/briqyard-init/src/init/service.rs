@@ -10,7 +10,6 @@ use super::*;
 use guest::{CloneHooks, CLONE_HOOK_FAILED};
 
 const CGROUP: &str = "/sys/fs/cgroup/briqyard-workload";
-const CLONE_JSON: &str = "/run/briqyard/clone.json";
 /// The most of a hook's stderr reported back.
 const TAIL: usize = 4096;
 /// The freezer settles within this or the park fails.
@@ -375,7 +374,8 @@ pub(super) async fn resume(st: Arc<State>) {
     };
     let outcome: Result<(), String> = async {
         let hooks = hooks(&st).map_err(|e| format!("{e:#}"))?;
-        write_clone_json(&identity).map_err(|e| format!("clone.json: {e:#}"))?;
+        write_clone_json(&st.paths.clone_json, &identity)
+            .map_err(|e| format!("clone.json: {e:#}"))?;
         run_hook(&st, "resume", &hooks.resume, hooks.resume_timeout_s)
             .await
             .map_err(|e| e.to_string())?;
@@ -395,17 +395,19 @@ pub(super) async fn resume(st: Arc<State>) {
     }
 }
 
-fn write_clone_json(identity: &guest::CloneIdentity) -> Result<()> {
-    fs::create_dir_all("/run/briqyard")?;
+fn write_clone_json(path: &Path, identity: &guest::CloneIdentity) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
     let body = serde_json::json!({
         "generation": identity.generation,
         "hostname": identity.hostname,
         "ip": identity.ip,
         "machine_id": identity.machine_id,
     });
-    let tmp = format!("{CLONE_JSON}.tmp");
+    let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, serde_json::to_vec(&body)?)?;
-    fs::rename(tmp, CLONE_JSON)?;
+    fs::rename(tmp, path)?;
     Ok(())
 }
 
@@ -459,7 +461,28 @@ mod tests {
         SPAWNS.lock().await
     }
 
+    /// A state whose console and identity file live in a private temp directory, so the
+    /// tests run without root.
     fn hooked_state(park: &[&str], resume: &[&str], seconds: u32) -> Arc<State> {
+        let mut st = hooked_state_at(park, resume, seconds);
+        let dir = std::env::temp_dir().join(format!(
+            "init-service-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let state = Arc::get_mut(&mut st).unwrap();
+        state.paths = Paths {
+            console: dir.join("console"),
+            clone_json: dir.join("run/clone.json"),
+        };
+        fs::write(&state.paths.console, b"").unwrap();
+        st
+    }
+
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    fn hooked_state_at(park: &[&str], resume: &[&str], seconds: u32) -> Arc<State> {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect();
         testutil::state_with(Config {
             template_profile: Some(guest::SERVICE_READY_V1.into()),

@@ -40,8 +40,8 @@ pub(super) fn workload_command(st: &State, argv: &[String]) -> Result<Command> {
     cmd.stdin(Stdio::null());
     let console = fs::OpenOptions::new()
         .write(true)
-        .open("/dev/console")
-        .context("/dev/console")?;
+        .open(&st.paths.console)
+        .with_context(|| st.paths.console.display().to_string())?;
     cmd.process_group(0);
     if !cfg.user.is_empty() {
         let (uid, gid, home) = lookup_user(&cfg.user)?;

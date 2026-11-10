@@ -28,6 +28,7 @@ pub(super) fn state_with(cfg: Config) -> Arc<State> {
         requested: Mutex::new(false),
         clone_gate: tokio::sync::Mutex::new(gate),
         activate: Notify::new(),
+        paths: Paths::default(),
     })
 }
 

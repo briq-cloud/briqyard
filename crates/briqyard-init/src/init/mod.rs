@@ -57,6 +57,23 @@ struct State {
     requested: Mutex<bool>,
     clone_gate: tokio::sync::Mutex<clone::Gate>,
     activate: Notify,
+    paths: Paths,
+}
+
+/// Where the init writes what tests redirect: the workload's console and the clone's
+/// identity file.
+struct Paths {
+    console: PathBuf,
+    clone_json: PathBuf,
+}
+
+impl Default for Paths {
+    fn default() -> Self {
+        Paths {
+            console: "/dev/console".into(),
+            clone_json: "/run/briqyard/clone.json".into(),
+        }
+    }
 }
 
 impl State {
@@ -229,6 +246,7 @@ async fn run() -> ExitReport {
         requested: Mutex::new(false),
         clone_gate: tokio::sync::Mutex::new(gate),
         activate: Notify::new(),
+        paths: Paths::default(),
     });
     if template {
         tokio::spawn(serve(st.clone()));
