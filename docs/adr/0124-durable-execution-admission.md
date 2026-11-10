@@ -833,3 +833,11 @@ new ownership generation correctly refuses installation. A local regression runs
 all four scenario identities through one retained host journal and verifies both
 that old-ID rebinding refuses and each fresh identity installs. This fixes the
 fixture; it does not relax the production history or revocation fences.
+
+Native recovery distinguishes an exec duplicate from retained status observation.
+Exec still requires a currently eligible exact grant before it returns an existing
+admission; expired or revoked grants refuse, even for a known operation ID. The
+authenticated gateway observation route retains status after that authority ends
+without another prepare, quota debit or guest dispatch. The native scenarios check
+both eligible duplicates and expired/revoked refusal, then recover through observation;
+the guest counter independently proves one launch for each scenario.

@@ -689,11 +689,32 @@ async fn main() -> Result<()> {
                 "execution did not cross original quota window"
             );
         }
-        let duplicate = channel.call("gateway", "exec", request).await?;
-        ensure!(
-            duplicate["state"] == "existing",
-            "duplicate command was dispatched again"
-        );
+        // The exec endpoint rechecks grant eligibility before duplicate lookup.
+        // Expiry or revocation cannot be bypassed by presenting an old operation ID;
+        // retained recovery uses the separately authenticated observe endpoint.
+        let duplicate = channel.request("gateway", "exec", &request).await?;
+        if args[1] == "renewable-refused" {
+            ensure!(duplicate.status().is_success(), "live duplicate refused");
+            let duplicate: Value = duplicate.json().await?;
+            ensure!(
+                duplicate["state"] == "existing",
+                "duplicate command was dispatched again"
+            );
+        } else {
+            if args[1] == "renewable" {
+                let observed = briqyard_api::execution::clock::ClockSample::read()
+                    .and_then(|sample| sample.interval())
+                    .context("response clock unqualified")?;
+                ensure!(
+                    observed.now.saturating_sub(observed.uncertainty) >= expiry,
+                    "grant not yet expired at recovery"
+                );
+            }
+            ensure!(
+                duplicate.status() == StatusCode::UNPROCESSABLE_ENTITY,
+                "ineligible grant accepted for duplicate execution"
+            );
+        }
         let status = channel
             .call("gateway", "observe", json!({"id":args[1]}))
             .await?;
@@ -701,7 +722,7 @@ async fn main() -> Result<()> {
             status["state"] == "known",
             "operation evidence lost beyond permit expiry"
         );
-        println!("scoped renewable native: {} quiet guest, bounded runtime and status-only duplicate passed", args[1]);
+        println!("scoped renewable native: {} quiet guest, bounded runtime, grant eligibility and status-only recovery passed", args[1]);
         return Ok(());
     }
     let first = operation(
