@@ -30,11 +30,12 @@ cleanup() {
     sudo kill -TERM "$AUTHORITY_PID" 2>/dev/null
     wait "$AUTHORITY_PID" 2>/dev/null
   fi
+  sudo "$DRIVER" drain "$D" || { echo "scoped native: cleanup protection drain failed" >&2; rc=1; }
   for id in $(briqyard machine ls --namespace "$T" 2>/dev/null | awk 'NR>1{print $1}'); do
     timeout 90 briqyard machine rm "$id" >/dev/null 2>&1 || rc=1
   done
   timeout 90 briqyard namespace gateway rm "$T" >/dev/null 2>&1 || true
-  briqyard namespace rm "$T" >/dev/null 2>&1 || rc=1
+  briqyard namespace rm "$T" >/dev/null 2>&1 || { echo "scoped native: cleanup namespace failed" >&2; rc=1; }
   if briqyard namespace ls | jq -e --arg ns "$T" 'any(.[]; .id == $ns)' >/dev/null; then rc=1; fi
   # The retained compatibility floor belongs to this disposable fixture and is never removed.
   if [ "$CONFIG_SAVED" = 1 ]; then

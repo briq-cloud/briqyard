@@ -45,6 +45,30 @@ fn provision(dir: &Path) -> Result<()> {
     std::fs::write(dir.join("verification.json"), serde_json::to_vec(&keys)?)?;
     Ok(())
 }
+// Namespace teardown broadens membership and cannot bypass retained execution
+// protection. Observe its qualified lower clock bound before the one-shot cleanup.
+async fn drain_protection(dir: &Path) -> Result<()> {
+    let path = dir.join("protection-deadline");
+    let deadline: u64 = match std::fs::read_to_string(path) {
+        Ok(value) => value.parse()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    tokio::time::timeout(Duration::from_secs(75), async {
+        loop {
+            let lower = briqyard_api::execution::clock::ClockSample::read()
+                .and_then(|sample| sample.lower_ms());
+            // The mutation fence subtracts a further five-second uncertainty bound.
+            if lower.is_some_and(|now| now.saturating_sub(5000) > deadline) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .context("native protection did not drain")?;
+    Ok(())
+}
 struct Channel {
     client: Client,
     installer: String,
@@ -140,6 +164,9 @@ async fn main() -> Result<()> {
         "usage: scoped-execution-native provision DIR | run DIR NAMESPACE MACHINE SIBLING"
     );
     let dir = Path::new(&args[2]);
+    if args[1] == "drain" {
+        return drain_protection(dir).await;
+    }
     if args[1] == "provision" {
         return provision(dir);
     }
@@ -242,6 +269,10 @@ async fn main() -> Result<()> {
         .await?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let expiry = now + 40;
+    std::fs::write(
+        dir.join("protection-deadline"),
+        ((expiry + 15) * 1000).to_string(),
+    )?;
     channel.install("protect", json!({"id":"protection","ownership":"ownership","committed":{"admission":"idle","expires_at_ms":(expiry+15)*1000}})).await?;
     let central = key(&dir.join("central.pk8"))?;
     let grant_body = json!({"v":1,"iss":"central","aud":"runtime","iat":now-10,"nbf":now-10,"exp":expiry,

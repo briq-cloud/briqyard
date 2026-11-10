@@ -197,6 +197,10 @@ impl HostTransport {
         } else {
             Method::POST
         };
+        // Keep the transport invariant next to the credential-bearing request too.
+        if url.scheme() != "https" {
+            return Err(Error::Configuration);
+        }
         let mut request = self.client.request(method, url).header(
             header::AUTHORIZATION,
             if route.installer() {

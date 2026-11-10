@@ -600,3 +600,8 @@ Host dispatch replies alone have a 64 MiB JSON transport bound. Two 4 MiB stream
 fit even when each control byte expands to six JSON bytes; lossy UTF-8 expands each
 invalid byte to at most three. Requests, installation, metadata and status replies
 keep their 8 MiB bounds. This changes no activation or qualification gate.
+
+The native channel fixture records its protection deadline before installation and
+waits for the qualified lower clock bound, including the mutation uncertainty
+margin, before namespace teardown. Successful guest completion does not release
+topology protection early. Cleanup remains bounded and emits fixed stage failures.
