@@ -35,6 +35,30 @@ host refuse missing, extra or differently sized debits. The entire vector is ato
 Unused, failed, uncertain and completed admissions never refund capacity.
 Other operation families have no dispatch implementation in this change.
 
+### Streaming file request commitment (dormant)
+
+`FileRequest` defines control metadata for the next scoped streaming-file path.
+It does not enable file grants, admission, continuations or dispatch. Existing
+execution request digests and the guest's legacy file protocol remain unchanged.
+
+The v1 digest uses domain `briqyard-file-request-v1` plus NUL, an operation byte
+(read 1, write 2), then exact path, optional mode, optional declared size, mandatory
+byte ceiling, optional upload SHA-256, timeout, frozen absolute deadline, metadata
+revision and projection digest, in that order. Integers are unsigned u64 big-endian;
+UTF-8 strings have a u64 byte-length prefix. Every optional value starts with a
+single 0/1 presence byte. Mode omission preserves permissions; explicit zero or
+0644 is distinct. Expected upload hashes are lowercase hexadecimal. Paths follow
+the existing file-path validator without normalization. Checked-in JSON vectors
+cover absent fields, empty uploads, Unicode and explicit modes for other clients.
+
+The runtime byte ceiling cannot exceed its existing native file bound; a caller
+can sign a lower bound. Timeout is explicit and at most 600 seconds. Control-plane
+policy may choose a shorter timeout or smaller ceiling. These are structural
+bounds: a current qualified clock, exact installed projection, source authority,
+protection and durable admission remain required before consuming input. The
+operation deadline is not an authorization extension. File-specific live renewal,
+guest timeout and recovery compatibility must land before this contract is usable.
+
 ### Persistence and recovery
 
 Each private directory has one permanent 0600 lock inode held with a nonblocking OS lock.
