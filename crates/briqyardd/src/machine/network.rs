@@ -128,7 +128,7 @@ impl Manager {
         let mut pins = Vec::new();
         let mut members = Vec::new();
         for r in running {
-            if r.template_birth.is_some()
+            if r.template_birth.as_ref().is_some_and(|b| !b.is_service())
                 || r.clone_origin
                     .as_ref()
                     .is_some_and(|o| o.stage != templates::CloneStage::Active)

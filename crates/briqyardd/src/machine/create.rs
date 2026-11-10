@@ -314,7 +314,9 @@ impl Manager {
             restoring: None,
         };
         if let Some(birth) = template_birth {
+            let service = birth.is_service();
             rec.template_birth = Some(birth);
+            if !service {
             rec.egress = api::Egress {
                 mode: api::egress::NONE.into(),
                 ..Default::default()
@@ -331,6 +333,7 @@ impl Manager {
                 rec.cmd = Some(vec![]);
             } else {
                 rec.cmd = Some(templates::builder_config().cmd);
+            }
             }
         }
         self.check_egress(&rec.egress, &rec.namespace, &rec.id)?;

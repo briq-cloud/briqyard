@@ -373,9 +373,22 @@ impl DiskArgs {
 
 #[derive(Args)]
 struct RunArgs {
-    /// Reviewed init-ready-v1 builder; requires the pinned public recipe and 256 MB
-    #[arg(long, value_parser = ["init-ready-v1"])]
+    /// Template builder: init-ready-v1 (the pinned public recipe, 256 MB) or service-ready-v1
+    /// (a running service with --clone-park and --clone-resume)
+    #[arg(long, value_parser = ["init-ready-v1", "service-ready-v1"])]
     template_build: Option<String>,
+    /// service-ready-v1: the park hook, an argv run before the seal; repeat for each argument
+    #[arg(long = "clone-park", value_name = "ARG", requires = "clone_resume")]
+    clone_park: Vec<String>,
+    /// service-ready-v1: the resume hook, an argv run in each clone before its workload thaws
+    #[arg(long = "clone-resume", value_name = "ARG", requires = "clone_park")]
+    clone_resume: Vec<String>,
+    /// service-ready-v1: seconds the park hook may run
+    #[arg(long, default_value_t = 30)]
+    clone_park_timeout: u32,
+    /// service-ready-v1: seconds the resume hook may run
+    #[arg(long, default_value_t = 30)]
+    clone_resume_timeout: u32,
     #[arg(long)]
     image: String,
     /// A DNS label; made from the image when absent

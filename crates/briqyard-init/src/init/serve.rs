@@ -141,6 +141,10 @@ where
             let response = destination::bind(&st, req.destination_bind).await;
             send(&stream, &response).await;
         }
+        guest::SERVICE_PARK_OP => {
+            let response = service::park(&st).await;
+            send(&stream, &response).await;
+        }
         "clone_configure_v1" => {
             let response = clone::configure(&st, req.clone_configure).await;
             send(&stream, &response).await;

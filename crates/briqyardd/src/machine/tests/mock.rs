@@ -126,6 +126,8 @@ pub(super) struct Mock {
     pub(in crate::machine) fs_thaws: Arc<std::sync::atomic::AtomicU32>,
     pub(in crate::machine) fs_freeze_fault: std::sync::atomic::AtomicU32,
     pub(in crate::machine) fs_sync_fault: std::sync::atomic::AtomicU32,
+    /// 1: the park hook fails; 2: an established socket; 3: the resume hook fails.
+    pub(in crate::machine) service_fault: std::sync::atomic::AtomicU32,
     pub(in crate::machine) assigned_resume_loss: AtomicBool,
     pub(in crate::machine) assigned_resume_credentials: AtomicBool,
     pub(in crate::machine) destination_ack_loss: AtomicBool,
@@ -219,6 +221,7 @@ impl Mock {
             fs_thaws: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             fs_freeze_fault: std::sync::atomic::AtomicU32::new(0),
             fs_sync_fault: std::sync::atomic::AtomicU32::new(0),
+            service_fault: std::sync::atomic::AtomicU32::new(0),
             assigned_resume_loss: AtomicBool::new(false),
             assigned_resume_credentials: AtomicBool::new(false),
             destination_ack_loss: AtomicBool::new(false),
@@ -677,8 +680,14 @@ impl fc::Vmm for Mock {
                                 protocol: 1,
                                 profile: cfg.template_profile.clone().unwrap(),
                                 ram_marker: "0123456789abcdef0123456789abcdef".into(),
-                                stage: "builder".into(),
+                                stage: if cfg.clone_hooks.is_some() {
+                                    "running"
+                                } else {
+                                    "builder"
+                                }
+                                .into(),
                                 identity: None,
+                                failure: None,
                             },
                         );
                         use sha2::{Digest, Sha256};

@@ -21,6 +21,12 @@ pub(super) fn main_command(st: &State) -> Result<Command> {
     if argv.is_empty() {
         return Err(anyhow!("the image has no entrypoint or command"));
     }
+    workload_command(st, &argv)
+}
+
+/// A command as the workload runs: its user, environment, working directory and console.
+pub(super) fn workload_command(st: &State, argv: &[String]) -> Result<Command> {
+    let cfg = st.config();
     let path = look_path(&argv[0], st.environment())?;
     let mut cmd = Command::new(path);
     cmd.args(&argv[1..]);

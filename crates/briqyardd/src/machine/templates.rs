@@ -11,6 +11,7 @@ pub(super) mod sandbox;
 pub(super) use policy::*;
 mod create;
 mod start;
+pub(super) use start::CloneHookFailed;
 pub(super) use create::clone_mac;
 mod recovery;
 mod sealing;
@@ -408,3 +409,5 @@ pub(in crate::machine) fn fingerprint(path: &Path) -> Result<ArtifactFile> {
 
 #[cfg(test)]
 pub(in crate::machine) mod tests;
+#[cfg(test)]
+mod service_tests;

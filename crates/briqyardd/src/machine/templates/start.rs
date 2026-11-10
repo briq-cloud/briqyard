@@ -113,11 +113,13 @@ impl Manager {
         let status = pong
             .clone_status
             .ok_or_else(|| anyhow!("template init omitted clone protocol"))?;
+        // A parked service holds its workload frozen: its pid exists, its stage is `parked`.
+        let service = profile == guest::SERVICE_READY_V1;
         anyhow::ensure!(
-            pong.main_pid == 0
+            (pong.main_pid != 0) == service
                 && status.protocol == 1
                 && status.profile == profile
-                && status.stage == "builder"
+                && status.stage == if service { "parked" } else { "builder" }
                 && status.identity.is_none(),
             "template init is not at its pre-main barrier"
         );
@@ -214,7 +216,7 @@ impl Manager {
         let c = &origin.configure;
         anyhow::ensure!(
             configured.protocol == 1
-                && configured.profile == guest::INIT_READY_V1
+                && configured.profile == origin.artifact.profile
                 && configured.stage == "identity_done"
                 && identity.generation == c.generation
                 && identity.hostname == c.hostname
@@ -368,14 +370,28 @@ impl Manager {
                 if ready && origin.sandbox.is_some() {
                     sandbox::check_ack(&origin, &pong, &["active"])?;
                 }
+                if let Some(s) = pong.clone_status.as_ref().filter(|s| s.stage == "hook_failed") {
+                    return Err(CloneHookFailed(
+                        s.failure.clone().unwrap_or_else(|| "resume hook failed".into()),
+                    )
+                    .into());
+                }
                 if ready && pong.main_pid > 0 {
                     return Ok::<_, anyhow::Error>(pong.version);
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         };
+        // The resume hook has its own timeout, which the init enforces.
+        let resume_s = origin
+            .artifact
+            .recipe
+            .config
+            .clone_hooks
+            .as_ref()
+            .map_or(0, |h| u64::from(h.resume_timeout_s) + 10);
         let version = tokio::time::timeout(
-            Duration::from_secs(self.inner.cfg.boot_timeout_sec.max(10)),
+            Duration::from_secs(self.inner.cfg.boot_timeout_sec.max(10).max(resume_s)),
             wait,
         )
         .await
@@ -422,3 +438,15 @@ impl Manager {
         Ok(version)
     }
 }
+
+/// The resume hook of a service clone failed or timed out. The clone is never thawed.
+#[derive(Debug)]
+pub struct CloneHookFailed(pub String);
+
+impl std::fmt::Display for CloneHookFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "clone {}", self.0)
+    }
+}
+
+impl std::error::Error for CloneHookFailed {}

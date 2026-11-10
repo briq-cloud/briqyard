@@ -136,7 +136,7 @@ impl Manager {
             let pending = entry.launch_pending.load(Relaxed)
                 || entry.launch_unproven.load(Relaxed)
                 || entry.pending_adoption.lock().unwrap().is_some();
-            let quarantined = r.template_birth.is_some()
+            let quarantined = r.template_birth.as_ref().is_some_and(|b| !b.is_service())
                 || r.clone_origin
                     .as_ref()
                     .is_some_and(|o| o.stage != templates::CloneStage::Active);
@@ -481,6 +481,7 @@ mod tests {
             namespace: record.namespace.clone(),
             image: record.image.clone(),
             init_sha256: "test".into(),
+            hooks: None,
         });
         let entry = Entry::new(record.clone(), h.m.inner.events.clone());
         let (_, exited) = tokio::sync::watch::channel(false);

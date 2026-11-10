@@ -83,6 +83,16 @@ pub trait Guest: Send + Sync {
     async fn clone_control(&self, _vsock: &Path, _request: Request) -> Result<guest::CloneStatus> {
         Err(anyhow!("clone control unavailable"))
     }
+    /// One request and its answer of any kind, within `limit`: the service hooks outlast the
+    /// ordinary control timeout, and their refusal carries an error code the caller maps.
+    async fn control_within(
+        &self,
+        _vsock: &Path,
+        _request: Request,
+        _limit: Duration,
+    ) -> Result<Response> {
+        Err(anyhow!("service control unavailable"))
+    }
     /// Open a raw file stream after its ready handshake (ADR 0061).
     async fn file_stream(
         &self,
@@ -148,6 +158,21 @@ impl Guest for Vsock {
         tokio::time::timeout(Duration::from_secs(10), exchange)
             .await
             .context("guest control timeout")?
+    }
+    async fn control_within(
+        &self,
+        vsock: &Path,
+        request: Request,
+        limit: Duration,
+    ) -> Result<Response> {
+        let exchange = async {
+            let mut connection = dial(vsock).await?;
+            write_request(&mut connection, &request).await?;
+            read_frame::<_, Response>(&mut connection).await
+        };
+        tokio::time::timeout(limit, exchange)
+            .await
+            .context("guest service control timeout")?
     }
     async fn clone_control(&self, vsock: &Path, request: Request) -> Result<guest::CloneStatus> {
         self.destination_control(vsock, request)

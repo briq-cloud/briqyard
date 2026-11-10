@@ -24,7 +24,10 @@ mod assigned_run;
 pub use assigned_run::AssignedRunProof;
 mod clone;
 mod destination;
-pub use clone::{CloneConfigure, CloneIdentity, CloneStatus, INIT_READY_V1};
+pub use clone::{
+    CloneConfigure, CloneHooks, CloneIdentity, CloneStatus, CLONE_HOOK_FAILED, INIT_READY_V1,
+    SERVICE_PARK_OP, SERVICE_READY_V1,
+};
 pub use destination::{DestinationBind, DestinationFile, SANDBOX_READY_V1};
 
 use serde::{Deserialize, Serialize};
@@ -72,6 +75,9 @@ pub struct Config {
     /// Internal, reviewed template recipe; absent retains ordinary boot behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_profile: Option<String>,
+    /// The hooks of a `service-ready-v1` service; absent for every other boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_hooks: Option<CloneHooks>,
     /// Internal fixed data-device topology for a pristine sandbox seed and its destination.
     /// Absent in the sandbox profile means no third drive at all (a volume-free seed).
     #[serde(default, skip_serializing_if = "Option::is_none")]

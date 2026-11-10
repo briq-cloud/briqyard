@@ -15,6 +15,9 @@ pub struct Templates {
     /// Default-off rollout for the implemented reviewed init-ready profile.
     pub enabled: bool,
     pub init_ready_init_sha256: String,
+    /// Default-off `service-ready-v1`: a parked, already-running service as a template.
+    /// Needs `enabled` and the same exact init hash.
+    pub service_ready: bool,
     /// Paused pool rollout, requiring the same exact qualified template inputs.
     pub warm_pools: bool,
     /// Default-off pristine unbound factory, catalog advertisement and create selection.
