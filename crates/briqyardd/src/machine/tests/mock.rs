@@ -680,7 +680,13 @@ impl fc::Vmm for Mock {
                                 protocol: 1,
                                 profile: cfg.template_profile.clone().unwrap(),
                                 ram_marker: "0123456789abcdef0123456789abcdef".into(),
-                                stage: if cfg.clone_hooks.is_some() {
+                                stage: if b.memory_clone.is_some()
+                                    && cfg.template_profile.as_deref()
+                                        == Some(guest::SERVICE_READY_V1)
+                                {
+                                    // A restored service comes back parked.
+                                    "parked"
+                                } else if cfg.clone_hooks.is_some() {
                                     "running"
                                 } else {
                                     "builder"

@@ -91,11 +91,13 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     fork: None,
                     restore: None,
                     template_build: a.template_build.clone(),
-                    clone_hooks: (!a.clone_park.is_empty()).then(|| briqyard_api::guest::CloneHooks {
-                        park: a.clone_park.clone(),
-                        resume: a.clone_resume.clone(),
-                        park_timeout_s: a.clone_park_timeout,
-                        resume_timeout_s: a.clone_resume_timeout,
+                    clone_hooks: (!a.clone_park.is_empty()).then(|| {
+                        briqyard_api::guest::CloneHooks {
+                            park: a.clone_park.clone(),
+                            resume: a.clone_resume.clone(),
+                            park_timeout_s: a.clone_park_timeout,
+                            resume_timeout_s: a.clone_resume_timeout,
+                        }
                     }),
                     sandbox_seed: None,
                 };

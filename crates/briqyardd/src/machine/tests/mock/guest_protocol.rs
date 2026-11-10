@@ -166,7 +166,10 @@ impl guestc::Guest for Mock {
         _limit: Duration,
     ) -> Result<guest::Response> {
         self.record(format!("{} {}", request.op, vsock.display()));
-        anyhow::ensure!(request.op == guest::SERVICE_PARK_OP, "unsupported service op");
+        anyhow::ensure!(
+            request.op == guest::SERVICE_PARK_OP,
+            "unsupported service op"
+        );
         let mut statuses = self.clone_status.lock().unwrap();
         let status = statuses
             .get_mut(vsock)

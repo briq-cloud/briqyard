@@ -411,6 +411,11 @@ impl Manager {
                     "clone VMM exit is unconfirmed; reservation retained".into(),
                 ));
             }
+            if let Some(origin) = e.rec.lock().unwrap().clone_origin.as_mut() {
+                // The VMM exited: the clone's capacity is released, its backing stays for the
+                // caller to read and destroy.
+                origin.mapping_exited = true;
+            }
             self.inner.stats.starts_failed.fetch_add(1, Relaxed);
             let why = match said {
                 true => why,

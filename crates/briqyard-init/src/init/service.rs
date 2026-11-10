@@ -133,7 +133,9 @@ impl std::fmt::Display for HookFailure {
 
 fn tail_of(bytes: &[u8]) -> String {
     let start = bytes.len().saturating_sub(TAIL);
-    String::from_utf8_lossy(&bytes[start..]).trim_end().to_string()
+    String::from_utf8_lossy(&bytes[start..])
+        .trim_end()
+        .to_string()
 }
 
 /// Runs one hook as the workload's user, in its environment, to its end or its timeout.
@@ -144,7 +146,8 @@ pub(super) async fn run_hook(
     timeout_s: u32,
 ) -> Result<(), HookFailure> {
     let fail = |why: String| HookFailure(format!("{name} hook {why}"));
-    let mut cmd = workload_command(st, argv).map_err(|e| fail(format!("could not start: {e:#}")))?;
+    let mut cmd =
+        workload_command(st, argv).map_err(|e| fail(format!("could not start: {e:#}")))?;
     cmd.stderr(Stdio::piped());
     let mut child = {
         let mut tracked = TRACKED.lock().unwrap();
@@ -270,7 +273,9 @@ pub(super) async fn resume(st: Arc<State>) {
     let (identity, generation) = {
         let gate = st.clone_gate.lock().await;
         match &*gate {
-            clone::Gate::Configured { identity, .. } => (identity.clone(), identity.generation.clone()),
+            clone::Gate::Configured { identity, .. } => {
+                (identity.clone(), identity.generation.clone())
+            }
             _ => return,
         }
     };
@@ -391,7 +396,10 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(failure.starts_with("resume hook timed out after 1s"), "{failure}");
+        assert!(
+            failure.starts_with("resume hook timed out after 1s"),
+            "{failure}"
+        );
         tokio::time::sleep(Duration::from_millis(2500)).await;
         assert!(!marker.exists(), "a child of the hook outlived its timeout");
     }

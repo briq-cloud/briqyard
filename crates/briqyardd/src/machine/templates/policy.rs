@@ -97,7 +97,9 @@ impl Manager {
         }
         let bound = &self.inner.cfg.templates.init_ready_init_sha256;
         if profile != guest::SERVICE_READY_V1 && req.clone_hooks.is_some() {
-            return Err(invalid("clone_hooks belong to the service-ready-v1 profile"));
+            return Err(invalid(
+                "clone_hooks belong to the service-ready-v1 profile",
+            ));
         }
         if !self
             .named_memory_profiles()
@@ -165,7 +167,7 @@ impl Manager {
             .clone_hooks
             .clone()
             .ok_or_else(|| invalid("service-ready-v1 requires clone_hooks"))?;
-        hooks.validate().map_err(|e| invalid(&e.to_string()))?;
+        hooks.validate().map_err(|e| invalid(e.to_string()))?;
         if req.image.is_empty()
             || role.is_some()
             || req.fork.is_some()

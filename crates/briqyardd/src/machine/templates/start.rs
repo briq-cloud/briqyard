@@ -121,7 +121,10 @@ impl Manager {
                 && status.profile == profile
                 && status.stage == if service { "parked" } else { "builder" }
                 && status.identity.is_none(),
-            "template init is not at its pre-main barrier"
+            "template init is not at its pre-main barrier (profile {}, stage {}, pid {})",
+            status.profile,
+            status.stage,
+            pong.main_pid
         );
         anyhow::ensure!(
             status.ram_marker.len() == 32 && expected_marker.is_none_or(|m| m == status.ram_marker),
@@ -347,6 +350,15 @@ impl Manager {
                 .guest
                 .clone_control(&live.vsock, activation)
                 .await?;
+            if activated.stage == "hook_failed" {
+                return Err(CloneHookFailed(
+                    activated
+                        .failure
+                        .clone()
+                        .unwrap_or_else(|| "resume hook failed".into()),
+                )
+                .into());
+            }
             anyhow::ensure!(
                 activated
                     .identity
@@ -370,9 +382,15 @@ impl Manager {
                 if ready && origin.sandbox.is_some() {
                     sandbox::check_ack(&origin, &pong, &["active"])?;
                 }
-                if let Some(s) = pong.clone_status.as_ref().filter(|s| s.stage == "hook_failed") {
+                if let Some(s) = pong
+                    .clone_status
+                    .as_ref()
+                    .filter(|s| s.stage == "hook_failed")
+                {
                     return Err(CloneHookFailed(
-                        s.failure.clone().unwrap_or_else(|| "resume hook failed".into()),
+                        s.failure
+                            .clone()
+                            .unwrap_or_else(|| "resume hook failed".into()),
                     )
                     .into());
                 }

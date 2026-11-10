@@ -125,7 +125,9 @@ impl Manager {
                     a.message
                 )));
             }
-            Ok(a) => a.clone_status.filter(|s| s.stage == "parked" && s.ram_marker.len() == 32),
+            Ok(a) => a
+                .clone_status
+                .filter(|s| s.stage == "parked" && s.ram_marker.len() == 32),
             Err(_) => None,
         };
         let Some(parked) = parked else {
@@ -220,7 +222,8 @@ impl Manager {
                 size: r.size,
                 root_disk_gb: self.inner.cfg.root_disk_gb,
                 config: if birth.is_service() {
-                    let (mut cfg, _) = crate::machine::start::resolved_guest_config(&r, Ipv4Addr::UNSPECIFIED)?;
+                    let (mut cfg, _) =
+                        crate::machine::start::resolved_guest_config(&r, Ipv4Addr::UNSPECIFIED)?;
                     // Identity is the clone's own: it comes with the configure step.
                     cfg.hostname.clear();
                     cfg.ip.clear();

@@ -44,7 +44,10 @@ impl Gate {
                 Ok(Self::Builder)
             }
             Some(SERVICE_READY_V1)
-                if cfg.clone_hooks.as_ref().is_some_and(|h| h.validate().is_ok())
+                if cfg
+                    .clone_hooks
+                    .as_ref()
+                    .is_some_and(|h| h.validate().is_ok())
                     && cfg.sandbox_device.is_none() =>
             {
                 Ok(Self::Service)
@@ -189,7 +192,11 @@ pub(super) async fn configure(st: &State, request: Option<CloneConfigure>) -> Re
     }
 }
 
-pub(super) async fn activate(st: &Arc<State>, generation: &str, realtime_sec: Option<u64>) -> Response {
+pub(super) async fn activate(
+    st: &Arc<State>,
+    generation: &str,
+    realtime_sec: Option<u64>,
+) -> Response {
     let mut gate = st.clone_gate.lock().await;
     if let Gate::Sandbox(b) = &mut *gate {
         return b.activate(st, generation, realtime_sec);

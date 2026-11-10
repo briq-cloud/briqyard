@@ -11,8 +11,8 @@ pub(super) mod sandbox;
 pub(super) use policy::*;
 mod create;
 mod start;
-pub(super) use start::CloneHookFailed;
 pub(super) use create::clone_mac;
+pub(super) use start::CloneHookFailed;
 mod recovery;
 mod sealing;
 
@@ -256,6 +256,7 @@ impl Manager {
             .as_ref()
             .ok_or_else(|| invalid("snapshot is not a sealed memory template"))?;
         let sandbox = a.profile == guest::SANDBOX_READY_V1;
+        let service = a.profile == guest::SERVICE_READY_V1;
         if (r.namespace != namespace && !sandbox)
             || r.state == state::DESTROYING
             || !self.named_memory_profiles().iter().any(|p| p == &a.profile)
@@ -266,12 +267,13 @@ impl Manager {
         }
         if s.memory.is_none()
             || a.schema != 1
-            || (!sandbox && a.profile != guest::INIT_READY_V1)
+            || (!sandbox && !service && a.profile != guest::INIT_READY_V1)
             || a.init_protocol != 1
             || a.recipe.root_disk_gb == 0
             || a.recipe.root_disk_gb != self.inner.cfg.root_disk_gb
             || a.ram_marker.len() != 32
             || (!sandbox
+                && !service
                 && (a.recipe.image != ALPINE
                     || a.recipe.image_digest != ALPINE.split('@').nth(1).unwrap_or("")
                     || a.recipe.image_config_digest != ALPINE_CONFIG_DIGEST))
@@ -408,6 +410,6 @@ pub(in crate::machine) fn fingerprint(path: &Path) -> Result<ArtifactFile> {
 }
 
 #[cfg(test)]
-pub(in crate::machine) mod tests;
-#[cfg(test)]
 mod service_tests;
+#[cfg(test)]
+pub(in crate::machine) mod tests;

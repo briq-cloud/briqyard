@@ -258,8 +258,8 @@ impl Manager {
         let template_marker = self
             .check_template_seal(&e, req.memory, req.template)
             .await?;
-        let service = template_marker.is_some()
-            && r.template_birth.as_ref().is_some_and(|b| b.is_service());
+        let service =
+            template_marker.is_some() && r.template_birth.as_ref().is_some_and(|b| b.is_service());
         let out = self.snapshot_sealed(id, &e, r, req, template_marker).await;
         if service {
             // Parked by the seal: it never serves again, sealed or not.

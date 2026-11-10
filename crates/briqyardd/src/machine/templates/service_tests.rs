@@ -24,11 +24,22 @@ async fn harness(service: bool) -> Harness {
     })
     .await;
     h.namespace("t1");
+    let config = ImageConfig {
+        cmd: vec!["/app/svc".into()],
+        workdir: "/".into(),
+        ..Default::default()
+    };
+    h.m.inner
+        .images
+        .seed_with_config_digest(ALPINE, config, ALPINE_CONFIG_DIGEST)
+        .await
+        .unwrap();
     h
 }
 
 fn builder_request(h: &Harness) -> api::CreateMachineRequest {
     let mut req = h.request("service");
+    req.image = ALPINE.into();
     req.sleep = "never".into();
     req.template_build = Some(guest::SERVICE_READY_V1.into());
     req.clone_hooks = Some(hooks());
@@ -95,7 +106,10 @@ async fn a_service_serves_until_sealed_then_the_source_stops_and_three_clones_st
     let h = harness(true).await;
     let builder = h.m.create_made(builder_request(&h)).await.unwrap();
     assert_eq!(builder.state, state::RUNNING);
-    assert!(builder.ready, "a service builder is an ordinary machine until the seal");
+    assert!(
+        builder.ready,
+        "a service builder is an ordinary machine until the seal"
+    );
     h.m.exec(
         &builder.id,
         api::ExecRequest {
@@ -114,7 +128,10 @@ async fn a_service_serves_until_sealed_then_the_source_stops_and_three_clones_st
     h.host_calls();
     let mut ids = Vec::new();
     for n in 0..3 {
-        let clone = h.m.create_made(clone_request(&builder.id, &format!("c{n}"))).await.unwrap();
+        let clone =
+            h.m.create_made(clone_request(&builder.id, &format!("c{n}")))
+                .await
+                .unwrap();
         assert_eq!(clone.state, state::RUNNING);
         assert_eq!(clone.memory_origin.as_ref().unwrap().stage, "active");
         ids.push(clone.id);
@@ -143,7 +160,9 @@ async fn a_service_serves_until_sealed_then_the_source_stops_and_three_clones_st
     for id in ids {
         h.m.destroy(&id, None).await.unwrap();
     }
-    h.m.delete_snapshot(&builder.id, &snapshot.id).await.unwrap();
+    h.m.delete_snapshot(&builder.id, &snapshot.id)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -171,20 +190,34 @@ async fn a_failed_resume_quarantines_that_clone_and_releases_its_capacity() {
     let h = harness(true).await;
     let builder = h.m.create_made(builder_request(&h)).await.unwrap();
     h.m.snapshot(&builder.id, seal()).await.unwrap();
-    let ok = h.m.create_made(clone_request(&builder.id, "first")).await.unwrap();
+    let ok =
+        h.m.create_made(clone_request(&builder.id, "first"))
+            .await
+            .unwrap();
     let used = h.m.usage().0.memory_mb;
     h.service_fault(3);
-    let error = h.m.create_made(clone_request(&builder.id, "second")).await.unwrap_err();
+    let error =
+        h.m.create_made(clone_request(&builder.id, "second"))
+            .await
+            .unwrap_err();
     let MError::BootFailed(view) = error else {
         panic!("{error:?}");
     };
     assert_eq!(view.state, state::ERROR);
-    assert_eq!(view.error_reason, reason::CLONE_HOOK_FAILED);
+    assert_eq!(
+        view.error_reason,
+        reason::CLONE_HOOK_FAILED,
+        "{}",
+        view.error
+    );
     assert!(view.error.contains("resume hook"), "{}", view.error);
     h.service_fault(0);
     // The first clone is untouched and the failed one holds no memory once its VMM exited.
     assert_eq!(h.m.get(&ok.id).unwrap().state, state::RUNNING);
     assert_eq!(h.m.usage().0.memory_mb, used);
-    let third = h.m.create_made(clone_request(&builder.id, "third")).await.unwrap();
+    let third =
+        h.m.create_made(clone_request(&builder.id, "third"))
+            .await
+            .unwrap();
     assert_eq!(third.state, state::RUNNING);
 }

@@ -160,14 +160,28 @@ mod tests {
         let d: CloneHooks = serde_json::from_str(json).unwrap();
         assert_eq!((d.park_timeout_s, d.resume_timeout_s), (30, 30));
         for bad in [
-            CloneHooks { park: vec![], ..ok.clone() },
-            CloneHooks { resume: vec!["".into()], ..ok.clone() },
-            CloneHooks { park_timeout_s: 0, ..ok.clone() },
-            CloneHooks { resume_timeout_s: 301, ..ok.clone() },
+            CloneHooks {
+                park: vec![],
+                ..ok.clone()
+            },
+            CloneHooks {
+                resume: vec!["".into()],
+                ..ok.clone()
+            },
+            CloneHooks {
+                park_timeout_s: 0,
+                ..ok.clone()
+            },
+            CloneHooks {
+                resume_timeout_s: 301,
+                ..ok.clone()
+            },
         ] {
             assert!(bad.validate().is_err());
         }
-        assert!(serde_json::from_str::<CloneHooks>(r#"{"park":["a"],"resume":["b"],"x":1}"#).is_err());
+        assert!(
+            serde_json::from_str::<CloneHooks>(r#"{"park":["a"],"resume":["b"],"x":1}"#).is_err()
+        );
     }
 
     #[test]
