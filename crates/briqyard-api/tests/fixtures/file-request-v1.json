@@ -1,0 +1,70 @@
+[
+  {
+    "name": "unknown-upload",
+    "request": {
+      "v": 1,
+      "operation": "files_write",
+      "path": "/tmp/é data",
+      "mode": null,
+      "declared_size": null,
+      "max_bytes": 100,
+      "expected_sha256": null,
+      "timeout_ms": 120000,
+      "deadline_ms": 1800000000000,
+      "metadata_revision": "revision-1",
+      "projection_digest": "mxTlASYOJBPTg1KhZZdsIu7iUno65dW79wVKMnpAO2g"
+    },
+    "digest": "73RBF7Kk1j15MWFZpS1XqRIyAk0jcXVECrvQ1YmaU6U"
+  },
+  {
+    "name": "empty-upload",
+    "request": {
+      "v": 1,
+      "operation": "files_write",
+      "path": "/tmp/é data",
+      "mode": 0,
+      "declared_size": 0,
+      "max_bytes": 0,
+      "expected_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timeout_ms": 120000,
+      "deadline_ms": 1800000000000,
+      "metadata_revision": "revision-1",
+      "projection_digest": "mxTlASYOJBPTg1KhZZdsIu7iUno65dW79wVKMnpAO2g"
+    },
+    "digest": "e7xgxHTB3eusT_5CK2hobmdDe6VBWL_EmLGNikST1hw"
+  },
+  {
+    "name": "read",
+    "request": {
+      "v": 1,
+      "operation": "files_read",
+      "path": "/tmp/é data",
+      "mode": null,
+      "declared_size": null,
+      "max_bytes": 104857600,
+      "expected_sha256": null,
+      "timeout_ms": 120000,
+      "deadline_ms": 1800000000000,
+      "metadata_revision": "revision-1",
+      "projection_digest": "mxTlASYOJBPTg1KhZZdsIu7iUno65dW79wVKMnpAO2g"
+    },
+    "digest": "nC-Jn3niT1zg-tefa4wMFqIbOGke7MM78LqlUPhCJI8"
+  },
+  {
+    "name": "explicit-mode",
+    "request": {
+      "v": 1,
+      "operation": "files_write",
+      "path": "/tmp/é data",
+      "mode": 420,
+      "declared_size": 100,
+      "max_bytes": 100,
+      "expected_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "timeout_ms": 600000,
+      "deadline_ms": 1800000000000,
+      "metadata_revision": "revision-1",
+      "projection_digest": "mxTlASYOJBPTg1KhZZdsIu7iUno65dW79wVKMnpAO2g"
+    },
+    "digest": "jSzSZePfAKF_mg_zZ578ZDCqfsZ_p_cOK3XoS-DcUJw"
+  }
+]

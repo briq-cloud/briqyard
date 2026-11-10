@@ -20,12 +20,16 @@ pub use issuer::*;
 pub mod clock;
 #[cfg(feature = "execution-admission")]
 mod continuation;
+#[cfg(feature = "execution-verifier")]
+mod file_request;
 #[cfg(all(feature = "execution-admission", feature = "tls"))]
 pub mod provision;
 #[cfg(feature = "execution-verifier")]
 mod request;
 #[cfg(feature = "execution-admission")]
 pub use continuation::*;
+#[cfg(feature = "execution-verifier")]
+pub use file_request::*;
 #[cfg(feature = "execution-verifier")]
 pub use request::*;
 
