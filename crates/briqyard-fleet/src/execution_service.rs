@@ -140,6 +140,31 @@ pub(super) fn router_with_continuation(
     clock: Arc<dyn ClockSource>,
     continuation: Option<Arc<dyn renewal::ContinuationProvider>>,
 ) -> Result<Router, &'static str> {
+    build_router(
+        issuer,
+        host,
+        host_id,
+        credentials,
+        administrator,
+        trust,
+        clock,
+        continuation,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_router(
+    issuer: briqyard_api::execution::DurableIssuer,
+    host: HostTransport,
+    host_id: String,
+    credentials: Credentials,
+    administrator: &str,
+    trust: TrustConfig,
+    clock: Arc<dyn ClockSource>,
+    continuation: Option<Arc<dyn renewal::ContinuationProvider>>,
+    renewable: bool,
+) -> Result<Router, &'static str> {
     if host_id.is_empty()
         || host_id != host.host_id()
         || credentials.host_administrator != host.administrator_token()
@@ -160,7 +185,7 @@ pub(super) fn router_with_continuation(
         trust,
         clock,
         continuation,
-        renewable: false, // Native qualification and a provisioned callback are required.
+        renewable, // Production construction always passes false.
         live: Arc::new(LiveOperations::default()),
     });
     Ok(Router::new()
@@ -306,6 +331,7 @@ async fn handle(
     let installer_role = matches!(
         action.as_str(),
         "identity"
+            | "authorization_clock"
             | "register"
             | "discover"
             | "ownership"
@@ -389,6 +415,26 @@ async fn run(
         "operation_active" | "operation_protect" | "operation_continue"
     ) {
         return renewal::run(service, action, body).await;
+    }
+    if action == "authorization_clock" {
+        let _: Empty = parse(body)?;
+        clock(service.clock.as_ref())?;
+        let host: briqyard_api::execution::channel::ClockObservation = service
+            .host
+            .call(crate::execution_host::Route::Clock, &())
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        let authority = clock(service.clock.as_ref())?;
+        if host.now == 0 || host.uncertainty > 5 {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        return value(briqyard_api::execution::channel::AuthorizationClock {
+            authority: briqyard_api::execution::channel::ClockObservation {
+                now: authority.now,
+                uncertainty: authority.uncertainty,
+            },
+            host,
+        });
     }
     if action == "exec" {
         return execute(service, parse(body)?).await;
@@ -809,3 +855,6 @@ fn installation_reply(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod native;

@@ -601,6 +601,11 @@ fit even when each control byte expands to six JSON bytes; lossy UTF-8 expands e
 invalid byte to at most three. Requests, installation, metadata and status replies
 keep their 8 MiB bounds. This changes no activation or qualification gate.
 
+The native channel fixture records its protection deadline before installation and
+waits for the qualified lower clock bound, including the mutation uncertainty
+margin, before namespace teardown. Successful guest completion does not release
+topology protection early. Cleanup remains bounded and emits fixed stage failures.
+
 ## Dormant renewable operation primitives
 
 `limits.execution_mode` optionally names `renewable_exec_v1`. Omission preserves
@@ -757,3 +762,30 @@ responsibility; unsigned callback success itself never extends a host timer.
 Provisioning defaults to no callback. The production renewable capability remains
 false pending independent review, Linux lifecycle/crash/clock qualification,
 compatibility evidence and CI. Mac checks do not supply native evidence.
+
+
+## Activation observation and authorization clocks
+
+The continuation driver may run before its sole dispatch RPC reaches the host.
+It waits only for authenticated active evidence, bounded by the original signed
+expiry and ten-second dispatch budget. Unknown observation never authorizes a
+callback or a new dispatch. Terminal evidence ends the wait. Host active status
+takes the admission write turn so it cannot reconcile the consumed record while
+initial acceptance and durable active publication still hold the read turn.
+
+Installer `POST /internal/authority/v1/authorization_clock` accepts only `{}` and
+returns `{authority:{now,uncertainty},host:{now,uncertainty}}`. The host sample uses
+installer `GET /internal/execution/v1/clock` on the same pinned dedicated transport.
+Both are qualified clock observations, independent of source authorization and
+renewable capability. Neither reads or changes a journal. Missing or stale local
+clock qualification refuses the request. A signer may conservatively use these
+lower bounds; observation alone never extends signed authorization freshness.
+
+The existing disposable native proof includes a test-only qualified Service,
+central callback reentry, exact host protection and continuation ACK, a quiet
+60-second guest timeout across the original quota window, one-unit quota budgets,
+status-only duplicates, source refusal/lease expiry and active revocation. It also
+runs the monotonic activation and completion-owner regressions. Normal Service
+construction keeps renewable issuance false. A compiled fixture or Mac checks do
+not satisfy native qualification; production activation requires separately
+reviewed native evidence.

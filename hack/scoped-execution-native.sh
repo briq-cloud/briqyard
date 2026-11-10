@@ -9,6 +9,10 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
 DRIVER=$TARGET/release/scoped-execution-native
+FLEET_TEST_PATH=$TARGET/scoped-native-fleet-test
+[ -f "$FLEET_TEST_PATH" ] || { echo 'build the native fleet test receipt first' >&2; exit 2; }
+FLEET_TEST=$(cat "$FLEET_TEST_PATH")
+[ -x "$FLEET_TEST" ] || { echo 'native fleet test binary unavailable' >&2; exit 2; }
 [ -x "$DRIVER" ] || { echo 'build scoped-execution-native first' >&2; exit 2; }
 export BRIQYARD_URL=http://127.0.0.1:7420
 # No arbitrary endpoint overrides: this fixture owns the disposable local host.
@@ -30,11 +34,12 @@ cleanup() {
     sudo kill -TERM "$AUTHORITY_PID" 2>/dev/null
     wait "$AUTHORITY_PID" 2>/dev/null
   fi
+  sudo "$DRIVER" drain "$D" || { echo "scoped native: cleanup protection drain failed" >&2; rc=1; }
   for id in $(briqyard machine ls --namespace "$T" 2>/dev/null | awk 'NR>1{print $1}'); do
     timeout 90 briqyard machine rm "$id" >/dev/null 2>&1 || rc=1
   done
   timeout 90 briqyard namespace gateway rm "$T" >/dev/null 2>&1 || true
-  briqyard namespace rm "$T" >/dev/null 2>&1 || rc=1
+  briqyard namespace rm "$T" >/dev/null 2>&1 || { echo "scoped native: cleanup namespace failed" >&2; rc=1; }
   if briqyard namespace ls | jq -e --arg ns "$T" 'any(.[]; .id == $ns)' >/dev/null; then rc=1; fi
   # The retained compatibility floor belongs to this disposable fixture and is never removed.
   if [ "$CONFIG_SAVED" = 1 ]; then
@@ -101,3 +106,23 @@ PHASE=sibling
 S=$(briqyard machine run --namespace "$T" --name sibling --image alpine:3.20 --memory 128 -l briq_id=native-sibling -l "team=$T" -- sleep 3600 | jq -er .id)
 PHASE=scoped_dispatch
 sudo "$DRIVER" run "$D" "$T" "$M" "$S"
+
+# The production authority always refuses renewable issuance. Only this compiled
+# test fixture may inject the qualified Service capability and central callback.
+PHASE=legacy_authority_stop
+AUTHORITY_CHILD=$(sudo cat "$D/authority.pid")
+[[ "$AUTHORITY_CHILD" =~ ^[0-9]+$ ]] || exit 1
+sudo kill -TERM "$AUTHORITY_CHILD"
+wait "$AUTHORITY_PID"
+AUTHORITY_PID=
+PHASE=renewable_service_callback_guest
+sudo env RUNNER_ENVIRONMENT=github-hosted BRIQYARD_NATIVE_DIRECTORY="$D" \
+  BRIQYARD_NATIVE_DRIVER="$DRIVER" BRIQYARD_NATIVE_NAMESPACE="$T" \
+  BRIQYARD_NATIVE_MACHINE="$M" BRIQYARD_NATIVE_SIBLING="$S" \
+  timeout 210 "$FLEET_TEST" --ignored --exact execution_service::native::renewable_service_callback_host_guest --nocapture
+PHASE=renewable_side_effects
+[ "$(briqyard machine exec "$M" -- wc -l /tmp/scoped-renewable-counter | awk '{print $1}')" = 3 ]
+PHASE=host_regressions
+cargo test --release --locked -p briqyardd active_commit_cannot_reconstruct_expired_initial_monotonic_authority -- --exact guestc::active_lease::tests::active_commit_cannot_reconstruct_expired_initial_monotonic_authority
+cargo test --release --locked -p briqyardd terminal_owner_remains_distinct_from_abandoned_until_finish_fsync -- --exact guestc::active_operations::tests::terminal_owner_remains_distinct_from_abandoned_until_finish_fsync
+printf 'scoped native: renewable Service callback/guest and host regression qualification passed\n'

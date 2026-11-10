@@ -174,6 +174,7 @@ fn registered_keys(
 pub fn router(state: Arc<HostExecutionChannel>) -> Router {
     Router::new()
         .route("/internal/execution/v1/instance", get(instance))
+        .route("/internal/execution/v1/clock", get(authorization_clock))
         .route("/internal/execution/v1/register", post(register))
         .route("/internal/execution/v1/discover", post(discover))
         .route("/internal/execution/v1/ownership", post(ownership))
@@ -192,6 +193,15 @@ pub fn router(state: Arc<HostExecutionChannel>) -> Router {
         .route("/internal/execution/v1/active", post(renewal::active))
         .layer(DefaultBodyLimit::max(access::MAX_BODY_BYTES))
         .with_state(state)
+}
+
+async fn authorization_clock(State(st): Channel, headers: HeaderMap) -> Answer<ClockObservation> {
+    st.authorize(&headers, true)?;
+    let sample = st.clock()?;
+    Ok(Json(ClockObservation {
+        now: sample.now,
+        uncertainty: sample.uncertainty,
+    }))
 }
 
 async fn instance(State(st): Channel, headers: HeaderMap) -> Answer<Instance> {

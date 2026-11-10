@@ -58,6 +58,19 @@ async fn internal_execution_route_requires_its_installer_credential_on_loopback(
         );
     }
 
+    for token in [None, Some("execution-secret"), Some("ordinary-admin")] {
+        let mut builder = Request::builder().uri("/internal/execution/v1/clock");
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
     for (path, body, wrong_role) in [
         (
             "continue",

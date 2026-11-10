@@ -133,3 +133,11 @@ pub struct ClockObservation {
     pub now: u64,
     pub uncertainty: u64,
 }
+
+/// Fresh qualified intervals sampled by the fixed authority and its pinned host.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationClock {
+    pub authority: ClockObservation,
+    pub host: ClockObservation,
+}

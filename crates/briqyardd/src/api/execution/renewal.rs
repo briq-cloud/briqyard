@@ -109,7 +109,9 @@ pub(super) async fn active(
     Json(req): Json<StatusRequest>,
 ) -> Answer<ActiveStatus> {
     st.authorize(&headers, false)?;
-    let _read = st.admission.read().await;
+    // Initial consumption and active publication hold the read turn through the
+    // guest ACK and fsync. Status must not reconcile their intermediate record.
+    let _write = st.admission.write().await;
     let mut journal = st.journal.lock().await;
     let fresh = sample()?;
     let mut evidence = journal

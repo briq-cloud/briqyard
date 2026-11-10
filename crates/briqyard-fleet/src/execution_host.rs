@@ -11,6 +11,7 @@ const MAX_BODY: usize = api::execution::MAX_BODY_BYTES;
 #[derive(Clone, Copy)]
 pub(super) enum Route {
     Instance,
+    Clock,
     Register,
     Discover,
     Ownership,
@@ -30,6 +31,7 @@ impl Route {
     fn path(self) -> &'static str {
         match self {
             Self::Instance => "instance",
+            Self::Clock => "clock",
             Self::Register => "register",
             Self::Discover => "discover",
             Self::Ownership => "ownership",
@@ -203,7 +205,7 @@ impl HostTransport {
     ) -> Result<R, Error> {
         let mut url = self.origin.clone();
         url.set_path(&format!("/internal/execution/v1/{}", route.path()));
-        let method = if matches!(route, Route::Instance) {
+        let method = if matches!(route, Route::Instance | Route::Clock) {
             Method::GET
         } else {
             Method::POST
@@ -221,7 +223,7 @@ impl HostTransport {
                 &self.execution
             },
         );
-        if !matches!(route, Route::Instance) {
+        if !matches!(route, Route::Instance | Route::Clock) {
             let body = serde_json::to_vec(input).map_err(|_| Error::Request)?;
             if body.len() > MAX_BODY {
                 return Err(Error::Request);
@@ -289,6 +291,13 @@ pub(super) mod tests {
             headers[header::AUTHORIZATION].to_str().unwrap().into(),
         ));
         match uri.path() {
+            "/internal/execution/v1/clock" => {
+                axum::Json(api::execution::channel::ClockObservation {
+                    now: 1000,
+                    uncertainty: 1,
+                })
+                .into_response()
+            }
             "/internal/execution/v1/instance" => axum::Json(api::execution::channel::Instance {
                 host_instance: instance.lock().unwrap().clone(),
             })

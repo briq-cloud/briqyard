@@ -321,11 +321,63 @@ pub(crate) trait ContinuationProvider: Send + Sync {
     >;
 }
 
+// Observation can race ahead of the sole dispatch RPC. Unknown is not active
+// evidence, but it is not proof that that in-flight RPC has failed either.
+async fn await_activation<F, Fut, C>(
+    initial_expiry: u64,
+    mut observe: F,
+    mut qualified: C,
+) -> Option<ActiveStatus>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<ActiveStatus, StatusCode>>,
+    C: FnMut() -> Result<Clock, StatusCode>,
+{
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let now = qualified().ok()?;
+        if initial_expiry <= now.now.saturating_add(now.uncertainty) {
+            return None;
+        }
+        let status = tokio::time::timeout_at(deadline, observe())
+            .await
+            .ok()?
+            .ok()?;
+        match status.state {
+            ActiveState::Active => return Some(status),
+            ActiveState::Terminal => return None,
+            ActiveState::Unknown if status.evidence.is_none() => {}
+            ActiveState::Unknown => return None,
+        }
+        tokio::time::timeout_at(
+            deadline,
+            tokio::time::sleep(std::time::Duration::from_millis(100)),
+        )
+        .await
+        .ok()?;
+    }
+}
+
 pub(super) async fn drive(service: &Service, operation_id: &str, initial_expiry: u64) {
     let Some(provider) = &service.continuation else {
         return;
     };
-    let mut expiry = initial_expiry;
+    let Some(initial) = await_activation(
+        initial_expiry,
+        || async {
+            let mut issuer = service.issuer.lock().await;
+            live(service, &mut issuer, operation_id).await
+        },
+        || clock(service.clock.as_ref()),
+    )
+    .await
+    else {
+        return;
+    };
+    let Some(initial) = initial.evidence else {
+        return;
+    };
+    let mut expiry = initial.lease_expires_at;
     let mut attempted = std::collections::BTreeSet::new();
     loop {
         let Ok(now) = clock(service.clock.as_ref()) else {
@@ -400,5 +452,75 @@ pub(super) async fn drive(service: &Service, operation_id: &str, initial_expiry:
             return;
         }
         expiry = current.lease_expires_at;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn status_before_dispatch_waits_without_authorizing_or_replaying() {
+        let reads = AtomicUsize::new(0);
+        // Active payload validation belongs to live(); this verifies the driver
+        // waits for that result rather than abandoning the sole pending RPC.
+        let result = await_activation(
+            1010,
+            || async {
+                let n = reads.fetch_add(1, Ordering::SeqCst);
+                Ok(ActiveStatus {
+                    state: if n == 0 {
+                        ActiveState::Unknown
+                    } else {
+                        ActiveState::Active
+                    },
+                    observed_at: briqyard_api::execution::channel::ClockObservation {
+                        now: 1000,
+                        uncertainty: 1,
+                    },
+                    evidence: None,
+                })
+            },
+            || {
+                Ok(Clock {
+                    now: 1000,
+                    uncertainty: 1,
+                })
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap().state, ActiveState::Active);
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn activation_observation_never_crosses_initial_expiry_or_terminal() {
+        for expired in [false, true] {
+            let reads = AtomicUsize::new(0);
+            let result = await_activation(
+                if expired { 1001 } else { 1010 },
+                || async {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    Ok(ActiveStatus {
+                        state: ActiveState::Terminal,
+                        observed_at: briqyard_api::execution::channel::ClockObservation {
+                            now: 1000,
+                            uncertainty: 1,
+                        },
+                        evidence: None,
+                    })
+                },
+                || {
+                    Ok(Clock {
+                        now: 1000,
+                        uncertainty: 1,
+                    })
+                },
+            )
+            .await;
+            assert!(result.is_none());
+            assert_eq!(reads.load(Ordering::SeqCst), usize::from(!expired));
+        }
     }
 }
