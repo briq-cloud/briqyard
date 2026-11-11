@@ -87,6 +87,12 @@ async fn the_queue_counts_a_start_and_empties_on_success_failure_and_cancellatio
         0,
         "a machine that is not started is not booting"
     );
+    let made = h.m.entry(&m.id).unwrap();
+    assert!(
+        h.m.make_queued(&made, &crate::machine::Make::Image)
+            .is_none(),
+        "nor is it queued while its image and disks are made"
+    );
 
     // Success: it waits for a turn, then runs.
     let size = hold_gate(&h).await;
