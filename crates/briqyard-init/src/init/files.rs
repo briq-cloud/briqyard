@@ -117,7 +117,7 @@ where
         if let Err(e) = result.unwrap_or_else(|_| Err(anyhow!("file transfer timeout"))) {
             let _ = tokio::time::timeout(
                 Duration::from_secs(wire::IDLE_SEC),
-                send(&output, &Response::error(e.to_string())),
+                send(&output, &failure(&e)),
             )
             .await;
         }
@@ -126,10 +126,74 @@ where
             // Once ready, failure is EOF, never an error frame in the raw body.
             let _ = tokio::time::timeout(
                 Duration::from_secs(wire::IDLE_SEC),
-                send(&output, &Response::error(e.to_string())),
+                send(&output, &failure(&e)),
             )
             .await;
         }
+    }
+}
+
+/// An error the caller's path caused, tagged where the path is resolved, created or opened.
+/// Failures on our own temporary file are never tagged, whatever their errno.
+#[derive(Debug)]
+struct PathError(anyhow::Error);
+impl std::fmt::Display for PathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+impl std::error::Error for PathError {}
+
+/// Whether an errno is one the path of the request can cause.
+pub(super) fn path_errno(errno: rustix::io::Errno) -> bool {
+    use rustix::io::Errno;
+    matches!(
+        errno,
+        Errno::NOENT
+            | Errno::NOTDIR
+            | Errno::ISDIR
+            | Errno::ACCESS
+            | Errno::PERM
+            | Errno::ROFS
+            | Errno::LOOP
+            | Errno::NAMETOOLONG
+    )
+}
+
+/// Tags an I/O failure on the caller's path; others pass through unchanged.
+fn tag(e: impl Into<anyhow::Error>) -> anyhow::Error {
+    let e: anyhow::Error = e.into();
+    let errno = e.downcast_ref::<rustix::io::Errno>().copied().or_else(|| {
+        e.downcast_ref::<std::io::Error>()
+            .and_then(|e| e.raw_os_error())
+            .map(rustix::io::Errno::from_raw_os_error)
+    });
+    match errno {
+        Some(errno) if path_errno(errno) => anyhow::Error::new(PathError(e)),
+        _ => e,
+    }
+}
+
+fn at_path<T, E: Into<anyhow::Error>>(r: std::result::Result<T, E>) -> Result<T> {
+    r.map_err(tag)
+}
+
+fn not_a_file(why: &str) -> anyhow::Error {
+    anyhow::Error::new(PathError(anyhow!("{why}")))
+}
+
+fn failure(e: &anyhow::Error) -> Response {
+    match e.chain().any(|c| c.is::<PathError>()) {
+        true => Response::path_error(e.to_string()),
+        false => Response::error(e.to_string()),
+    }
+}
+
+/// The answer to a failed whole-file `put` or `get`, whose every step is on the caller's path.
+pub(super) fn io_failure(e: &std::io::Error) -> Response {
+    match e.raw_os_error().map(rustix::io::Errno::from_raw_os_error) {
+        Some(errno) if path_errno(errno) => Response::path_error(e.to_string()),
+        _ => Response::error(e.to_string()),
     }
 }
 
@@ -142,11 +206,11 @@ async fn idle<T>(f: impl std::future::Future<Output = std::io::Result<T>>) -> Re
 /// Open one directory at a time, with a descriptor pinned across rename races.
 fn parent(root: &Path, path: &str, create: bool) -> Result<(OwnedFd, CString)> {
     wire::check_path(path).map_err(|e| anyhow!(e))?;
-    let mut dir = at::open(
+    let mut dir = at_path(at::open(
         root,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::empty(),
-    )?;
+    ))?;
     let mut parts = path[1..].split('/').peekable();
     while let Some(part) = parts.next() {
         let name = CString::new(part)?;
@@ -156,30 +220,30 @@ fn parent(root: &Path, path: &str, create: bool) -> Result<(OwnedFd, CString)> {
         if create {
             match at::mkdirat(&dir, &name, Mode::from_raw_mode(0o755)) {
                 Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(tag(e)),
             }
         }
-        dir = at::openat(
+        dir = at_path(at::openat(
             &dir,
             &name,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
             Mode::empty(),
-        )?;
+        ))?;
     }
-    Err(anyhow!("path must name a file"))
+    Err(not_a_file("path must name a file"))
 }
 
 fn open_file(root: &Path, path: &str) -> Result<fs::File> {
     let (dir, name) = parent(root, path, false)?;
-    let fd = at::openat(
+    let fd = at_path(at::openat(
         &dir,
         &name,
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
-    )?;
+    ))?;
     let file = fs::File::from(fd);
     if !file.metadata()?.is_file() {
-        return Err(anyhow!("path must name a regular file"));
+        return Err(not_a_file("path must name a regular file"));
     }
     Ok(file)
 }
@@ -227,7 +291,8 @@ impl Upload {
                     })
                 }
                 Err(rustix::io::Errno::EXIST) => continue,
-                Err(e) => return Err(e.into()),
+                // The temporary lives in the caller's directory: a refusal there is the path's.
+                Err(e) => return Err(tag(e)),
             }
         }
         Err(anyhow!("cannot create upload temporary file"))
@@ -247,7 +312,12 @@ impl Upload {
         };
         at::fchmod(&self.file, Mode::from_raw_mode(mode))?;
         // rename replaces a final symlink itself; it never writes its target.
-        at::renameat(&self.dir, &self.temporary, &self.dir, &self.name)?;
+        at_path(at::renameat(
+            &self.dir,
+            &self.temporary,
+            &self.dir,
+            &self.name,
+        ))?;
         self.committed = true;
         Ok(())
     }
@@ -395,6 +465,100 @@ mod tests {
         assert!(open_file(root.path(), "/link/original").is_err());
         symlink("original", root.path().join("readlink")).unwrap();
         assert!(open_file(root.path(), "/readlink").is_err());
+    }
+
+    #[test]
+    fn a_refused_temporary_create_is_the_paths_fault() {
+        let root = tempfile::tempdir().unwrap();
+        // The directory goes away between the walk and the create: ENOENT on the temporary.
+        let dir = root.path().join("d");
+        let gone = dir.clone();
+        let mut first = true;
+        let sequence = std::iter::from_fn(move || {
+            if std::mem::take(&mut first) {
+                fs::remove_dir(&gone).unwrap();
+            }
+            Some(0)
+        });
+        let e = Upload::create(root.path(), "/d/f", sequence).err().unwrap();
+        assert_eq!(failure(&e).cause, "path");
+        // Out of space or descriptors on that create is ours, not the path's.
+        for errno in [rustix::io::Errno::NOSPC, rustix::io::Errno::MFILE] {
+            assert_eq!(failure(&tag(errno)).cause, "");
+        }
+    }
+
+    #[test]
+    fn path_failures_carry_the_path_cause_and_others_do_not() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("file"), b"x").unwrap();
+        fs::create_dir(root.path().join("dir")).unwrap();
+        symlink(root.path(), root.path().join("link")).unwrap();
+        let cause = |e: anyhow::Error| failure(&e).cause;
+        // A parent that is a regular file (ENOTDIR), for a write and a read.
+        assert_eq!(
+            cause(Upload::new(root.path(), "/file/x").err().unwrap()),
+            "path"
+        );
+        assert_eq!(
+            cause(open_file(root.path(), "/file/x").err().unwrap()),
+            "path"
+        );
+        // A missing parent on a read, and a symlink component (ELOOP or ENOTDIR).
+        assert_eq!(
+            cause(open_file(root.path(), "/none/x").err().unwrap()),
+            "path"
+        );
+        assert_eq!(
+            cause(open_file(root.path(), "/none").err().unwrap()),
+            "path"
+        );
+        assert_eq!(
+            cause(Upload::new(root.path(), "/link/x").err().unwrap()),
+            "path"
+        );
+        // A directory as the target: the rename onto it fails with EISDIR.
+        let mut upload = Upload::new(root.path(), "/dir").unwrap();
+        assert_eq!(cause(upload.commit(Some(0o644)).unwrap_err()), "path");
+        // Not a regular file.
+        assert_eq!(cause(open_file(root.path(), "/dir").err().unwrap()), "path");
+        let resp = failure(&not_a_file("path must name a file"));
+        assert_eq!(
+            (
+                resp.kind.as_str(),
+                resp.cause.as_str(),
+                resp.message.as_str()
+            ),
+            ("error", "path", "path must name a file")
+        );
+        // A name too long, as a parent component.
+        let long = "a".repeat(300);
+        assert_eq!(
+            cause(
+                Upload::new(root.path(), &format!("/{long}/x"))
+                    .err()
+                    .unwrap()
+            ),
+            "path"
+        );
+        // Only the path errnos are tagged, from rustix or std errors alike.
+        use rustix::io::Errno;
+        for errno in [Errno::ACCESS, Errno::ROFS, Errno::NAMETOOLONG, Errno::PERM] {
+            assert_eq!(cause(tag(errno)), "path", "{errno}");
+            let io = std::io::Error::from_raw_os_error(errno.raw_os_error());
+            assert_eq!(cause(tag(io)), "path", "{errno}");
+        }
+        for errno in [Errno::NOSPC, Errno::IO] {
+            assert_eq!(cause(tag(errno)), "", "{errno}");
+        }
+        // Our own temporary file is never tagged: a failure there stays plain, whatever the errno.
+        for errno in [Errno::ACCESS, Errno::ROFS, Errno::NOENT] {
+            let e = anyhow::Error::from(errno).context("fchmod");
+            assert_eq!(cause(e), "", "{errno}");
+        }
+        assert_eq!(cause(anyhow!("file stream shorter than declared size")), "");
+        // The kind stays `error`, so an older daemon reads the frame as before.
+        assert_eq!(failure(&anyhow!("x")).kind, "error");
     }
 
     #[tokio::test]

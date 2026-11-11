@@ -117,6 +117,9 @@ async fn upload(
         .await?
         .map_err(crate::machine::not_running_if_unreachable)?;
     if response.kind != "ok" {
+        if response.cause == guest::CAUSE_PATH {
+            return Err(MError::PathRefused(response.message));
+        }
         return Err(MError::Other(anyhow::anyhow!(
             "upload: {}",
             response.message
@@ -289,6 +292,33 @@ mod tests {
                 .unwrap();
             assert_eq!(written.size, 5);
             assert_eq!(written.sha256, hex::encode(Sha256::digest(b"bytes")));
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_path_cause_is_refused_and_any_other_guest_error_is_internal() {
+        for (frame, path) in [
+            (guest::Response::path_error("not a directory"), true),
+            (guest::Response::error("no space left on device"), false),
+        ] {
+            let (mut host, mut guest) = tokio::io::duplex(1024);
+            let task = tokio::spawn(async move {
+                let mut received = [0; 9];
+                guest.read_exact(&mut received).await.unwrap();
+                guest
+                    .write_all(&guest::encode_frame(&frame).unwrap())
+                    .await
+                    .unwrap();
+            });
+            let err = upload(&mut host, Body::from("bytes"), None)
+                .await
+                .unwrap_err();
+            match (path, &err) {
+                (true, MError::PathRefused(m)) => assert_eq!(m, "not a directory"),
+                (false, MError::Other(_)) => {}
+                _ => panic!("unexpected {err:?}"),
+            }
             task.await.unwrap();
         }
     }

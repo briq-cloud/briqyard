@@ -96,6 +96,9 @@ impl Manager {
     /// 0027): what an exec, a put, a get, and any op added later go through. A guest that
     /// cannot be reached is exiting: not running, 409.
     fn init_named(&self, id: &str, err: anyhow::Error) -> MError {
+        if let Some(p) = err.downcast_ref::<guestc::PathRefused>() {
+            return MError::PathRefused(p.0.clone());
+        }
         match not_running_if_unreachable(err) {
             MError::Other(err) => {
                 let init = self

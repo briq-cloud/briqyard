@@ -107,6 +107,10 @@ pub enum MError {
     NoSnapshot(String),
     #[error("invalid request: {0}")]
     Invalid(String),
+    /// The guest refused a file transfer because of the caller's path (the guest's message):
+    /// 422 `path_refused`, not a failure of the host.
+    #[error("{0}")]
+    PathRefused(String),
     #[error("{0}")]
     Conflict(String),
     /// A create of a name the namespace has: the machine of that name, for a caller sending the

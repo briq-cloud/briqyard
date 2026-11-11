@@ -195,6 +195,9 @@ impl Guest for Vsock {
             if r.message == "too many file transfers" {
                 return Err(FileTransferBusy.into());
             }
+            if r.cause == guest::CAUSE_PATH {
+                return Err(PathRefused(r.message).into());
+            }
             return Err(answered(&req.op, &r.message));
         }
         if r.kind != "ready" {
@@ -264,6 +267,11 @@ impl Guest for Vsock {
 #[derive(Debug, thiserror::Error)]
 #[error("too many file transfers in the guest")]
 pub struct FileTransferBusy;
+
+/// The guest refused a file transfer because of the caller's path (`Response::cause`).
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct PathRefused(pub String);
 
 /// The guest cannot be reached: Firecracker's socket refuses (its process is exiting or gone)
 /// or the init's port does (the guest is exiting). The machine is not running, whatever its
@@ -525,6 +533,9 @@ async fn round_trip(uds: &Path, req: Request) -> Result<Response> {
     write_request(&mut s, &req).await?;
     let r: Response = read_frame(&mut s).await?;
     if r.kind == "error" {
+        if r.cause == guest::CAUSE_PATH {
+            return Err(PathRefused(r.message).into());
+        }
         return Err(answered(&req.op, &r.message));
     }
     Ok(r)
@@ -1384,6 +1395,48 @@ mod tests {
             .unwrap();
         assert!(err.is::<UnknownOp>());
         server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_guests_path_refusal_is_typed_and_other_errors_are_not() {
+        for (resp, typed) in [
+            (Response::path_error("no such file or directory"), true),
+            (Response::error("input/output error"), false),
+        ] {
+            let (_dir, path) = socket();
+            let server = serve(&path, OK, vec![frame(&resp)]);
+            let err = Vsock
+                .file_stream(
+                    &path,
+                    Request {
+                        op: "get_stream".into(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(err.is::<PathRefused>(), typed);
+            assert_eq!(err.to_string(), resp.message);
+            server.await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn the_whole_file_ops_type_a_path_refusal_too() {
+        for (resp, typed) in [
+            (Response::path_error("is a directory"), true),
+            (Response::error("no space left on device"), false),
+        ] {
+            let (_dir, path) = socket();
+            let server = serve(&path, OK, vec![frame(&resp)]);
+            let err = put(&path, "/x", 0o644, vec![1]).await.unwrap_err();
+            assert_eq!(err.is::<PathRefused>(), typed);
+            server.await.unwrap();
+            let (_dir, path) = socket();
+            let server = serve(&path, OK, vec![frame(&resp)]);
+            let err = get(&path, "/x").await.unwrap_err();
+            assert_eq!(err.is::<PathRefused>(), typed);
+            server.await.unwrap();
+        }
     }
     #[tokio::test]
     async fn a_guests_file_transfer_limit_is_a_typed_refusal() {

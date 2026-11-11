@@ -192,6 +192,11 @@ pub struct Request {
     pub clone_activation_realtime_sec: Option<u64>,
 }
 
+/// `Response::cause` of a file transfer the caller's path makes impossible: a missing or
+/// non-directory parent, a directory or special file as the target, a refused or read-only
+/// location, a symlink component, a name too long.
+pub const CAUSE_PATH: &str = "path";
+
 /// Responses: stdout and stderr chunks then exit; or ok, file, pong, ready, error.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Response {
@@ -238,6 +243,11 @@ pub struct Response {
     /// Stable failure category for a versioned streaming terminal error.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error_code: String,
+    /// With an `error`: what about the request caused it, when the caller can fix it. `"path"`
+    /// is a file transfer the target path makes impossible (see [`CAUSE_PATH`]). Empty for every
+    /// other failure, and from an init older than the field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cause: String,
     /// Present only for guests born at the reviewed pre-main template barrier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone_status: Option<CloneStatus>,
@@ -287,6 +297,13 @@ impl Response {
             kind: "error".into(),
             message: msg.into(),
             ..Default::default()
+        }
+    }
+    /// An error the caller's path caused ([`CAUSE_PATH`]).
+    pub fn path_error(msg: impl Into<String>) -> Self {
+        Self {
+            cause: CAUSE_PATH.into(),
+            ..Self::error(msg)
         }
     }
     pub fn chunk(kind: &str, data: Vec<u8>) -> Self {

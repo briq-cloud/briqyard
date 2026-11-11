@@ -219,12 +219,12 @@ where
             .unwrap_or_else(|e| Err(std::io::Error::other(format!("put worker: {e}"))));
             match res {
                 Ok(()) => send(&stream, &Response::new("ok")).await,
-                Err(e) => send(&stream, &Response::error(e.to_string())).await,
+                Err(e) => send(&stream, &files::io_failure(&e)).await,
             }
         }
         "get" => match fs::read(&req.path) {
             Ok(data) => send(&stream, &Response::chunk("file", data)).await,
-            Err(e) => send(&stream, &Response::error(e.to_string())).await,
+            Err(e) => send(&stream, &files::io_failure(&e)).await,
         },
         "shutdown" => {
             *st.requested.lock().unwrap() = true;
