@@ -500,7 +500,9 @@ fn decide(
     // Only a spilling walk gets here with a region found: the score decides, a later region
     // winning with a strictly lower one.
     let n = spill.unwrap_or(0);
-    let score = |(i, _, waves): &(usize, &HostRec, u32)| waves + *i as u32 * n;
+    let score = |(i, _, waves): &(usize, &HostRec, u32)| {
+        waves.saturating_add((*i as u32).saturating_mul(n))
+    };
     let mut winner: Option<&(usize, &HostRec, u32)> = None;
     for f in &found {
         if winner.is_none_or(|w| score(f) < score(w)) {
