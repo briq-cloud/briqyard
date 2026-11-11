@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.7 — 2026-11-11
+
+### Fixes
+
+- answer a path the guest refuses as 422 path_refused, not internal (#228) ([554b19aa](https://github.com/briq-cloud/briqyard/commit/554b19aac864a2c99ac100c40d3039c9ce1795e4))
+
+- hold placement admission capacity for 4 minutes (#230) ([b3b6ef48](https://github.com/briq-cloud/briqyard/commit/b3b6ef48b2c4b9a0942776f1541dddd93a2909c4))
+
+
+### Maintenance
+
+- qualify VMGenID, MAC, clock and RNG of loaded-service clones (#227) ([5d324667](https://github.com/briq-cloud/briqyard/commit/5d324667f6f91012e8482264ca86158856d90ace))
+
 ## 0.2.6 — 2026-11-11
 
 ### Upgrade notes
