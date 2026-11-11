@@ -221,6 +221,22 @@ impl HostRec {
         self.capacity.memory_mb.saturating_sub(self.used.memory_mb)
     }
 
+    /// Boots queued on the host (ADR 0130): those its last report counts, and the creates and
+    /// admissions placed since, which `report` leaves in `holds`. `None`: it reports no queue.
+    pub fn queued(&self) -> Option<u32> {
+        let (_, queue) = self.boots_at_once.zip(self.boot_queue)?;
+        Some(queue.saturating_add(self.holds.len() as u32))
+    }
+
+    /// Whole boot waves queued on the host: `queued` over the gate's size. 0 when the host
+    /// reports no queue, so it is never read as busy.
+    pub fn waves(&self) -> u32 {
+        match (self.queued(), self.boots_at_once) {
+            (Some(queued), Some(gate)) => queued.checked_div(gate).unwrap_or(0),
+            _ => 0,
+        }
+    }
+
     pub fn free_cpu_millis(&self) -> u32 {
         self.capacity
             .cpu_millis()
@@ -443,6 +459,9 @@ pub struct Policy {
     /// How long a placement admission holds capacity for a requirement not dispatched yet (ADR
     /// 0128).
     pub admission_hold: Duration,
+    /// Waves of queued boots from which a region is busy for a request that spills (ADR 0130);
+    /// 0: no spill.
+    pub spill_waves: u32,
 }
 
 impl Default for Policy {
@@ -455,6 +474,7 @@ impl Default for Policy {
             fill_ceiling: 0.85,
             down_after: Duration::seconds(60),
             admission_hold: Duration::minutes(4),
+            spill_waves: 2,
         }
     }
 }

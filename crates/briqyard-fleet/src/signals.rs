@@ -8,6 +8,45 @@ use briqyard_api::{RegionRoom, Room, Unschedulable};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+/// Placements that left a region for its queue of boots (ADR 0130), by the first region passed
+/// over and the one placed in.
+#[derive(Default)]
+pub struct Spills(Mutex<BTreeMap<(String, String), u64>>);
+
+impl Spills {
+    pub fn count(&self, from: &str, to: &str) {
+        *self
+            .0
+            .lock()
+            .unwrap()
+            .entry((from.to_string(), to.to_string()))
+            .or_default() += 1;
+    }
+
+    /// The counter, a series per pair seen: none before the first spill.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        let rows = self
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|((from, to), n)| {
+                let labels = format!("from=\"{}\",to=\"{}\"", label_value(from), label_value(to));
+                (labels, n.to_string())
+            })
+            .collect();
+        family(
+            &mut out,
+            "briqyard_fleet_placement_spills_total",
+            "counter",
+            "Placements that left a region busy with boots for a later one, since the fleet started.",
+            rows,
+        );
+        out
+    }
+}
+
 /// The region a refusal is counted in when no host is in the region it asked: a caller's typo
 /// never makes a new series.
 pub const OTHER: &str = "other";

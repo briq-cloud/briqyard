@@ -120,6 +120,12 @@ pub struct Placement {
     /// How long a placement admission holds capacity for a requirement not dispatched yet (ADR
     /// 0128).
     pub admission_hold_sec: u64,
+    /// Whole boot waves queued on a region's best host from which it counts as busy, for a
+    /// request that opts in with `spill_when_busy`; 0 turns spilling off (ADR 0130).
+    pub spill_waves: u32,
+    /// How long a placement waits for a fresh read of a busy region's hosts, in milliseconds,
+    /// 1 to 1000 (ADR 0130).
+    pub busy_read_ms: u64,
 }
 
 impl Default for Placement {
@@ -128,6 +134,8 @@ impl Default for Placement {
             fill_ceiling: 0.85,
             down_after_sec: 60,
             admission_hold_sec: 240,
+            spill_waves: 2,
+            busy_read_ms: 300,
         }
     }
 }
@@ -382,6 +390,12 @@ impl Config {
                 listen.ip()
             );
         }
+        if !(1..=1000).contains(&self.placement.busy_read_ms) {
+            bail!(
+                "placement.busy_read_ms {}: want 1 to 1000, under the second a host is not read twice in",
+                self.placement.busy_read_ms
+            );
+        }
         let b = &self.bootstrap;
         if !b.private_network.is_empty() {
             crate::bootstrap::Network::parse(&b.private_network)
@@ -535,6 +549,8 @@ mod tests {
         assert_eq!(cfg.placement.fill_ceiling, 0.85);
         assert_eq!(cfg.placement.down_after_sec, 60);
         assert_eq!(cfg.placement.admission_hold_sec, 240);
+        assert_eq!(cfg.placement.spill_waves, 2);
+        assert_eq!(cfg.placement.busy_read_ms, 300);
         let b = &cfg.bootstrap;
         assert!(!b.enabled);
         assert_eq!(b.ssh_user, "root");
@@ -657,6 +673,24 @@ bootstrap:
             let msg = format!("{err:#}");
             assert!(msg.contains("parse config"), "{msg}");
             assert!(msg.contains(field), "{field} named in: {msg}");
+        }
+    }
+
+    #[test]
+    fn the_spill_settings_parse_and_busy_read_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let load = |text: &str| {
+            let path = write(&dir, text);
+            with_env(&[], || Config::load(Some(&path)))
+        };
+        let cfg = load("placement:\n  spill_waves: 0\n  busy_read_ms: 1000\n").unwrap();
+        assert_eq!(
+            (cfg.placement.spill_waves, cfg.placement.busy_read_ms),
+            (0, 1000)
+        );
+        for bad in ["0", "1001"] {
+            let err = load(&format!("placement:\n  busy_read_ms: {bad}\n")).unwrap_err();
+            assert!(format!("{err:#}").contains("busy_read_ms"), "{err:#}");
         }
     }
 

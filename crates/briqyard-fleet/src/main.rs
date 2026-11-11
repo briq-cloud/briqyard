@@ -112,6 +112,11 @@ struct AppState {
     restores: restores::Restores,
     /// Creates refused for want of room, for an external scaler (ADR 0042).
     refusals: signals::Refusals,
+    /// Placements that left a busy region, by the region passed over and the one placed in (ADR
+    /// 0130).
+    spills: signals::Spills,
+    /// When each host was last read for a placement that found its region busy (ADR 0130).
+    busy_reads: Mutex<HashMap<String, std::time::Instant>>,
     /// The registry file's writes take turns (ADR 0043); the digest of what the last one wrote.
     written: Arc<tokio::sync::Mutex<Option<[u8; 32]>>>,
     /// The registry's change count when the last write was encoded (ADR 0119). Read and set only
@@ -377,6 +382,7 @@ async fn run(args: Args) -> Result<()> {
         fill_ceiling: cfg.placement.fill_ceiling,
         down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
         admission_hold: Duration::seconds(cfg.placement.admission_hold_sec as i64),
+        spill_waves: cfg.placement.spill_waves,
     };
     let acks_file = cfg.state_dir.join("published-keys.json");
     let published = backup::Backup::open(&cfg.backup)?;
@@ -398,6 +404,8 @@ async fn run(args: Args) -> Result<()> {
         list_timeout: LIST_TIMEOUT,
         restores: Default::default(),
         refusals: Default::default(),
+        spills: Default::default(),
+        busy_reads: Default::default(),
         written: Default::default(),
         written_rev: Default::default(),
         encodes: Default::default(),
