@@ -32,7 +32,7 @@ Doubling the burst adds about 1.1 s at p50 on the same hosts: the queue, not the
 
 `/v1/status` shows both figures for each host.
 
-**Waves.** `waves(host) = ⌊queued(host) / boots_at_once(host)⌋`. Everything waves change, the host order and the depth below included, applies only to a request with `spill_when_busy` and a fleet with `spill_waves > 0`; any other create is placed exactly as ADR 0128 places it. Within a region, the host pick of ADR 0128 keeps its keys and adds waves before free memory: a host holding a validated seed first, then the nested-hypervisor key (ADR 0088), then fewer whole waves, then most free memory.
+**Waves.** `waves(host) = ⌊queued(host) / boots_at_once(host)⌋`. Everything waves change, the host order and the depth below included, applies only to a request with `spill_when_busy` and more than one region, on a fleet with `spill_waves > 0`; any other create is placed exactly as ADR 0128 places it. Within a region, the host pick of ADR 0128 keeps its keys and adds waves before free memory: a host holding a validated seed first, then the nested-hypervisor key (ADR 0088), then fewer whole waves, then most free memory.
 
 **A region's depth** is the waves of the host the pick would choose there. A host `spill_waves` or more deep loses its seed and nested-hypervisor preference, so the pick does not queue on a deep seeded host beside an idle one. A region with candidates is `busy` when its depth is at least `placement.spill_waves` (fleet config, default 2).
 
@@ -62,6 +62,6 @@ A seed saves a cold boot, not a queue: a seeded host counts with its waves like 
 - Daemon: `boot_queue` counts gate holders and waiters for every kind of boot.
 - Registry unit tests: the walk above, including `busy` then `unconfirmed` (places in the busy region), all regions busy (the distribution follows the score), a pinned namespace (ignores `busy`), a seeded host in a busy region, a host that does not report `boots_at_once` or `boot_queue` (never busy), `full` then `unconfirmed` then a placed region (refuses as ADR 0128), a tie at exactly `spill_waves` (stays), `spill_waves = 0`, abandoned admissions expiring from the queue, replay of a spilled decision, and an older fleet loading a `busy` record.
 - A steady create rate below the gate makes no spill.
-- Flag off, or `spill_waves = 0`, with a deep seeded host: the pick is the one of ADR 0128.
+- Flag off, one region with the flag on, or `spill_waves = 0`, with a deep seeded host: the pick is the one of ADR 0128.
 - `hack/fleet-two-hosts.sh` with two regions of one host each: a burst of 3 × `boots_at_once` with `spill_when_busy` lands in both regions, and without it lands in the first.
 - Staging: the length of one boot wave in seconds (to justify `spill_waves = 2`), then a 100-nano burst with a preferred region and spilling on, against the same burst with it off: p50 and p90 to the first command, and the latency of a command to a spilled sandbox afterwards.
