@@ -643,6 +643,9 @@ impl Manager {
             _ => None,
         };
         let _guard = e.lock.lock().await;
+        // Declared after the lock, so dropped before it: the place is given back while the
+        // lock is held, never after a later boot of this machine has taken its own.
+        let _queued = _queued;
         let id = e.snapshot().id;
         if !self.inner.machines.lock().unwrap().contains_key(&id)
             || e.snapshot().state != state::CREATING
