@@ -106,13 +106,35 @@ export SECOND_HOST_SH="$WORK/second-host"
 export SECOND_HOST_STOP="$WORK/second-host systemctl stop briqyardd"
 export SECOND_HOST_START="$WORK/second-host systemctl start briqyardd"
 export FLEET_SH=sudo
+# Placement admission needs an authenticated fleet (ADR 0128), the rest of the run an open one:
+# the fleet has an API token only while fleet-two-hosts runs. Both hosts keep their own tokens.
+fleet_token() {
+  sudo python3 - "$1" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+p=Path('/etc/briqyard/fleet.yaml'); c=yaml.safe_load(p.read_text())
+if sys.argv[1]: c['token']=sys.argv[1]
+else: c.pop('token',None)
+p.write_text(yaml.safe_dump(c,sort_keys=False))
+PY
+  sudo systemctl restart briqyard-fleet
+  ready=0
+  for _ in $(seq 1 90); do
+    if curl -fsS ${1:+-H "Authorization: Bearer $1"} http://127.0.0.1:7430/v1/hosts | jq -e 'length == 2 and all(.state == "ready")' >/dev/null 2>&1; then ready=1; break; fi
+    sleep 1
+  done
+  [ "$ready" = 1 ] || { echo 'the fleet did not see both hosts ready after its token changed'; exit 1; }
+}
 rc=0
 for suite in fleet-two-hosts fleet-restore; do
   start=$SECONDS
+  if [ "$suite" = fleet-two-hosts ]; then fleet_token two-hosts-fleet-token; export BRIQYARD_TOKEN=two-hosts-fleet-token; fi
   set +e
   bash "hack/$suite.sh" 2>&1 | tee "native-logs/$suite.log"
   statuses=("${PIPESTATUS[@]}")
   set -e
+  if [ "$suite" = fleet-two-hosts ]; then unset BRIQYARD_TOKEN; fleet_token ''; fi
   printf '%s duration seconds: %s\n' "$suite" "$((SECONDS-start))" | tee -a native-logs/durations.log
   if [ "${statuses[0]}" != 0 ] || [ "${statuses[1]}" != 0 ]; then rc=1; fi
 done
