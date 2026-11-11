@@ -125,6 +125,8 @@ mod tests {
     #[allow(clippy::zombie_processes)]
     #[test]
     fn reaper_leaves_tracked_children_and_reaps_orphans() {
+        // A test that makes this process a subreaper holds the same lock.
+        let _one = one_at_a_time_blocking();
         // Ours: still running, held by its stdin. The orphan: exits at once, nobody waits.
         let mut ours = spawn_tracked(
             std::process::Command::new("cat")

@@ -21,6 +21,11 @@ pub(super) async fn one_at_a_time() -> tokio::sync::MutexGuard<'static, ()> {
     TIMING.lock().await
 }
 
+/// Like `one_at_a_time`, for a test that is not async.
+pub(super) fn one_at_a_time_blocking() -> tokio::sync::MutexGuard<'static, ()> {
+    TIMING.blocking_lock()
+}
+
 pub(super) fn state_with(cfg: Config) -> Arc<State> {
     let env = build_env(&cfg.env);
     let gate = clone::Gate::from_config(&cfg).unwrap();

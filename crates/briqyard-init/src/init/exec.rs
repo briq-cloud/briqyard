@@ -857,6 +857,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_has_no_deadline_unless_asked() {
+        let _one = testutil::one_at_a_time().await;
         let mut req = session(&["sh", "-c", "sleep 1; echo done"], false);
         req.timeout_ms = 0;
         let mut s = open(&state(), req).await;
@@ -915,6 +916,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_normal_exit_can_win_cancel_race() {
+        let _one = testutil::one_at_a_time().await;
         let mut s = open(&state(), stream_req(&["true"])).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         let _ =

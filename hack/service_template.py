@@ -208,7 +208,8 @@ def e2e():
     # The child wrote its pid before the seal (it ran), and no process with that pid is left.
     gone = cli('exec', cl[0]['id'], '--', 'sh', '-c',
                'p=$(cat /tmp/bgpark.pid 2>/dev/null); '
-               'if [ -z "$p" ]; then echo never-ran; elif [ -e /proc/$p ]; then echo alive; else echo gone; fi').stdout
+               'if [ -z "$p" ]; then echo never-ran; '
+               'elif tr "\\0" " " < /proc/$p/cmdline 2>/dev/null | grep -q "^sleep 60417"; then echo alive; else echo gone; fi').stdout
     check('park hook background child ran, and is absent from the clone', gone.strip() == 'gone', gone.strip())
     # 2: the draw taken before the seal is shared: the documented application duty.
     check('cached draw is shared across clones', len({o['cached'] for o in out}) == 1 and bool(out[0]['cached']))

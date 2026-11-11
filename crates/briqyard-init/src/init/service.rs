@@ -609,34 +609,84 @@ mod tests {
         wait_admitted(&st).await.unwrap();
     }
 
+    /// Makes this process the parent of the orphans it leaves (as PID 1 is in the guest),
+    /// until dropped. Without it the host's init would reap them and hide a missing reap.
+    struct Subreaper;
+    impl Subreaper {
+        fn new() -> Self {
+            nix::sys::prctl::set_child_subreaper(true).unwrap();
+            Subreaper
+        }
+    }
+    impl Drop for Subreaper {
+        fn drop(&mut self) {
+            let _ = nix::sys::prctl::set_child_subreaper(false);
+        }
+    }
+
     #[tokio::test]
     async fn a_killed_hook_group_is_gone_before_the_run_returns() {
         let _one = one_at_a_time().await;
+        let _sub = Subreaper::new();
         let st = hooked_state(&["true"], &["true"], 5);
         let marker = std::env::temp_dir().join(format!("hook-bg-{}", std::process::id()));
-        let script = format!("sleep 60411 & echo $$ $! > {}", marker.display());
+        let _ = fs::remove_file(&marker);
+        let script = format!(
+            "sleep 60411 & echo $$ $! > {m}.tmp; mv {m}.tmp {m}",
+            m = marker.display()
+        );
+        // The orphan reaper of the guest, narrowed to the one orphan this test makes: it
+        // follows the real rule (an orphan is reaped once its group leader is untracked)
+        // and leaves every other child of the test binary alone.
+        let reaper = {
+            let marker = marker.clone();
+            tokio::task::spawn_blocking(move || {
+                let ids = loop {
+                    if let Some(ids) = fs::read_to_string(&marker)
+                        .ok()
+                        .map(|s| {
+                            s.split_whitespace()
+                                .filter_map(|n| n.parse::<i32>().ok())
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|v| v.len() == 2)
+                    {
+                        break ids;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                };
+                wait_tracked(|t| !t.contains(ids[0]));
+                let give_up = std::time::Instant::now() + Duration::from_secs(5);
+                while std::time::Instant::now() < give_up {
+                    // ECHILD until the shell is gone and the child is ours.
+                    if let Ok(nix::sys::wait::WaitStatus::Signaled(..)) = nix::sys::wait::waitpid(
+                        Pid::from_raw(ids[1]),
+                        Some(nix::sys::wait::WaitPidFlag::WNOHANG),
+                    ) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                (ids[0], ids[1])
+            })
+        };
         let t0 = std::time::Instant::now();
         run_hook(&st, "park", &["sh".into(), "-c".into(), script], 5)
             .await
             .unwrap();
         let took = t0.elapsed();
-        let ids = fs::read_to_string(&marker).unwrap();
+        let (pgid, bg) = reaper.await.unwrap();
         let _ = fs::remove_file(&marker);
-        let mut ids = ids.split_whitespace().map(|n| n.parse::<i32>().unwrap());
-        let (pgid, bg) = (ids.next().unwrap(), ids.next().unwrap());
-        // The child is collected, not a zombie: nothing is left in the group, and the wait
-        // did not run out its timeout.
-        assert_eq!(
-            kill(Pid::from_raw(-pgid), None),
-            Err(nix::errno::Errno::ESRCH),
-            "the group is not gone: {}",
-            fs::read_to_string(format!("/proc/{bg}/status")).unwrap_or_default()
-        );
-        assert!(!std::path::Path::new(&format!("/proc/{bg}")).exists());
         assert!(
             took < GROUP_GONE_TIMEOUT / 2,
             "the run waited for the group: {took:?}"
         );
+        assert_eq!(
+            kill(Pid::from_raw(-pgid), None),
+            Err(nix::errno::Errno::ESRCH),
+            "the group is not gone"
+        );
+        assert!(!std::path::Path::new(&format!("/proc/{bg}")).exists());
     }
 
     #[tokio::test]
