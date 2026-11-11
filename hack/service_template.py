@@ -334,7 +334,8 @@ echo "draw=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 echo "dmesg_ok=$(dmesg >/dev/null 2>&1 && echo 1 || echo 0)"
 echo "fork_msgs=$(dmesg 2>/dev/null | grep -c 'crng reseeded due to virtual machine fork')"
 echo "fork_line=$(dmesg 2>/dev/null | grep 'crng reseeded due to virtual machine fork' | tail -n 1)"
-echo "vmgenid_dev=$(ls /sys/bus/acpi/drivers/vmgenid 2>/dev/null | grep ':' | tr '\n' ' ')"
+echo "vmgenid_dev=$(ls /sys/bus/acpi/devices 2>/dev/null | grep -E '^(VMGENCTR|VMGENCNT|VM_GEN_COUNTER|FCVMGID)' | tr '\n' ' ')"
+echo "vmgenid_drv=$(for d in /sys/bus/acpi/devices/VMGENCTR* /sys/bus/acpi/devices/VMGENCNT* /sys/bus/acpi/devices/VM_GEN_COUNTER* /sys/bus/acpi/devices/FCVMGID*; do [ -e "$d" ] && for l in "$d/driver" "$d"/physical_node/driver; do [ -e "$l" ] && echo "$(basename $d)->$(basename $(readlink -f $l))"; done; done 2>/dev/null | tr '\n' ' ')"
 echo "acpi_devices=$(ls /sys/bus/acpi/devices 2>/dev/null | tr '\n' ' ')"
 echo "vmgenid_log=$(dmesg 2>/dev/null | grep -i vmgenid | tail -n 2 | tr '\n' '|')"
 echo "vmclock_dev=$(ls /sys/bus/acpi/devices 2>/dev/null | grep -E '^AMZNC10C' | tr '\n' ' ')"
@@ -411,7 +412,7 @@ def verdict(statuses):
 
 def vmgenid_status(p):
     opt, where = pick_config(p.get('config', ''), 'CONFIG_VMGENID')
-    ev = {'config': opt or 'no config evidence', 'config_from': where or 'none', 'device_bound_to_vmgenid_driver': p.get('vmgenid_dev') or 'none',
+    ev = {'config': opt or 'no config evidence', 'config_from': where or 'none', 'device': p.get('vmgenid_dev') or 'none', 'driver': p.get('vmgenid_drv') or 'none',
           'acpi_devices': p.get('acpi_devices', ''), 'fork_messages': p.get('fork_msgs'), 'fork_line': p.get('fork_line', ''),
           'cmdline': p.get('cmdline', '')}
     if opt.startswith('#'):
@@ -421,7 +422,7 @@ def vmgenid_status(p):
     if p.get('dmesg_ok') != '1':
         return 'fail', 'the kernel log is unreadable in the guest, so the reseed cannot be observed', ev
     if not p.get('vmgenid_dev'):
-        return 'fail', '%s, but no ACPI device is bound to the vmgenid driver (is ACPI on?)' % (opt or 'config unknown'), ev
+        return 'fail', '%s, but the guest has no VM generation ID ACPI device (is ACPI on?)' % (opt or 'config unknown'), ev
     if not p.get('fork_msgs', '0').isdigit() or int(p['fork_msgs']) < 1:
         return 'fail', 'device present, but the kernel never logged "%s": the generation ID did not change on restore' % FORK_MSG, ev
     return 'pass', 'device %s, and "%s" logged %s time(s): the ID changed across the restore' % (p['vmgenid_dev'].strip(), FORK_MSG, p['fork_msgs']), ev

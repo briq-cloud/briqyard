@@ -6,7 +6,7 @@ import service_template as st
 
 
 def probe(**kw):
-    p = {'dmesg_ok': '1', 'vmgenid_dev': 'FCVMGID:00 ', 'fork_msgs': '1', 'config': 'CONFIG_VMGENID=y;'}
+    p = {'dmesg_ok': '1', 'vmgenid_dev': 'VMGENCTR:00 ', 'fork_msgs': '1', 'config': 'CONFIG_VMGENID=y;'}
     p.update(kw)
     return p
 
