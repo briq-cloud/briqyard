@@ -14,6 +14,20 @@ pub(super) fn spawn_tracked(cmd: &mut std::process::Command) -> std::process::Ch
     child
 }
 
+/// The timing-sensitive tests (those that spawn processes and wait on deadlines) run one at
+/// a time: they hold timing assumptions and share the machine. Every test that can leave an
+/// orphan, reaps children or makes this process a subreaper holds it too: while one test is
+/// a subreaper, another's orphans would become this process's children.
+static TIMING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(super) async fn one_at_a_time() -> tokio::sync::MutexGuard<'static, ()> {
+    TIMING.lock().await
+}
+
+/// Like `one_at_a_time`, for a test that is not async.
+pub(super) fn one_at_a_time_blocking() -> tokio::sync::MutexGuard<'static, ()> {
+    TIMING.blocking_lock()
+}
+
 pub(super) fn state_with(cfg: Config) -> Arc<State> {
     let env = build_env(&cfg.env);
     let gate = clone::Gate::from_config(&cfg).unwrap();
@@ -27,6 +41,7 @@ pub(super) fn state_with(cfg: Config) -> Arc<State> {
         main_done: Notify::new(),
         requested: Mutex::new(false),
         clone_gate: tokio::sync::Mutex::new(gate),
+        admitting: Default::default(),
         activate: Notify::new(),
         paths: Paths::default(),
     })
@@ -65,7 +80,7 @@ pub(super) fn exit_of(frames: &[Response]) -> &Response {
 pub(super) async fn exec(st: &Arc<State>, req: Request) -> Vec<Response> {
     let sink = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let (host, input) = tokio::io::duplex(64);
-    exec_op(st, input, sink.clone(), req).await;
+    exec_op(st, input, sink.clone(), req, None).await;
     drop(host);
     let buf = sink.lock().await;
     frames(&buf)

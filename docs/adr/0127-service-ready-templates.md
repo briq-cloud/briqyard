@@ -29,15 +29,22 @@ A seal (`snapshot` with `memory` and `template`) does, in the guest init:
 1. Refuse unless the service runs unparked, with the right init digest.
 2. Run `park` as the workload's user. Non-zero or a timeout: the service keeps running and
    the seal is refused with 409 (`clone_hook_failed`, exit code and the last 4 KB of stderr).
-   However the hook exits, its whole process group is killed: a background child of `park`
-   does not outlive it and is not in any clone.
+   However the hook exits, its whole process group is killed, reaped by init and awaited (normally
+   immediate, at most 1 s) before the checks, so a background child of `park` does not outlive it and is not in any
+   clone. A child that left the group (`setsid`) escapes the kill; the process scan below
+   finds it outside the workload cgroup and refuses the seal.
 3. Freeze the workload's cgroup and wait for `frozen 1`. Then, with the workload quiescent:
    - Refuse (409, `process_outside_workload`) while any process other than init, kernel
      threads and zombies is outside the workload cgroup. An exec session runs there and the
      freeze would not stop it, so a seal needs no running exec session.
    - Refuse (409, `established_socket`) when any established non-loopback TCP connection
      remains, or when the table cannot be read. This check does not rest on the hook.
-   A refusal thaws the workload: the service keeps running as it was.
+   A refusal thaws the workload: the service keeps running as it was. If the thaw is not
+   confirmed (`frozen 0` within 10 s), the refusal is `park_unrecoverable` and the source is
+   stopped.
+   Before the hook runs, park waits (at most 5 s) for the executions the gate has already
+   admitted to spawn, and the gate admits none meanwhile, so every execution is either
+   visible to the scan or refused by the gate.
 4. Take eth0 down, remove addresses and identity files.
 5. Sync, pause and snapshot. The source is then stopped, sealed or not: a parked source never
    serves again. A source that keeps running is out of scope.
@@ -91,8 +98,6 @@ is also `clone_hook_failed`, with the message `thaw unconfirmed, the workload ma
 
 ## Open before enabling the flag
 
-- Exec admission race: an exec admitted just before park can spawn after the process scan.
-  Needs an in-flight exec counter that park waits on.
 - Daemon kill between the guest's acknowledgement and the activation, on real Firecracker.
 - An 8-clone run on a larger host.
 - Native VMGenID, MAC and clock qualification (below).

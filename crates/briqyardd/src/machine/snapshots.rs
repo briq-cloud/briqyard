@@ -263,7 +263,7 @@ impl Manager {
         let out = self.snapshot_sealed(id, &e, r, req, template_marker).await;
         if service {
             // Parked by the seal: it never serves again, sealed or not.
-            self.stop_parked(&e).await;
+            self.stop_parked(&e, "service template sealed").await;
         }
         out
     }

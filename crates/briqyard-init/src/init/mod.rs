@@ -56,8 +56,32 @@ struct State {
     main_done: Notify,
     requested: Mutex<bool>,
     clone_gate: tokio::sync::Mutex<clone::Gate>,
+    /// Executions admitted by the gate that have not yet spawned (`Admission`).
+    admitting: std::sync::atomic::AtomicUsize,
     activate: Notify,
     paths: Paths,
+}
+
+/// An execution the gate admitted that has not spawned yet. Park waits for these, so no
+/// execution can spawn after its process scan. Dropped once the process exists.
+struct Admission(Arc<State>);
+
+impl Admission {
+    /// Taken while the gate lock is held, so the gate cannot change between the check and
+    /// the count.
+    fn new(st: &Arc<State>) -> Self {
+        st.admitting
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Admission(st.clone())
+    }
+}
+
+impl Drop for Admission {
+    fn drop(&mut self) {
+        self.0
+            .admitting
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Where the init writes what tests redirect: the workload's console and the clone's
@@ -245,6 +269,7 @@ async fn run() -> ExitReport {
         main_done: Notify::new(),
         requested: Mutex::new(false),
         clone_gate: tokio::sync::Mutex::new(gate),
+        admitting: Default::default(),
         activate: Notify::new(),
         paths: Paths::default(),
     });

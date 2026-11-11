@@ -43,6 +43,7 @@ pub(super) async fn exec_op<R, W>(
     input: R,
     stream: Arc<tokio::sync::Mutex<W>>,
     req: Request,
+    admission: Option<Admission>,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -156,6 +157,8 @@ pub(super) async fn exec_op<R, W>(
             }
         }
     };
+    // The process exists: a park scan sees it from here.
+    drop(admission);
     let pid = child.id().unwrap_or(0) as i32;
     if renewable
         && tokio::time::timeout_at(
@@ -501,9 +504,12 @@ mod tests {
         let (_host, input) = tokio::io::duplex(64);
         let (blocked, _unread) = tokio::io::duplex(1);
         let sink = Arc::new(tokio::sync::Mutex::new(blocked));
-        tokio::time::timeout(Duration::from_secs(3), exec_op(&st, input, sink, request))
-            .await
-            .expect("blocked acceptance must still end the spawned command");
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            exec_op(&st, input, sink, request, None),
+        )
+        .await
+        .expect("blocked acceptance must still end the spawned command");
     }
 
     #[tokio::test]
@@ -590,6 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_timeout_kills_the_process_group() {
+        let _one = testutil::one_at_a_time().await;
         let st = state();
         // The shell prints its sleep's pid so the test can watch that grandchild die too.
         let mut req = exec_req(&["sh", "-c", "sleep 60 & echo $!; wait"]);
@@ -777,6 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_hosts_close_kills_the_command() {
+        let _one = testutil::one_at_a_time().await;
         // A session, and a plain exec too: nobody reads its answer any more.
         for interactive in [true, false] {
             let mut req = exec_req(&["sh", "-c", "echo $$; exec sleep 60"]);
@@ -824,6 +832,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_hosts_close_hangs_up_a_terminal() {
+        let _one = testutil::one_at_a_time().await;
         let script = "trap 'exit 9' HUP; echo $$; while :; do sleep 0.1; done";
         let mut s = open(&state(), session(&["sh", "-c", script], true)).await;
         s.until("\n").await;
@@ -848,6 +857,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_has_no_deadline_unless_asked() {
+        let _one = testutil::one_at_a_time().await;
         let mut req = session(&["sh", "-c", "sleep 1; echo done"], false);
         req.timeout_ms = 0;
         let mut s = open(&state(), req).await;
@@ -893,6 +903,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_timeout_kills_child_and_grandchild() {
+        let _one = testutil::one_at_a_time().await;
         let mut req = stream_req(&["sh", "-c", "sleep 60 & echo $!; wait"]);
         req.timeout_ms = 100;
         let frames = exec(&state(), req).await;
@@ -905,6 +916,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_normal_exit_can_win_cancel_race() {
+        let _one = testutil::one_at_a_time().await;
         let mut s = open(&state(), stream_req(&["true"])).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         let _ =
