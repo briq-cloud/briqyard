@@ -22,9 +22,15 @@ Doubling the burst adds about 1.1 s at p50 on the same hosts: the queue, not the
 - `boots_at_once`: the gate's size (ADR 0129);
 - `boot_queue`: the boots the host has accepted and that have not left the gate yet, counted from the moment the machine is recorded (its image and disks come before the gate, and count too). Every boot counts: a create, a gateway, a start, a wake, a resume, a fork, a restore.
 
-`queued(host) = boot_queue + the holds the host has not answered yet`. A hold already answered is in the host's `boot_queue` from then on, so it is not added again.
+`queued(host) = boot_queue + holds not answered before at`, where `at` is when the figures were asked for: a hold not answered yet, or answered after `at` (the rule ADR 0044 applies to memory, `registry/mod.rs`). A hold answered before `at` is in `boot_queue` already. A create in transit at `at` can be counted twice for a moment; that errs towards spreading, never towards a refusal.
 
-**Busy is confirmed by a fresh read.** A heartbeat is up to one report interval old: boots that finished since still count in it. A region that would be passed over as busy from the figures in memory is read again first: the fleet asks its candidate hosts for their figures (the `refresh` it already does, outside the registry lock, at most once a second per host), then classifies it with those. Between that read and the answer, a create in transit can be counted twice for a moment; it errs towards spreading, never towards a refusal. A host that does not answer the read keeps its figures from memory. A host that does not report both figures is never busy: guessing the gate from the capacity vCPUs would overstate it several times over.
+**Busy is confirmed by a fresh read, outside the lock.** A heartbeat is up to one report interval old, so boots that finished since still count in it. The walk runs under the registry lock, so the read cannot happen inside it:
+
+1. Decide from the figures in memory. No region found busy: that is the answer.
+2. Otherwise release the lock and read the candidate hosts of every region found busy, in parallel, with a timeout of its own well under one boot wave (`placement.busy_read_ms`, 300 by default). A host read less than a second ago, a read already in flight, or a host that does not answer keeps its figures from memory; a create never waits for another create's read.
+3. Take the lock again, check replay as ADR 0128 does, and decide once more with the new figures. That decision is final: no further read.
+
+`/v1/status` shows both figures for each host.
 
 **Waves.** `waves(host) = ⌊queued(host) / boots_at_once(host)⌋`. Within a region, the host pick of ADR 0128 keeps its keys and adds waves before free memory: a host holding a validated seed first, then the nested-hypervisor key (ADR 0088), then fewer whole waves, then most free memory.
 
