@@ -143,6 +143,8 @@ impl Manager {
             namespace_lifecycle: tokio::sync::RwLock::new(()),
             backups,
             boot_gate: tokio::sync::Semaphore::new(boots_at_once as usize),
+            boots_at_once,
+            boot_queue: AtomicU32::new(0),
             probe_gate: tokio::sync::Semaphore::new(probes::PROBES_AT_ONCE),
             began: tokio::time::Instant::now(),
             probe_spread: Box::new(rand::random::<f64>),

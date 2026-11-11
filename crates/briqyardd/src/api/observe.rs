@@ -38,6 +38,8 @@ pub(super) async fn status(State(st): S) -> Json<api::Status> {
         machines,
         running,
         disk_free_mb: st.mgr.disk_free_mb().await,
+        boots_at_once: Some(st.mgr.boots_at_once()),
+        boot_queue: Some(st.mgr.boot_queue()),
         tls_fingerprint: st.tls_fingerprint.clone(),
         conditions: st.mgr.conditions(),
         started: Some(st.mgr.started()),

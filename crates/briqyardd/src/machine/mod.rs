@@ -22,13 +22,14 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, Notify};
 
 mod assignments;
 mod backups;
+mod boot_queue;
 mod classes;
 mod consistency;
 mod create;
@@ -602,6 +603,8 @@ struct Entry {
     live: Mutex<Option<fc::Vm>>,
     memory_protection: Mutex<Option<fc::MemoryProtection>>,
     launch_pending: AtomicBool,
+    /// Holds a place in the host's boot queue (`boot_queue`).
+    boot_queued: AtomicBool,
     /// A boot that failed without proof its VMM never started: its charge is unknown.
     launch_unproven: AtomicBool,
     pending_adoption: Mutex<Option<(fc::Vm, bool)>>,
@@ -649,6 +652,7 @@ impl Entry {
             live: Mutex::new(None),
             memory_protection: Mutex::new(None),
             launch_pending: AtomicBool::new(false),
+            boot_queued: AtomicBool::new(false),
             launch_unproven: AtomicBool::new(false),
             pending_adoption: Mutex::new(None),
             identity_trusted: AtomicBool::new(false),
@@ -926,6 +930,10 @@ struct Inner {
     backups: Backups,
     /// Boots run at once; see `boots_at_once`.
     boot_gate: tokio::sync::Semaphore,
+    /// The gate's size, as the heartbeat reports it.
+    boots_at_once: u32,
+    /// Boots accepted and not yet out of the gate (`boot_queue`, ADR 0130).
+    boot_queue: AtomicU32,
     /// Probe executions run at once (ADR 0022).
     probe_gate: tokio::sync::Semaphore,
     /// When this daemon started: a probe that starts within its period of it spreads its

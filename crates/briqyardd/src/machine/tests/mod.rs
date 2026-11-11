@@ -6,6 +6,7 @@ use chrono::TimeZone;
 
 mod assignment_close;
 mod balloon;
+mod boot_queue;
 mod classes;
 mod event_log;
 mod gateway;
@@ -280,6 +281,8 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             namespace_lifecycle: tokio::sync::RwLock::new(()),
             backups,
             boot_gate: tokio::sync::Semaphore::new(2),
+            boots_at_once: 2,
+            boot_queue: AtomicU32::new(0),
             probe_gate: tokio::sync::Semaphore::new(probes::PROBES_AT_ONCE),
             began: tokio::time::Instant::now(),
             probe_spread: Box::new(golden_spread()),

@@ -48,6 +48,7 @@ impl Manager {
     /// the worker can be queued or admission closed. The worker owns it through settlement.
     pub(super) fn spawn_make_admitted(&self, scope: crate::zfs::IoScope, e: Arc<Entry>, how: Make) {
         let m = self.clone();
+        let queued = self.make_queued(&e, &how);
         tokio::spawn(async move {
             if matches!(how, Make::Existing) {
                 // Replay dispatched no work. Positively settle its reserved admission:
@@ -62,7 +63,7 @@ impl Manager {
                 metrics::warm::Operation::Prepare
             };
             let began = std::time::Instant::now();
-            let result = scope.run(m.make_owned(&e, how)).await;
+            let result = scope.run(m.make_owned(&e, how, queued)).await;
             if warm {
                 let outcome = if result.is_ok() {
                     metrics::warm::Outcome::Success
@@ -571,15 +572,35 @@ impl Manager {
         how: Make,
     ) -> Result<(), MError> {
         let (manager, entry) = (self.clone(), e.clone());
+        let queued = self.make_queued(e, &how);
         // This task, including its lifecycle lock and children, outlives an observer.
-        match tokio::spawn(async move { scope.run(manager.make_owned(&entry, how)).await }).await {
+        match tokio::spawn(async move { scope.run(manager.make_owned(&entry, how, queued)).await })
+            .await
+        {
             Ok(result) => result,
             // A lost make owner is not a settled error permitting caller cleanup.
             Err(_) => std::future::pending().await,
         }
     }
 
-    async fn make_owned(&self, e: &Arc<Entry>, how: Make) -> Result<(), MError> {
+    /// The boot queue's place for a make, taken as the make is dispatched and kept until the
+    /// boot leaves the gate or the make ends, by any exit. A replay boots nothing. A make that
+    /// is not started counts only once a start is accepted while it runs (`creating`).
+    pub(super) fn make_queued(&self, e: &Arc<Entry>, how: &Make) -> Option<boot_queue::BootQueued> {
+        match how {
+            Make::Existing => None,
+            Make::Assigned => Some(self.boot_queued(e)),
+            _ if e.snapshot().start => Some(self.boot_queued(e)),
+            _ => Some(self.boot_unqueued(e)),
+        }
+    }
+
+    async fn make_owned(
+        &self,
+        e: &Arc<Entry>,
+        how: Make,
+        _queued: Option<boot_queue::BootQueued>,
+    ) -> Result<(), MError> {
         if matches!(how, Make::Existing) {
             return Ok(());
         }
@@ -622,6 +643,9 @@ impl Manager {
             _ => None,
         };
         let _guard = e.lock.lock().await;
+        // Declared after the lock, so dropped before it: the place is given back while the
+        // lock is held, never after a later boot of this machine has taken its own.
+        let _queued = _queued;
         let id = e.snapshot().id;
         if !self.inner.machines.lock().unwrap().contains_key(&id)
             || e.snapshot().state != state::CREATING

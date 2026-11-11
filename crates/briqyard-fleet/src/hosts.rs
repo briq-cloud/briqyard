@@ -457,6 +457,8 @@ pub(super) async fn register_host(
                 last_seen: now,
                 version: req.version,
                 disk_free_mb: req.disk_free_mb,
+                boots_at_once: req.boots_at_once,
+                boot_queue: req.boot_queue,
                 note: String::new(),
                 bootstrap_attempts: 0,
                 public_tcp_ports: None,
@@ -646,6 +648,8 @@ pub(super) fn new_added_host(
         last_seen: now,
         version: String::new(),
         disk_free_mb: None,
+        boots_at_once: None,
+        boot_queue: None,
         note: "added; waiting for the bootstrap".into(),
         bootstrap_attempts: 0,
         public_tcp_ports,
@@ -821,6 +825,8 @@ pub(super) async fn poll_static_hosts_once(st: &AppState) -> bool {
             rec.namespaces = namespaces;
             rec.version = s.version;
             rec.disk_free_mb = s.disk_free_mb;
+            rec.boots_at_once = s.boots_at_once;
+            rec.boot_queue = s.boot_queue;
             rec.conditions = s.conditions;
             rec.started = s.started;
             st.reg.lock().unwrap().heartbeat(rec, now);

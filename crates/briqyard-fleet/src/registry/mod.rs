@@ -110,6 +110,13 @@ pub struct HostRec {
         skip_serializing_if = "Option::is_none"
     )]
     pub disk_free_mb: Option<u64>,
+    /// The boot gate's size, from the last report (ADR 0129); `None` from a daemon older than
+    /// ADR 0130, which is never held to a queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boots_at_once: Option<u32>,
+    /// Boots the host had accepted and not let out of the gate, by its last report (ADR 0130).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_queue: Option<u32>,
     /// The last thing the bootstrap or an upgrade said.
     #[serde(default)]
     pub note: String,
@@ -293,6 +300,8 @@ impl HostRec {
             used: self.used,
             // 0 is "reports none", as in `has_disk`.
             disk_free_mb: self.disk_free_mb,
+            boots_at_once: self.boots_at_once,
+            boot_queue: self.boot_queue,
             machines: self.machines,
             namespaces: self.namespaces.clone(),
             last_seen: self.last_seen,
@@ -548,6 +557,8 @@ impl Registry {
         entry.capacity = h.capacity;
         entry.memory_policy = h.memory_policy;
         entry.report(h.used, h.disk_free_mb, now);
+        entry.boots_at_once = h.boots_at_once;
+        entry.boot_queue = h.boot_queue;
         entry.machines = h.machines;
         entry.namespaces = h.namespaces.clone();
         entry.version = h.version;

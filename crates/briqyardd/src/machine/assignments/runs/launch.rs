@@ -32,6 +32,8 @@ impl Manager {
         let prior = current.clone();
         current.launch_started = true;
         self.persist_run_transition(entry, prior, &current)?;
+        // The boot is accepted: in the queue from here, its network and disks included.
+        let _queued = self.boot_queued(entry);
         self.unplug(&id, &current.target.ip).await?;
         let tap = self.inner.net.quarantine(&id).await?;
         self.verify_run_prelaunch_backing(&current).await?;
@@ -73,7 +75,7 @@ impl Manager {
             disk: self.disk_rate(rec),
             disk_io: entry.disk_io.clone(),
         };
-        let _turn = self.inner.boot_gate.acquire().await?;
+        let _turn = self.boot_turn(entry).await?;
         self.check_run_creation_authority(&current)?;
         self.verify_run_prelaunch_backing(&current).await?;
         // No ResumeFailed fallback: a different boot requires different explicit authority.
