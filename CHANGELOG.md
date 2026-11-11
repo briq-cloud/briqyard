@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.7 — 2026-11-11
+
+### Upgrade notes
+
+- The heartbeat carries each host's boot admission (`boots_at_once`, `boot_queue`) and a placement can answer the new `busy` outcome with a queue `depth` (ADR 0130). Roll the fleet before the hosts so it reads the new heartbeat; an older fleet ignores the fields.
+- The fleet advertises `placement_spill_v1: true` in `GET /v1/status`. A placement admission with `spill_when_busy: true` passes over a region whose boot queue is at least `placement.spill_waves` deep. An older fleet refuses the unknown field with 422, so a control plane must check the capability first and resend without the flag when a flagged admission is refused.
+- New fleet settings: `placement.spill_waves` (default 2; 0 turns spilling off) and `placement.busy_read_ms` (default 300, 1 to 1000), how long a placement waits for a fresh read of a busy region's hosts. An older fleet refuses a config that sets either: remove them before rolling back.
+- Rolling the fleet back below 0.2.7 cannot load a placement record whose outcome is `busy`, whether pending, dispatched or a tombstone. Roll back only once none is stored: stop sending `spill_when_busy` (or set `placement.spill_waves` to 0) and wait until they are pruned: a record whose requirements are all dispatched goes one window (24 hours) after its last change, one with any requirement still pending expires a window after its last change and its tombstone goes a window later (48 hours); a record whose create route is still kept goes with that route.
+- The guest init is unchanged from 0.2.6, so its digest is too (ADR 0101): seeds need no resealing.
+
+### Documentation
+
+- spill a burst to the next allowed region when boots queue (#232) ([b35ffb5a](https://github.com/briq-cloud/briqyard/commit/b35ffb5a4ca2ec22538ae3cceeb94ba4bae25c45))
+
+
+### Features
+
+- boot queue in the heartbeat (ADR 0130 phase 1) (#233) ([6bb4ced8](https://github.com/briq-cloud/briqyard/commit/6bb4ced8eb9db54a9fd0d9282fdd651904b3ebd0))
+
+- spill a burst to a later region when the first is busy (#234) ([94c99f0a](https://github.com/briq-cloud/briqyard/commit/94c99f0ae8663fef3ef3c41fa4544c9125bd0bcd))
+
 ## 0.2.6 — 2026-11-11
 
 ### Upgrade notes
