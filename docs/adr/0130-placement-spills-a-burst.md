@@ -17,36 +17,42 @@ Doubling the burst adds about 1.1 s at p50 on the same hosts: the queue, not the
 
 ## Decision
 
-**A host's queue is the boots placed on it that the host has not answered yet.** The fleet already keeps them: a hold (ADR 0044) with no `made` time is a create the host has not answered (it answers once the guest has booted) or an admission requirement not dispatched yet. `queued(host)` counts those holds, and only requirements that boot a machine: a gateway requirement does not count. A hold with a `made` time is a finished boot waiting for the next report; it does not count, or a steady create rate below the gate would look busy.
+**A host's queue is reported by the host, plus what was placed since.** The daemon's create answers once the machine is recorded in `creating` (ADR 0048); the boot follows in a task that waits on the boot gate. So the fleet cannot see the queue from its own holds alone. The heartbeat gains two figures:
 
-**The gate.** The daemon adds `boots_at_once` to its heartbeat (the value its gate uses, ADR 0129). A host that does not report it is never busy: guessing it from the capacity vCPUs would overstate it several times over.
+- `boots_at_once`: the gate's size (ADR 0129);
+- `boot_queue`: the boots holding or waiting on the gate when the report was composed. Every boot counts: a create, a gateway, a start, a wake, a resume, a fork, a restore.
+
+`queued(host) = boot_queue + the holds the last report does not count yet` (the rule ADR 0044 already applies to memory: holds not yet answered, or answered after the report was composed). A host that does not report both figures is never busy: guessing the gate from the capacity vCPUs would overstate it several times over.
 
 **Waves.** `waves(host) = ⌊queued(host) / boots_at_once(host)⌋`. Within a region, the host pick of ADR 0128 keeps its keys and adds waves before free memory: a host holding a validated seed first, then the nested-hypervisor key (ADR 0088), then fewer whole waves, then most free memory.
 
-**A new region class, `busy`.** A region with at least one candidate host, where every candidate has `waves ≥ placement.spill_waves` (fleet config, default 2; 0 turns spilling off). The walk with `spill_when_busy`:
+**A region's depth** is the fewest waves among its candidate hosts. A region with candidates is `busy` when its depth is at least `placement.spill_waves` (fleet config, default 2).
 
-1. Classify every region as ADR 0128 does, plus `busy`. The first region keeps its own rules: `ineligible` refuses as before, `unconfirmed` refuses as before.
-2. Among the regions with a candidate (`placed` or `busy`), place in the one with the lowest `waves(best candidate) + index × spill_waves`, where `index` is its position in `regions`; ties go to list order. The preferred region wins until it is `spill_waves` deep, then the burst balances across regions instead of piling back onto the first one.
-3. A later region that is `unconfirmed`, `full` or `ineligible` is skipped, never a refusal, once an earlier region had a candidate. With no candidate anywhere the walk ends as ADR 0128's does.
+**The walk with `spill_when_busy`** (and `spill_waves > 0`; 0 is exactly the walk of ADR 0128):
 
-A seeded candidate in a busy region is compared with its waves like any other: a seed saves a cold boot, not a queue.
+1. Walk `regions` in order, classifying each as ADR 0128 does. Before any region with a candidate, its rules hold unchanged: the first region `ineligible` refuses, an `unconfirmed` region stops the walk with 503, a `full` one moves on.
+2. Once a region with a candidate has been seen, later regions are still classified, and those without a candidate (`full`, `unconfirmed`, `ineligible`) are skipped, never a refusal.
+3. Among the regions with a candidate, score each `depth + index × spill_waves`, where `index` is its position in `regions`. A later region wins only with a strictly lower score. The preferred region keeps every create until it is more than `spill_waves` deeper than the next one; then the burst balances across regions instead of piling back onto the first.
+
+A seed saves a cold boot, not a queue: a seeded host counts with its waves like any other.
 
 **Only between regions the caller listed, only for a new binding.** `regions` stays the allowlist and its order the only weight (ADR 0128). The request gains `spill_when_busy` (default `false`): the caller's consent to a namespace that may live in a farther region for its whole life. The fleet does not know the caller's latency to each region, so it takes no per-region weight. A caller that sends one region, or leaves the flag off, gets exactly ADR 0128. A namespace already pinned (`binding: existing`) answers before the walk, as before: `busy` never applies to it.
 
-**Recorded like any decision.** The answer's `regions` gains the outcome `busy`, with the waves seen, and replay returns the stored answer (ADR 0128). A spill is not a refusal: `count_full` does not count it. The metrics count spills per pair of regions. Rollback: an older fleet that loads a stored `busy` outcome must read it as `full`, so the outcome enum takes a serde fallback in the release before the walk changes.
+**Recorded like any decision.** The answer's `regions` gains the outcome `busy`, with the depth seen, for a region passed over because of its queue; the region placed in is `placed`, busy or not. Replay returns the stored answer (ADR 0128). A spill is not a refusal: `count_full` does not count it. The metrics count spills per pair of regions. Rollback: an older fleet that loads a stored `busy` outcome must read it as `full`, so the outcome enum takes a serde fallback in a release before the walk changes.
 
 ## Consequences
 
 - A burst uses every allowed region's boot capacity before queueing `spill_waves` deep in one.
 - A spilled namespace stays in its region for its whole life (ADR 0025): every later call pays that region's latency. Hence a threshold in waves, and the opt-in flag.
-- The signal under-counts what takes the gate without a hold: starts, wakes and resumes (`machine/start.rs`), and forks and restores, which bypass admission. A host busy with those looks less busy than it is.
+- `boot_queue` is as old as the last report (up to one heartbeat). Boots that finished since still count until the next one, so a region can look busy for a few seconds after its queue drained: it errs towards spreading, never towards a refusal.
 - An admission abandoned before its dispatch counts until its hold deadline (`placement.admission_hold_sec`, 240 s by default).
-- `queued` is fleet memory only: after a fleet restart it starts at zero, so the walk underestimates queues until creates are placed again.
+- After a fleet restart, the holds are gone; the next reports carry the queue again.
 - Spreading across providers, not only regions, is the control plane's job: it can read the `busy` outcomes in the answer to send the next creates of a burst elsewhere. Out of scope here.
 
 ## Test plan
 
-- Registry unit tests: the walk above, including `busy` then `unconfirmed` (places in the busy region), all regions busy (the distribution follows the score), a pinned namespace (ignores `busy`), a seeded host in a busy region, a host that does not report `boots_at_once` (never busy), `spill_waves = 0`, abandoned admissions expiring from the queue, replay of a spilled decision, and an older fleet loading a `busy` record.
+- Daemon: `boot_queue` counts gate holders and waiters for every kind of boot.
+- Registry unit tests: the walk above, including `busy` then `unconfirmed` (places in the busy region), all regions busy (the distribution follows the score), a pinned namespace (ignores `busy`), a seeded host in a busy region, a host that does not report `boots_at_once` or `boot_queue` (never busy), `full` then `unconfirmed` then a placed region (refuses as ADR 0128), a tie at exactly `spill_waves` (stays), `spill_waves = 0`, abandoned admissions expiring from the queue, replay of a spilled decision, and an older fleet loading a `busy` record.
 - A steady create rate below the gate makes no spill.
 - `hack/fleet-two-hosts.sh` with two regions of one host each: a burst of 3 × `boots_at_once` with `spill_when_busy` lands in both regions, and without it lands in the first.
 - Staging: the length of one boot wave in seconds (to justify `spill_waves = 2`), then a 100-nano burst with a preferred region and spilling on, against the same burst with it off: p50 and p90 to the first command, and the latency of a command to a spilled sandbox afterwards.
