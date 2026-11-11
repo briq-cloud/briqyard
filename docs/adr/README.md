@@ -130,3 +130,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 - [0128: One placement admission across an ordered list of regions](0128-placement-admission.md)
 
 - [0129: Boots at once: one and a half times the threads](0129-boots-at-once-follows-the-threads.md)
+
+- [0130: Placement spills a burst to the next allowed region when the preferred one is queueing boots](0130-placement-spills-a-burst.md)
