@@ -205,12 +205,15 @@ def e2e():
         vals = [o.get(key) for o in out]
         check('clones differ in ' + key, len(set(vals)) == 3 and all(vals), str(vals))
     # 3c: the park hook's background child was killed when the hook ended: no clone has it.
-    # The child wrote its pid before the seal (it ran), and no process with that pid is left.
+    # The child wrote its pid before the seal (it ran), and neither it nor its zombie is left
+    # (a pid reused by another process counts as gone).
     gone = cli('exec', cl[0]['id'], '--', 'sh', '-c',
                'p=$(cat /tmp/bgpark.pid 2>/dev/null); '
                'if [ -z "$p" ]; then echo never-ran; '
-               'elif tr "\\0" " " < /proc/$p/cmdline 2>/dev/null | grep -q "^sleep 60417"; then echo alive; else echo gone; fi').stdout
-    check('park hook background child ran, and is absent from the clone', gone.strip() == 'gone', gone.strip())
+               'elif [ ! -e /proc/$p ]; then echo gone; '
+               'elif tr "\\0" " " < /proc/$p/cmdline 2>/dev/null | grep -q "^sleep 60417"; then echo alive; '
+               'elif grep -q "^State:.*Z" /proc/$p/status 2>/dev/null; then echo zombie; else echo gone-pid-reused; fi').stdout
+    check('park hook background child ran, and is absent from the clone', gone.strip() in ('gone', 'gone-pid-reused'), gone.strip())
     # 2: the draw taken before the seal is shared: the documented application duty.
     check('cached draw is shared across clones', len({o['cached'] for o in out}) == 1 and bool(out[0]['cached']))
     for o, m in zip(out, cl):

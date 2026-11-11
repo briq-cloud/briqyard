@@ -15,7 +15,9 @@ pub(super) fn spawn_tracked(cmd: &mut std::process::Command) -> std::process::Ch
 }
 
 /// The timing-sensitive tests (those that spawn processes and wait on deadlines) run one at
-/// a time: they hold timing assumptions and share the machine.
+/// a time: they hold timing assumptions and share the machine. Every test that can leave an
+/// orphan, reaps children or makes this process a subreaper holds it too: while one test is
+/// a subreaper, another's orphans would become this process's children.
 static TIMING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub(super) async fn one_at_a_time() -> tokio::sync::MutexGuard<'static, ()> {
     TIMING.lock().await

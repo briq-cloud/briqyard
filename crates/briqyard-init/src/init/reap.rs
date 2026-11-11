@@ -145,15 +145,13 @@ mod tests {
             proc_state(orphan.as_raw()) == Some('Z')
         });
 
-        // Another test's tracked child may be reported first; only an orphan gets reaped,
-        // and the only orphan is ours.
+        // Another test's tracked child may be reported first; only an orphan gets reaped.
+        // An orphan another test left is reaped too, and does not count.
         let start = Instant::now();
         loop {
             match reap_one() {
-                Ok(Reaped::Orphan(p)) => {
-                    assert_eq!(p, orphan);
-                    break;
-                }
+                Ok(Reaped::Orphan(p)) if p == orphan => break,
+                Ok(Reaped::Orphan(_)) => {}
                 Ok(Reaped::Ours(p)) => assert_ne!(p, orphan),
                 Ok(Reaped::Nothing) => {}
                 Err(e) => panic!("{e}"),
@@ -179,7 +177,8 @@ mod tests {
         loop {
             match reap_one() {
                 Ok(Reaped::Ours(p)) if p == our_pid => break,
-                Ok(Reaped::Orphan(p)) => panic!("reaped {p}, which nobody here spawned"),
+                // Another test's orphan: reaped, and not ours to check.
+                Ok(Reaped::Orphan(p)) => assert_ne!(p, our_pid),
                 Ok(_) => {}
                 Err(e) => panic!("{e}"),
             }

@@ -641,6 +641,7 @@ mod tests {
         let reaper = {
             let marker = marker.clone();
             tokio::task::spawn_blocking(move || {
+                let marker_by = std::time::Instant::now() + Duration::from_secs(5);
                 let ids = loop {
                     if let Some(ids) = fs::read_to_string(&marker)
                         .ok()
@@ -653,21 +654,30 @@ mod tests {
                     {
                         break ids;
                     }
+                    // The hook never ran: give up, so the run's own error is what fails.
+                    if std::time::Instant::now() > marker_by {
+                        return None;
+                    }
                     std::thread::sleep(Duration::from_millis(2));
                 };
                 wait_tracked(|t| !t.contains(ids[0]));
                 let give_up = std::time::Instant::now() + Duration::from_secs(5);
-                while std::time::Instant::now() < give_up {
+                let mut reaped = false;
+                while !reaped && std::time::Instant::now() < give_up {
                     // ECHILD until the shell is gone and the child is ours.
-                    if let Ok(nix::sys::wait::WaitStatus::Signaled(..)) = nix::sys::wait::waitpid(
-                        Pid::from_raw(ids[1]),
-                        Some(nix::sys::wait::WaitPidFlag::WNOHANG),
-                    ) {
-                        break;
+                    reaped = matches!(
+                        nix::sys::wait::waitpid(
+                            Pid::from_raw(ids[1]),
+                            Some(nix::sys::wait::WaitPidFlag::WNOHANG),
+                        ),
+                        Ok(nix::sys::wait::WaitStatus::Signaled(..)
+                            | nix::sys::wait::WaitStatus::Exited(..))
+                    );
+                    if !reaped {
+                        std::thread::sleep(Duration::from_millis(2));
                     }
-                    std::thread::sleep(Duration::from_millis(2));
                 }
-                (ids[0], ids[1])
+                Some((ids[0], ids[1], reaped))
             })
         };
         let t0 = std::time::Instant::now();
@@ -675,8 +685,9 @@ mod tests {
             .await
             .unwrap();
         let took = t0.elapsed();
-        let (pgid, bg) = reaper.await.unwrap();
+        let (pgid, bg, reaped) = reaper.await.unwrap().expect("the hook wrote no marker");
         let _ = fs::remove_file(&marker);
+        assert!(reaped, "the background child {bg} was never reaped");
         assert!(
             took < GROUP_GONE_TIMEOUT / 2,
             "the run waited for the group: {took:?}"
