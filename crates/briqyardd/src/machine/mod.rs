@@ -108,7 +108,7 @@ pub enum MError {
     #[error("invalid request: {0}")]
     Invalid(String),
     /// The guest refused a file transfer because of the caller's path (the guest's message):
-    /// 422 `invalid`, not a failure of the host.
+    /// 422 `path_refused`, not a failure of the host.
     #[error("{0}")]
     PathRefused(String),
     #[error("{0}")]

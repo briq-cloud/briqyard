@@ -43,7 +43,7 @@ growth is excluded by its initial size; truncation fails the response.
 
 A frame refused because of the caller's path (a missing or non-directory parent, a directory or
 special file as the target, permission, read-only filesystem, symlink component, name too long)
-carries `cause: "path"`; the daemon answers it 422 `invalid` with the guest's message, and every
+carries `cause: "path"`; the daemon answers it 422 `path_refused` with the guest's message, and every
 other guest failure stays 500 `internal`. An init without the field, or a daemon that ignores it,
 behaves as before.
 

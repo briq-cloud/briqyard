@@ -229,7 +229,7 @@ fn error_codes() {
         (e.status, e.code, e.error.as_str()),
         (
             StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid",
+            "path_refused",
             "no such file or directory"
         )
     );

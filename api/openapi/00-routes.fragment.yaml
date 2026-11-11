@@ -245,6 +245,7 @@ paths:
         - { name: path, in: query, required: true, schema: { type: string } }
       responses:
         "200": { description: file, content: { application/json: { schema: { $ref: "#/components/schemas/FileResponse" } } } }
+        "422": { description: "`path_refused`: the path cannot be read, the guest's reason in `error`" }
     put:
       summary: Write a file into a running machine
       requestBody:
@@ -254,6 +255,7 @@ paths:
             schema: { $ref: "#/components/schemas/PutFileRequest" }
       responses:
         "204": { description: written }
+        "422": { description: "`path_refused`: the path cannot be written, the guest's reason in `error`" }
   /v1/machines/{id}/files/capabilities:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
@@ -288,7 +290,7 @@ paths:
           content:
             application/octet-stream: { schema: { type: string, format: binary } }
         "400": { description: invalid path or file too large }
-        "422": { description: "`invalid`: the path cannot be read, the guest's reason in `error` (no such file or directory, a parent that is not a directory, not a regular file, permission, symlink component, name too long)" }
+        "422": { description: "`path_refused`: the path cannot be read, the guest's reason in `error` (no such file or directory, a parent that is not a directory, not a regular file, permission, symlink component, name too long)" }
         "409": { description: machine not running, old init, or transfer limit reached }
     put:
       summary: Atomically replace a file in a running machine from raw bytes
@@ -312,7 +314,7 @@ paths:
                   size: { type: integer, minimum: 0, maximum: 1073741824 }
                   sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
         "400": { description: invalid path, mode, size or body }
-        "422": { description: "`invalid`: the path cannot be written, the guest's reason in `error` (a parent that is not a directory or cannot be created, a directory as the target, permission, read-only filesystem, symlink component, name too long). Any other guest failure is 500 `internal`" }
+        "422": { description: "`path_refused`: the path cannot be written, the guest's reason in `error` (a parent that is not a directory or cannot be created, a directory as the target, permission, read-only filesystem, symlink component, name too long). Any other guest failure is 500 `internal`" }
         "409": { description: machine not running, old init, or transfer limit reached }
   /v1/machines/{id}/logs:
     parameters:

@@ -133,49 +133,67 @@ where
     }
 }
 
-/// The target path cannot name a file to write or read: no errno, the path itself is wrong.
+/// An error the caller's path caused, tagged where the path is resolved, created or opened.
+/// Failures on our own temporary file are never tagged, whatever their errno.
 #[derive(Debug)]
-struct NotAFile(&'static str);
-impl std::fmt::Display for NotAFile {
+struct PathError(anyhow::Error);
+impl std::fmt::Display for PathError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
-impl std::error::Error for NotAFile {}
+impl std::error::Error for PathError {}
 
-/// Whether the caller's path caused the failure, from its errno or [`NotAFile`].
-fn path_refused(e: &anyhow::Error) -> bool {
+/// Whether an errno is one the path of the request can cause.
+pub(super) fn path_errno(errno: rustix::io::Errno) -> bool {
     use rustix::io::Errno;
-    e.chain().any(|cause| {
-        if cause.is::<NotAFile>() {
-            return true;
-        }
-        let errno = cause.downcast_ref::<Errno>().copied().or_else(|| {
-            cause
-                .downcast_ref::<std::io::Error>()
-                .and_then(|e| e.raw_os_error())
-                .map(Errno::from_raw_os_error)
-        });
-        errno.is_some_and(|errno| {
-            matches!(
-                errno,
-                Errno::NOENT
-                    | Errno::NOTDIR
-                    | Errno::ISDIR
-                    | Errno::ACCESS
-                    | Errno::PERM
-                    | Errno::ROFS
-                    | Errno::LOOP
-                    | Errno::NAMETOOLONG
-            )
-        })
-    })
+    matches!(
+        errno,
+        Errno::NOENT
+            | Errno::NOTDIR
+            | Errno::ISDIR
+            | Errno::ACCESS
+            | Errno::PERM
+            | Errno::ROFS
+            | Errno::LOOP
+            | Errno::NAMETOOLONG
+    )
+}
+
+/// Tags an I/O failure on the caller's path; others pass through unchanged.
+fn tag(e: impl Into<anyhow::Error>) -> anyhow::Error {
+    let e: anyhow::Error = e.into();
+    let errno = e.downcast_ref::<rustix::io::Errno>().copied().or_else(|| {
+        e.downcast_ref::<std::io::Error>()
+            .and_then(|e| e.raw_os_error())
+            .map(rustix::io::Errno::from_raw_os_error)
+    });
+    match errno {
+        Some(errno) if path_errno(errno) => anyhow::Error::new(PathError(e)),
+        _ => e,
+    }
+}
+
+fn at_path<T, E: Into<anyhow::Error>>(r: std::result::Result<T, E>) -> Result<T> {
+    r.map_err(tag)
+}
+
+fn not_a_file(why: &str) -> anyhow::Error {
+    anyhow::Error::new(PathError(anyhow!("{why}")))
 }
 
 fn failure(e: &anyhow::Error) -> Response {
-    match path_refused(e) {
+    match e.chain().any(|c| c.is::<PathError>()) {
         true => Response::path_error(e.to_string()),
         false => Response::error(e.to_string()),
+    }
+}
+
+/// The answer to a failed whole-file `put` or `get`, whose every step is on the caller's path.
+pub(super) fn io_failure(e: &std::io::Error) -> Response {
+    match e.raw_os_error().map(rustix::io::Errno::from_raw_os_error) {
+        Some(errno) if path_errno(errno) => Response::path_error(e.to_string()),
+        _ => Response::error(e.to_string()),
     }
 }
 
@@ -188,11 +206,11 @@ async fn idle<T>(f: impl std::future::Future<Output = std::io::Result<T>>) -> Re
 /// Open one directory at a time, with a descriptor pinned across rename races.
 fn parent(root: &Path, path: &str, create: bool) -> Result<(OwnedFd, CString)> {
     wire::check_path(path).map_err(|e| anyhow!(e))?;
-    let mut dir = at::open(
+    let mut dir = at_path(at::open(
         root,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::empty(),
-    )?;
+    ))?;
     let mut parts = path[1..].split('/').peekable();
     while let Some(part) = parts.next() {
         let name = CString::new(part)?;
@@ -202,30 +220,30 @@ fn parent(root: &Path, path: &str, create: bool) -> Result<(OwnedFd, CString)> {
         if create {
             match at::mkdirat(&dir, &name, Mode::from_raw_mode(0o755)) {
                 Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(tag(e)),
             }
         }
-        dir = at::openat(
+        dir = at_path(at::openat(
             &dir,
             &name,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
             Mode::empty(),
-        )?;
+        ))?;
     }
-    Err(NotAFile("path must name a file").into())
+    Err(not_a_file("path must name a file"))
 }
 
 fn open_file(root: &Path, path: &str) -> Result<fs::File> {
     let (dir, name) = parent(root, path, false)?;
-    let fd = at::openat(
+    let fd = at_path(at::openat(
         &dir,
         &name,
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
-    )?;
+    ))?;
     let file = fs::File::from(fd);
     if !file.metadata()?.is_file() {
-        return Err(NotAFile("path must name a regular file").into());
+        return Err(not_a_file("path must name a regular file"));
     }
     Ok(file)
 }
@@ -293,7 +311,12 @@ impl Upload {
         };
         at::fchmod(&self.file, Mode::from_raw_mode(mode))?;
         // rename replaces a final symlink itself; it never writes its target.
-        at::renameat(&self.dir, &self.temporary, &self.dir, &self.name)?;
+        at_path(at::renameat(
+            &self.dir,
+            &self.temporary,
+            &self.dir,
+            &self.name,
+        ))?;
         self.committed = true;
         Ok(())
     }
@@ -311,13 +334,6 @@ mod tests {
     use super::*;
     use crate::init::testutil::state;
     use std::os::unix::fs::symlink;
-
-    /// Linux errno values, as the guest sees them.
-    mod libc_errno {
-        pub const ENOENT: i32 = 2;
-        pub const EIO: i32 = 5;
-        pub const ENOSPC: i32 = 28;
-    }
 
     async fn read_response<S: AsyncRead + Unpin>(s: &mut S) -> Response {
         let mut hdr = [0; 4];
@@ -484,18 +500,40 @@ mod tests {
         assert_eq!(cause(upload.commit(Some(0o644)).unwrap_err()), "path");
         // Not a regular file.
         assert_eq!(cause(open_file(root.path(), "/dir").err().unwrap()), "path");
-        let resp = failure(&anyhow!(NotAFile("path must name a file")));
+        let resp = failure(&not_a_file("path must name a file"));
         assert_eq!(
-            (resp.kind.as_str(), resp.message.as_str()),
-            ("error", "path must name a file")
+            (
+                resp.kind.as_str(),
+                resp.cause.as_str(),
+                resp.message.as_str()
+            ),
+            ("error", "path", "path must name a file")
         );
-        // Other failures stay plain errors, however they are wrapped.
-        for errno in [libc_errno::ENOSPC, libc_errno::EIO] {
-            let e = anyhow::Error::from(std::io::Error::from_raw_os_error(errno)).context("write");
-            assert_eq!(cause(e), "");
+        // A name too long, as a parent component.
+        let long = "a".repeat(300);
+        assert_eq!(
+            cause(
+                Upload::new(root.path(), &format!("/{long}/x"))
+                    .err()
+                    .unwrap()
+            ),
+            "path"
+        );
+        // Only the path errnos are tagged, from rustix or std errors alike.
+        use rustix::io::Errno;
+        for errno in [Errno::ACCESS, Errno::ROFS, Errno::NAMETOOLONG, Errno::PERM] {
+            assert_eq!(cause(tag(errno)), "path", "{errno}");
+            let io = std::io::Error::from_raw_os_error(errno.raw_os_error());
+            assert_eq!(cause(tag(io)), "path", "{errno}");
         }
-        let e = anyhow::Error::from(std::io::Error::from_raw_os_error(libc_errno::ENOENT));
-        assert_eq!(failure(&e).cause, "path");
+        for errno in [Errno::NOSPC, Errno::IO] {
+            assert_eq!(cause(tag(errno)), "", "{errno}");
+        }
+        // Our own temporary file is never tagged: a failure there stays plain, whatever the errno.
+        for errno in [Errno::ACCESS, Errno::ROFS, Errno::NOENT] {
+            let e = anyhow::Error::from(errno).context("fchmod");
+            assert_eq!(cause(e), "", "{errno}");
+        }
         assert_eq!(cause(anyhow!("file stream shorter than declared size")), "");
         // The kind stays `error`, so an older daemon reads the frame as before.
         assert_eq!(failure(&anyhow!("x")).kind, "error");

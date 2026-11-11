@@ -533,6 +533,9 @@ async fn round_trip(uds: &Path, req: Request) -> Result<Response> {
     write_request(&mut s, &req).await?;
     let r: Response = read_frame(&mut s).await?;
     if r.kind == "error" {
+        if r.cause == guest::CAUSE_PATH {
+            return Err(PathRefused(r.message).into());
+        }
         return Err(answered(&req.op, &r.message));
     }
     Ok(r)
@@ -1414,6 +1417,24 @@ mod tests {
                 .unwrap();
             assert_eq!(err.is::<PathRefused>(), typed);
             assert_eq!(err.to_string(), resp.message);
+            server.await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn the_whole_file_ops_type_a_path_refusal_too() {
+        for (resp, typed) in [
+            (Response::path_error("is a directory"), true),
+            (Response::error("no space left on device"), false),
+        ] {
+            let (_dir, path) = socket();
+            let server = serve(&path, OK, vec![frame(&resp)]);
+            let err = put(&path, "/x", 0o644, vec![1]).await.unwrap_err();
+            assert_eq!(err.is::<PathRefused>(), typed);
+            server.await.unwrap();
+            let (_dir, path) = socket();
+            let server = serve(&path, OK, vec![frame(&resp)]);
+            let err = get(&path, "/x").await.unwrap_err();
+            assert_eq!(err.is::<PathRefused>(), typed);
             server.await.unwrap();
         }
     }

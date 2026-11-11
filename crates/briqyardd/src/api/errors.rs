@@ -23,7 +23,7 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
         MError::ExecStreamUnsupported => (StatusCode::CONFLICT, "unsupported"),
         MError::PoolEmpty => (StatusCode::CONFLICT, "pool_empty"),
         MError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
-        MError::PathRefused(_) => (StatusCode::UNPROCESSABLE_ENTITY, "invalid"),
+        MError::PathRefused(_) => (StatusCode::UNPROCESSABLE_ENTITY, "path_refused"),
         MError::Conflict(_) | MError::NameTaken(_) => (StatusCode::CONFLICT, "conflict"),
         MError::NotRunning(_) => (StatusCode::CONFLICT, "not_running"),
         MError::BadState(_) | MError::Refused(_) => (StatusCode::CONFLICT, "bad_state"),
