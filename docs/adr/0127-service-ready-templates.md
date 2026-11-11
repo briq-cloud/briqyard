@@ -29,8 +29,8 @@ A seal (`snapshot` with `memory` and `template`) does, in the guest init:
 1. Refuse unless the service runs unparked, with the right init digest.
 2. Run `park` as the workload's user. Non-zero or a timeout: the service keeps running and
    the seal is refused with 409 (`clone_hook_failed`, exit code and the last 4 KB of stderr).
-   However the hook exits, its whole process group is killed and awaited (at most 1 s)
-   before the checks, so a background child of `park` does not outlive it and is not in any
+   However the hook exits, its whole process group is killed, reaped by init and awaited (normally
+   immediate, at most 1 s) before the checks, so a background child of `park` does not outlive it and is not in any
    clone. A child that left the group (`setsid`) escapes the kill; the process scan below
    finds it outside the workload cgroup and refuses the seal.
 3. Freeze the workload's cgroup and wait for `frozen 1`. Then, with the workload quiescent:

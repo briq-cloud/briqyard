@@ -288,10 +288,12 @@ pub(super) async fn run_hook(
             )))
         }
     };
+    // The leader is reaped. Untrack it first: the orphan reaper waits on the tracked set, and
+    // until it collects the hook's killed children they stay zombies in the group.
+    TRACKED.lock().unwrap().remove(pid);
     // Whatever the hook left running in its process group was killed with it: wait until the
     // group is gone, so a dying child is not taken for a foreign process by the scan.
     wait_group_gone(pid).await;
-    TRACKED.lock().unwrap().remove(pid);
     result
 }
 
@@ -612,17 +614,28 @@ mod tests {
         let _one = one_at_a_time().await;
         let st = hooked_state(&["true"], &["true"], 5);
         let marker = std::env::temp_dir().join(format!("hook-bg-{}", std::process::id()));
-        let script = format!("sleep 60411 & echo $! > {}", marker.display());
+        let script = format!("sleep 60411 & echo $$ $! > {}", marker.display());
+        let t0 = std::time::Instant::now();
         run_hook(&st, "park", &["sh".into(), "-c".into(), script], 5)
             .await
             .unwrap();
-        let bg: i32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        let took = t0.elapsed();
+        let ids = fs::read_to_string(&marker).unwrap();
         let _ = fs::remove_file(&marker);
-        // Not found, or at most a zombie awaiting the reaper: not a live process.
-        let state = fs::read_to_string(format!("/proc/{bg}/status")).unwrap_or_default();
+        let mut ids = ids.split_whitespace().map(|n| n.parse::<i32>().unwrap());
+        let (pgid, bg) = (ids.next().unwrap(), ids.next().unwrap());
+        // The child is collected, not a zombie: nothing is left in the group, and the wait
+        // did not run out its timeout.
+        assert_eq!(
+            kill(Pid::from_raw(-pgid), None),
+            Err(nix::errno::Errno::ESRCH),
+            "the group is not gone: {}",
+            fs::read_to_string(format!("/proc/{bg}/status")).unwrap_or_default()
+        );
+        assert!(!std::path::Path::new(&format!("/proc/{bg}")).exists());
         assert!(
-            state.is_empty() || state.contains("State:\tZ"),
-            "the background child survived: {state}"
+            took < GROUP_GONE_TIMEOUT / 2,
+            "the run waited for the group: {took:?}"
         );
     }
 

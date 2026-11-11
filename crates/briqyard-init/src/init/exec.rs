@@ -596,6 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_timeout_kills_the_process_group() {
+        let _one = testutil::one_at_a_time().await;
         let st = state();
         // The shell prints its sleep's pid so the test can watch that grandchild die too.
         let mut req = exec_req(&["sh", "-c", "sleep 60 & echo $!; wait"]);
@@ -783,6 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_hosts_close_kills_the_command() {
+        let _one = testutil::one_at_a_time().await;
         // A session, and a plain exec too: nobody reads its answer any more.
         for interactive in [true, false] {
             let mut req = exec_req(&["sh", "-c", "echo $$; exec sleep 60"]);
@@ -900,6 +902,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_timeout_kills_child_and_grandchild() {
+        let _one = testutil::one_at_a_time().await;
         let mut req = stream_req(&["sh", "-c", "sleep 60 & echo $!; wait"]);
         req.timeout_ms = 100;
         let frames = exec(&state(), req).await;
