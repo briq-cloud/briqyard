@@ -61,6 +61,24 @@ impl Manager {
         }
     }
 
+    /// The guard of a make that does not start its machine: it counts nothing, but a start
+    /// accepted while the make is still running (`queue_accepted_start`) is given back with it.
+    pub(super) fn boot_unqueued(&self, e: &Arc<Entry>) -> BootQueued {
+        BootQueued {
+            manager: self.clone(),
+            entry: e.clone(),
+            owner: true,
+        }
+    }
+
+    /// A start accepted for a machine whose create is still running: counted from now, given
+    /// back by the create's guard or by the boot's turn, whichever comes first.
+    pub(super) fn queue_accepted_start(&self, e: &Entry) {
+        if !e.boot_queued.swap(true, Relaxed) {
+            self.inner.boot_queue.fetch_add(1, Relaxed);
+        }
+    }
+
     /// The machine's boot is out of the gate, or gone: its place is given back, once.
     pub(super) fn boot_left(&self, e: &Entry) {
         if e.boot_queued.swap(false, Relaxed) {

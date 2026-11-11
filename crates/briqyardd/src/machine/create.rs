@@ -584,15 +584,15 @@ impl Manager {
     }
 
     /// The boot queue's place for a make, taken as the make is dispatched and kept until the
-    /// boot leaves the gate or the make ends, by any exit. A replay boots nothing, and neither
-    /// does a make that is not started.
+    /// boot leaves the gate or the make ends, by any exit. A replay boots nothing. A make that
+    /// is not started counts only once a start is accepted while it runs (`creating`).
     pub(super) fn make_queued(&self, e: &Arc<Entry>, how: &Make) -> Option<boot_queue::BootQueued> {
-        let boots = match how {
-            Make::Existing => false,
-            Make::Assigned => true,
-            _ => e.snapshot().start,
-        };
-        boots.then(|| self.boot_queued(e))
+        match how {
+            Make::Existing => None,
+            Make::Assigned => Some(self.boot_queued(e)),
+            _ if e.snapshot().start => Some(self.boot_queued(e)),
+            _ => Some(self.boot_unqueued(e)),
+        }
     }
 
     async fn make_owned(

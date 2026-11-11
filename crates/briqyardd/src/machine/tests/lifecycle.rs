@@ -689,10 +689,12 @@ async fn a_create_takes_its_memory_when_recorded() {
     c.start = Some(false);
     let c = h.m.create(c).await.unwrap();
     assert_eq!(h.m.usage().0.memory_mb, 640);
+    assert_eq!(h.m.boot_queue(), 1, "only the started create is a boot");
     assert!(matches!(
         h.m.start(&c.id, None).await,
         Err(MError::Capacity(_))
     ));
+    assert_eq!(h.m.boot_queue(), 1, "a refused start is not a boot");
     h.m.destroy(&a.id, None).await.unwrap();
     let c = h.m.start(&c.id, None).await.unwrap();
     assert_eq!(
@@ -700,6 +702,11 @@ async fn a_create_takes_its_memory_when_recorded() {
         (state::CREATING, 512)
     );
     assert!(h.stored(&c.id).unwrap().start);
+    let made = h.m.entry(&c.id).unwrap();
+    assert!(
+        made.boot_queued.load(std::sync::atomic::Ordering::Relaxed),
+        "the accepted start is a boot from now, its pull included"
+    );
 }
 
 /// A registry that takes connections and never answers: a pull from it waits until the

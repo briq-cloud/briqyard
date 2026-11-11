@@ -60,6 +60,7 @@ impl Manager {
                 r.size.cpu_millis(),
             )?;
             e.rec.lock().unwrap().start = true;
+            self.queue_accepted_start(e);
         }
         self.save(e)?;
         Ok(self.view(e))
