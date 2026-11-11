@@ -255,6 +255,8 @@ impl Manager {
         .map_err(|e| {
             if e.is::<guestc::FileTransferBusy>() {
                 MError::Conflict(e.to_string())
+            } else if let Some(p) = e.downcast_ref::<guestc::PathRefused>() {
+                MError::PathRefused(p.0.clone())
             } else {
                 self.init_named(id, e)
             }

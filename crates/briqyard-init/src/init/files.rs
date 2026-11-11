@@ -117,7 +117,7 @@ where
         if let Err(e) = result.unwrap_or_else(|_| Err(anyhow!("file transfer timeout"))) {
             let _ = tokio::time::timeout(
                 Duration::from_secs(wire::IDLE_SEC),
-                send(&output, &Response::error(e.to_string())),
+                send(&output, &failure(&e)),
             )
             .await;
         }
@@ -126,10 +126,56 @@ where
             // Once ready, failure is EOF, never an error frame in the raw body.
             let _ = tokio::time::timeout(
                 Duration::from_secs(wire::IDLE_SEC),
-                send(&output, &Response::error(e.to_string())),
+                send(&output, &failure(&e)),
             )
             .await;
         }
+    }
+}
+
+/// The target path cannot name a file to write or read: no errno, the path itself is wrong.
+#[derive(Debug)]
+struct NotAFile(&'static str);
+impl std::fmt::Display for NotAFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for NotAFile {}
+
+/// Whether the caller's path caused the failure, from its errno or [`NotAFile`].
+fn path_refused(e: &anyhow::Error) -> bool {
+    use rustix::io::Errno;
+    e.chain().any(|cause| {
+        if cause.is::<NotAFile>() {
+            return true;
+        }
+        let errno = cause.downcast_ref::<Errno>().copied().or_else(|| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .and_then(|e| e.raw_os_error())
+                .map(Errno::from_raw_os_error)
+        });
+        errno.is_some_and(|errno| {
+            matches!(
+                errno,
+                Errno::NOENT
+                    | Errno::NOTDIR
+                    | Errno::ISDIR
+                    | Errno::ACCESS
+                    | Errno::PERM
+                    | Errno::ROFS
+                    | Errno::LOOP
+                    | Errno::NAMETOOLONG
+            )
+        })
+    })
+}
+
+fn failure(e: &anyhow::Error) -> Response {
+    match path_refused(e) {
+        true => Response::path_error(e.to_string()),
+        false => Response::error(e.to_string()),
     }
 }
 
@@ -166,7 +212,7 @@ fn parent(root: &Path, path: &str, create: bool) -> Result<(OwnedFd, CString)> {
             Mode::empty(),
         )?;
     }
-    Err(anyhow!("path must name a file"))
+    Err(NotAFile("path must name a file").into())
 }
 
 fn open_file(root: &Path, path: &str) -> Result<fs::File> {
@@ -179,7 +225,7 @@ fn open_file(root: &Path, path: &str) -> Result<fs::File> {
     )?;
     let file = fs::File::from(fd);
     if !file.metadata()?.is_file() {
-        return Err(anyhow!("path must name a regular file"));
+        return Err(NotAFile("path must name a regular file").into());
     }
     Ok(file)
 }
@@ -265,6 +311,13 @@ mod tests {
     use super::*;
     use crate::init::testutil::state;
     use std::os::unix::fs::symlink;
+
+    /// Linux errno values, as the guest sees them.
+    mod libc_errno {
+        pub const ENOENT: i32 = 2;
+        pub const EIO: i32 = 5;
+        pub const ENOSPC: i32 = 28;
+    }
 
     async fn read_response<S: AsyncRead + Unpin>(s: &mut S) -> Response {
         let mut hdr = [0; 4];
@@ -395,6 +448,57 @@ mod tests {
         assert!(open_file(root.path(), "/link/original").is_err());
         symlink("original", root.path().join("readlink")).unwrap();
         assert!(open_file(root.path(), "/readlink").is_err());
+    }
+
+    #[test]
+    fn path_failures_carry_the_path_cause_and_others_do_not() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("file"), b"x").unwrap();
+        fs::create_dir(root.path().join("dir")).unwrap();
+        symlink(root.path(), root.path().join("link")).unwrap();
+        let cause = |e: anyhow::Error| failure(&e).cause;
+        // A parent that is a regular file (ENOTDIR), for a write and a read.
+        assert_eq!(
+            cause(Upload::new(root.path(), "/file/x").err().unwrap()),
+            "path"
+        );
+        assert_eq!(
+            cause(open_file(root.path(), "/file/x").err().unwrap()),
+            "path"
+        );
+        // A missing parent on a read, and a symlink component (ELOOP or ENOTDIR).
+        assert_eq!(
+            cause(open_file(root.path(), "/none/x").err().unwrap()),
+            "path"
+        );
+        assert_eq!(
+            cause(open_file(root.path(), "/none").err().unwrap()),
+            "path"
+        );
+        assert_eq!(
+            cause(Upload::new(root.path(), "/link/x").err().unwrap()),
+            "path"
+        );
+        // A directory as the target: the rename onto it fails with EISDIR.
+        let mut upload = Upload::new(root.path(), "/dir").unwrap();
+        assert_eq!(cause(upload.commit(Some(0o644)).unwrap_err()), "path");
+        // Not a regular file.
+        assert_eq!(cause(open_file(root.path(), "/dir").err().unwrap()), "path");
+        let resp = failure(&anyhow!(NotAFile("path must name a file")));
+        assert_eq!(
+            (resp.kind.as_str(), resp.message.as_str()),
+            ("error", "path must name a file")
+        );
+        // Other failures stay plain errors, however they are wrapped.
+        for errno in [libc_errno::ENOSPC, libc_errno::EIO] {
+            let e = anyhow::Error::from(std::io::Error::from_raw_os_error(errno)).context("write");
+            assert_eq!(cause(e), "");
+        }
+        let e = anyhow::Error::from(std::io::Error::from_raw_os_error(libc_errno::ENOENT));
+        assert_eq!(failure(&e).cause, "path");
+        assert_eq!(cause(anyhow!("file stream shorter than declared size")), "");
+        // The kind stays `error`, so an older daemon reads the frame as before.
+        assert_eq!(failure(&anyhow!("x")).kind, "error");
     }
 
     #[tokio::test]

@@ -224,6 +224,15 @@ fn error_codes() {
         e.error,
         "namespace t1's quota: machines 1 of 1 used, 1 more asked"
     );
+    let e = AppError::from(MError::PathRefused("no such file or directory".into()));
+    assert_eq!(
+        (e.status, e.code, e.error.as_str()),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid",
+            "no such file or directory"
+        )
+    );
     let e = AppError::from(MError::GatewayInUse);
     assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "gateway_in_use"));
     let e = AppError::from(MError::Refused(
