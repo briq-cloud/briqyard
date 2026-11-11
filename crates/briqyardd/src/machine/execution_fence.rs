@@ -103,9 +103,10 @@ impl ExecutionFence {
             let entry = entry?;
             let regular = entry.file_type()?.is_file();
             if entry.file_name() == "state.json.tmp" && regular {
-                // `write_private` renames the temp file over `state.json`: the rename
-                // is the commit, so a leftover temp file is a write that never
-                // committed. Drop it; it is never read as the record.
+                // `commit` writes through `put_durable`: `write_private` renames the
+                // temp file over `state.json`, then the directory is synced. A
+                // commit that returned has no temp file left, so a leftover one is
+                // a write that never committed. Drop it; it is never read as the record.
                 std::fs::remove_file(entry.path())
                     .with_context(|| format!("remove {}", entry.path().display()))?;
                 removed = true;
@@ -445,8 +446,13 @@ mod tests {
         let (_dir, store) = open();
         let dir = store.dir(KIND);
         // A well-formed temp file must not be taken as the record either.
-        let record = serde_json::to_vec(&Record::default()).unwrap();
-        std::fs::write(dir.join("state.json.tmp"), record).unwrap();
+        let mut record = Record::default();
+        record.generations.insert("a".into(), 7);
+        std::fs::write(
+            dir.join("state.json.tmp"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
         let fence = ExecutionFence::load(&store).unwrap();
         assert!(fence.record.generations.is_empty());
         assert!(!dir.join("state.json.tmp").exists());
@@ -659,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_state_and_uncertain_write_refuse_admission() {
+    fn corrupt_state_and_unexpected_file_refuse_admission() {
         let (dir, store) = open();
         let mut fence = ExecutionFence::load(&store).unwrap();
         let a = names(&["a"]);
