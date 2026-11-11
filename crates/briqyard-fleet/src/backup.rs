@@ -295,7 +295,7 @@ where
 }
 
 /// The digest of the registry without what each heartbeat rewrites (`last_seen`, `used`, free
-/// disk, conditions, the machine count): the next report after a restore is the truth for all
+/// disk, conditions, the machine count, the boot queue): the next report after a restore is the truth for all
 /// of them. Two registries with the same digest differ in nothing a restore needs.
 fn stable_digest(reg: &Registry) -> [u8; 32] {
     let mut stable = reg.clone();
@@ -305,6 +305,8 @@ fn stable_digest(reg: &Registry) -> [u8; 32] {
         h.disk_free_mb = None;
         h.conditions.clear();
         h.machines = 0;
+        h.boots_at_once = None;
+        h.boot_queue = None;
     }
     Sha256::digest(encode(&stable)).into()
 }
@@ -1459,6 +1461,7 @@ pub(super) mod tests {
                 h.last_seen += chrono::Duration::seconds(60);
                 h.used.memory_mb = beat % 97;
                 h.disk_free_mb = Some(1000 + u64::from(beat % 31));
+                h.boot_queue = Some(beat % 13);
                 h.machines = (beat % 5) as usize;
             }
             assert!(!push().await.unwrap(), "beat {beat}");
