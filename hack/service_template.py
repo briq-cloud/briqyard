@@ -429,12 +429,18 @@ def host_neigh(ip, request=None):
         f = subprocess.run([*sudo, 'ip', 'neigh', 'flush', 'to', ip], capture_output=True, text=True, timeout=10)
         if f.returncode != 0:
             return None, 'ip neigh flush failed: %s' % ((f.stderr or f.stdout).strip()[:150] or 'rc %d' % f.returncode)
+        req_err = None
         if request:
-            request()
+            try:
+                request()
+            except Exception as e:  # the ARP reply may still have arrived: read the entry anyway
+                req_err = type(e).__name__
         r = subprocess.run(['ip', 'neigh', 'show', ip], capture_output=True, text=True, timeout=10)
     except Exception as e:
         return None, 'ip neigh unavailable: %s' % type(e).__name__
     raw = (r.stdout.strip() or r.stderr.strip() or 'no entry')[:200]
+    if req_err:
+        raw = ('request failed: %s; ' % req_err + raw)[:200]
     return parse_neigh(r.stdout), raw
 
 
@@ -638,7 +644,7 @@ def qualify(args, facts):
             raise
         except BaseException as e:
             r['error'] = '%s: %s' % (type(e).__name__, str(e)[:300])
-    th = [threading.Thread(target=one, args=(k,)) for k in range(args.clones)]
+    th = [threading.Thread(target=one, args=(k,), daemon=True) for k in range(args.clones)]
     t0 = time.monotonic()
     for x in th:
         x.start()

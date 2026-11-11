@@ -712,7 +712,7 @@ in the `e2e.sh` counts.
 check behind ADR 0127's VMGenID, MAC and clock gate: it seals one template, starts the clones together (`--sequential` for one
 by one; `--clones 8` is the simultaneous run) and reports create-to-ready p50 and max, host free memory and `host_firecracker_rss_mb` (host-wide: every Firecracker process on the host, not only the clones) before and after, and
 `pass`, `fail` or `unsupported` for each of the checks below. It runs on the daemon host only (it refuses a `BRIQYARD_URL`
-that is not this machine) and records the host: hostname and whether it is itself a guest (`nested`, from the `hypervisor` CPU
+that is not this machine; a port forward to loopback passes that check, so run it on the host itself) and records the host: hostname and whether it is itself a guest (`nested`, from the `hypervisor` CPU
 flag or `/sys/hypervisor/type`). What each check proves differs:
 - **VMGenID** tests the hypervisor and the kernel: the guest has the device and logged `crng reseeded due to virtual machine fork`
   more often than before the seal (the park hook records that count), which the driver does only when the ID changed.
@@ -720,7 +720,7 @@ flag or `/sys/hypervisor/type`). What each check proves differs:
 - **Host MAC** (`mac_host`) is an outside observation of the activation path, not a hypervisor check: the guest init sets the MAC
   and the host learns it from the guest's ARP reply. The run flushes the host's entry (`ip neigh flush to <ip>`), makes one request,
   then `ip neigh show <ip>` must show the assigned MAC (`06:b1:` and the address), distinct per clone. `unsupported` when the
-  flush fails or the entry cannot be read.
+  flush fails (it needs root or passwordless `sudo`) or the entry cannot be read.
 - **MAC, clock and RNG** test the activation path only. `clone_configure_v1` writes the daemon's per-clone MAC, wall clock and
   entropy into the guest before the clone is ready, so they pass whenever that path works, whatever the hypervisor restores.
   They catch a regression of that path: the guest `eth0` MAC against the daemon's rule and across clones, the wall clock (the
@@ -730,7 +730,7 @@ flag or `/sys/hypervisor/type`). What each check proves differs:
 
 Whether a VMClock device is present is reported across all clones, not judged. The last line is always one JSON summary, also
 after an error. `ok` is true and the exit status 0 only when every check is `pass`: a `fail`, an `unsupported` check or a clone error
-makes it false and the status 1, unless `--allow-unsupported` is given (recorded in the summary). A usage error (`--clones` below 2 or
+makes it false and the status 1; `--allow-unsupported` excuses only `unsupported` checks (recorded in the summary). A usage error (`--clones` below 2 or
 above 64, `--age-seconds` below 5, `--memory-mb` not positive) exits 2 without JSON. A `BRIQYARD_URL` that is not this machine
 exits 1 with the JSON line and the error; it makes no call to the daemon, so there is no teardown. The run fails too if its machines or namespace are not all destroyed afterwards. On a nested
 host the timings are relative only; the gate counts only a run on a native host with `ok` true and `allow_unsupported` false.
