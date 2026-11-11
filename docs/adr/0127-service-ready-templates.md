@@ -100,7 +100,9 @@ is also `clone_hook_failed`, with the message `thaw unconfirmed, the workload ma
 
 - Daemon kill between the guest's acknowledgement and the activation, on real Firecracker.
 - An 8-clone run on a larger host.
-- Native VMGenID, MAC and clock qualification (below); `hack/service-template.sh qualify` runs it.
+- Native VMGenID, MAC and clock qualification (below); `hack/service-template.sh qualify` runs it. Only VMGenID and the host-side MAC
+  test the hypervisor and kernel; the guest MAC, clock and RNG checks test the activation path (`clone_configure_v1` writes them), so
+  they pass whatever the hypervisor restores. A run counts only when `ok` is true and `nested` is false.
 
 ## Not qualified
 
