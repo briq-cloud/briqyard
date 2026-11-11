@@ -176,9 +176,13 @@ check "a fork into a new namespace lands on its source's host" '[ "$(briqyard ma
 # A move across hosts is not supported yet: refused before anything happens, naming both hosts.
 out=$(briqyard machine move "$A2" --namespace "$T-b" 2>&1 || true)
 check "a move into a namespace on the other host is refused, the machine untouched" 'echo "$out" | grep -q "not supported yet" && echo "$out" | grep -q "$HB" && [ "$(briqyard machine get "$A2" | jq -r "[.state, .host, .namespace] | join(\" \")")" = "running $HA $T-a" ]'
-if [ -n "${REGION_A:-}" ] && [ -n "${REGION_B:-}" ]; then
+# The two regions are the ones the hosts hold unless the caller names others: a and b are on
+# different hosts, and a harness that gives those hosts distinct regions needs to set nothing.
+region_of() { hosts | jq -r ".[] | select(.id == \"$1\") | .region"; }
+REGION_A=${REGION_A:-$(region_of "$HA")}
+REGION_B=${REGION_B:-$(region_of "$HB")}
+if [ -n "$REGION_A" ] && [ -n "$REGION_B" ] && [ "$REGION_A" != "$REGION_B" ]; then
   echo "== placement admission across two regions (ADR 0128)"
-  region_of() { hosts | jq -r ".[] | select(.id == \"$1\") | .region"; }
   adm()  { curl -sS -X "$1" ${auth[@]+"${auth[@]}"} -H 'Content-Type: application/json' -w '\n%{http_code}' "$BRIQYARD_URL/v1/namespaces/$2/admissions/$3" ${4:+-d "$4"}; }
   code() { tail -n1; }
   body() { sed '$d'; }
@@ -193,15 +197,15 @@ if [ -n "${REGION_A:-}" ] && [ -n "${REGION_B:-}" ]; then
   check "the same id and body answer the same decision" '[ "$(adm PUT "$T-p1" req-p1 "$AB" | body | jq -S -c .)" = "$(echo "$D1" | jq -S -c .)" ]'
   check "the same id and another body is refused" '[ "$(adm PUT "$T-p1" req-p1 "$BA" | code)" = 409 ]'
   out=$(adm PUT "$T-p3" req-p3 "{\"regions\":[\"no-such-region\",\"$REGION_A\"],\"requirements\":$REQS}")
-  check "a first region no host serves is refused, nothing stored" '[ "$(echo "$out" | code)" != 200 ] && [ "$(briqyard namespace get "$T-p3" 2>&1 | grep -c "not found\|404")" -ge 1 ]'
+  check "a first region no host serves is refused, nothing stored" '[ "$(echo "$out" | code)" != 200 ] && [ "$(curl -s -o /dev/null -w "%{http_code}" ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/namespaces/$T-p3")" = 404 ]'
   # The create under the decision goes to the decision's host.
   P1=$(curl -fsS -X POST ${auth[@]+"${auth[@]}"} -H 'Content-Type: application/json' -H 'x-briqyard-placement-request-id: req-p1' "$BRIQYARD_URL/v1/machines" \
-    -d "{\"namespace\":\"$T-p1\",\"name\":\"p\",\"image\":\"alpine:3.20\",\"cmd\":[\"sleep\",\"3600\"],\"size\":{\"vcpus\":1,\"memory_mb\":256},\"region\":\"$REGION_A\"}" | jq -r .id)
+    -d "{\"namespace\":\"$T-p1\",\"name\":\"p\",\"image\":\"alpine:3.20\",\"cmd\":[\"sleep\",\"3600\"],\"size\":{\"vcpus\":1,\"memory_mb\":256},\"region\":\"$REGION_A\"}" | jq -r .id || true)
   check "the create goes to the host of the decision" '[ "$(briqyard machine get "$P1" | jq -r .host)" = "$(echo "$D1" | jq -r .host)" ]'
   check "an admission cannot be cancelled once dispatched" '[ "$(adm DELETE "$T-p1" req-p1 | code)" = 409 ]'
   check "an unused one can be cancelled" '[ "$(adm DELETE "$T-p2" req-p2 | code)" = 204 ]'
   briqyard machine destroy "$P1" >/dev/null || true
 else
-  skip "placement admission across two regions (REGION_A and REGION_B are not set)"
+  skip "placement admission across two regions (the two hosts are not in two distinct regions; set REGION_A and REGION_B)"
 fi
 suite_summary
