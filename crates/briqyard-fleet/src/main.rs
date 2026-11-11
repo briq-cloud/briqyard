@@ -315,6 +315,8 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         last_seen: now,
         version: String::new(),
         disk_free_mb: None,
+        boots_at_once: None,
+        boot_queue: None,
         note: String::new(),
         bootstrap_attempts: 0,
         public_tcp_ports: None,

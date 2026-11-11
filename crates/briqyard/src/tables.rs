@@ -228,6 +228,12 @@ pub(super) fn host_table(hs: &[api::Host]) -> String {
         if let Some(mb) = h.disk_free_mb {
             out.push_str(&format!("{:<16} disk free: {mb} MB\n", ""));
         }
+        if let (Some(queue), Some(gate)) = (h.boot_queue, h.boots_at_once) {
+            out.push_str(&format!(
+                "{:<16} boot queue: {queue} ({gate} at once)\n",
+                ""
+            ));
+        }
         for c in &h.runtime_classes {
             out.push_str(&format!("{:<16} class: {}\n", "", class_label(c)));
         }

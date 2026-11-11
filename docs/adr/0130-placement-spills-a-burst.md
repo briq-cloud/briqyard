@@ -1,6 +1,6 @@
 # ADR 0130: Placement spills a burst to the next allowed region when the preferred one is queueing boots
 
-Date: 2026-11-11 · Status: proposed · Amends ADR 0128 (placement admission walk; this is the reopening its last section anticipated) · Builds on ADR 0044 (holds), ADR 0129 (boots at once), ADR 0025 (a namespace never spans regions)
+Date: 2026-11-11 · Status: accepted (phase 1: signal and rollback-safe outcome; phase 2: the walk) · Amends ADR 0128 (placement admission walk; this is the reopening its last section anticipated) · Builds on ADR 0044 (holds), ADR 0129 (boots at once), ADR 0025 (a namespace never spans regions)
 
 ## Context
 
@@ -20,7 +20,7 @@ Doubling the burst adds about 1.1 s at p50 on the same hosts: the queue, not the
 **A host's queue is reported by the host, plus what was placed since.** The daemon's create answers once the machine is recorded in `creating` (ADR 0048); the boot follows in a task that waits on the boot gate. So the fleet cannot see the queue from its own holds alone. The heartbeat gains two figures:
 
 - `boots_at_once`: the gate's size (ADR 0129);
-- `boot_queue`: the boots the host has accepted and that have not left the gate yet, counted from the moment the machine is recorded (its image and disks come before the gate, and count too). Every boot counts: a create, a gateway, a start, a wake, a resume, a fork, a restore.
+- `boot_queue`: the boots the host has accepted and that have not left the gate yet, counted from the moment the machine is recorded (its image and disks come before the gate, and count too). Every boot counts: a create, a gateway, a start, a wake, a resume, a fork, a restore. A warm-slot fill competes for the gate like any other boot, so it counts.
 
 `queued(host) = boot_queue + holds not answered before at`, where `at` is when the figures were asked for: a hold not answered yet, or answered after `at` (the rule ADR 0044 applies to memory, `registry/mod.rs`). A hold answered before `at` is in `boot_queue` already. A create in transit at `at` can be counted twice for a moment; that errs towards spreading, never towards a refusal.
 

@@ -133,6 +133,13 @@ pub struct Host {
     /// less what the fleet placed since; absent when the host reports none (fleet only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_free_mb: Option<u64>,
+    /// How many boots the host runs at once (ADR 0129); absent from a daemon older than ADR 0130.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boots_at_once: Option<u32>,
+    /// Boots the host accepted and has not let out of that gate, by its last report (ADR 0130);
+    /// absent from a daemon older than that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_queue: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_policy: Option<MemoryPolicy>,
     pub machines: usize,
@@ -247,6 +254,12 @@ pub struct RegisterHostRequest {
     /// one, and an older host that sends 0 for both reads as full).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_free_mb: Option<u64>,
+    /// The boot gate's size (ADR 0129); absent from a daemon older than ADR 0130.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boots_at_once: Option<u32>,
+    /// Boots accepted and not yet out of the gate (ADR 0130); absent from a daemon older than that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_queue: Option<u32>,
     /// The SHA-256 of the API's certificate; empty when the API is plain HTTP. The fleet
     /// refuses a heartbeat whose fingerprint is not the one it pinned (ADR 0020).
     #[serde(default)]
@@ -316,6 +329,12 @@ pub struct Status {
     /// Free space for disks, in MB; absent when the host cannot read its pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_free_mb: Option<u64>,
+    /// The boot gate's size (ADR 0129); absent from a daemon older than ADR 0130.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boots_at_once: Option<u32>,
+    /// Boots accepted and not yet out of the gate (ADR 0130); absent from a daemon older than that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_queue: Option<u32>,
     /// The SHA-256 of the API's certificate; empty when the API is plain HTTP (ADR 0020).
     #[serde(default)]
     pub tls_fingerprint: String,

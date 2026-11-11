@@ -48,6 +48,7 @@ impl Manager {
     /// the worker can be queued or admission closed. The worker owns it through settlement.
     pub(super) fn spawn_make_admitted(&self, scope: crate::zfs::IoScope, e: Arc<Entry>, how: Make) {
         let m = self.clone();
+        let queued = self.make_queued(&e, &how);
         tokio::spawn(async move {
             if matches!(how, Make::Existing) {
                 // Replay dispatched no work. Positively settle its reserved admission:
@@ -62,7 +63,7 @@ impl Manager {
                 metrics::warm::Operation::Prepare
             };
             let began = std::time::Instant::now();
-            let result = scope.run(m.make_owned(&e, how)).await;
+            let result = scope.run(m.make_owned(&e, how, queued)).await;
             if warm {
                 let outcome = if result.is_ok() {
                     metrics::warm::Outcome::Success
@@ -571,15 +572,29 @@ impl Manager {
         how: Make,
     ) -> Result<(), MError> {
         let (manager, entry) = (self.clone(), e.clone());
+        let queued = self.make_queued(e, &how);
         // This task, including its lifecycle lock and children, outlives an observer.
-        match tokio::spawn(async move { scope.run(manager.make_owned(&entry, how)).await }).await {
+        match tokio::spawn(async move { scope.run(manager.make_owned(&entry, how, queued)).await })
+            .await
+        {
             Ok(result) => result,
             // A lost make owner is not a settled error permitting caller cleanup.
             Err(_) => std::future::pending().await,
         }
     }
 
-    async fn make_owned(&self, e: &Arc<Entry>, how: Make) -> Result<(), MError> {
+    /// The boot queue's place for a make, taken as the make is dispatched and kept until the
+    /// boot leaves the gate or the make ends, by any exit. A replay boots nothing.
+    fn make_queued(&self, e: &Arc<Entry>, how: &Make) -> Option<boot_queue::BootQueued> {
+        (!matches!(how, Make::Existing)).then(|| self.boot_queued(e))
+    }
+
+    async fn make_owned(
+        &self,
+        e: &Arc<Entry>,
+        how: Make,
+        _queued: Option<boot_queue::BootQueued>,
+    ) -> Result<(), MError> {
         if matches!(how, Make::Existing) {
             return Ok(());
         }

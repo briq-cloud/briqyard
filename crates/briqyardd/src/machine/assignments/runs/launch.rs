@@ -73,7 +73,8 @@ impl Manager {
             disk: self.disk_rate(rec),
             disk_io: entry.disk_io.clone(),
         };
-        let _turn = self.inner.boot_gate.acquire().await?;
+        let _queued = self.boot_queued(entry);
+        let _turn = self.boot_turn(entry).await?;
         self.check_run_creation_authority(&current)?;
         self.verify_run_prelaunch_backing(&current).await?;
         // No ResumeFailed fallback: a different boot requires different explicit authority.

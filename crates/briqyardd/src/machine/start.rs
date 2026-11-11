@@ -108,6 +108,8 @@ impl Manager {
     /// `asked`: a caller asked for this run (a create, a start, a wake), not the restart
     /// policy; its startup probe failing is a failed boot (ADR 0022).
     pub(super) async fn start_entry(&self, e: &Arc<Entry>, asked: bool) -> Result<(), MError> {
+        // In the host's boot queue from here to the gate, a create's place included.
+        let _queued = self.boot_queued(e);
         self.settle_stopped_update(e)?;
         self.refresh_launch_reservation(e);
         let cfg = &self.inner.cfg;
@@ -297,12 +299,7 @@ impl Manager {
         };
         // Boots take their turn: a host asked for many at once boots a few at a time, each
         // with the whole timeout, instead of all of them crawling past it together.
-        let _boot_turn = self
-            .inner
-            .boot_gate
-            .acquire()
-            .await
-            .map_err(|e| fail(anyhow!(e)))?;
+        let _boot_turn = self.boot_turn(e).await.map_err(|e| fail(anyhow!(e)))?;
         // CPU time counts from what the machine's cgroup holds before this boot.
         let cpu = self
             .inner

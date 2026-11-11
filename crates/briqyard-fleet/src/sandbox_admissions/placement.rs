@@ -62,14 +62,23 @@ enum Binding {
 enum Class {
     Placed,
     Unconfirmed,
-    Full,
     Ineligible,
+    /// Passed over for its queue of boots (ADR 0130); `Outcome::depth` says how deep. Nothing
+    /// produces it yet.
+    Busy,
+    /// Also what a name this release does not know reads as, so a record written by a later
+    /// release that rolled back to this one stays readable.
+    #[serde(other)]
+    Full,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Outcome {
     region: String,
     outcome: Class,
+    /// With `Busy`: the waves of queued boots seen in the region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    depth: Option<u32>,
 }
 
 /// The answer, stored and replayed as it was.
@@ -381,6 +390,7 @@ fn decide(
             let regions = vec![Outcome {
                 region: h.region.clone(),
                 outcome: Class::Placed,
+                depth: None,
             }];
             return Ok(finish(h, Binding::Existing, regions));
         }
@@ -410,6 +420,7 @@ fn decide(
         outcomes.push(Outcome {
             region: region.clone(),
             outcome: class,
+            depth: None,
         });
         match class {
             Class::Placed => {
@@ -444,7 +455,7 @@ fn decide(
             Class::Ineligible if i == 0 => {
                 return Err(refuse_first_region(st, reg, namespace, region, reqs, &ask));
             }
-            Class::Full | Class::Ineligible => {}
+            Class::Full | Class::Ineligible | Class::Busy => {}
         }
     }
     count_full(st, reg, &outcomes, &ask);
@@ -778,5 +789,35 @@ pub(super) fn expire(reg: &mut Registry, now: DateTime<Utc>, window: chrono::Dur
             a.at = Some(now);
         }
         reg.release_owned(&format!("{k}#"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outcome(value: serde_json::Value) -> Outcome {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// An outcome this release does not know, read back from a stored decision, is `full`; a
+    /// `busy` one keeps its depth and is written back as it was (ADR 0130).
+    #[test]
+    fn an_unknown_outcome_reads_as_full() {
+        let unknown = outcome(serde_json::json!({"region": "r", "outcome": "spilled"}));
+        assert_eq!(unknown.outcome, Class::Full);
+        assert_eq!(unknown.depth, None);
+        let full = outcome(serde_json::json!({"region": "r", "outcome": "full"}));
+        assert_eq!(full.outcome, Class::Full);
+        let busy = serde_json::json!({"region": "r", "outcome": "busy", "depth": 3});
+        let read = outcome(busy.clone());
+        assert_eq!((read.outcome, read.depth), (Class::Busy, Some(3)));
+        assert_eq!(serde_json::to_value(&read).unwrap(), busy);
+        let placed = outcome(serde_json::json!({"region": "r", "outcome": "placed"}));
+        assert_eq!(serde_json::to_value(&placed).unwrap()["outcome"], "placed");
+        assert!(serde_json::to_value(&placed)
+            .unwrap()
+            .get("depth")
+            .is_none());
     }
 }

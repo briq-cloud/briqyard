@@ -33,6 +33,8 @@ fn host(id: &str, cap: u32, used: u32, machines: usize) -> HostRec {
         last_seen: Utc::now(),
         version: "0.1".into(),
         disk_free_mb: None,
+        boots_at_once: None,
+        boot_queue: None,
         note: String::new(),
         bootstrap_attempts: 0,
         public_tcp_ports: None,
@@ -825,4 +827,46 @@ fn a_class_is_placed_on_a_host_that_serves_it_and_default_avoids_nested() {
         Some("namespace t3 is on host without, which does not serve runtime class nested")
     );
     assert_eq!(reg.hosts["with"].without_class("t1", "nested"), None);
+}
+
+/// A heartbeat carries the boot gate's size and queue (ADR 0130); one from a daemon that sends
+/// neither leaves no figure, so the host is never read as queueing.
+#[test]
+fn a_heartbeat_carries_the_boot_queue_and_an_old_daemon_sends_none() {
+    let mut reg = Registry::default();
+    let mut report = host("a", 100_000, 0, 0);
+    report.boots_at_once = Some(36);
+    report.boot_queue = Some(70);
+    reg.heartbeat(report, Utc::now());
+    assert_eq!(reg.hosts["a"].boots_at_once, Some(36));
+    assert_eq!(reg.hosts["a"].boot_queue, Some(70));
+    assert_eq!(
+        reg.hosts["a"].to_api().boot_queue,
+        Some(70),
+        "the host view"
+    );
+    reg.heartbeat(host("a", 100_000, 0, 0), Utc::now());
+    assert_eq!(reg.hosts["a"].boots_at_once, None);
+    assert_eq!(reg.hosts["a"].boot_queue, None);
+}
+
+/// A heartbeat body from a daemon older than ADR 0130 parses, and a registry saved before it
+/// loads with no figures.
+#[test]
+fn a_body_and_a_record_without_the_boot_figures_parse() {
+    let req: api::RegisterHostRequest = serde_json::from_value(serde_json::json!({
+        "id": "h1", "url": "http://h1:7420",
+        "capacity": {"memory_mb": 1000, "vcpus": 4}, "used": {"memory_mb": 0, "vcpus": 0},
+        "machines": 0
+    }))
+    .unwrap();
+    assert_eq!((req.boots_at_once, req.boot_queue), (None, None));
+    let mut value = serde_json::to_value(host("h1", 1000, 0, 0)).unwrap();
+    assert!(
+        value.get("boot_queue").is_none(),
+        "absent figures are not written"
+    );
+    value.as_object_mut().unwrap().remove("boots_at_once");
+    let rec: HostRec = serde_json::from_value(value).unwrap();
+    assert_eq!((rec.boots_at_once, rec.boot_queue), (None, None));
 }
