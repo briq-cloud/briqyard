@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.5 — 2026-11-11
+
+### Upgrade notes
+
+- The fleet advertises `placement_admission_v1: true` in `GET /v1/status` and answers the new placement admission route (ADR 0128). An older fleet answers 404 to it, which is never capacity, so a control plane that offers a region preference must require 0.2.5 first. It asks once before any host is asked to create anything.
+- Rolling the fleet back below 0.2.5 reads placement records as seed admissions: a `cold` record fences nothing, a pending `sandbox-seed` record fences its namespace and host and is never forgotten, and an `expired` tombstone cannot be loaded. Roll back only when no placement admission is pending and the tombstones have been pruned (two windows, 48 hours). See "Rollback" under "Placement admission across regions" in `docs/FLEET-OPERATIONS.md`.
+- The guest init's code changes (service-ready loaded templates, #219), so its digest changes from 0.2.4 (ADR 0101). Existing seeds and running guests keep the init they were sealed with. Compare the candidate's `SHA256SUMS` line for `briqyard-init-linux-<arch>` and reseal seeds before turning on `templates.service_ready`, which stays off by default and needs the exact init digest.
+- `boots_at_once` now defaults to one and a half times the hardware threads, at least 2 (ADR 0129); an explicit value still wins.
+
+### Documentation
+
+- placement admission across an ordered list of regions (#221) ([0da5e716](https://github.com/briq-cloud/briqyard/commit/0da5e71618c1977fba5414fe02fab8c5e8be9fef))
+
+
+### Features
+
+- service-ready loaded templates behind a default-off flag (#219) ([0e5e9b12](https://github.com/briq-cloud/briqyard/commit/0e5e9b12cc3c43b13b88da48d940ae83fe7225d6))
+
+- placement admission across an ordered list of regions (ADR 0128) (#224) ([74865581](https://github.com/briq-cloud/briqyard/commit/7486558163303a97403f6a281e9d81a598093968))
+
+
+### Performance
+
+- boot 1.5 × the hardware threads at once by default (#223) ([f4380409](https://github.com/briq-cloud/briqyard/commit/f4380409b5f59482f466e562d178b2afa74f12b5))
+
 ## 0.2.4 — 2026-11-10
 
 ### Upgrade notes
