@@ -9,6 +9,7 @@ pub(super) async fn metrics(State(st): S) -> Response {
         let reg = st.reg.lock().unwrap();
         signals::render(&reg, &signals::regions(&reg, &st.policy, &st.refusals))
     };
+    text.push_str(&st.spills.render());
     text.push_str(&signals::render_backup(&backup::observe(
         st.backup.as_ref(),
         &st.written,
@@ -49,7 +50,7 @@ pub(super) async fn status(State(st): S) -> Json<serde_json::Value> {
     }
     // The daemon's Status, plus what only a fleet knows.
     Json(serde_json::json!({
-        "version": briqyard_version::VERSION, "host_id": "fleet", "egress_siblings_v1": true, "placement_admission_v1": true,
+        "version": briqyard_version::VERSION, "host_id": "fleet", "egress_siblings_v1": true, "placement_admission_v1": true, "placement_spill_v1": true,
         "capacity": cap, "used": used, "machines": machines, "running": machines,
         "hosts": reg.hosts.len(), "ready": ready, "namespaces": reg.namespaces.len(),
         "regions": signals::regions(&reg, &st.policy, &st.refusals),

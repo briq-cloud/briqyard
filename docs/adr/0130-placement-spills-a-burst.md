@@ -1,6 +1,6 @@
 # ADR 0130: Placement spills a burst to the next allowed region when the preferred one is queueing boots
 
-Date: 2026-11-11 · Status: accepted (phase 1: signal and rollback-safe outcome; phase 2: the walk) · Amends ADR 0128 (placement admission walk; this is the reopening its last section anticipated) · Builds on ADR 0044 (holds), ADR 0129 (boots at once), ADR 0025 (a namespace never spans regions)
+Date: 2026-11-11 · Status: accepted (phase 1: signal and rollback-safe outcome, shipped; phase 2: the walk, `placement_spill_v1`) · Amends ADR 0128 (placement admission walk; this is the reopening its last section anticipated) · Builds on ADR 0044 (holds), ADR 0129 (boots at once), ADR 0025 (a namespace never spans regions)
 
 ## Context
 
@@ -27,10 +27,12 @@ Doubling the burst adds about 1.1 s at p50 on the same hosts: the queue, not the
 **Busy is confirmed by a fresh read, outside the lock.** A heartbeat is up to one report interval old, so boots that finished since still count in it. The walk runs under the registry lock, so the read cannot happen inside it:
 
 1. Decide from the figures in memory. No region found busy: that is the answer.
-2. Otherwise release the lock and read the candidate hosts of every region found busy, in parallel, with a timeout of its own well under one boot wave (`placement.busy_read_ms`, 300 by default). A host read less than a second ago, a read already in flight, or a host that does not answer keeps its figures from memory; a create never waits for another create's read.
+2. Otherwise release the lock and read the candidate hosts of every region found busy, in parallel, with a timeout of its own well under one boot wave (`placement.busy_read_ms`, 300 by default, at most 1000). A host read or heard from (a heartbeat) less than a second ago (a read in flight is one: its timeout is at most a second), or a host that does not answer, keeps its figures from memory; a create never waits for another create's read. The read is the one a delete makes to free what a machine held: the host's status, taken into the registry as a heartbeat would (`used`, free disk, `boots_at_once`, `boot_queue`).
 3. Take the lock again, check replay as ADR 0128 does, and decide once more with the new figures. That decision is final: no further read.
 
-`/v1/status` shows both figures for each host.
+`/v1/hosts` shows both figures for each host.
+
+**Counting the queue.** The holds of a host are exactly those its last figures do not count yet (`report` drops a hold made at or before the report, ADR 0044), so `queued(host) = boot_queue + holds`: one hold per requirement (a gateway, a consumer), taken by the decision and kept until its dispatch or its deadline. A host that reports neither `boots_at_once` nor `boot_queue` has no waves and is never busy. A fresh read is asked at `at` = the moment the request leaves, so a create answered while the read is in flight can be counted twice, never missed.
 
 **Waves.** `waves(host) = ⌊queued(host) / boots_at_once(host)⌋`. Everything waves change, the host order and the depth below included, applies only to a request with `spill_when_busy` and more than one region, on a fleet with `spill_waves > 0`; any other create is placed exactly as ADR 0128 places it. Within a region, the host pick of ADR 0128 keeps its keys and adds waves before free memory: a host holding a validated seed first, then the nested-hypervisor key (ADR 0088), then fewer whole waves, then most free memory.
 
@@ -44,9 +46,13 @@ Doubling the burst adds about 1.1 s at p50 on the same hosts: the queue, not the
 
 A seed saves a cold boot, not a queue: a seeded host counts with its waves like any other.
 
+**The wire.** `spill_when_busy` is a boolean of the admission body, absent or `false` by default. The body refuses fields it does not know (ADR 0128), so a fleet before this ADR answers 400 to it. The fleet therefore advertises the capability `placement_spill_v1: true` in `GET /v1/status`, beside `placement_admission_v1`; a client sends `spill_when_busy` only to a fleet that says so, and an older fleet (the field absent) gets the body of ADR 0128 and places as before. The capability means the field is accepted; with `spill_waves = 0` the fleet accepts it and walks as ADR 0128.
+
+**Replay.** The fingerprint of a body (ADR 0128) leaves out `spill_when_busy` when it is `false` or absent, so a retry of a body sent before this ADR, or by a client that never sends the flag, matches its stored admission. A body with `true` is a different body from the same one with `false`: the same id with the other value is 409. The stored record does not keep the flag: it matters to the decision alone, and a fleet rolled back past this ADR rejects a field it does not know when it loads the registry.
+
 **Only between regions the caller listed, only for a new binding.** `regions` stays the allowlist and its order the only weight (ADR 0128). The request gains `spill_when_busy` (default `false`): the caller's consent to a namespace that may live in a farther region for its whole life. The fleet does not know the caller's latency to each region, so it takes no per-region weight. A caller that sends one region, or leaves the flag off, gets exactly ADR 0128. A namespace already pinned (`binding: existing`) answers before the walk, as before: `busy` never applies to it.
 
-**Recorded like any decision.** The answer's `regions` gains the outcome `busy`, with the depth seen, for a region passed over because of its queue; the region placed in is `placed`, busy or not; a later region with candidates that was not needed is omitted, as ADR 0128 omits regions it did not reach. Replay returns the stored answer (ADR 0128). A spill is not a refusal: `count_full` does not count it. The metrics count spills per pair of regions. Rollback: an older fleet that loads a stored `busy` outcome must read it as `full`, so the outcome enum takes a serde fallback in a release before the walk changes.
+**Recorded like any decision.** The answer's `regions` gains the outcome `busy`, with the depth seen, for a region passed over because of its queue; the region placed in is `placed`, busy or not; a later region with candidates that was not needed is omitted, as ADR 0128 omits regions it did not reach. Replay returns the stored answer (ADR 0128). A spill is not a refusal: `count_full` does not count it. The outcomes run up to the region placed in, so a spilled answer lists each earlier region as `busy` (its depth), `full`, `unconfirmed` or `ineligible`. The metrics count spills in `briqyard_fleet_placement_spills_total{from,to}`: `from` is the first region passed over for its queue, `to` the region placed in; both have hosts, so a caller's typo makes no series. Rollback: an older fleet that loads a stored `busy` outcome must read it as `full`, so the outcome enum takes a serde fallback in a release before the walk changes.
 
 ## Consequences
 

@@ -190,6 +190,7 @@ if [ -n "$REGION_A" ] && [ -n "$REGION_B" ] && [ "$REGION_A" != "$REGION_B" ]; t
   AB="{\"regions\":[\"$REGION_A\",\"$REGION_B\"],\"requirements\":$REQS}"
   BA="{\"regions\":[\"$REGION_B\",\"$REGION_A\"],\"requirements\":$REQS}"
   check "the fleet says it answers admissions" '[ "$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/status" | jq -r .placement_admission_v1)" = true ]'
+  check "the fleet says it accepts spill_when_busy" '[ "$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/status" | jq -r .placement_spill_v1)" = true ]'
   out=$(adm PUT "$T-p1" req-p1 "$AB"); D1=$(echo "$out" | body)
   echo "       p1 admission: $(echo "$out" | code) $(echo "$D1" | tr -d '\n' | cut -c1-300)"
   check "the preferred region is placed first, on a host of it" '[ "$(echo "$out" | code)" = 200 ] && [ "$(echo "$D1" | jq -r .region)" = "$REGION_A" ] && [ "$(region_of "$(echo "$D1" | jq -r .host)")" = "$REGION_A" ]'
@@ -200,6 +201,10 @@ if [ -n "$REGION_A" ] && [ -n "$REGION_B" ] && [ "$REGION_A" != "$REGION_B" ]; t
   check "the same id and another body is refused" '[ "$(adm PUT "$T-p1" req-p1 "$BA" | code)" = 409 ]'
   out=$(adm PUT "$T-p3" req-p3 "{\"regions\":[\"no-such-region\",\"$REGION_A\"],\"requirements\":$REQS}")
   check "a first region no host serves is refused, nothing stored" '[ "$(echo "$out" | code)" != 200 ] && [ "$(curl -s -o /dev/null -w "%{http_code}" ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/namespaces/$T-p3")" = 404 ]'
+  # An idle fleet keeps the preferred region for a request that accepts a spill (ADR 0130).
+  out=$(adm PUT "$T-p4" req-p4 "{\"regions\":[\"$REGION_A\",\"$REGION_B\"],\"requirements\":$REQS,\"spill_when_busy\":true}")
+  check "an idle fleet places a spill_when_busy request in the first region" '[ "$(echo "$out" | code)" = 200 ] && [ "$(echo "$out" | body | jq -r .region)" = "$REGION_A" ]'
+  adm DELETE "$T-p4" req-p4 >/dev/null || true
   # The create under the decision goes to the decision's host.
   P1=$(curl -fsS -X POST ${auth[@]+"${auth[@]}"} -H 'Content-Type: application/json' -H 'x-briqyard-placement-request-id: req-p1' "$BRIQYARD_URL/v1/machines" \
     -d "{\"namespace\":\"$T-p1\",\"name\":\"p\",\"image\":\"alpine:3.20\",\"cmd\":[\"sleep\",\"3600\"],\"size\":{\"vcpus\":1,\"memory_mb\":256},\"region\":\"$REGION_A\"}" | jq -r .id || true)

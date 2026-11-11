@@ -220,6 +220,7 @@ Prometheus text:
 | `briqyard_fleet_hosts` | `state` | hosts in the registry |
 | `briqyard_fleet_free_mb` | `resource="memory\|disk"`, `region` | free on the region's hosts that take a new namespace (ready, under `fill_ceiling`, no condition), summed |
 | `briqyard_fleet_largest_slot_mb` | same | the most free on one of them: the largest machine (memory) or volume plus 2 GB (disk) the region still takes |
+| `briqyard_fleet_placement_spills_total` | `from`, `to` | placement admissions that passed over a region for its queue of boots (`from`, the first one passed over) and placed in `to` (ADR 0130) |
 | `briqyard_fleet_unschedulable_total` | `resource="memory\|disk\|pressure"`, `region` | creates refused 503 `capacity` since the fleet started, by the fleet or by a host (a pinned namespace's full host: counted by what the fleet's figures say it lacks, not for a quota or a used-up address or port) |
 
 `memory`: no host had the memory free, or those with the room are under `memory_pressure`;
@@ -284,6 +285,19 @@ A quota `PUT` with the id is checked the same way and consumes no requirement.
 `DELETE` on the route cancels the admission and releases its holds, only before any dispatch
 (409 after, the gateway's included). The pin stays and follows the heartbeat's rule.
 
+- **Spill (ADR 0130).** A body with `"spill_when_busy": true` accepts a later region when the
+  first is queueing boots. `GET /v1/status` says the fleet takes the field
+  (`placement_spill_v1: true`); an older fleet answers 400 to it, so send it only to a fleet that
+  says so. A host's queue is its `boot_queue` plus the holds not counted in it yet; a wave is
+  `boots_at_once` boots; a region is `busy` from `placement.spill_waves` waves (default 2, 0: off)
+  at the host the pick chooses there. A region found busy is confirmed by a fresh read of its
+  hosts (`placement.busy_read_ms`, default 300, at most 1000; a host read or heard from under a
+  second ago, or one that does not answer, keeps its figures). The region with the lowest
+  `depth + index × spill_waves` wins, a later one only with a strictly lower score. The answer
+  lists the regions up to the one placed in, a busy one as `{"region": "…", "outcome": "busy",
+  "depth": 3}`; a client that does not know `busy` reads it as `full`. A namespace stays in its
+  region for its whole life. `briqyard_fleet_placement_spills_total{from,to}` counts spills.
+  `false` and absent are the same body; the stored record does not keep the flag.
 - **Holds.** Each requirement is held for `placement.admission_hold_sec` (default 240). The
   heartbeat gives back what no dispatch took over; the decision stands.
 - **Fence.** While a requirement is not dispatched, the admission pins its namespace to the host

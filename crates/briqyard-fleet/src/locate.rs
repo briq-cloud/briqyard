@@ -141,9 +141,13 @@ pub(super) async fn holder(
 /// A host's memory and disk asked of it now, as its heartbeat would report them (ADR 0044).
 /// Not answering within five seconds is nothing: the heartbeat comes.
 pub(super) async fn refresh(st: &AppState, host: &HostRec) {
+    refresh_within(st, host, std::time::Duration::from_secs(5)).await;
+}
+
+/// `refresh`, giving the host `within` to answer.
+pub(crate) async fn refresh_within(st: &AppState, host: &HostRec, within: std::time::Duration) {
     let asked = Utc::now();
     let status = get_json::<api::Status>(st, host, "/v1/status");
-    let within = std::time::Duration::from_secs(5);
     if let Ok(Some(s)) = tokio::time::timeout(within, status).await {
         if let Some(h) = st.reg.lock().unwrap().hosts.get_mut(&host.id) {
             h.egress_siblings_v1 = s.egress_siblings_v1;

@@ -50,6 +50,8 @@ pub(super) struct Daemon {
     /// The runtime classes its status lists besides `default`.
     pub(super) runtime_classes: Mutex<Vec<api::RuntimeClassInfo>>,
     pub(super) backup_records: Mutex<Vec<serde_json::Value>>,
+    /// The `boots_at_once` and `boot_queue` its status reports (ADR 0129); none: neither.
+    pub(super) boot_figures: Mutex<Option<(u32, u32)>>,
 }
 
 impl Daemon {
@@ -186,6 +188,7 @@ pub(super) async fn start_daemon_on(
         runtime_classes: Mutex::new(vec![]),
         status_body_failure: std::sync::atomic::AtomicBool::new(false),
         backup_records: Mutex::new(vec![]),
+        boot_figures: Mutex::new(None),
     });
     type D = State<Arc<Daemon>>;
     async fn status(State(d): D) -> Response {
@@ -197,6 +200,7 @@ pub(super) async fn start_daemon_on(
         if let Some((status, body)) = d.status_reply.lock().unwrap().clone() {
             return (status, Json(body)).into_response();
         }
+        let figures = *d.boot_figures.lock().unwrap();
         let ms = d.machines.lock().unwrap();
         Json(api::Status {
             observation: None,
@@ -221,8 +225,8 @@ pub(super) async fn start_daemon_on(
             machines: ms.len(),
             running: ms.len(),
             disk_free_mb: Some(100_000),
-            boots_at_once: None,
-            boot_queue: None,
+            boots_at_once: figures.map(|(n, _)| n),
+            boot_queue: figures.map(|(_, q)| q),
             tls_fingerprint: d.tls_fingerprint.clone(),
             conditions: d.conditions.lock().unwrap().clone(),
             started: Default::default(),

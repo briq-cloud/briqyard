@@ -2,7 +2,7 @@
 //! list of regions. One decision, made under the registry lock before any host is asked, saved
 //! before it is answered, and held to by the gateway `PUT` and the create that carry its id.
 use super::*;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 
 /// Seeds a consumer may offer: each is checked on its host before the walk.
 const MAX_SEEDS: usize = 8;
@@ -47,6 +47,11 @@ pub(crate) struct Requirement {
 pub(crate) struct Request {
     regions: Vec<String>,
     requirements: Vec<Requirement>,
+    /// The caller accepts a namespace in a later region of `regions` when the first is queueing
+    /// boots (ADR 0130). Left out of the body, so of its fingerprint, unless set: a retry from a
+    /// client that never sends it matches its stored admission.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    spill_when_busy: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -63,8 +68,7 @@ enum Class {
     Placed,
     Unconfirmed,
     Ineligible,
-    /// Passed over for its queue of boots (ADR 0130); `Outcome::depth` says how deep. Nothing
-    /// produces it yet.
+    /// Passed over for its queue of boots (ADR 0130); `Outcome::depth` says how deep.
     Busy,
     /// Also what a name this release does not know reads as, so a record written by a later
     /// release that rolled back to this one stays readable.
@@ -272,6 +276,30 @@ fn region_class(classes: &[HostClass]) -> Class {
 /// A seed checked on its host before the walk.
 type Checked = (Selector, String);
 
+/// The host a region's pick chooses among its `candidates`: a host with a validated seed first,
+/// then a default machine away from a host with a hypervisor of its own, then (with `spill`,
+/// the waves from which a host is deep) fewer whole waves, then the most free memory. A deep
+/// host loses the seed and the hypervisor preference (ADR 0130).
+fn pick<'a>(
+    candidates: impl Iterator<Item = &'a HostRec>,
+    all_default: bool,
+    seeded: impl Fn(&HostRec) -> bool,
+    spill: Option<u32>,
+) -> &'a HostRec {
+    let key = |h: &HostRec| {
+        let deep = spill.is_some_and(|n| h.waves() >= n);
+        (
+            seeded(h) && !deep,
+            !(all_default && h.serves_nested()) && !deep,
+            std::cmp::Reverse(spill.map_or(0, |_| h.waves())),
+            h.free_memory_mb(),
+        )
+    };
+    candidates
+        .max_by(|a, b| key(a).cmp(&key(b)).then_with(|| b.id.cmp(&a.id)))
+        .expect("a placed region has a candidate")
+}
+
 struct Plan {
     host: String,
     region: String,
@@ -279,6 +307,8 @@ struct Plan {
     mode: Mode,
     seed: Option<Selector>,
     regions: Vec<Outcome>,
+    /// The candidate hosts of the regions found busy: read afresh before the walk is final.
+    busy_hosts: Vec<HostRec>,
 }
 
 /// The 503 of a walk that placed nothing, with what each region came to.
@@ -378,6 +408,7 @@ fn decide(
             },
             seed,
             regions,
+            busy_hosts: Vec::new(),
         }
     };
     // A namespace already pinned: its host, if the requirements fit there. A stack is never
@@ -407,6 +438,17 @@ fn decide(
             ),
         ));
     }
+    let all_default = reqs
+        .iter()
+        .all(|r| api::class_name(&r.runtime_class) == api::DEFAULT_CLASS);
+    // The walk of ADR 0130 for a request that opts in, on a fleet that spills and more than one
+    // region; any other is the walk of ADR 0128, to the letter.
+    let spill = (request.spill_when_busy && request.regions.len() > 1)
+        .then_some(st.policy.spill_waves)
+        .filter(|n| *n > 0);
+    // The regions with a candidate, in order: where, the host the pick chooses, and its waves.
+    let mut found: Vec<(usize, &HostRec, u32)> = Vec::new();
+    let mut busy_hosts: Vec<HostRec> = Vec::new();
     let mut outcomes: Vec<Outcome> = Vec::new();
     for (i, region) in request.regions.iter().enumerate() {
         let hosts: Vec<(&HostRec, HostClass)> = reg
@@ -422,29 +464,26 @@ fn decide(
             outcome: class,
             depth: None,
         });
+        let candidates = || {
+            hosts
+                .iter()
+                .filter(|(_, c)| *c == HostClass::Candidate)
+                .map(|(h, _)| *h)
+        };
         match class {
             Class::Placed => {
-                let all_default = reqs
-                    .iter()
-                    .all(|r| api::class_name(&r.runtime_class) == api::DEFAULT_CLASS);
-                // A host with a validated seed first, then as `place`: a default machine
-                // away from a host with a hypervisor of its own, then the most free memory.
-                let key = |h: &HostRec| {
-                    (
-                        seeded(h),
-                        !(all_default && h.serves_nested()),
-                        h.free_memory_mb(),
-                    )
+                let best = pick(candidates(), all_default, seeded, spill);
+                let Some(n) = spill else {
+                    return Ok(finish(best, Binding::New, outcomes));
                 };
-                let best = hosts
-                    .iter()
-                    .filter(|(_, c)| *c == HostClass::Candidate)
-                    .map(|(h, _)| *h)
-                    .max_by(|a, b| key(a).cmp(&key(b)).then_with(|| b.id.cmp(&a.id)))
-                    .expect("a placed region has a candidate");
-                return Ok(finish(best, Binding::New, outcomes));
+                if best.waves() >= n {
+                    busy_hosts.extend(candidates().cloned());
+                }
+                found.push((i, best, best.waves()));
             }
-            Class::Unconfirmed => {
+            // After a region with a candidate, a region without one is skipped, never a
+            // refusal (ADR 0130).
+            Class::Unconfirmed if found.is_empty() => {
                 count_full(st, reg, &outcomes, &ask);
                 return Err(refused(
                     "region_unconfirmed",
@@ -455,8 +494,32 @@ fn decide(
             Class::Ineligible if i == 0 => {
                 return Err(refuse_first_region(st, reg, namespace, region, reqs, &ask));
             }
-            Class::Full | Class::Ineligible | Class::Busy => {}
+            Class::Unconfirmed | Class::Full | Class::Ineligible | Class::Busy => {}
         }
+    }
+    // Only a spilling walk gets here with a region found: the score decides, a later region
+    // winning with a strictly lower one.
+    let n = spill.unwrap_or(0);
+    let score = |(i, _, waves): &(usize, &HostRec, u32)| {
+        waves.saturating_add((*i as u32).saturating_mul(n))
+    };
+    let mut winner: Option<&(usize, &HostRec, u32)> = None;
+    for f in &found {
+        if winner.is_none_or(|w| score(f) < score(w)) {
+            winner = Some(f);
+        }
+    }
+    if let Some(&(won, host, _)) = winner {
+        // The regions after the winner were not needed. Before it, a region with a candidate
+        // lost to its queue: a region below the threshold is never beaten by a later one.
+        outcomes.truncate(won + 1);
+        for &(i, _, waves) in found.iter().filter(|(i, ..)| *i < won) {
+            outcomes[i].outcome = Class::Busy;
+            outcomes[i].depth = Some(waves);
+        }
+        let mut plan = finish(host, Binding::New, outcomes);
+        plan.busy_hosts = busy_hosts;
+        return Ok(plan);
     }
     count_full(st, reg, &outcomes, &ask);
     Err(refused(
@@ -482,6 +545,12 @@ fn commit(
     plan: Plan,
     now: DateTime<Utc>,
 ) -> Decision {
+    // The flag matters to the decision alone: a fleet rolled back past ADR 0130 could not load
+    // a record that carries it.
+    let request = Request {
+        spill_when_busy: false,
+        ..request
+    };
     match plan.binding {
         Binding::New => reg.pin(namespace, &plan.host),
         Binding::Existing => reg.note_namespace_create(namespace),
@@ -552,6 +621,31 @@ fn replay(
     }
 }
 
+/// Reads the `hosts` of the regions found busy afresh, in parallel (ADR 0130). A host read, or
+/// heard from, less than a second ago keeps its figures, so a burst of creates costs each host
+/// one read a second; one that does not answer within `placement.busy_read_ms` keeps them too.
+async fn read_busy(st: &AppState, hosts: Vec<HostRec>) {
+    let fresh = std::time::Duration::from_secs(1);
+    let within = std::time::Duration::from_millis(st.cfg.placement.busy_read_ms);
+    let now = std::time::Instant::now();
+    let due: Vec<HostRec> = {
+        let mut reads = st.busy_reads.lock().unwrap();
+        reads.retain(|_, at| now.duration_since(*at) < fresh);
+        hosts
+            .into_iter()
+            .filter(|h| {
+                let heard = Utc::now() - h.last_seen < Duration::from_std(fresh).unwrap();
+                !heard && reads.insert(h.id.clone(), now).is_none()
+            })
+            .collect()
+    };
+    futures::future::join_all(
+        due.iter()
+            .map(|h| crate::locate::refresh_within(st, h, within)),
+    )
+    .await;
+}
+
 /// `PUT /v1/namespaces/{ns}/admissions/{id}`: the placement decision for the namespace's first
 /// requirements (ADR 0128).
 pub(crate) async fn admit(
@@ -603,6 +697,18 @@ pub(crate) async fn admit(
         .into_iter()
         .flatten()
         .collect();
+    // The decision from the figures in memory. A region found busy is confirmed by a fresh read
+    // of its hosts, outside the lock, and decided once more; that decision is final (ADR 0130).
+    let busy = {
+        let reg = st.reg.lock().unwrap();
+        match replay(&reg, &namespace, &id, &fingerprint)? {
+            Some(_) => Vec::new(),
+            None => decide(&st, &reg, &namespace, &request, &seeds, Utc::now())?.busy_hosts,
+        }
+    };
+    if !busy.is_empty() {
+        read_busy(&st, busy).await;
+    }
     let decision = {
         let mut reg = st.reg.lock().unwrap();
         if let Some(decision) = replay(&reg, &namespace, &id, &fingerprint)? {
@@ -610,6 +716,9 @@ pub(crate) async fn admit(
         } else {
             let now = Utc::now();
             let plan = decide(&st, &reg, &namespace, &request, &seeds, now)?;
+            if let Some(first) = plan.regions.iter().find(|o| o.outcome == Class::Busy) {
+                st.spills.count(&first.region, &plan.region);
+            }
             commit(
                 &st,
                 &mut reg,

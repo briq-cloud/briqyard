@@ -4,24 +4,24 @@
 use super::*;
 use serde_json::{json, Value};
 
-fn path(namespace: &str, id: &str) -> String {
+pub(super) fn path(namespace: &str, id: &str) -> String {
     format!("/v1/namespaces/{namespace}/admissions/{id}")
 }
-fn gateway() -> Value {
+pub(super) fn gateway() -> Value {
     json!({"role": "gateway", "size": {"vcpus": 1, "memory_mb": 256}})
 }
-fn consumer(memory_mb: u32) -> Value {
+pub(super) fn consumer(memory_mb: u32) -> Value {
     json!({"role": "consumer", "size": {"vcpus": 1, "memory_mb": memory_mb}, "volume_gb": 2})
 }
-fn body(regions: &[&str], requirements: Vec<Value>) -> Value {
+pub(super) fn body(regions: &[&str], requirements: Vec<Value>) -> Value {
     json!({"regions": regions, "requirements": requirements})
 }
-fn both(regions: &[&str]) -> Value {
+pub(super) fn both(regions: &[&str]) -> Value {
     body(regions, vec![gateway(), consumer(256)])
 }
 
 /// A ready host with `used` of `cap` MB taken, in `region`, with no daemon behind it.
-fn put_host(f: &Fleet, id: &str, region: &str, cap: u32, used: u32) {
+pub(super) fn put_host(f: &Fleet, id: &str, region: &str, cap: u32, used: u32) {
     let now = Utc::now();
     let mut h = static_host(
         &config::StaticHost {
@@ -47,12 +47,12 @@ fn put_host(f: &Fleet, id: &str, region: &str, cap: u32, used: u32) {
     };
     f.st.reg.lock().unwrap().heartbeat(h, now);
 }
-fn fill(f: &Fleet, id: &str) {
+pub(super) fn fill(f: &Fleet, id: &str) {
     let mut reg = f.st.reg.lock().unwrap();
     let h = reg.hosts.get_mut(id).unwrap();
     h.used.memory_mb = h.capacity.memory_mb;
 }
-fn cfg() -> config::Config {
+pub(super) fn cfg() -> config::Config {
     config::Config {
         token: "api".into(),
         ..Default::default()
@@ -82,7 +82,7 @@ fn fill_region(f: &Fleet, region: &str) {
     }
 }
 
-async fn admit(f: &Fleet, namespace: &str, id: &str, b: Value) -> (StatusCode, Value) {
+pub(super) async fn admit(f: &Fleet, namespace: &str, id: &str, b: Value) -> (StatusCode, Value) {
     let (s, _, text) = call(&f.st, "PUT", &path(namespace, id), "api", Some(b)).await;
     (s, json(&text))
 }
@@ -139,7 +139,7 @@ fn host_used(f: &Fleet, id: &str) -> u32 {
     f.st.reg.lock().unwrap().hosts[id].used.memory_mb
 }
 /// The holds an admission made and no dispatch has taken over.
-fn holds(f: &Fleet, id: &str) -> usize {
+pub(super) fn holds(f: &Fleet, id: &str) -> usize {
     let reg = f.st.reg.lock().unwrap();
     reg.hosts[id]
         .holds
@@ -154,7 +154,7 @@ fn refused_in(f: &Fleet, region: &str) -> u64 {
         .find(|r| r.region == region)
         .map_or(0, |r| r.unschedulable.memory)
 }
-fn outcomes(b: &Value) -> Vec<(String, String)> {
+pub(super) fn outcomes(b: &Value) -> Vec<(String, String)> {
     b["regions"]
         .as_array()
         .unwrap()
@@ -167,7 +167,7 @@ fn outcomes(b: &Value) -> Vec<(String, String)> {
         })
         .collect()
 }
-fn pair(region: &str, outcome: &str) -> (String, String) {
+pub(super) fn pair(region: &str, outcome: &str) -> (String, String) {
     (region.into(), outcome.into())
 }
 
