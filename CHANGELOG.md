@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.6 — 2026-11-11
+
+### Upgrade notes
+
+- v0.2.5 was never published, so 0.2.6 is the first release with placement admission: the fleet advertises `placement_admission_v1: true` in `GET /v1/status` and answers the new placement admission route (ADR 0128). An older fleet answers 404 to it, which is never capacity, so a control plane that offers a region preference must require 0.2.6 first. Rolling the fleet back below 0.2.6 reads placement records as seed admissions; roll back only when no placement admission is pending and the tombstones have been pruned. See "Rollback" under "Placement admission across regions" in `docs/FLEET-OPERATIONS.md`.
+- Also first published here: `boots_at_once` defaults to one and a half times the hardware threads, at least 2 (ADR 0129); an explicit value still wins.
+- The guest init's code changed from 0.2.4 (service-ready loaded templates, #219, and the follow-ups in #222), so its digest changes (ADR 0101). Existing seeds and running guests keep the init they were sealed with. Seeds sealed against an older init need resealing: compare the candidate's `SHA256SUMS` line for `briqyard-init-linux-<arch>` first. `templates.service_ready` stays off by default and needs the exact init digest.
+- With `templates.service_ready` on, #222 closes the exec admission race at park: park waits (at most 5 s) for already admitted executions to spawn, the hook's process group is killed and reaped before the checks, and a refusal whose thaw is not confirmed within 10 s answers `park_unrecoverable` and stops the source (ADR 0127). No change while the flag is off.
+
+### Fixes
+
+- service-template follow-ups from #220 (#222) ([d3cf502a](https://github.com/briq-cloud/briqyard/commit/d3cf502af1d3bba26264b63977a63c8433278b0d))
+
 ## 0.2.5 — 2026-11-11
 
 ### Upgrade notes
