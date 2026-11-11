@@ -291,7 +291,8 @@ impl Upload {
                     })
                 }
                 Err(rustix::io::Errno::EXIST) => continue,
-                Err(e) => return Err(e.into()),
+                // The temporary lives in the caller's directory: a refusal there is the path's.
+                Err(e) => return Err(tag(e)),
             }
         }
         Err(anyhow!("cannot create upload temporary file"))
@@ -464,6 +465,27 @@ mod tests {
         assert!(open_file(root.path(), "/link/original").is_err());
         symlink("original", root.path().join("readlink")).unwrap();
         assert!(open_file(root.path(), "/readlink").is_err());
+    }
+
+    #[test]
+    fn a_refused_temporary_create_is_the_paths_fault() {
+        let root = tempfile::tempdir().unwrap();
+        // The directory goes away between the walk and the create: ENOENT on the temporary.
+        let dir = root.path().join("d");
+        let gone = dir.clone();
+        let mut first = true;
+        let sequence = std::iter::from_fn(move || {
+            if std::mem::take(&mut first) {
+                fs::remove_dir(&gone).unwrap();
+            }
+            Some(0)
+        });
+        let e = Upload::create(root.path(), "/d/f", sequence).err().unwrap();
+        assert_eq!(failure(&e).cause, "path");
+        // Out of space or descriptors on that create is ours, not the path's.
+        for errno in [rustix::io::Errno::NOSPC, rustix::io::Errno::MFILE] {
+            assert_eq!(failure(&tag(errno)).cause, "");
+        }
     }
 
     #[test]
