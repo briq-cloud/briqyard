@@ -11,6 +11,7 @@
 
 ### Fixes
 
+- fleet: the placement admission hold defaults to 4 minutes (was 10)
 - service-template follow-ups from #220 (#222) ([d3cf502a](https://github.com/briq-cloud/briqyard/commit/d3cf502af1d3bba26264b63977a63c8433278b0d))
 
 ## 0.2.5 — 2026-11-11

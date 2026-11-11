@@ -445,7 +445,7 @@ impl Default for Policy {
             runtime_class: String::new(),
             fill_ceiling: 0.85,
             down_after: Duration::seconds(60),
-            admission_hold: Duration::minutes(10),
+            admission_hold: Duration::minutes(4),
         }
     }
 }
