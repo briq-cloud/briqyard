@@ -91,3 +91,4 @@ workload, and stops the source afterwards. A refusal leaves the service running.
 runs `resume` while frozen; `/run/briqyard/clone.json` holds its generation, hostname, ip and
 machine_id. A failed resume leaves that clone in `error`, reason `clone_hook_failed`.
 Applications reseed their own random generators and re-create outbound sessions.
+`hack/service-template.sh qualify` checks VMGenID (hypervisor and kernel), and the host-side MAC, guest MAC, clock and RNG (the activation path that applies the daemon's per-clone values) of clones ([development notes](DEVELOPMENT.md)).

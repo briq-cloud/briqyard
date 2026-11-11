@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Running-service template checks (ADR 0127) on a disposable host: turns on templates.service_ready,
-# runs hack/service_template.py (e2e or bench), and puts the configuration back on every exit.
-#   BRIQYARD_TEST_SERVICE=1 hack/service-template.sh [e2e|bench]
+# runs hack/service_template.py (e2e, bench or qualify), and puts the configuration back on every exit.
+#   BRIQYARD_TEST_SERVICE=1 hack/service-template.sh [e2e|bench|qualify [--clones N] [--age-seconds S] [--sequential] [--memory-mb M] [--allow-unsupported]]
 set -euo pipefail
 [ "${BRIQYARD_TEST_SERVICE:-}" = 1 ] || { echo 'set BRIQYARD_TEST_SERVICE=1: this edits the daemon configuration' >&2; exit 2; }
 handover() {
@@ -27,4 +27,4 @@ t.update(enabled=True, service_ready=True, init_ready_init_sha256=hashlib.sha256
 p.write_text(yaml.safe_dump(c, sort_keys=False))
 CONFIG
 handover
-python3 "$(dirname "${BASH_SOURCE[0]}")/service_template.py" "${1:-e2e}"
+python3 "$(dirname "${BASH_SOURCE[0]}")/service_template.py" "${@:-e2e}"
