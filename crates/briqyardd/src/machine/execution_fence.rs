@@ -96,14 +96,28 @@ impl ExecutionFence {
 
     pub(super) fn load(store: &Store) -> Result<Self> {
         let dir = store.dir(KIND);
+        let mut removed = false;
         for entry in
             std::fs::read_dir(&dir).with_context(|| format!("inspect {}", dir.display()))?
         {
             let entry = entry?;
+            let regular = entry.file_type()?.is_file();
+            if entry.file_name() == "state.json.tmp" && regular {
+                // `write_private` renames the temp file over `state.json`: the rename
+                // is the commit, so a leftover temp file is a write that never
+                // committed. Drop it; it is never read as the record.
+                std::fs::remove_file(entry.path())
+                    .with_context(|| format!("remove {}", entry.path().display()))?;
+                removed = true;
+                continue;
+            }
             anyhow::ensure!(
-                entry.file_name() == "state.json" && entry.file_type()?.is_file(),
+                entry.file_name() == "state.json" && regular,
                 "unexpected execution namespace fence file"
             );
+        }
+        if removed {
+            store.sync_dir(KIND)?;
         }
         let records = store.inspect::<Record>(
             KIND,
@@ -414,6 +428,46 @@ mod tests {
     }
 
     #[test]
+    fn leftover_uncommitted_write_is_removed_on_load() {
+        let (_dir, store) = open();
+        let mut fence = ExecutionFence::load(&store).unwrap();
+        fence.snapshot(&store, &names(&["a"]), 10_000).unwrap();
+        let dir = store.dir(KIND);
+        std::fs::write(dir.join("state.json.tmp"), b"{ torn").unwrap();
+        let reopened = ExecutionFence::load(&store).unwrap();
+        assert!(reopened.record.generations.contains_key("a"));
+        assert!(!dir.join("state.json.tmp").exists());
+        assert!(dir.join("state.json").exists());
+    }
+
+    #[test]
+    fn leftover_uncommitted_write_alone_loads_the_empty_record() {
+        let (_dir, store) = open();
+        let dir = store.dir(KIND);
+        // A well-formed temp file must not be taken as the record either.
+        let record = serde_json::to_vec(&Record::default()).unwrap();
+        std::fs::write(dir.join("state.json.tmp"), record).unwrap();
+        let fence = ExecutionFence::load(&store).unwrap();
+        assert!(fence.record.generations.is_empty());
+        assert!(!dir.join("state.json.tmp").exists());
+        assert!(!dir.join("state.json").exists());
+    }
+
+    #[test]
+    fn other_stray_files_are_still_refused() {
+        let (_dir, store) = open();
+        let dir = store.dir(KIND);
+        for name in ["state.json.bak", "other.tmp", "state.json.tmp.tmp"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+            assert!(ExecutionFence::load(&store).is_err(), "{name}");
+            std::fs::remove_file(dir.join(name)).unwrap();
+        }
+        // A directory named like the temp file is not an uncommitted write.
+        std::fs::create_dir(dir.join("state.json.tmp")).unwrap();
+        assert!(ExecutionFence::load(&store).is_err());
+    }
+
+    #[test]
     fn startup_drain_retains_all_deadlines_and_pending_evidence() {
         let (_dir, store) = open();
         let mut fence = ExecutionFence::load(&store).unwrap();
@@ -614,7 +668,7 @@ mod tests {
         std::fs::write(&state, b"{").unwrap();
         assert!(ExecutionFence::load(&store).is_err());
         std::fs::remove_file(&state).unwrap();
-        let stray = dir.path().join("state").join(KIND).join("state.json.tmp");
+        let stray = dir.path().join("state").join(KIND).join("stray");
         std::fs::write(&stray, b"{}").unwrap();
         assert!(ExecutionFence::load(&store).is_err());
         std::fs::remove_file(&stray).unwrap();
