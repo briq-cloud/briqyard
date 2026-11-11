@@ -191,8 +191,10 @@ if [ -n "$REGION_A" ] && [ -n "$REGION_B" ] && [ "$REGION_A" != "$REGION_B" ]; t
   BA="{\"regions\":[\"$REGION_B\",\"$REGION_A\"],\"requirements\":$REQS}"
   check "the fleet says it answers admissions" '[ "$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/status" | jq -r .placement_admission_v1)" = true ]'
   out=$(adm PUT "$T-p1" req-p1 "$AB"); D1=$(echo "$out" | body)
+  echo "       p1 admission: $(echo "$out" | code) $(echo "$D1" | tr -d '\n' | cut -c1-300)"
   check "the preferred region is placed first, on a host of it" '[ "$(echo "$out" | code)" = 200 ] && [ "$(echo "$D1" | jq -r .region)" = "$REGION_A" ] && [ "$(region_of "$(echo "$D1" | jq -r .host)")" = "$REGION_A" ]'
   out=$(adm PUT "$T-p2" req-p2 "$BA")
+  echo "       p2 admission: $(echo "$out" | code) $(echo "$out" | body | tr -d '\n' | cut -c1-300)"
   check "another namespace prefers the other region" '[ "$(echo "$out" | code)" = 200 ] && [ "$(echo "$out" | body | jq -r .region)" = "$REGION_B" ]'
   check "the same id and body answer the same decision" '[ "$(adm PUT "$T-p1" req-p1 "$AB" | body | jq -S -c .)" = "$(echo "$D1" | jq -S -c .)" ]'
   check "the same id and another body is refused" '[ "$(adm PUT "$T-p1" req-p1 "$BA" | code)" = 409 ]'
