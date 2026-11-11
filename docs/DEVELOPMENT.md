@@ -708,24 +708,29 @@ records relative latency and stalls on shared hosted x86_64; its artifacts inclu
 distinct identity, template deletion fencing, and a resume failure that quarantines one clone. `... bench` times cold
 start against clone on a busybox fixture (interleaved, p50 and max) and eight simultaneous clones. Its checks are not
 in the `e2e.sh` counts.
-`... qualify [--clones N] [--age-seconds S] [--allow-unsupported]` (default 3 clones, template aged 30 s, at least 2) is the
+`... qualify [--clones N] [--age-seconds S] [--sequential] [--memory-mb M] [--allow-unsupported]` (default 3 clones, 2 to 64; template aged 30 s, at least 5; 512 MB) is the
 check behind ADR 0127's VMGenID, MAC and clock gate: it seals one template, starts the clones together (`--sequential` for one
-by one; `--clones 8` is the simultaneous run) and reports create-to-ready p50 and max, host free memory before and after, and
+by one; `--clones 8` is the simultaneous run) and reports create-to-ready p50 and max, host free memory and `host_firecracker_rss_mb` (host-wide: every Firecracker process on the host, not only the clones) before and after, and
 `pass`, `fail` or `unsupported` for each of the checks below. It runs on the daemon host only (it refuses a `BRIQYARD_URL`
 that is not this machine) and records the host: hostname and whether it is itself a guest (`nested`, from the `hypervisor` CPU
 flag or `/sys/hypervisor/type`). What each check proves differs:
 - **VMGenID** tests the hypervisor and the kernel: the guest has the device and logged `crng reseeded due to virtual machine fork`
   more often than before the seal (the park hook records that count), which the driver does only when the ID changed.
   `unsupported` when the kernel config has no `CONFIG_VMGENID`.
-- **Host MAC** (`mac_host`) tests the hypervisor side: after a clone served HTTP, `ip neigh show <ip>` on the daemon host shows
-  the assigned MAC (`06:b1:` and the address), distinct per clone. `unsupported` when the entry cannot be read.
+- **Host MAC** (`mac_host`) is an outside observation of the activation path, not a hypervisor check: the guest init sets the MAC
+  and the host learns it from the guest's ARP reply. The run flushes the host's entry (`ip neigh flush to <ip>`), makes one request,
+  then `ip neigh show <ip>` must show the assigned MAC (`06:b1:` and the address), distinct per clone. `unsupported` when the
+  flush fails or the entry cannot be read.
 - **MAC, clock and RNG** test the activation path only. `clone_configure_v1` writes the daemon's per-clone MAC, wall clock and
   entropy into the guest before the clone is ready, so they pass whenever that path works, whatever the hypervisor restores.
-  They catch a regression of that path: the guest `eth0` MAC against the daemon's rule and across clones, the wall clock within
-  1 s of the host's although the template is `--age-seconds` old, and fresh kernel randomness across clones.
+  They catch a regression of that path: the guest `eth0` MAC against the daemon's rule and across clones, the wall clock (the
+  skew is a lower bound: the guest read its clock somewhere between the host's start and end of the exec, so the exec round trip is
+  inside the window, and a guest clock without sub-second digits is truncated and counts as a second wide; the check passes when
+  that lower bound is at most 1 s, so the true skew can be up to 2 s) although the template is `--age-seconds` old, and fresh kernel randomness across clones.
 
 Whether a VMClock device is present is reported across all clones, not judged. The last line is always one JSON summary, also
-after an error. `ok` is true and the exit status 0 only when every check is `pass`: a `fail`, an `unsupported` check (also
-`--clones 1`, which cannot compare randomness) or a clone error makes it false and the status 1, unless `--allow-unsupported` is
-given (recorded in the summary). The run fails too if its machines or namespace are not all destroyed afterwards. On a nested
-host the timings are relative only; the gate needs a run on a native host.
+after an error. `ok` is true and the exit status 0 only when every check is `pass`: a `fail`, an `unsupported` check or a clone error
+makes it false and the status 1, unless `--allow-unsupported` is given (recorded in the summary). A usage error (`--clones` below 2 or
+above 64, `--age-seconds` below 5, `--memory-mb` not positive) exits 2 without JSON. A `BRIQYARD_URL` that is not this machine
+exits 1 with the JSON line and the error; it makes no call to the daemon, so there is no teardown. The run fails too if its machines or namespace are not all destroyed afterwards. On a nested
+host the timings are relative only; the gate counts only a run on a native host with `ok` true and `allow_unsupported` false.

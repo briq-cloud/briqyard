@@ -325,7 +325,9 @@ def bench():
 # What each check proves (the same text is in the JSON):
 #  - vmgenid   the hypervisor and the kernel: the VM generation ID changed on restore and the guest
 #              kernel reseeded its CRNG for it. Nothing in the daemon or the init does that for it.
-#  - mac_host  the hypervisor side: the host's neighbour entry for the clone shows the assigned MAC.
+#  - mac_host  an outside observation of the activation path: the guest init sets the MAC and the host learns
+#              it from the guest's ARP reply, so the host's neighbour entry (flushed first) shows what the init set.
+#              It is not a hypervisor check; VMGenID is the only one.
 #  - mac, clock, rng
 #              the activation path only. clone_configure_v1 writes the daemon's per-clone MAC, wall
 #              clock and entropy into the guest before the clone is ready, so these pass whenever the
@@ -338,7 +340,7 @@ CHECKS = ('vmgenid', 'mac', 'mac_host', 'clock', 'rng')
 PROVES = {
     'vmgenid': 'hypervisor and kernel: the VM generation ID changed on restore and the guest kernel reseeded its CRNG for it',
     'mac': 'activation path: clone_configure_v1 writes the daemon\'s per-clone MAC; the guest applied it and the MACs differ',
-    'mac_host': 'hypervisor side: the host\'s neighbour entry for the clone shows the assigned MAC, distinct per clone',
+    'mac_host': 'outside observation of the activation path (not a hypervisor check): the host\'s freshly learned neighbour entry for the clone shows the assigned MAC, distinct per clone',
     'clock': 'activation path: clone_configure_v1 sets the wall clock from the host; it is not proof of what the hypervisor restores',
     'rng': 'activation path: the init reseeds from per-clone host entropy; it is not proof of what the hypervisor restores',
 }
@@ -417,10 +419,18 @@ def parse_neigh(text):
     return None
 
 
-def host_neigh(ip):
-    """(mac or None, raw text): the daemon host's neighbour entry for a clone that has just served HTTP."""
+def host_neigh(ip, request=None):
+    """(mac or None, raw text): the daemon host's neighbour entry for a clone, learned fresh. The entry is
+    flushed first and one request (`request`) makes the host resolve it again, so a stale entry cannot match.
+    A failed flush gives None (the check is then unsupported)."""
     ip = ip.split('/')[0]
+    sudo = [] if os.geteuid() == 0 else ['sudo', '-n']
     try:
+        f = subprocess.run([*sudo, 'ip', 'neigh', 'flush', 'to', ip], capture_output=True, text=True, timeout=10)
+        if f.returncode != 0:
+            return None, 'ip neigh flush failed: %s' % ((f.stderr or f.stdout).strip()[:150] or 'rc %d' % f.returncode)
+        if request:
+            request()
         r = subprocess.run(['ip', 'neigh', 'show', ip], capture_output=True, text=True, timeout=10)
     except Exception as e:
         return None, 'ip neigh unavailable: %s' % type(e).__name__
@@ -478,6 +488,8 @@ def vmgenid_status(p):
         return 'unsupported', 'no VM generation ID device and no kernel config evidence', ev
     if p.get('dmesg_ok') != '1':
         return 'fail', 'the kernel log is unreadable in the guest, so the reseed cannot be observed', ev
+    if not p.get('pre_fork', '').isdigit():
+        return 'fail', 'the park hook left no fork message count (/tmp/pre_seal_fork_msgs is missing), so the reseed cannot be told from an earlier one', ev
     if not p.get('vmgenid_dev'):
         return 'fail', '%s, but the guest has no VM generation ID ACPI device (is ACPI on?)' % (opt or 'config unknown'), ev
     n = int(p['fork_msgs']) if p.get('fork_msgs', '').isdigit() else 0
@@ -506,7 +518,8 @@ def vmclock_summary(probes):
 
 def detect_nested(cpuinfo, hypervisor_type):
     """True when the host is itself a guest: the `hypervisor` CPU flag or /sys/hypervisor/type.
-    None when neither source could be read."""
+    None when neither source could be read. x86 only (the `hypervisor` CPU flag); an arm64 host is reported by
+    /sys/hypervisor/type or not at all."""
     if cpuinfo is None and hypervisor_type is None:
         return None
     flag = any(l.startswith('flags') and 'hypervisor' in l.split() for l in (cpuinfo or '').splitlines())
@@ -523,12 +536,19 @@ def _can_bind(addr):
 
 
 def is_local_host(host, can_bind=_can_bind):
-    """True when the host name or address is this machine: loopback, or an address it can bind."""
+    """True when the host name or address is this machine: loopback, or an address it can bind.
+    An empty host and wildcard addresses (0.0.0.0, ::) name no machine, so they are not local."""
+    if not host or not host.strip():
+        return False
     try:
-        addrs = {i[4][0] for i in socket.getaddrinfo(host, None)}
+        addrs = {i[4][0].split('%')[0] for i in socket.getaddrinfo(host, None)}
     except OSError:
         return False
-    return any(ipaddress.ip_address(a.split('%')[0]).is_loopback or can_bind(a.split('%')[0]) for a in addrs)
+    try:
+        ips = [ipaddress.ip_address(a) for a in addrs]
+    except ValueError:
+        return False
+    return any(not a.is_unspecified and (a.is_loopback or can_bind(str(a))) for a in ips)
 
 
 def _read(path):
@@ -563,11 +583,23 @@ def tool_version(*cmd):
         return 'unknown'
 
 
+class Refused(RuntimeError):
+    """The run was refused before any call to the daemon: nothing to tear down."""
+
+
+def clone_unusable(r):
+    """Why a clone's result cannot be judged (a reason), or None. A clone that failed early lacks the keys."""
+    p = r.get('probe')
+    if any(k not in r for k in ('ip', 't0', 't1', 'exec_s', 'neigh')) or p is None or ('error' in r and 'mac' not in p):
+        return r.get('error') or 'the clone did not reach the probe'
+    return None
+
+
 def qualify(args, facts):
     """Runs the checks and returns the summary's fields. Raises on anything that stops the run."""
     global SRC
     if not facts['daemon_local']:
-        raise RuntimeError('BRIQYARD_URL points at %r, not this host: memory, RSS, firecracker and clock readings would describe the wrong machine. '
+        raise Refused('BRIQYARD_URL points at %r, not this host: memory, RSS, firecracker and clock readings would describe the wrong machine. '
                            'Run qualify on the daemon host.' % facts['daemon_host'])
     mem = args.memory_mb
     b = make(builder_body('qual-src', 0, 0, mem))
@@ -580,7 +612,7 @@ def qualify(args, facts):
     get(SRC, 'stopped', 60)
     print('template ages %ds before the first clone' % args.age_seconds)
     time.sleep(args.age_seconds)
-    before = {**free_mb(), 'firecracker_rss_mb': round(rss_mb())}
+    before = {**free_mb(), 'host_firecracker_rss_mb': round(rss_mb())}
     res = {}
 
     def one(k):
@@ -592,7 +624,7 @@ def qualify(args, facts):
             serves(m['ip'])
             r['ready_s'] = time.monotonic() - t
             r['id'], r['ip'] = m['id'], m['ip']
-            r['neigh'] = host_neigh(m['ip'])
+            r['neigh'] = host_neigh(m['ip'], lambda: http(m['ip'], timeout=3))
             t0 = time.time()
             p = cli('exec', m['id'], '--', 'sh', '-c', GUEST_PROBE)
             t1 = time.time()
@@ -602,7 +634,9 @@ def qualify(args, facts):
                 r['error'] = 'probe exec failed: rc %s %s' % (p.returncode, p.stderr.strip()[:200])
             r['t0'], r['t1'] = t0, t1
             r['fresh'] = info(http(m['ip'], timeout=3)).get('fresh', '')
-        except Exception as e:
+        except KeyboardInterrupt:
+            raise
+        except BaseException as e:
             r['error'] = '%s: %s' % (type(e).__name__, str(e)[:300])
     th = [threading.Thread(target=one, args=(k,)) for k in range(args.clones)]
     t0 = time.monotonic()
@@ -613,16 +647,17 @@ def qualify(args, facts):
     for x in th:
         x.join()
     wall = time.monotonic() - t0
-    after = {**free_mb(), 'firecracker_rss_mb': round(rss_mb())}
+    after = {**free_mb(), 'host_firecracker_rss_mb': round(rss_mb())}
     rs = [res[k] for k in range(args.clones)]
     ready = [r['ready_s'] for r in rs if 'ready_s' in r]
 
     checks = {n: {'per_clone': [], 'evidence': []} for n in CHECKS}
     for k, r in enumerate(rs):
         p = r.get('probe') or {}
-        if r.get('error') and not (p and 'ip' in r and 't0' in r):
+        why_not = clone_unusable(r)
+        if why_not:
             for n in checks:
-                checks[n]['per_clone'].append(('fail', 'clone %d: %s' % (k, r['error'])))
+                checks[n]['per_clone'].append(('fail', 'clone %d: %s' % (k, why_not)))
             continue
         st, why, ev = vmgenid_status(p)
         checks['vmgenid']['per_clone'].append((st, 'clone %d: %s' % (k, why)))
@@ -640,10 +675,8 @@ def qualify(args, facts):
         else:
             checks['clock']['per_clone'].append(('pass' if skew <= 1.0 else 'fail',
                                                  'clone %d: skew >= %.2fs (guest - host about %+.2fs, %s, exec %.2fs)' % (k, skew, est, 'sub-second' if precise else 'whole seconds', r['exec_s'])))
-    good = [r for r in rs if r.get('probe') and 'ip' in r and 't0' in r and r.get('fresh') is not None]
-    if args.clones == 1:
-        checks['rng']['per_clone'].append(('unsupported', 'one clone: nothing to compare against'))
-    elif len(good) >= 2:
+    good = [r for r in rs if not clone_unusable(r) and r.get('fresh') is not None]
+    if len(good) >= 2:
         macs = [r['probe'].get('mac') for r in good]
         checks['mac']['per_clone'].append(('pass' if len(set(macs)) == len(macs) and all(macs) else 'fail', 'MACs differ across clones: %s' % macs))
         seen = [r['neigh'][0] for r in good if r['neigh'][0]]
@@ -703,37 +736,66 @@ def teardown():
 def run_qualify(args):
     """Always prints one JSON summary line last, whatever happened. Returns the exit status."""
     summary = {'qualify': 'service-ready-v1', 'ok': False, 'allow_unsupported': args.allow_unsupported}
+    touched = True
     try:
-        facts = host_facts()
-        summary['host'] = facts
-        summary.update(qualify(args, facts))
-    except BaseException as e:
-        traceback.print_exc()
-        summary['ok'] = False
-        summary['error'] = '%s: %s' % (type(e).__name__, str(e)[:500])
-    td = teardown()
-    summary['cleanup'] = td
-    if td['machines_left'] or td['error']:
-        summary['ok'] = False
-        summary['failed'] = [*summary.get('failed', []), 'cleanup']
-    print(json.dumps(summary, separators=(',', ':')))
+        try:
+            facts = host_facts()
+            summary['host'] = facts
+            summary.update(qualify(args, facts))
+        except Refused as e:
+            touched = False
+            summary['ok'] = False
+            summary['error'] = 'Refused: %s' % str(e)[:500]
+        except BaseException as e:
+            traceback.print_exc()
+            summary['ok'] = False
+            summary['error'] = '%s: %s' % (type(e).__name__, str(e)[:500])
+    finally:
+        if touched:
+            try:
+                td = teardown()
+            except BaseException as e:
+                td = {'machines_left': [], 'error': 'teardown failed: %s: %s' % (type(e).__name__, str(e)[:200])}
+            summary['cleanup'] = td
+            if td['machines_left'] or td['error']:
+                summary['ok'] = False
+                summary['failed'] = [*summary.get('failed', []), 'cleanup']
+        else:
+            summary['cleanup'] = {'skipped': 'refused before any call to the daemon'}
+        print(json.dumps(summary, separators=(',', ':')))
     return exit_status(summary)
+
+
+MAX_CLONES = 64
+MIN_AGE_SECONDS = 5
+
+
+def qualify_usage_error(args):
+    """A reason to refuse the qualify arguments (exit 2, no JSON), or None."""
+    if args.clones < 2:
+        return '--clones must be at least 2: one clone has nothing to compare its randomness against'
+    if args.clones > MAX_CLONES:
+        return '--clones must be at most %d' % MAX_CLONES
+    if args.age_seconds < MIN_AGE_SECONDS:
+        return '--age-seconds must be at least %d: the clock check allows about 1 s and the exec round trip, so a younger template proves nothing' % MIN_AGE_SECONDS
+    if args.memory_mb < 1:
+        return '--memory-mb must be a positive number of megabytes'
+    return None
 
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('mode', nargs='?', default='e2e', choices=['e2e', 'bench', 'qualify'])
-    ap.add_argument('--clones', type=int, default=3, help='qualify: clones to start (8 for the simultaneous run)')
-    ap.add_argument('--age-seconds', type=int, default=30, help='qualify: wait between the seal and the first clone (at least 2)')
+    ap.add_argument('--clones', type=int, default=3, help='qualify: clones to start, 2 to 64 (8 for the simultaneous run)')
+    ap.add_argument('--age-seconds', type=int, default=30, help='qualify: wait between the seal and the first clone (at least 5)')
     ap.add_argument('--sequential', action='store_true', help='qualify: start the clones one after another instead of together')
     ap.add_argument('--memory-mb', type=int, default=512, help='qualify: memory of the builder and its clones')
-    ap.add_argument('--allow-unsupported', action='store_true', help='qualify: an unsupported check (no VMGenID in the kernel, no host neighbour entry, one clone) does not make the run fail')
+    ap.add_argument('--allow-unsupported', action='store_true', help='qualify: an unsupported check (no VMGenID in the kernel, no host neighbour entry) does not make the run fail')
     args = ap.parse_args()
     if args.mode == 'qualify':
-        if args.age_seconds < 2:
-            ap.error('--age-seconds must be at least 2: the clock check allows 1 s and the exec round trip, so a younger template proves nothing')
-        if args.clones < 1:
-            ap.error('--clones must be at least 1')
+        err = qualify_usage_error(args)
+        if err:
+            ap.error(err)
         sys.exit(run_qualify(args))
     mode = args.mode
     ok = False

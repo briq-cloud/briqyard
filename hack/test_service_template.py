@@ -6,7 +6,7 @@ import service_template as st
 
 
 def probe(**kw):
-    p = {'dmesg_ok': '1', 'vmgenid_dev': 'VMGENCTR:00 ', 'fork_msgs': '1', 'config': 'CONFIG_VMGENID=y;'}
+    p = {'dmesg_ok': '1', 'vmgenid_dev': 'VMGENCTR:00 ', 'fork_msgs': '1', 'pre_fork': '0', 'config': 'CONFIG_VMGENID=y;'}
     p.update(kw)
     return p
 
@@ -53,6 +53,36 @@ class Qualify(unittest.TestCase):
         self.assertEqual(s, 'unsupported')
         self.assertIn('# CONFIG_VMGENID is not set', why)
 
+    def test_vmgenid_needs_the_pre_seal_count(self):
+        s, why, _ = st.vmgenid_status(probe(pre_fork=''))
+        self.assertEqual(s, 'fail')
+        self.assertIn('pre_seal_fork_msgs', why)
+        self.assertEqual(st.vmgenid_status({k: v for k, v in probe().items() if k != 'pre_fork'})[0], 'fail')
+
+    def test_usage_errors(self):
+        import argparse
+        def a(**kw):
+            d = dict(clones=3, age_seconds=30, memory_mb=512)
+            d.update(kw)
+            return argparse.Namespace(**d)
+        self.assertIsNone(st.qualify_usage_error(a()))
+        self.assertIsNone(st.qualify_usage_error(a(clones=2, age_seconds=5)))
+        self.assertIsNone(st.qualify_usage_error(a(clones=64)))
+        self.assertIn('at least 2', st.qualify_usage_error(a(clones=1)))
+        self.assertIn('at least 2', st.qualify_usage_error(a(clones=0)))
+        self.assertIn('at most', st.qualify_usage_error(a(clones=65)))
+        self.assertIn('at least 5', st.qualify_usage_error(a(age_seconds=4)))
+        self.assertIn('positive', st.qualify_usage_error(a(memory_mb=0)))
+
+    def test_unusable_clone_results(self):
+        full = {'ip': '10.0.0.2', 't0': 1.0, 't1': 2.0, 'exec_s': 1.0, 'neigh': (None, 'x'), 'probe': {'mac': 'aa'}}
+        self.assertIsNone(st.clone_unusable(full))
+        for k in ('ip', 't0', 't1', 'exec_s', 'neigh', 'probe'):
+            r = {x: v for x, v in full.items() if x != k}
+            self.assertIsNotNone(st.clone_unusable({**r, 'error': 'boom'}), k)
+        self.assertEqual(st.clone_unusable({'error': 'boom'}), 'boom')
+        self.assertEqual(st.clone_unusable({**full, 'error': 'probe exec failed', 'probe': {}}), 'probe exec failed')
+
     def test_ok_needs_every_check_to_pass(self):
         allp = {n: 'pass' for n in st.CHECKS}
         self.assertEqual(st.evaluate(allp, {}, False), {'ok': True, 'failed': [], 'unsupported': []})
@@ -61,7 +91,7 @@ class Qualify(unittest.TestCase):
         r = st.evaluate({**allp, 'vmgenid': 'unsupported'}, {}, False)
         self.assertEqual((r['ok'], r['failed'], r['unsupported']), (False, [], ['vmgenid']))
         self.assertTrue(st.evaluate({**allp, 'vmgenid': 'unsupported'}, {}, True)['ok'])
-        self.assertFalse(st.evaluate({**allp, 'rng': 'unsupported'}, {}, False)['ok'])  # --clones 1
+        self.assertFalse(st.evaluate({**allp, 'rng': 'unsupported'}, {}, False)['ok'])
         r = st.evaluate(allp, {'2': 'TimeoutError'}, True)
         self.assertEqual((r['ok'], r['failed']), (False, ['clones']))
         self.assertFalse(st.evaluate({}, {}, True)['ok'])  # a check that never ran is a fail
@@ -101,6 +131,8 @@ class Qualify(unittest.TestCase):
         self.assertTrue(st.is_local_host('127.0.0.1'))
         self.assertTrue(st.is_local_host('localhost'))
         self.assertFalse(st.is_local_host('192.0.2.7', can_bind=lambda a: False))
+        for h in ('', '  ', '0.0.0.0', '::'):  # no machine: empty and wildcard, even if they can be bound
+            self.assertFalse(st.is_local_host(h, can_bind=lambda a: True), h)
         self.assertTrue(st.is_local_host('192.0.2.7', can_bind=lambda a: True))
 
     def test_vmclock_across_clones(self):
