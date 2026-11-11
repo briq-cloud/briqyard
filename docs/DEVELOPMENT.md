@@ -708,3 +708,12 @@ records relative latency and stalls on shared hosted x86_64; its artifacts inclu
 distinct identity, template deletion fencing, and a resume failure that quarantines one clone. `... bench` times cold
 start against clone on a busybox fixture (interleaved, p50 and max) and eight simultaneous clones. Its checks are not
 in the `e2e.sh` counts.
+`... qualify [--clones N] [--age-seconds S]` (default 3 clones, template aged 30 s) is the check behind ADR 0127's
+VMGenID, MAC and clock gate: it seals one template, starts the clones together (`--sequential` for one by one; `--clones 8` is the
+simultaneous run) and reports create-to-ready p50 and max, host free memory before and after, and `pass`, `fail` or
+`unsupported` for each of: VMGenID (the guest has the device and logged `crng reseeded due to virtual machine fork`, which the
+driver does only when the ID changed; `unsupported` when the kernel config has no `CONFIG_VMGENID`), the effective `eth0` MAC
+against the daemon's rule (`06:b1:` and the address) and across clones, the wall clock against the host's (within 1 s although
+the template is `--age-seconds` old), and fresh kernel randomness across clones. Whether a VMClock device is present is reported,
+not judged. The last line is one JSON summary; the exit status is non-zero on any `fail`; `unsupported` is listed. On a nested
+host the timings are relative only; the gate needs a run on a native host.

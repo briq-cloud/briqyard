@@ -3,10 +3,13 @@
 
   service_template.py e2e     isolation checks on a small service fixture
   service_template.py bench   cold start against clone, interleaved, then simultaneous clones
+  service_template.py qualify [--clones N] [--age-seconds S] [--sequential] [--memory-mb M]
+                              seal one template, start N clones and check VMGenID, the effective MAC,
+                              the wall clock and the kernel RNG in each; the last line is a JSON summary
 
 Run through hack/service-template.sh, which enables the profile and puts the configuration back.
 The fixture is plain busybox: no language runtime. Timings on a nested host are relative only."""
-import base64, json, math, os, statistics, subprocess, sys, threading, time, urllib.error, urllib.request
+import argparse, base64, json, math, os, re, statistics, subprocess, sys, threading, time, urllib.error, urllib.request
 
 BASE = os.getenv('BRIQYARD_URL', 'http://127.0.0.1:7420')
 HEAD = {'Content-Type': 'application/json'}
@@ -313,11 +316,263 @@ def bench():
     return res['clone_p50_over_cold_p50'] <= 0.25
 
 
+# ---- qualify: VMGenID, MAC, clock and RNG of loaded-service clones (ADR 0127) -------------------
+# Each check is "pass", "fail" or "unsupported" (the pinned kernel has no such device). A fail makes
+# the exit status non-zero; "unsupported" does not, and is listed in the summary. A nested host's
+# timings are relative only: the numbers say nothing about a native host.
+
+KERNEL_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kernel', 'base-x86_64.config')
+FORK_MSG = 'crng reseeded due to virtual machine fork'
+
+# One exec per clone, run right after it answers: the clock first, then the rest. Plain busybox.
+GUEST_PROBE = r"""
+echo "now=$(date +%s.%N 2>/dev/null)"
+echo "mac=$(cat /sys/class/net/eth0/address)"
+echo "uname=$(uname -r)"
+echo "cmdline=$(cat /proc/cmdline)"
+echo "draw=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+echo "dmesg_ok=$(dmesg >/dev/null 2>&1 && echo 1 || echo 0)"
+echo "fork_msgs=$(dmesg 2>/dev/null | grep -c 'crng reseeded due to virtual machine fork')"
+echo "fork_line=$(dmesg 2>/dev/null | grep 'crng reseeded due to virtual machine fork' | tail -n 1)"
+echo "vmgenid_dev=$(ls /sys/bus/acpi/devices 2>/dev/null | grep -E '^(VMGENCNT|VM_GEN_COUNTER)' | tr '\n' ' ')"
+echo "vmgenid_drv=$(ls /sys/bus/acpi/drivers 2>/dev/null | grep -x vmgenid)"
+echo "vmgenid_log=$(dmesg 2>/dev/null | grep -i vmgenid | tail -n 2 | tr '\n' '|')"
+echo "vmclock_dev=$(ls /sys/bus/acpi/devices 2>/dev/null | grep -E '^AMZNC10C' | tr '\n' ' ')"
+echo "vmclock_node=$(ls /dev 2>/dev/null | grep -i vmclock | tr '\n' ' ')"
+echo "ptp=$(for f in /sys/class/ptp/*/clock_name; do [ -e "$f" ] && echo "$(basename $(dirname $f))=$(cat $f)"; done 2>/dev/null | tr '\n' ' ')"
+echo "vmclock_log=$(dmesg 2>/dev/null | grep -i vmclock | tail -n 2 | tr '\n' '|')"
+echo "config=$(zcat /proc/config.gz 2>/dev/null | grep -E '^(# )?CONFIG_(VMGENID|PTP_1588_CLOCK_VMCLOCK)[ =]' | tr '\n' ';')"
+"""
+
+
+def config_line(text, option):
+    """The kernel config's own line for an option: "CONFIG_X=y", "# CONFIG_X is not set", or ''."""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith(option + '=') or line == '# %s is not set' % option:
+            return line
+    return ''
+
+
+def repo_config(option):
+    try:
+        with open(KERNEL_CONFIG) as f:
+            return config_line(f.read(), option), 'hack/kernel/base-x86_64.config'
+    except OSError:
+        return '', ''
+
+
+def pick_config(guest_config, option):
+    """Config evidence for an option: the running guest's /proc/config.gz first, else the repo's
+    copy of the pinned kernel's config. Returns (line, where)."""
+    line = config_line(guest_config.replace(';', '\n'), option)
+    if line:
+        return line, 'guest /proc/config.gz'
+    return repo_config(option)
+
+
+def parse_probe(text):
+    out = {}
+    for l in text.splitlines():
+        if '=' in l:
+            k, v = l.split('=', 1)
+            out[k] = v.strip()
+    return out
+
+
+def expected_mac(ip):
+    """The MAC the daemon assigns a clone: locally administered 06:b1 followed by its IPv4 address
+    (the API does not return it, so this follows the daemon's rule)."""
+    return '06:b1:' + ':'.join('%02x' % int(o) for o in ip.split('/')[0].split('.'))
+
+
+def clock_skew(guest_now, t0, t1):
+    """Seconds between the guest's wall clock and the host's, as a lower bound. The guest read its
+    clock once, somewhere in [t0, t1] on the host; without sub-second digits it is a second wide.
+    Returns (skew_s, guest_minus_host_estimate_s, precise)."""
+    m = re.match(r'^(\d+)(?:\.(\d{1,9}))?$', guest_now or '')
+    if not m:
+        return None, None, False
+    precise = m.group(2) is not None
+    g0 = float(guest_now) if precise else float(m.group(1))
+    g1 = g0 if precise else g0 + 1.0
+    skew = max(0.0, g0 - t1, t0 - g1)
+    return skew, (g0 + g1) / 2 - (t0 + t1) / 2, precise
+
+
+def verdict(statuses):
+    if 'fail' in statuses:
+        return 'fail'
+    if statuses and all(s == 'unsupported' for s in statuses):
+        return 'unsupported'
+    return 'pass' if statuses else 'fail'
+
+
+def vmgenid_status(p):
+    opt, where = pick_config(p.get('config', ''), 'CONFIG_VMGENID')
+    ev = {'config': opt or 'no config evidence', 'config_from': where or 'none', 'device': p.get('vmgenid_dev') or 'none',
+          'driver_bound': bool(p.get('vmgenid_drv')), 'fork_messages': p.get('fork_msgs'), 'fork_line': p.get('fork_line', ''),
+          'cmdline': p.get('cmdline', '')}
+    if opt.startswith('#'):
+        return 'unsupported', '%s (%s)' % (opt, where), ev
+    if not opt and not p.get('vmgenid_dev'):
+        return 'unsupported', 'no VM generation ID device and no kernel config evidence', ev
+    if p.get('dmesg_ok') != '1':
+        return 'fail', 'the kernel log is unreadable in the guest, so the reseed cannot be observed', ev
+    if not p.get('vmgenid_dev'):
+        return 'fail', '%s, but the guest has no VMGENCNT device (is ACPI on?)' % (opt or 'config unknown'), ev
+    if not p.get('fork_msgs', '0').isdigit() or int(p['fork_msgs']) < 1:
+        return 'fail', 'device present, but the kernel never logged "%s": the generation ID did not change on restore' % FORK_MSG, ev
+    return 'pass', 'device %s, and "%s" logged %s time(s): the ID changed across the restore' % (p['vmgenid_dev'].strip(), FORK_MSG, p['fork_msgs']), ev
+
+
+def vmclock_info(p):
+    opt, where = pick_config(p.get('config', ''), 'CONFIG_PTP_1588_CLOCK_VMCLOCK')
+    present = bool(p.get('vmclock_dev') or p.get('vmclock_node') or re.search(r'vmclock|virtual machine ptp', p.get('ptp', ''), re.I))
+    status = 'present' if present else ('unsupported' if opt.startswith('#') else 'absent')
+    return {'status': status, 'config': opt or 'no config evidence', 'config_from': where or 'none', 'acpi_device': p.get('vmclock_dev') or 'none',
+            'dev_node': p.get('vmclock_node') or 'none', 'ptp': p.get('ptp') or 'none', 'log': p.get('vmclock_log', '')}
+
+
+def free_mb():
+    mem = {}
+    with open('/proc/meminfo') as f:
+        for l in f:
+            k, v = l.split(':', 1)
+            mem[k] = int(v.split()[0]) // 1024
+    return {'free_mb': mem['MemFree'], 'available_mb': mem['MemAvailable']}
+
+
+def tool_version(*cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout.strip().splitlines()[0]
+    except Exception:
+        return 'unknown'
+
+
+def qualify(args):
+    global SRC
+    mem = args.memory_mb
+    b = make(builder_body('qual-src', 0, 0, mem))
+    SRC = b['id']
+    b = get(SRC)
+    serves(b['ip'])
+    t = time.monotonic()
+    snap = api('POST', '/machines/%s/snapshots' % SRC, {'name': 'loaded', 'memory': True, 'template': True})
+    print('sealed in %.1fs (generation %s)' % (time.monotonic() - t, snap.get('clone_generation')))
+    get(SRC, 'stopped', 60)
+    if args.age_seconds:
+        print('template ages %ds before the first clone' % args.age_seconds)
+        time.sleep(args.age_seconds)
+    before = {**free_mb(), 'firecracker_rss_mb': round(rss_mb())}
+    res = {}
+
+    def one(k):
+        r = res[k] = {}
+        t = time.monotonic()
+        try:
+            m = make(clone_body('q%d' % k, 'loaded', mem))
+            m = get(m['id'])
+            serves(m['ip'])
+            r['ready_s'] = time.monotonic() - t
+            r['id'], r['ip'] = m['id'], m['ip']
+            t0 = time.time()
+            p = cli('exec', m['id'], '--', 'sh', '-c', GUEST_PROBE)
+            t1 = time.time()
+            r['probe'] = parse_probe(p.stdout)
+            r['exec_s'] = t1 - t0
+            if p.returncode != 0 or 'mac' not in r['probe']:
+                r['error'] = 'probe exec failed: rc %s %s' % (p.returncode, p.stderr.strip()[:200])
+            r['t0'], r['t1'] = t0, t1
+            r['fresh'] = info(http(m['ip'], timeout=3)).get('fresh', '')
+        except Exception as e:
+            r['error'] = '%s: %s' % (type(e).__name__, str(e)[:300])
+    th = [threading.Thread(target=one, args=(k,)) for k in range(args.clones)]
+    t0 = time.monotonic()
+    for x in th:
+        x.start()
+        if args.sequential:
+            x.join()
+    for x in th:
+        x.join()
+    wall = time.monotonic() - t0
+    after = {**free_mb(), 'firecracker_rss_mb': round(rss_mb())}
+    rs = [res[k] for k in range(args.clones)]
+    ready = [r['ready_s'] for r in rs if 'ready_s' in r]
+
+    checks = {n: {'per_clone': [], 'evidence': []} for n in ('vmgenid', 'mac', 'clock', 'rng')}
+    for k, r in enumerate(rs):
+        p = r.get('probe') or {}
+        if r.get('error') and not p:
+            for n in checks:
+                checks[n]['per_clone'].append(('fail', 'clone %d: %s' % (k, r['error'])))
+            continue
+        st, why, ev = vmgenid_status(p)
+        checks['vmgenid']['per_clone'].append((st, 'clone %d: %s' % (k, why)))
+        checks['vmgenid']['evidence'].append(ev)
+        want, got = expected_mac(r['ip']), p.get('mac', '')
+        checks['mac']['per_clone'].append(('pass' if want == got else 'fail', 'clone %d: eth0 %s, assigned %s' % (k, got, want)))
+        skew, est, precise = clock_skew(p.get('now'), r['t0'], r['t1'])
+        if skew is None:
+            checks['clock']['per_clone'].append(('fail', 'clone %d: unreadable guest clock %r' % (k, p.get('now'))))
+        else:
+            checks['clock']['per_clone'].append(('pass' if skew <= 1.0 else 'fail',
+                                                 'clone %d: skew >= %.2fs (guest - host about %+.2fs, %s, exec %.2fs)' % (k, skew, est, 'sub-second' if precise else 'whole seconds', r['exec_s'])))
+    macs = [(r.get('probe') or {}).get('mac') for r in rs]
+    draws = [(r.get('probe') or {}).get('draw') for r in rs] + [r.get('fresh') for r in rs]
+    fresh = [r.get('fresh') for r in rs]
+    if args.clones > 1:
+        checks['mac']['per_clone'].append(('pass' if len(set(macs)) == len(macs) and all(macs) else 'fail', 'MACs differ across clones: %s' % macs))
+        distinct = all(fresh) and len(set(fresh)) == len(fresh) and all(draws[:args.clones]) and len(set(draws[:args.clones])) == args.clones
+        checks['rng']['per_clone'].append(('pass' if distinct else 'fail', 'resume-hook draws %s, probe draws %s' % (fresh, draws[:args.clones])))
+    else:
+        checks['rng']['per_clone'].append(('unsupported', 'one clone: nothing to compare against'))
+    for k, r in enumerate(rs):
+        if not r.get('probe'):
+            checks['rng']['per_clone'].append(('fail', 'clone %d: %s' % (k, r.get('error', 'no probe'))))
+    out = {}
+    for n, c in checks.items():
+        v = verdict([s for s, _ in c['per_clone']])
+        out[n] = {'status': v, 'details': [d for _, d in c['per_clone']]}
+        if c['evidence']:
+            out[n]['evidence'] = c['evidence'][0]
+        print('  %-12s %s' % (n, v))
+        for s, d in c['per_clone']:
+            print('       %-11s %s' % (s, d))
+    vc = vmclock_info((rs[0].get('probe') or {}) if rs else {})
+    print('  vmclock      %s (config: %s)' % (vc['status'], vc['config']))
+    failed = [n for n, c in out.items() if c['status'] == 'fail']
+    if any('error' in r for r in rs):
+        failed.append('clones')
+    summary = {
+        'qualify': 'service-ready-v1', 'ok': not failed, 'failed': failed,
+        'unsupported': [n for n, c in out.items() if c['status'] == 'unsupported'],
+        'clones': args.clones, 'sequential': args.sequential, 'age_seconds': args.age_seconds, 'memory_mb': mem,
+        'create_to_ready_s': {'n': len(ready), 'p50': round(statistics.median(ready), 2) if ready else None, 'max': round(max(ready), 2) if ready else None,
+                              'wall': round(wall, 2)},
+        'host_memory_mb': {'before': before, 'after': after},
+        'checks': out, 'vmclock': vc,
+        'guest_kernel': next(((r.get('probe') or {}).get('uname') for r in rs if r.get('probe')), None),
+        'firecracker': tool_version('firecracker', '--version'),
+        'nested_or_relative_only': True,
+    }
+    cleanup()
+    print(json.dumps(summary, separators=(',', ':')))
+    return not failed
+
+
 if __name__ == '__main__':
-    mode = sys.argv[1] if len(sys.argv) > 1 else 'e2e'
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('mode', nargs='?', default='e2e', choices=['e2e', 'bench', 'qualify'])
+    ap.add_argument('--clones', type=int, default=3, help='qualify: clones to start (8 for the simultaneous run)')
+    ap.add_argument('--age-seconds', type=int, default=30, help='qualify: wait between the seal and the first clone')
+    ap.add_argument('--sequential', action='store_true', help='qualify: start the clones one after another instead of together')
+    ap.add_argument('--memory-mb', type=int, default=512, help='qualify: memory of the builder and its clones')
+    args = ap.parse_args()
+    mode = args.mode
     ok = False
     try:
-        ok = {'e2e': e2e, 'bench': bench}[mode]()
+        ok = {'e2e': e2e, 'bench': bench, 'qualify': lambda: qualify(args)}[mode]()
     finally:
         cleanup()
         try:

@@ -24,6 +24,7 @@ jobs:
           python3 -m unittest discover -s hack -p "test_bootstrap.py"
           python3 -m unittest discover -s hack -p "test_native_seals.py"
           python3 -m unittest discover -s hack -p "test_release.py"
+          python3 -m unittest discover -s hack -p "test_service_template.py"
           python3 -m unittest discover -s hack -p "test_monitoring_auth.py"
           python3 -m unittest discover -s hack -p "test_monitoring_alerts.py"
           python3 -m unittest discover -s hack -p "test_stress_safety.py"

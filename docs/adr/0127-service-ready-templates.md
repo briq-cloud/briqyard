@@ -100,7 +100,7 @@ is also `clone_hook_failed`, with the message `thaw unconfirmed, the workload ma
 
 - Daemon kill between the guest's acknowledgement and the activation, on real Firecracker.
 - An 8-clone run on a larger host.
-- Native VMGenID, MAC and clock qualification (below).
+- Native VMGenID, MAC and clock qualification (below); `hack/service-template.sh qualify` runs it.
 
 ## Not qualified
 
