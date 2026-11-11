@@ -20,13 +20,15 @@ Doubling the burst adds about 1.1 s at p50 on the same hosts: the queue, not the
 **A host's queue is reported by the host, plus what was placed since.** The daemon's create answers once the machine is recorded in `creating` (ADR 0048); the boot follows in a task that waits on the boot gate. So the fleet cannot see the queue from its own holds alone. The heartbeat gains two figures:
 
 - `boots_at_once`: the gate's size (ADR 0129);
-- `boot_queue`: the boots holding or waiting on the gate when the report was composed. Every boot counts: a create, a gateway, a start, a wake, a resume, a fork, a restore.
+- `boot_queue`: the boots the host has accepted and that have not left the gate yet, counted from the moment the machine is recorded (its image and disks come before the gate, and count too). Every boot counts: a create, a gateway, a start, a wake, a resume, a fork, a restore.
 
-`queued(host) = boot_queue + the holds the last report does not count yet` (the rule ADR 0044 already applies to memory: holds not yet answered, or answered after the report was composed). A host that does not report both figures is never busy: guessing the gate from the capacity vCPUs would overstate it several times over.
+`queued(host) = boot_queue + the holds the host has not answered yet`. A hold already answered is in the host's `boot_queue` from then on, so it is not added again.
+
+**Busy is confirmed by a fresh read.** A heartbeat is up to one report interval old: boots that finished since still count in it. A region that would be passed over as busy from the figures in memory is read again first: the fleet asks its candidate hosts for their figures (the `refresh` it already does, outside the registry lock, at most once a second per host), then classifies it with those. Between that read and the answer, a create in transit can be counted twice for a moment; it errs towards spreading, never towards a refusal. A host that does not answer the read keeps its figures from memory. A host that does not report both figures is never busy: guessing the gate from the capacity vCPUs would overstate it several times over.
 
 **Waves.** `waves(host) = ⌊queued(host) / boots_at_once(host)⌋`. Within a region, the host pick of ADR 0128 keeps its keys and adds waves before free memory: a host holding a validated seed first, then the nested-hypervisor key (ADR 0088), then fewer whole waves, then most free memory.
 
-**A region's depth** is the fewest waves among its candidate hosts. A region with candidates is `busy` when its depth is at least `placement.spill_waves` (fleet config, default 2).
+**A region's depth** is the waves of the host the pick would choose there. A host `spill_waves` or more deep loses its seed and nested-hypervisor preference, so the pick does not queue on a deep seeded host beside an idle one. A region with candidates is `busy` when its depth is at least `placement.spill_waves` (fleet config, default 2).
 
 **The walk with `spill_when_busy`** (and `spill_waves > 0`; 0 is exactly the walk of ADR 0128):
 
@@ -38,13 +40,13 @@ A seed saves a cold boot, not a queue: a seeded host counts with its waves like 
 
 **Only between regions the caller listed, only for a new binding.** `regions` stays the allowlist and its order the only weight (ADR 0128). The request gains `spill_when_busy` (default `false`): the caller's consent to a namespace that may live in a farther region for its whole life. The fleet does not know the caller's latency to each region, so it takes no per-region weight. A caller that sends one region, or leaves the flag off, gets exactly ADR 0128. A namespace already pinned (`binding: existing`) answers before the walk, as before: `busy` never applies to it.
 
-**Recorded like any decision.** The answer's `regions` gains the outcome `busy`, with the depth seen, for a region passed over because of its queue; the region placed in is `placed`, busy or not. Replay returns the stored answer (ADR 0128). A spill is not a refusal: `count_full` does not count it. The metrics count spills per pair of regions. Rollback: an older fleet that loads a stored `busy` outcome must read it as `full`, so the outcome enum takes a serde fallback in a release before the walk changes.
+**Recorded like any decision.** The answer's `regions` gains the outcome `busy`, with the depth seen, for a region passed over because of its queue; the region placed in is `placed`, busy or not; a later region with candidates that was not needed is omitted, as ADR 0128 omits regions it did not reach. Replay returns the stored answer (ADR 0128). A spill is not a refusal: `count_full` does not count it. The metrics count spills per pair of regions. Rollback: an older fleet that loads a stored `busy` outcome must read it as `full`, so the outcome enum takes a serde fallback in a release before the walk changes.
 
 ## Consequences
 
 - A burst uses every allowed region's boot capacity before queueing `spill_waves` deep in one.
 - A spilled namespace stays in its region for its whole life (ADR 0025): every later call pays that region's latency. Hence a threshold in waves, and the opt-in flag.
-- `boot_queue` is as old as the last report (up to one heartbeat). Boots that finished since still count until the next one, so a region can look busy for a few seconds after its queue drained: it errs towards spreading, never towards a refusal.
+- A spill costs one extra read of the busy region's hosts on the create path, rate-limited per host.
 - An admission abandoned before its dispatch counts until its hold deadline (`placement.admission_hold_sec`, 240 s by default).
 - After a fleet restart, the holds are gone; the next reports carry the queue again.
 - Spreading across providers, not only regions, is the control plane's job: it can read the `busy` outcomes in the answer to send the next creates of a burst elsewhere. Out of scope here.
