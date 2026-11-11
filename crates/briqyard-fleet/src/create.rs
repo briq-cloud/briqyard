@@ -216,19 +216,8 @@ pub(super) async fn create_machine(
                         st.policy.down_after,
                         &placement.named_memory_profile,
                     )?;
-                } else if !reg.hosts.values().any(|h| {
-                    h.named_memory_fork_v1
-                        && h.named_memory_profiles
-                            .iter()
-                            .any(|p| p == &placement.named_memory_profile)
-                        && h.state == "ready"
-                        && (req.region.is_empty() || h.region == req.region)
-                }) {
-                    return Err(err(
-                        StatusCode::CONFLICT,
-                        "capability_unsupported",
-                        "no host supports named memory templates in the requested region",
-                    ));
+                } else {
+                    refuse_no_named_memory(&reg, &req.region, &placement.named_memory_profile)?;
                 }
             }
             if needs_siblings {
@@ -236,17 +225,8 @@ pub(super) async fn create_machine(
                     require_siblings(host)?;
                 }
             }
-            if needs_siblings
-                && bound.is_none()
-                && !reg.hosts.values().any(|host| {
-                    host.egress_siblings_v1 && (req.region.is_empty() || host.region == req.region)
-                })
-            {
-                return Err(err(
-                    StatusCode::CONFLICT,
-                    "capability_unsupported",
-                    "no host supports egress.siblings in the requested region",
-                ));
+            if needs_siblings && bound.is_none() {
+                refuse_no_siblings(&reg, &req.region)?;
             }
             refuse_outside(&reg, bound.as_deref(), &req.namespace, &req.region)?;
             refuse_class(
@@ -283,6 +263,16 @@ pub(super) async fn create_machine(
             let physical = host
                 .reservation_mb(ask.memory_mb)
                 .ok_or_else(|| no_room(&st, &reg, &ask))?;
+            // Under a placement admission the host's room is checked for its requirement before
+            // anything is marked or pinned (ADR 0128).
+            crate::sandbox_admissions::dispatch_create(
+                &st,
+                &mut reg,
+                &req,
+                admission_id.as_deref(),
+                &host.id,
+                &ask,
+            )?;
             // A fork's new namespace lives where its source does, as a placement would pin it.
             reg.pin(&req.namespace, &host.id);
             if req.sandbox_seed.is_some() {
@@ -291,11 +281,6 @@ pub(super) async fn create_machine(
                     crate::create_replay::request_route(&req, host.id.clone())?,
                 );
             }
-            crate::sandbox_admissions::dispatched(
-                &mut reg,
-                &req.namespace,
-                admission_id.as_deref(),
-            );
             let id = reg.hold(&host.id, physical, ask.disk_mb, ask.cpu_millis);
             reg.bind_hold_namespace(&host.id, id, &req.namespace);
             Placement::Admitted(
@@ -465,6 +450,44 @@ pub(super) fn refuse_outside(
         Some(why) => Err(err(StatusCode::BAD_REQUEST, "invalid", why)),
         None => Ok(()),
     }
+}
+
+/// A create needing named memory of `profile` in `region`, where no host is ready with it:
+/// 409, a configuration is not a shortage.
+pub(super) fn refuse_no_named_memory(
+    reg: &Registry,
+    region: &str,
+    profile: &str,
+) -> Result<(), Refusal> {
+    if reg.hosts.values().any(|h| {
+        h.named_memory_fork_v1
+            && h.named_memory_profiles.iter().any(|p| p == profile)
+            && h.state == "ready"
+            && (region.is_empty() || h.region == region)
+    }) {
+        return Ok(());
+    }
+    Err(err(
+        StatusCode::CONFLICT,
+        "capability_unsupported",
+        "no host supports named memory templates in the requested region",
+    ))
+}
+
+/// A create needing `egress.siblings` in `region`, where no host has the capability: 409.
+pub(super) fn refuse_no_siblings(reg: &Registry, region: &str) -> Result<(), Refusal> {
+    if reg
+        .hosts
+        .values()
+        .any(|host| host.egress_siblings_v1 && (region.is_empty() || host.region == region))
+    {
+        return Ok(());
+    }
+    Err(err(
+        StatusCode::CONFLICT,
+        "capability_unsupported",
+        "no host supports egress.siblings in the requested region",
+    ))
 }
 
 /// A create naming a runtime class (ADR 0088) bound to a host that does not serve it, or with

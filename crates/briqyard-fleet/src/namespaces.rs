@@ -179,12 +179,14 @@ pub(super) struct PlaceQuery {
 
 /// A PUT on a namespace that the namespace's host answers: one with no host yet is placed as its
 /// first machine would be, in `region`, with `need_mb` and `need_disk_mb` as the need. The
-/// host's answer, with the host.
+/// host's answer, with the host. `gateway`: the gateway a placement admission's id is matched to.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn put_on_namespace(
     st: &AppState,
     id: &str,
     what: &str,
     placement: &PlaceQuery,
+    gateway: Option<&api::GatewaySpec>,
     (need_mb, need_disk_mb, need_cpu_millis): (u32, u64, u32),
     headers: &HeaderMap,
     body: Bytes,
@@ -224,6 +226,12 @@ pub(super) async fn put_on_namespace(
             region,
             placement.placement_request_id.as_deref(),
         )?;
+        let admitted = match placement.placement_request_id.as_deref() {
+            Some(pid) => crate::sandbox_admissions::placement::check_namespace_put(
+                &reg, id, pid, region, gateway,
+            )?,
+            None => None,
+        };
         let first = !reg.namespaces.contains_key(id);
         let bound = reg.namespaces.get(id).cloned();
         refuse_outside(&reg, bound.as_deref(), id, region)?;
@@ -242,6 +250,13 @@ pub(super) async fn put_on_namespace(
         let physical = host
             .reservation_mb(need_mb)
             .ok_or_else(|| no_room(st, &reg, &ask))?;
+        // Under a placement admission the gateway `PUT` is a dispatch (ADR 0128): the room is
+        // checked for its requirement, and the role marked, before the host is asked.
+        if let (Some(role), Some(pid)) = (admitted, placement.placement_request_id.as_deref()) {
+            crate::sandbox_admissions::placement::dispatch(
+                st, &mut reg, id, pid, role, &host.id, &ask,
+            )?;
+        }
         let hold = reg.hold(&host.id, physical, need_disk_mb, need_cpu_millis);
         reg.bind_hold_namespace(&host.id, hold, id);
         let id = hold;
@@ -288,7 +303,7 @@ pub(super) async fn set_gateway(
         disk_need(spec.volume_gb),
         spec.size().cpu_millis(),
     );
-    put_on_namespace(&st, &id, "gateway", &q, need, &headers, body).await
+    put_on_namespace(&st, &id, "gateway", &q, Some(&spec), need, &headers, body).await
 }
 
 /// Puts a namespace's quota on the namespace's host (ADR 0025); a namespace with none yet is placed,
@@ -302,7 +317,7 @@ pub(super) async fn set_quota(
 ) -> Result<Response, Refusal> {
     serde_json::from_slice::<api::Quota>(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
-    put_on_namespace(&st, &id, "quota", &q, (0, 0, 0), &headers, body).await
+    put_on_namespace(&st, &id, "quota", &q, None, (0, 0, 0), &headers, body).await
 }
 
 /// A namespace's quota and use, from its host.

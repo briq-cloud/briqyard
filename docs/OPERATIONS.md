@@ -222,7 +222,7 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `conditions.disk_free_pct` | `10` | `disk_pressure` when the pool's free space is under this share of its size: the fleet places nothing new, and unused images go, oldest first, until it is back. `0`: never |
 | `console_max_mb` | `64` | A running machine's console is rotated past this size; one previous file is kept |
 | `boot_timeout_sec` | `120` | How long a guest may take to answer after its process starts |
-| `boots_at_once` | half the threads, at least 2 | Boots run at once; the rest wait their turn, each with the whole timeout |
+| `boots_at_once` | 1.5 × the threads, at least 2 | Boots run at once; the rest wait their turn, each with the whole timeout |
 | `backup.store` | none | `s3://bucket/prefix` or `file:///path`; set, `POST /v1/machines/{id}/backups` works. Credentials `BRIQYARD_S3_ACCESS_KEY` / `BRIQYARD_S3_SECRET_KEY` in `/etc/briqyard/briqyardd.env` (root's, `0600`), read at the next start: change them with a hand-over, never `systemctl restart` (ADR 0041) |
 | `backup.endpoint`, `backup.region` | none | The S3 endpoint (`https://s3.fr-par.scw.cloud`) and region |
 | `backup.keep_snapshots` | `1` | Backup snapshots kept on the host per machine (the newest is the base of the next incremental send) |
@@ -769,6 +769,7 @@ registry backups, operator archives and local backing/reference scopes are exclu
 | 403 `quota` | The namespace is at a limit of its quota: `briqyard namespace quota <namespace>` shows the limit and the use |
 | `host h_… is under disk_pressure` (fleet, 503 `capacity`) | The namespace's host takes nothing new until the condition clears. Disk: `zfs list -o space byard`; unused images go by themselves, then backups and destroys of what is left. Memory: stop machines, or move the namespace (below) |
 | `host h_… is down` (fleet, 503) | The host missed its heartbeats for `placement.down_after_sec`: its machines answer again once it is back. `briqyard host ls`, then the host's `journalctl -u briqyardd` |
+| `regions_full` / `region_unconfirmed` (fleet, 503 `capacity`) | A placement admission (ADR 0128) found every region walked full, or stopped at a region with a down, stale or upgrading host. The answer's `regions` says which. `placement.admission_hold_sec` (default 600) is how long an admission holds capacity before the heartbeat gives it back; see FLEET-OPERATIONS.md, "Placement admission across regions" |
 | `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it. `tls_mismatch`: its certificate is not the pinned one, or none is pinned (set `tls_fingerprint`); a host just added gets this until its bootstrap has pinned it |
 | `host …: … is not the pinned …` (fleet, 502 `host_unreachable`) | The host presents another certificate than its record's `tls_fingerprint`: reinstalled (pin the new one), or not the host |
 | `write registry …` (fleet, 500 `registry`) | The fleet's `state_dir` is full or not writable; nothing is recorded until it is |

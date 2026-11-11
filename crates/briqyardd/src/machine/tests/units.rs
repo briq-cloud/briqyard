@@ -192,6 +192,13 @@ fn host_facts() {
 }
 
 #[test]
+fn boots_at_once_follows_the_threads() {
+    assert_eq!(default_boots_at_once(24), 36);
+    assert_eq!(default_boots_at_once(8), 12);
+    assert_eq!(default_boots_at_once(1), 2, "at least 2");
+}
+
+#[test]
 fn wait_decisions() {
     let m = |state: &str, reason: &str, restarting: bool| api::Machine {
         state: state.into(),

@@ -117,6 +117,9 @@ impl<'de> Deserialize<'de> for Tls {
 pub struct Placement {
     pub fill_ceiling: f64,
     pub down_after_sec: u64,
+    /// How long a placement admission holds capacity for a requirement not dispatched yet (ADR
+    /// 0128).
+    pub admission_hold_sec: u64,
 }
 
 impl Default for Placement {
@@ -124,6 +127,7 @@ impl Default for Placement {
         Self {
             fill_ceiling: 0.85,
             down_after_sec: 60,
+            admission_hold_sec: 600,
         }
     }
 }
@@ -530,6 +534,7 @@ mod tests {
         assert!(cfg.hosts.is_empty());
         assert_eq!(cfg.placement.fill_ceiling, 0.85);
         assert_eq!(cfg.placement.down_after_sec, 60);
+        assert_eq!(cfg.placement.admission_hold_sec, 600);
         let b = &cfg.bootstrap;
         assert!(!b.enabled);
         assert_eq!(b.ssh_user, "root");

@@ -1,6 +1,6 @@
 # ADR 0009: Load: boots take turns, a tag's digest is remembered
 
-Date: 2026-10-20 · Status: accepted; amended by ADR 0036 (a tag resolved with a `HEAD`, the content through a mirror)
+Date: 2026-10-20 · Status: accepted; amended by ADR 0036 (a tag resolved with a `HEAD`, the content through a mirror) and ADR 0129 (`boots_at_once` 1.5 × the threads)
 
 ## Context
 
@@ -8,7 +8,7 @@ The stress spike (`../research/2026-10-19-stress-spike.md`) started 24 guests at
 
 ## Decisions
 
-**Boots take turns.** `boots_at_once` (half the host's threads, at least 2) is a semaphore around the Firecracker start and the wait for the guest; each boot gets the whole `boot_timeout_sec` (120) once it holds a turn. A slow host queues; it does not fail.
+**Boots take turns.** `boots_at_once` (half the host's threads, at least 2; 1.5 × since ADR 0129) is a semaphore around the Firecracker start and the wait for the guest; each boot gets the whole `boot_timeout_sec` (120) once it holds a turn. A slow host queues; it does not fail.
 
 **A tag's digest is remembered** for `image_resolve_minutes` (10), in memory and on disk (`meta/ref-<sha>.json`). When the registry refuses (a rate limit), the image already on the host serves, with a warning. A digest reference never asks the registry.
 

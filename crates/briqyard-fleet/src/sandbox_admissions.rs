@@ -1,6 +1,8 @@
 //! Fleet-local durable placement identity, established before a caller freezes its create.
 use super::*;
 
+pub(super) mod placement;
+
 pub(super) const HEADER: &str = "x-briqyard-placement-request-id";
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -29,6 +31,16 @@ pub(super) enum Phase {
     Pending,
     Dispatched,
     Cancelled,
+    /// A placement admission left undispatched for the replay window (ADR 0128): a tombstone.
+    Expired,
+}
+/// What an admission is for. A record written before placement admission is a seed's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum Kind {
+    #[default]
+    Seed,
+    Placement,
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(super) struct Admission {
@@ -43,10 +55,43 @@ pub(super) struct Admission {
     /// Absent in an admission made before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    kind: Kind,
+    /// The decision of a placement admission and what was dispatched under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    placement: Option<placement::Record>,
 }
 impl Admission {
-    pub fn pending_seed(&self) -> bool {
-        self.phase == Phase::Pending && self.mode == Mode::SandboxSeed
+    /// Whether it fences its namespace and host: a seed admission until its create is
+    /// dispatched, a placement admission until each of its requirements is (ADR 0128).
+    pub fn pending(&self) -> bool {
+        match &self.placement {
+            Some(p) => matches!(self.phase, Phase::Pending | Phase::Dispatched) && !p.complete(),
+            None => self.phase == Phase::Pending && self.mode == Mode::SandboxSeed,
+        }
+    }
+    /// The time its window counts from, and a way to move it back, for the tests of the windows.
+    #[cfg(test)]
+    pub fn at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.at
+    }
+    #[cfg(test)]
+    pub fn backdate(&mut self, by: chrono::Duration) {
+        self.at = self.at.map(|at| at - by);
+    }
+    fn tombstone(namespace: String, request_id: String, phase: Phase) -> Self {
+        Admission {
+            namespace,
+            request_id,
+            fingerprint: String::new(),
+            request: None,
+            mode: Mode::Cold,
+            host: None,
+            phase,
+            at: None,
+            kind: Kind::Seed,
+            placement: None,
+        }
     }
 }
 fn key(namespace: &str, id: &str) -> String {
@@ -87,6 +132,12 @@ fn replay(
     };
     if a.phase == Phase::Cancelled {
         return Err(conflict("admission was cancelled"));
+    }
+    if a.phase == Phase::Expired {
+        return Err(conflict("admission expired"));
+    }
+    if a.kind != Kind::Seed {
+        return Err(conflict("admission request identity conflict"));
     }
     if a.fingerprint != fingerprint {
         return Err(conflict("admission request identity conflict"));
@@ -172,6 +223,8 @@ pub(super) async fn admit(
                     host: (mode == Mode::SandboxSeed).then_some(host),
                     phase: Phase::Pending,
                     at: Some(chrono::Utc::now()),
+                    kind: Kind::Seed,
+                    placement: None,
                 },
             );
             mode
@@ -188,24 +241,21 @@ pub(super) async fn cancel(
     check_ids(&namespace, &id)?;
     {
         let mut reg = st.reg.lock().unwrap();
-        let a = reg
-            .sandbox_admissions
-            .entry(key(&namespace, &id))
-            .or_insert_with(|| Admission {
-                namespace: namespace.clone(),
-                request_id: id.clone(),
-                fingerprint: String::new(),
-                request: None,
-                mode: Mode::Cold,
-                host: None,
-                phase: Phase::Cancelled,
-                at: None,
-            });
+        let k = key(&namespace, &id);
+        let a = reg.sandbox_admissions.entry(k.clone()).or_insert_with(|| {
+            Admission::tombstone(namespace.clone(), id.clone(), Phase::Cancelled)
+        });
         if a.phase == Phase::Dispatched {
             return Err(conflict("admission already dispatched"));
         }
-        a.phase = Phase::Cancelled;
-        a.at = Some(chrono::Utc::now());
+        let placed = a.kind == Kind::Placement;
+        if a.phase != Phase::Expired {
+            a.phase = Phase::Cancelled;
+            a.at = Some(chrono::Utc::now());
+        }
+        if placed {
+            reg.release_owned(&format!("{k}#"));
+        }
         // Keep both tombstone and namespace pin: a gateway or another member may use it.
     }
     st.save().await.map_err(registry_error)?;
@@ -214,7 +264,7 @@ pub(super) async fn cancel(
 pub(super) fn namespace_pending(reg: &Registry, namespace: &str) -> bool {
     reg.sandbox_admissions
         .values()
-        .any(|a| a.namespace == namespace && a.pending_seed())
+        .any(|a| a.namespace == namespace && a.pending())
 }
 pub(super) fn header_id(headers: &HeaderMap) -> Result<Option<String>, Refusal> {
     headers
@@ -242,6 +292,9 @@ pub(super) fn check_gateway(
         .sandbox_admissions
         .get(&key(namespace, id))
         .ok_or_else(|| conflict("placement admission missing"))?;
+    if a.kind == Kind::Placement {
+        return Ok(()); // `placement::check_namespace_put` checks it, once the role is known.
+    }
     let request = a
         .request
         .as_ref()
@@ -278,6 +331,9 @@ pub(super) fn check_dispatch(
         .sandbox_admissions
         .get(&key(&req.namespace, id))
         .ok_or_else(|| conflict("placement admission missing"))?;
+    if a.kind == Kind::Placement {
+        return placement::check_create(reg, a, req);
+    }
     let request = a
         .request
         .as_ref()
@@ -301,8 +357,47 @@ pub(super) fn check_dispatch(
     }
     Ok(())
 }
+/// Ends the placement admissions left pending for `window` since their last change (ADR 0128).
+pub(super) fn expire(reg: &mut Registry, now: chrono::DateTime<chrono::Utc>, window: Duration) {
+    placement::expire(reg, now, window);
+}
+/// A create's dispatch under its admission, before the host is asked: a placement admission's
+/// room is checked for the `consumer` and the role marked (ADR 0128), a seed admission is marked
+/// dispatched.
+pub(super) fn dispatch_create(
+    st: &AppState,
+    reg: &mut Registry,
+    req: &api::CreateMachineRequest,
+    id: Option<&str>,
+    host: &str,
+    ask: &Ask,
+) -> Result<(), Refusal> {
+    let placed = id.is_some_and(|id| {
+        reg.sandbox_admissions
+            .get(&key(&req.namespace, id))
+            .is_some_and(|a| a.kind == Kind::Placement)
+    });
+    match (id, placed) {
+        (Some(id), true) => placement::dispatch(
+            st,
+            reg,
+            &req.namespace,
+            id,
+            Some(placement::Role::Consumer),
+            host,
+            ask,
+        ),
+        _ => {
+            dispatched(reg, &req.namespace, id);
+            Ok(())
+        }
+    }
+}
 pub(super) fn dispatched(reg: &mut Registry, namespace: &str, id: Option<&str>) {
-    if let Some(a) = id.and_then(|id| reg.sandbox_admissions.get_mut(&key(namespace, id))) {
+    if let Some(a) = id
+        .and_then(|id| reg.sandbox_admissions.get_mut(&key(namespace, id)))
+        .filter(|a| a.kind == Kind::Seed)
+    {
         a.phase = Phase::Dispatched;
         a.at = Some(chrono::Utc::now());
     }
@@ -316,7 +411,7 @@ pub(super) fn prune(reg: &mut Registry, now: chrono::DateTime<chrono::Utc>, wind
     let pinned = &reg.namespaces;
     let routes = &reg.sandbox_requests;
     reg.sandbox_admissions.retain(|_, a| {
-        if a.pending_seed() {
+        if a.pending() {
             return true;
         }
         let routed = routes.contains_key(&crate::create_replay::key(&a.namespace, &a.request_id));

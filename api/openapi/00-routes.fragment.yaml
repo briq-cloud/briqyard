@@ -45,6 +45,8 @@ paths:
               schema: { type: array, items: { $ref: "#/components/schemas/Machine" } }
         "400": { description: "`invalid`: a label selector that is not `key=value` or `key`" }
     post:
+      parameters:
+        - { name: x-briqyard-placement-request-id, in: header, schema: { type: string }, description: "fleet: the id of a placement admission (ADR 0128) this create is the `consumer` of; the create must be the admitted requirement and in the admitted region (409 otherwise, nothing forwarded), and goes to the admission's host" }
       summary: "Create a machine (ADR 0048): answers once it is recorded, in `creating`, its name, address and (unless `start` is false) memory taken. Its image is pulled when the host has not seen it, its disks made and it is started in the background; `/wait` waits for that. A failure leaves it in `error` with `error_reason` (`pull_failed`, `create_failed`, `boot_failed`), for a read and a destroy; nothing is tried again"
       requestBody:
         required: true
@@ -509,6 +511,27 @@ paths:
       summary: Namespaces on the host (daemon), or namespace to host (fleet)
       responses:
         "200": { description: namespaces, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Namespace" } } } } }
+  /v1/namespaces/{namespace}/admissions/{request_id}:
+    parameters:
+      - { name: namespace, in: path, required: true, schema: { type: string } }
+      - { name: request_id, in: path, required: true, schema: { type: string, maxLength: 128 }, description: "the caller's identity for this admission, unique per namespace" }
+    put:
+      summary: "Fleet only (`placement_admission_v1`, ADR 0128). Decide, once and durably, where a namespace's first requirements go, trying `regions` in order. A namespace already placed answers its own host. The decision is saved before it is answered, holds capacity for each requirement (`placement.admission_hold_sec`), and is replayed as it was for the same id and body for 24 h from its last change. Nothing is stored by a refusal"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlacementAdmission" }
+      responses:
+        "200": { description: the decision, content: { application/json: { schema: { $ref: "#/components/schemas/PlacementDecision" } } } }
+        "400": { description: "`invalid`: a bad body (no region, a repeated region, no requirement, a role twice, an invalid size); the first region cannot serve the requirements at all (a runtime class no host serves)" }
+        "409": { description: "`conflict`: the id was answered for another body, or is held by a seed admission, or was cancelled or expired; `capability_unsupported`: no token configured, or the first region has no host that serves the requirements" }
+        "503": { description: "`capacity` with `reason` and `regions` (the outcome of each region walked): `regions_full`, every region is full; `region_unconfirmed`, a host of a region may have had room and is down, stale or upgrading, so no later region is tried; a namespace already placed whose host cannot take the requirements" }
+    delete:
+      summary: "Cancel an admission before any of its requirements is dispatched: releases its holds and keeps the pin. An unknown id is tombstoned"
+      responses:
+        "204": { description: cancelled }
+        "409": { description: "`conflict`: a requirement was dispatched (a gateway or quota `PUT` with the id counts)" }
   /v1/namespaces/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
@@ -526,6 +549,7 @@ paths:
     put:
       parameters:
         - { name: region, in: query, schema: { type: string }, description: "fleet: where to place a namespace that has no host yet" }
+        - { name: placement_request_id, in: query, schema: { type: string }, description: "fleet: the id of a placement admission (ADR 0128); the request is checked against it, and ends its cancellation. A gateway `PUT` is the admission's `gateway`; a quota `PUT` consumes no requirement" }
       summary: "Make the namespace's gateway (the namespace too, when it has nothing yet), not started unless `start`, or replace its spec: a running one is restarted with it, on the same address, and the spec it has changes nothing (ADR 0016). It is a machine of the daemon named `gateway.internal` in the namespace, absent from `GET /v1/machines`; a machine with `egress: {mode: via, via: gateway}` starts it and waits for its port (its `ready` when it has a startup or readiness probe) before its own boot, and the daemon stops it when no such machine runs or starts"
       requestBody:
         required: true
@@ -607,6 +631,7 @@ paths:
       summary: "Put the namespace's quota, whole (the namespace too, when it has nothing yet). Checked at create, fork, restore and gateway put (machines, disk) and at each start's reservation (memory, vCPUs); a refusal is 403 `quota` and a `quota_exceeded` event. One under the use stops nothing. Through the fleet, to the namespace's host; a namespace with none is placed, in `region`"
       parameters:
         - { name: region, in: query, schema: { type: string }, description: "fleet: where to place a namespace that has no host yet" }
+        - { name: placement_request_id, in: query, schema: { type: string }, description: "fleet: the id of a placement admission (ADR 0128); the request is checked against it, and ends its cancellation. A gateway `PUT` is the admission's `gateway`; a quota `PUT` consumes no requirement" }
       requestBody:
         required: true
         content:

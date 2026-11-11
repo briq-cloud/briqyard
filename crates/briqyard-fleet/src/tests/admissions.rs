@@ -378,6 +378,51 @@ async fn cancellation_is_durable_and_cannot_undo_dispatched_route_or_shared_gate
     );
 }
 
+/// A cancel of an id never seen leaves a tombstone that lasts the replay window, and every
+/// cancel (a repeat too) restarts that window.
+#[tokio::test]
+async fn a_cancel_tombstone_for_an_unknown_id_survives_prune_and_a_repeat_refreshes_it() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    source(&f, &ds[0], "m_seed");
+    let cancel = || async {
+        call(
+            &f.st,
+            "DELETE",
+            &admission_path("fresh", "req_unknown"),
+            "api",
+            None,
+        )
+        .await
+        .0
+    };
+    let at = || {
+        let reg = f.st.reg.lock().unwrap();
+        let a = reg
+            .sandbox_admissions
+            .values()
+            .next()
+            .expect("the tombstone");
+        a.at()
+    };
+    assert_eq!(cancel().await, StatusCode::NO_CONTENT);
+    let first = at().expect("a cancel stamps the tombstone");
+    // Aged by less than the window: still there after a prune, so a late PUT is refused.
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        for a in reg.sandbox_admissions.values_mut() {
+            a.backdate(Duration::hours(23));
+        }
+        reg.prune(Utc::now());
+    }
+    assert_eq!(
+        admit(&f, "fresh", "req_unknown", "m_seed").await.0,
+        StatusCode::CONFLICT
+    );
+    // A repeated cancel refreshes the stamp.
+    assert_eq!(cancel().await, StatusCode::NO_CONTENT);
+    assert!(at().unwrap() >= first);
+}
+
 #[tokio::test]
 async fn admission_authentication_strict_input_and_gateway_hint_fail_closed() {
     let (f, ds) = fleet_with_daemons(1).await;
@@ -822,4 +867,73 @@ async fn sandbox_admission_matches_resources_but_keeps_exact_frozen_request_iden
         assert_eq!(creates.len(), 1);
         assert_eq!(serde_json::to_value(creates[0].size).unwrap(), body["size"]);
     }
+}
+
+/// A seed admission is not a placement admission: no window ends its fence (ADR 0128 leaves the
+/// seed route and contract as they were).
+#[tokio::test]
+async fn a_seed_admission_pending_for_a_day_still_fences_and_still_dispatches() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    source(&f, &ds[0], "m_seed");
+    let (s, b) = admit(&f, "destination", "req_one", "m_seed").await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let later = Utc::now() + Duration::hours(25);
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        reg.prune(later);
+        let mut host = reg.hosts[&ds[0].stub.id].clone();
+        host.namespaces.clear();
+        reg.heartbeat(host, later);
+        assert!(crate::sandbox_admissions::namespace_pending(
+            &reg,
+            "destination"
+        ));
+        assert_eq!(reg.namespaces["destination"], ds[0].stub.id);
+    }
+    // The late gateway and create are accepted as they were before placement admission.
+    let (s, _, b) = call(
+        &f.st,
+        "PUT",
+        "/v1/namespaces/destination/gateway?region=fsn&placement_request_id=req_one",
+        "api",
+        Some(gateway_body()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let (s, _, b) = create_admitted(&f, "destination", "req_one", Some("m_seed")).await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
+    assert!(!crate::sandbox_admissions::namespace_pending(
+        &f.st.reg.lock().unwrap(),
+        "destination"
+    ));
+}
+
+/// A registry saved before placement admission has no `kind` on its admissions: they are seeds.
+#[tokio::test]
+async fn an_admission_saved_before_placement_admission_loads_as_a_seed() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    source(&f, &ds[0], "m_seed");
+    let (s, b) = admit(&f, "destination", "req_one", "m_seed").await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let mut saved = serde_json::to_value(&*f.st.reg.lock().unwrap()).unwrap();
+    let admissions = saved["sandbox_admissions"].as_object_mut().unwrap();
+    assert_eq!(admissions.len(), 1);
+    for a in admissions.values_mut() {
+        assert_eq!(a["kind"], "seed");
+        a.as_object_mut().unwrap().remove("kind");
+        a.as_object_mut().unwrap().remove("placement");
+    }
+    let loaded: Registry = serde_json::from_value(saved).unwrap();
+    assert!(crate::sandbox_admissions::namespace_pending(
+        &loaded,
+        "destination"
+    ));
+    *f.st.reg.lock().unwrap() = loaded;
+    // It still fences after a day, and its create is the seed's.
+    f.st.reg
+        .lock()
+        .unwrap()
+        .prune(Utc::now() + Duration::hours(25));
+    let (s, _, b) = create_admitted(&f, "destination", "req_one", Some("m_seed")).await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
 }

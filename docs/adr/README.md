@@ -126,3 +126,7 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 - [0126: Stopped target acceptance receipts](0126-stopped-target-acceptance-receipts.md)
 
 - [0127: Loaded-service memory templates](0127-service-ready-templates.md)
+
+- [0128: One placement admission across an ordered list of regions](0128-placement-admission.md)
+
+- [0129: Boots at once: one and a half times the threads](0129-boots-at-once-follows-the-threads.md)
