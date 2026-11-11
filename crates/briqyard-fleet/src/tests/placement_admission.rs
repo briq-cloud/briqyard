@@ -414,7 +414,7 @@ async fn dispatch_after_the_hold_expired_and_the_host_filled() {
     // The hold lapses (the heartbeat prunes it) and another tenant fills the host.
     {
         let mut reg = f.st.reg.lock().unwrap();
-        reg.expire_holds(Utc::now() + chrono::Duration::minutes(11));
+        reg.expire_holds(Utc::now() + chrono::Duration::minutes(5));
         reg.hosts.get_mut(&host).unwrap().used.memory_mb = 64_000;
     }
     let (s, text) = put_gateway(&f, "ns", "bhs", "req_one").await;
@@ -1183,12 +1183,12 @@ async fn hold_deadline_is_pruned_by_the_heartbeat() {
     f.st.reg
         .lock()
         .unwrap()
-        .prune(Utc::now() + chrono::Duration::minutes(9));
+        .prune(Utc::now() + chrono::Duration::minutes(3));
     assert_eq!(holds(&f, &host), 2);
     f.st.reg
         .lock()
         .unwrap()
-        .prune(Utc::now() + chrono::Duration::minutes(11));
+        .prune(Utc::now() + chrono::Duration::minutes(5));
     assert_eq!((holds(&f, &host), host_used(&f, &host)), (0, 1_000));
     // Decision and pin stay.
     assert_eq!(pinned(&f.st, "ns").as_deref(), Some(host.as_str()));

@@ -284,7 +284,7 @@ A quota `PUT` with the id is checked the same way and consumes no requirement.
 `DELETE` on the route cancels the admission and releases its holds, only before any dispatch
 (409 after, the gateway's included). The pin stays and follows the heartbeat's rule.
 
-- **Holds.** Each requirement is held for `placement.admission_hold_sec` (default 600). The
+- **Holds.** Each requirement is held for `placement.admission_hold_sec` (default 240). The
   heartbeat gives back what no dispatch took over; the decision stands.
 - **Fence.** While a requirement is not dispatched, the admission pins its namespace to the host
   as a pending seed admission does: the heartbeat, `forget`, `namespace unpin` and `namespace rm`
