@@ -149,6 +149,56 @@
         nested: { type: boolean, default: false, description: "its machines see the CPU's virtualization extensions (`/dev/kvm` works in them) and take no memory snapshot" }
         kernel_release: { type: string, description: "the kernel's release, `6.18.54-briqyard-nested`" }
         openzfs: { type: string, description: "the OpenZFS version of the class's modules, when it has them" }
+    PlacementAdmission:
+      type: object
+      additionalProperties: false
+      required: [regions, requirements]
+      properties:
+        regions: { type: array, minItems: 1, items: { type: string }, description: "in the caller's order, without repeats: an allowlist and a preference" }
+        requirements:
+          type: array
+          minItems: 1
+          maxItems: 2
+          description: "what the namespace's first dispatches will ask for, at most one `gateway` and one `consumer`"
+          items: { $ref: "#/components/schemas/PlacementRequirement" }
+    PlacementRequirement:
+      type: object
+      additionalProperties: false
+      required: [role, size]
+      properties:
+        role: { type: string, enum: [gateway, consumer] }
+        size: { $ref: "#/components/schemas/Size" }
+        volume_gb: { type: integer }
+        runtime_class: { type: string }
+        memory_profile: { type: string }
+        egress_siblings: { type: boolean }
+        sandbox_seeds: { type: array, items: { $ref: "#/components/schemas/PlacementSeed" }, description: "`consumer` only: a seed that is on a host of a region walked and passes its check is used there, else the placement is `cold`" }
+    PlacementSeed:
+      type: object
+      additionalProperties: false
+      required: [machine_id, snapshot, generation]
+      properties:
+        machine_id: { type: string }
+        snapshot: { type: string }
+        generation: { type: string }
+    PlacementDecision:
+      type: object
+      required: [region, host, binding, mode, regions]
+      properties:
+        region: { type: string }
+        host: { type: string }
+        binding: { type: string, enum: [new, existing], description: "`new`: the admission pinned the namespace; `existing`: it already was" }
+        mode: { type: string, enum: [cold, sandbox-seed] }
+        seed: { $ref: "#/components/schemas/PlacementSeed" }
+        regions:
+          type: array
+          description: "the outcome of each region walked: evidence, not a promise"
+          items:
+            type: object
+            required: [region, outcome]
+            properties:
+              region: { type: string }
+              outcome: { type: string, enum: [placed, unconfirmed, full, ineligible] }
     Status:
       type: object
       properties:
@@ -156,6 +206,7 @@
           allOf: [{ $ref: "#/components/schemas/RuntimeObservation" }]
           description: "Serving runtime identity; absent on older daemons or unresolved recovery. Not a maintenance permit."
         egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
+        placement_admission_v1: { type: boolean, default: false, description: "fleet: it serves `/v1/namespaces/{namespace}/admissions/{request_id}` (ADR 0128); absent means the route is not there (404), never capacity" }
         named_memory_fork_v1: { type: boolean, default: false, description: "explicit availability of configured named memory cloning; supported profiles are listed separately; absent or stale reports are unsupported" }
         named_memory_profiles: { type: array, items: { type: string, enum: [init-ready-v1] }, description: "implemented configured profiles; init-ready does not clone already-running services" }
         warm_pool_profiles: { type: array, items: { type: string }, description: "implemented configured paused-pool profiles; absent means unsupported" }

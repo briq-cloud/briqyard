@@ -374,6 +374,7 @@ async fn run(args: Args) -> Result<()> {
         runtime_class: String::new(),
         fill_ceiling: cfg.placement.fill_ceiling,
         down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
+        admission_hold: Duration::seconds(cfg.placement.admission_hold_sec as i64),
     };
     let acks_file = cfg.state_dir.join("published-keys.json");
     let published = backup::Backup::open(&cfg.backup)?;
@@ -608,6 +609,10 @@ fn namespace_routes(prefix: &str) -> Router<Arc<AppState>> {
             put(sandbox_admissions::admit).delete(sandbox_admissions::cancel),
         )
         .route(
+            &format!("{prefix}/:namespace/admissions/:request_id"),
+            put(sandbox_admissions::placement::admit).delete(sandbox_admissions::cancel),
+        )
+        .route(
             &format!("{prefix}/:id"),
             get(get_namespace).delete(delete_namespace),
         )
@@ -690,6 +695,16 @@ struct Refusal {
     status: StatusCode,
     code: &'static str,
     error: String,
+    /// Fields added to the body beside the `ApiError`'s (a placement admission's reason and
+    /// regions, ADR 0128).
+    extra: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl Refusal {
+    fn with_fields(mut self, fields: serde_json::Value) -> Self {
+        self.extra = fields.as_object().cloned();
+        self
+    }
 }
 
 /// What a response the fleet made itself says of its failure, kept in the response for the
@@ -706,17 +721,18 @@ impl IntoResponse for Refusal {
             code: self.code,
             error: self.error.clone(),
         };
-        let mut resp = (
-            self.status,
-            Json(api::ApiError {
-                error: self.error,
-                code: self.code.into(),
-                request_id: String::new(),
-                machine: None,
-                oldest: None,
-            }),
-        )
-            .into_response();
+        let mut body = serde_json::to_value(api::ApiError {
+            error: self.error,
+            code: self.code.into(),
+            request_id: String::new(),
+            machine: None,
+            oldest: None,
+        })
+        .expect("ApiError serializes");
+        if let (Some(fields), Some(map)) = (self.extra, body.as_object_mut()) {
+            map.extend(fields);
+        }
+        let mut resp = (self.status, Json(body)).into_response();
         resp.extensions_mut().insert(refused);
         resp
     }
@@ -727,6 +743,7 @@ fn err(status: StatusCode, code: &'static str, msg: impl Into<String>) -> Refusa
         status,
         code,
         error: msg.into(),
+        extra: None,
     }
 }
 
