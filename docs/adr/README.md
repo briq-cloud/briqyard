@@ -132,3 +132,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 - [0129: Boots at once: one and a half times the threads](0129-boots-at-once-follows-the-threads.md)
 
 - [0130: Placement spills a burst to the next allowed region when the preferred one is queueing boots](0130-placement-spills-a-burst.md)
+
+- [0131: `/tmp` on the root disk](0131-tmp-on-the-root-disk.md)

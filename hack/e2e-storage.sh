@@ -225,7 +225,7 @@ check "its base gone with the restore: whole" '[ "$(briqyard machine backups "$C
 RK=$(briqyard machine restore --from "$CK" --backup "$CB3" --namespace "$T" --name ckback3 | jq -r .id)
 check "and restores to what the machine had"  '[ "$(briqyard machine exec "$RK" -- cat /data/f)" = v2 ]'
 briqyard machine destroy "$RK" >/dev/null
-# Memory: /tmp is a tmpfs, only in memory; a resume keeps it, a boot would not.
+# Memory: /tmp is a directory of the root disk, emptied at each boot; a resume keeps it (ADR 0131).
 on 'echo m1 > /tmp/mark; echo v4 > /data/f' >/dev/null
 up=$(on 'cut -d. -f1 /proc/uptime')
 t0=$(date +%s.%N)
@@ -240,7 +240,7 @@ check "restored with memory (${took}s): resumed, not booted" '[ "$(briqyard even
 check "memory and disks as they were"  '[ "$(on "cat /tmp/mark /data/f" | paste -sd, -)" = m1,v4 ] && [ "$(on "cut -d. -f1 /proc/uptime")" -ge "$up" ]'
 # Those reads may come from the memory's page cache: a cold boot reads the disk.
 briqyard machine restart "$CK" >/dev/null
-check "a cold boot after it, on the snapshot's disk" '[ "$(on "cat /data/f")" = v4 ] && ! on "test -e /tmp/mark"'
+check "a cold boot after it, on the snapshot's disk, /tmp emptied and not a tmpfs" '[ "$(on "cat /data/f")" = v4 ] && ! on "test -e /tmp/mark" && ! on "grep -q \" /tmp tmpfs \" /proc/mounts"'
 briqyard machine snapshot rm "$CK" before
 check "deleted by name" '! briqyard machine snapshot ls "$CK" | grep -q " before "'
 briqyard machine destroy "$FK" >/dev/null
