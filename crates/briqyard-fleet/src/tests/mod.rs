@@ -251,6 +251,7 @@ mod locate;
 mod metrics;
 mod placement;
 mod placement_admission;
+mod placement_seed_spill;
 mod placement_spill;
 mod regions;
 mod retention;
