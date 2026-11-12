@@ -892,7 +892,7 @@ async fn within_a_region_the_host_with_the_most_free_memory_is_picked() {
 }
 
 /// A seed on `host` of the daemon `d`, as a seed admission's test makes one.
-fn seed_on(f: &Fleet, d: &Running, machine: &str) {
+pub(super) fn seed_on(f: &Fleet, d: &Running, machine: &str) {
     let host = d.stub.id.clone();
     {
         let mut reg = f.st.reg.lock().unwrap();
