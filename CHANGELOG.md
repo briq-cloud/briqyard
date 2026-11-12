@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.8 — 2026-11-12
+
+### Upgrade notes
+
+- `/tmp` is a directory of the root disk, not a tmpfs (ADR 0131). The init makes it a directory with mode 1777 and empties it at each boot; a resume from a snapshot with memory keeps it. A build that wrote gigabytes there no longer takes the machine's memory, and what it writes now counts against the root disk's free space.
+- The guest init's code changed, so its digest changes from 0.2.7 (ADR 0101). Existing seeds and running guests keep the init they were sealed with. Compare the candidate's `SHA256SUMS` line for `briqyard-init-linux-<arch>` and reseal seeds as `docs/OPERATIONS.md` (Upgrade) says: set each recipe's `init_sha256` to the new digest before the host upgrades, or the host reports no named-memory profile after it.
+
+### Fixes
+
+- put /tmp on the root disk, not in a tmpfs (#237) ([ea78a65e](https://github.com/briq-cloud/briqyard/commit/ea78a65e1ac9b441eba341ba3eb59b36b92a2943))
+
+
+### Maintenance
+
+- seeded sandboxes in a spilling placement admission (#236) ([1f019981](https://github.com/briq-cloud/briqyard/commit/1f019981115306cdeea836ff4953a2654283635f))
+
 ## 0.2.7 — 2026-11-11
 
 ### Upgrade notes
