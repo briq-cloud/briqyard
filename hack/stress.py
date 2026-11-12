@@ -344,7 +344,7 @@ class Run:
             (t, n), m = kv
             mid = m["id"]
             suspend = int(n[1:]) % 2 == 1
-            # /tmp is a tmpfs in the guest: what must survive a cold boot lives on the root disk.
+            # /tmp is emptied at each boot (ADR 0131): what must survive a cold boot lives elsewhere on the root disk.
             self.exec(mid, ["sh", "-c", "echo kept > /root/kept; echo mem > /tmp/mem"])
             self.api.call("POST", f"/v1/machines/{mid}/stop", {"suspend": suspend, "timeout_sec": 10}, op="suspend" if suspend else "stop", timeout=120)
             self.wait_state(mid, {"stopped"}, timeout=120)

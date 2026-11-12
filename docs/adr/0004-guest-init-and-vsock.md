@@ -24,4 +24,4 @@ The image is anyone's. The guest has no agent of ours installed, no libc we can 
 
 - One binary to ship per architecture; no per-image agent.
 - The protocol is versioned by the init shipped with the daemon: a daemon upgrade is also an init upgrade at the next cold boot.
-- `/tmp` is a tmpfs: kept through a resume, lost on a cold boot.
+- `/tmp` is a directory of the root disk, emptied at each boot: kept through a resume, lost on a cold boot (ADR 0131; it was a tmpfs).

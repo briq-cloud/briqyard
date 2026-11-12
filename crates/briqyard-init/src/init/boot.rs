@@ -9,12 +9,14 @@ pub(super) fn mount_base() {
         ("sysfs", "/sys", "sysfs", nosuid | noexec | nodev, ""),
         ("devtmpfs", "/dev", "devtmpfs", nosuid, "mode=0755"),
         ("tmpfs", "/run", "tmpfs", nosuid | nodev, "mode=0755"),
-        ("tmpfs", "/tmp", "tmpfs", nosuid | nodev, "mode=1777"),
     ];
     for (src, dst, fstype, flags, data) in mounts {
         let _ = fs::create_dir_all(dst);
         let _ = mount(Some(*src), *dst, Some(*fstype), *flags, Some(*data));
     }
+    // `/tmp` is a directory of the root disk, made right and emptied at each boot: a tmpfs
+    // there would take half the machine's memory (ADR 0131).
+    prepare_tmp(Path::new("/tmp"));
     // What an init is expected to add to devtmpfs: bash's `<(...)` opens /dev/fd/N.
     for (link, target) in [
         ("/dev/fd", "/proc/self/fd"),
@@ -331,6 +333,32 @@ pub(super) fn verified_boot_bundle(
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
+/// Leaves `dir` an empty directory with mode 1777. Whatever else the root disk kept there (a
+/// symlink, a file, a changed mode) is replaced, so the tenant's last boot cannot break the next.
+fn prepare_tmp(dir: &Path) {
+    let is_dir = fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir());
+    if !is_dir {
+        let _ = fs::remove_file(dir);
+    }
+    let _ = fs::create_dir_all(dir);
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o1777));
+    clear_dir(dir);
+}
+
+/// Removes what a directory holds and keeps the directory. A symlink is removed, never followed.
+fn clear_dir(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        let _ = match e.file_type() {
+            Ok(t) if t.is_dir() => fs::remove_dir_all(&path),
+            _ => fs::remove_file(&path),
+        };
+    }
+}
+
 /// The installation rule is shared with host-side bundle measurement.
 pub(super) fn file_mode(mode: u32) -> u32 {
     guest::boot_file_mode(mode)
@@ -340,6 +368,46 @@ pub(super) fn file_mode(mode: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::init::testutil::*;
+
+    #[test]
+    fn clear_dir_empties_and_keeps_the_directory() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("kept"), "x").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("file"), "x").unwrap();
+        std::fs::create_dir_all(tmp.path().join("a/b")).unwrap();
+        std::fs::write(tmp.path().join("a/b/deep"), "x").unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("link")).unwrap();
+        clear_dir(tmp.path());
+        assert!(tmp.path().is_dir());
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+        assert!(outside.path().join("kept").exists());
+        clear_dir(&tmp.path().join("missing"));
+    }
+
+    #[test]
+    fn prepare_tmp_replaces_a_symlink_and_fixes_the_mode() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("kept"), "x").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let tmp = root.path().join("tmp");
+        std::os::unix::fs::symlink(outside.path(), &tmp).unwrap();
+        prepare_tmp(&tmp);
+        assert!(std::fs::symlink_metadata(&tmp).unwrap().is_dir());
+        assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
+        assert!(outside.path().join("kept").exists());
+        std::fs::write(tmp.join("f"), "x").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700)).unwrap();
+        prepare_tmp(&tmp);
+        assert_eq!(
+            std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o7777,
+            0o1777
+        );
+        assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
+        std::fs::remove_dir(&tmp).unwrap();
+        prepare_tmp(&tmp);
+        assert!(tmp.is_dir());
+    }
 
     // --- the config drive ---
 
