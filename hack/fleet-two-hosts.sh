@@ -65,12 +65,13 @@ check "two ready hosts" '[ "$(hosts | jq "[.[] | select(.state == \"ready\")] | 
 hosts | jq -r '.[] | "       \(.id)\t\(.state)\t\(.used.memory_mb)/\(.capacity.memory_mb) MB\t\(.url)"'
 
 echo "== placement"
-# Placement picks the host with the most free memory. The first namespace's machine takes enough
-# of the emptiest host that the second namespace lands on the other one: the memory asked is
-# whatever makes the two hosts' free memory cross (a guest that touches little of it costs
-# little; Firecracker maps pages as they are used).
-free_mb() { hosts | jq "[.[] | select(.state == \"ready\") | .capacity.memory_mb - .used.memory_mb] | sort | reverse | .[$1]"; }
-BIG=$(( $(free_mb 0) - $(free_mb 1) + 512 )); [ "$BIG" -lt 256 ] && BIG=256
+# Placement picks the host with the lowest memory share (used/capacity, ADR 0132). The first
+# namespace's machine takes enough of that host that its share passes the other host's, so the
+# second namespace lands on the other one (a guest that touches little of it costs little;
+# Firecracker maps pages as they are used).
+BIG=$(hosts | jq '[.[] | select(.state == "ready" and .capacity.memory_mb > 0)] | sort_by(.used.memory_mb / .capacity.memory_mb)
+  | (.[1].used.memory_mb * .[0].capacity.memory_mb / .[1].capacity.memory_mb | ceil) - .[0].used.memory_mb + 512')
+[ "$BIG" -lt 256 ] && BIG=256
 echo "       first machine asks ${BIG} MB so that the second namespace lands elsewhere"
 A=$(briqyard machine run --image alpine:3.20 --name a --namespace "$T-a" --memory "$BIG" -- sleep 3600 | jq -r .id)
 HA=$(briqyard machine get "$A" | jq -r .host)
