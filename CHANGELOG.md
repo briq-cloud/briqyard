@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.10 — 2026-11-14
+
+### Upgrade notes
+
+- The standalone execution authority takes SHA-256 digests of the host and fleet administrator bearers (`host_administrator_sha256`, `fleet_administrator_sha256`) instead of the plaintext, because it only compares them with its scoped credentials. Plaintext files and fields are still accepted in this release, hashed on read and dropped; the next release removes them. Move authority configs to digests and delete the plaintext files the authority can read. The daemon's own bundle is unchanged.
+- The guest init does not change, so its digest stays the same as 0.2.9 (ADR 0101): existing seeds stay valid.
+
+### Features
+
+- authority accepts administrator digests instead of plaintext (#241) ([700763c3](https://github.com/briq-cloud/briqyard/commit/700763c32c0aae31aef7e6b67dd9a9afcc7fed04))
+
 ## 0.2.9 — 2026-11-14
 
 ### Upgrade notes
