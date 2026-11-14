@@ -285,7 +285,7 @@ async fn run(args: Args) -> Result<()> {
     let execution = if let Some(execution) = &cfg.execution {
         let (credentials, keys, tls) = execution.load().map_err(anyhow::Error::msg)?;
         anyhow::ensure!(
-            credentials.host_administrator == cfg.token,
+            credentials.host_administrator.as_deref() == Some(cfg.token.as_str()),
             "execution administrator identity mismatch"
         );
         store::private_dir(

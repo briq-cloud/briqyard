@@ -342,13 +342,17 @@ async fn renewable_service_callback_host_guest() -> Result<()> {
             &std::fs::read(&cfg.signing_key)?,
             cfg.key_id.clone(),
         )?;
-        let host_admin = std::fs::read_to_string(&configuration.host_administrator_file)?;
-        let fleet_admin = std::fs::read_to_string(&configuration.fleet_administrator_file)?;
+        let host_admin = briqyard_api::execution::provision::digest(&std::fs::read_to_string(
+            &configuration.host_administrator_file,
+        )?);
+        let fleet_admin = briqyard_api::execution::provision::digest(&std::fs::read_to_string(
+            &configuration.fleet_administrator_file,
+        )?);
         let transport = HostTransport::from_trusted(
             TrustedHost {
                 id: &cfg.host_id,
                 tls_fingerprint: &configuration.host_tls_fingerprint,
-                administrator: &host_admin,
+                administrator: host_admin,
             },
             &cfg.host_url,
             &credentials.host_installer,
@@ -363,10 +367,10 @@ async fn renewable_service_callback_host_guest() -> Result<()> {
             Credentials {
                 installer: credentials.central_installer,
                 gateway: credentials.gateway,
-                administrator: fleet_admin.clone(),
+                administrator: fleet_admin,
                 host_administrator: host_admin,
             },
-            &fleet_admin,
+            fleet_admin,
             TrustConfig {
                 keys,
                 central_issuer: cfg.channel.central_issuer.clone(),

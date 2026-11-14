@@ -57,10 +57,13 @@ impl HttpsContinuation {
                 &roles.host_execution,
                 &roles.central_installer,
                 &roles.gateway,
-                &roles.host_administrator,
-                &roles.fleet_administrator,
             ]
             .contains(&&credential)
+            || {
+                let (host, fleet) = roles.administrators()?;
+                let digest = provision::digest(&credential);
+                provision::same(&digest, &host) || provision::same(&digest, &fleet)
+            }
         {
             return Err("invalid continuation credential");
         }
@@ -159,8 +162,15 @@ mod tests {
             host_execution: "host-execution".into(),
             central_installer: "central-installer".into(),
             gateway: "gateway".into(),
-            host_administrator: "host-admin".into(),
-            fleet_administrator: "fleet-admin".into(),
+            host_administrator: Some("host-admin".into()),
+            fleet_administrator: None,
+            host_administrator_sha256: None,
+            fleet_administrator_sha256: Some(
+                provision::digest("fleet-admin")
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+            ),
         }
     }
     #[test]

@@ -1341,7 +1341,13 @@ still requires the independently verified signed continuation and protection rec
 
 Credentials JSON has `host_installer`, `host_execution`, `central_installer`, `gateway`,
 `host_administrator` and `fleet_administrator`. The four scoped values must be distinct
-from one another and both administrator values. Keep the file and private keys at
+from one another and both administrator values. A process that never presents an
+administrator bearer (the standalone authority) may instead carry
+`host_administrator_sha256` and `fleet_administrator_sha256`: the SHA-256 of the bearer,
+64 lowercase hexadecimal characters (`printf %s "$BEARER" | sha256sum`). Per role, give
+the plaintext or the digest, never both; the distinctness check then compares digests
+in constant time. The daemon's own check of `host_administrator` against its `token` is
+unchanged, so the daemon's bundle keeps the host plaintext. Keep the file and private keys at
 0600, owned by the service user. Verification keys are a JSON array of objects with
 `kid`, `role` (`central` or `authority`), `issuer`, `authority` (null for central), and
 `public_key` (32 raw byte values). Files are bounded and read once at startup.
@@ -1368,13 +1374,20 @@ The file must exist. Its required root fields are:
 |---|---|
 | `execution` | Fleet execution object above: `channel`, `host_id`, `host_url`, `authority`, `key_id`, `signing_key` |
 | `host_tls_fingerprint` | Independently provisioned host certificate pin |
-| `host_administrator_file` | Absolute path to the host administrator comparison bearer |
-| `fleet_administrator_file` | Distinct absolute path to the fleet administrator comparison bearer |
+| `host_administrator_sha256` | SHA-256 of the host administrator bearer, lowercase hex |
+| `fleet_administrator_sha256` | SHA-256 of the fleet administrator bearer, lowercase hex |
 
-Administrator files contain the exact bearer bytes, without a trailing newline, at
-0600 and owned by the service user. Each is bounded to 4 KiB and must match its value
-in the credentials bundle. Unknown root fields, normal fleet configuration fields,
-missing files, malformed pins and mismatches refuse startup. A separate service must
+Each administrator is given by its digest, so no administrator bearer needs to exist on
+the authority's host. Per role, `host_administrator_file` / `fleet_administrator_file`
+(absolute path to the bearer) is still accepted in place of the digest for this release
+and will be removed in the next; giving both forms for one role, or neither, refuses
+startup. The digests must match the administrators in the credentials bundle (plaintext
+or digest there).
+
+An administrator file, where still used, contains the exact bearer bytes, without a
+trailing newline, at 0600 and owned by the service user, bounded to 4 KiB. Unknown root
+fields, normal fleet configuration fields, missing files, malformed pins or digests and
+mismatches with the credentials bundle refuse startup. A separate service must
 own this process and its journal; do not share registry or journal files with another
 process. Use the normal fleet command for administrator placement and management.
 

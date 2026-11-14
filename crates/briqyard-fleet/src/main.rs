@@ -526,7 +526,7 @@ fn provision_execution(
     authority::provision(
         execution,
         execution_host::TrustedHost::from(&host),
-        &state.cfg.token,
+        briqyard_api::execution::provision::digest(&state.cfg.token),
     )
 }
 
