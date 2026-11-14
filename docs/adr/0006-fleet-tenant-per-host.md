@@ -1,6 +1,6 @@
 # ADR 0006: Fleet: a tenant on one host, calls forwarded, listings never partial
 
-Date: 2026-10-19 · Status: accepted; "a listing is never partial" superseded for machines by ADR 0114 (a caller may ask for `partial=true`)
+Date: 2026-10-19 · Status: accepted; "a listing is never partial" superseded for machines by ADR 0114 (a caller may ask for `partial=true`); the host order superseded in part by ADR 0132 (ordering)
 
 ## Context
 
@@ -10,7 +10,7 @@ Several hosts, one API for the control plane. The control plane reads a machine 
 
 **`briqyard-fleet` offers the daemon's API and forwards each call to the host that runs the machine.** It adds nothing a daemon does not do: a rule about a machine lives in the daemon, once.
 
-**A tenant is placed on one host**: the ready host under the fill ceiling with the most free memory, disk counted too; a fork lands where its source is (same pool). A pin is kept while the host reports the tenant, and dropped from a heartbeat unless it is under 10 minutes old.
+**A tenant is placed on one host**: the ready host under the fill ceiling with the most free memory, disk counted too (superseded in part by ADR 0132 (ordering): the lowest share of memory used); a fork lands where its source is (same pool). A pin is kept while the host reports the tenant, and dropped from a heartbeat unless it is under 10 minutes old.
 
 **Hosts register by heartbeat every 15 s**, carrying capacity, tenants and the daemon's own API token. Silent for a minute: `down`. Its machines' calls answer 503 `host_down`; nothing is guessed. Static hosts can be listed in the fleet's config and polled.
 

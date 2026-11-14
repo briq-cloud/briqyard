@@ -221,6 +221,23 @@ impl HostRec {
         self.capacity.memory_mb.saturating_sub(self.used.memory_mb)
     }
 
+    /// Which of two hosts a new namespace prefers once the other keys tie (ADR
+    /// 0132): `Greater` is the host to pick. The lower share of memory
+    /// used, compared exactly by cross-multiplication (holds are in `used`), then the more free
+    /// memory, then the lower id. A host without memory capacity counts as full.
+    pub fn load_order(&self, other: &HostRec) -> std::cmp::Ordering {
+        let share = |h: &HostRec| match h.capacity.memory_mb {
+            0 => (1u64, 1u64),
+            cap => (u64::from(h.used.memory_mb), u64::from(cap)),
+        };
+        let ((used_a, cap_a), (used_b, cap_b)) = (share(self), share(other));
+        // used_a / cap_a < used_b / cap_b: self is the emptier.
+        (u128::from(used_b) * u128::from(cap_a))
+            .cmp(&(u128::from(used_a) * u128::from(cap_b)))
+            .then_with(|| self.free_memory_mb().cmp(&other.free_memory_mb()))
+            .then_with(|| other.id.cmp(&self.id))
+    }
+
     /// Boots queued on the host (ADR 0130): those its last report counts, and the creates and
     /// admissions placed since, which `report` leaves in `holds`. `None`: it reports no queue.
     pub fn queued(&self) -> Option<u32> {
@@ -745,7 +762,7 @@ impl Registry {
     }
 
     /// The host of a namespace, or the best host for a new one: of `region` when one is asked
-    /// (ADR 0025), serving `class` (ADR 0088), the readiest with the most free memory under the ceiling and no pressure,
+    /// (ADR 0025), serving `class` (ADR 0088), the readiest with the lowest share of memory used under the ceiling and no pressure,
     /// with room for `need_mb` of memory and `need_disk_mb` of disk (a host that reports no
     /// disk figure is not held to it). The caller then holds the need on the host (`hold`),
     /// so a burst of creates does not all land on the host the last report showed emptiest.
@@ -779,12 +796,12 @@ impl Registry {
                                 .is_some_and(|need| h.has_room(need, need_disk_mb, need_cpu_millis))
                     })
                     // A default machine goes where nothing runs a hypervisor of its own when
-                    // such a host has room (ADR 0088); then the most free memory.
-                    .max_by_key(|h| {
-                        let shared_with_nested = api::class_name(&policy.runtime_class)
-                            == api::DEFAULT_CLASS
-                            && h.serves_nested();
-                        (!shared_with_nested, h.free_memory_mb())
+                    // such a host has room (ADR 0088); then the lowest share of memory used
+                    // (ADR 0132).
+                    .max_by(|a, b| {
+                        let default = api::class_name(&policy.runtime_class) == api::DEFAULT_CLASS;
+                        let key = |h: &HostRec| !(default && h.serves_nested());
+                        key(a).cmp(&key(b)).then_with(|| a.load_order(b))
                     })?;
                 let id = best.id.clone();
                 self.namespaces.insert(namespace.to_string(), id.clone());

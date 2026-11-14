@@ -57,7 +57,7 @@ async fn a_create_is_placed_and_forwarded_with_its_host() {
     .await;
     assert_eq!(s, StatusCode::CREATED);
     assert_eq!(headers["x-briqyard-host"], host.as_str());
-    // A new namespace goes to the emptiest host.
+    // A new namespace goes to the host with the lowest memory share (used/capacity; ties by most free MB, then host id; ADR 0132).
     let (s, headers, _) = call(
         &f.st,
         "POST",

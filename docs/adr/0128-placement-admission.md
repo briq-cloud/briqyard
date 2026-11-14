@@ -61,7 +61,7 @@ It is a record of the same table as seed admissions, with a `kind` (`#[serde(def
 
 | Region class | When | Walk |
 |---|---|---|
-| `placed` | at least one `placed` candidate, whatever the other hosts are | stop; pick the host as `place` does (most free memory; a default machine avoids hosts with a hypervisor of their own first, ADR 0088), preferring one that holds a validated seed (below); pin, hold, store |
+| `placed` | at least one `placed` candidate, whatever the other hosts are | stop; pick the host as `place` does (most free memory, superseded in part by ADR 0132 (ordering): lowest share of memory used; a default machine avoids hosts with a hypervisor of their own first, ADR 0088), preferring one that holds a validated seed (below); pin, hold, store |
 | `unconfirmed` | no candidate, at least one `unknown` host | stop: 503 `capacity`, `reason: region_unconfirmed`. The next region is **not** tried |
 | `full` | no candidate, no `unknown`, at least one `full` host | next region |
 | `ineligible` | no host counted at all (none serves the requirements, or the region has no usable host) | **first region**: its own refusal, as a single-region create gives today (409 `capability_unsupported`, 400 for a runtime class no host serves, 503 `capacity` for a region with no host). A later region: skip it |

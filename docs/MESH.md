@@ -43,8 +43,8 @@ knows every machine of the namespace and its host. A daemon with no fleet answer
 A connecting to a sleeping sibling on host B reaches B's bridge address, where B's wake-on-
 connect sees the SYN as it does today. Nothing new.
 
-**The fleet.** Placement no longer pins a namespace: `place` picks the host with the most free
-memory and disk among those that already hold a slice of the namespace, then any host, and asks
+**The fleet.** Placement no longer pins a namespace: `place` picks the host with the lowest
+memory share (ADR 0132) among those that already hold a slice of the namespace, then any host, and asks
 the fleet for a slice there. The registry keeps `namespace → [(host, slice)]`. A host that goes
 down keeps its slice reserved for an hour, then the slice is freed and its machines are
 reported as `error` (there is no live migration; the disks are on that host).
