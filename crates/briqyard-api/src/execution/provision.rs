@@ -45,6 +45,10 @@ pub fn parse_digest(text: &str) -> Result<Digest, &'static str> {
     for (i, pair) in bytes.chunks(2).enumerate() {
         out[i] = nibble(pair[0]) << 4 | nibble(pair[1]);
     }
+    // The digest of the empty bearer is never an administrator.
+    if same(&out, &digest("")) {
+        return Err("invalid administrator digest");
+    }
     Ok(out)
 }
 
@@ -55,7 +59,12 @@ pub fn administrator(
 ) -> Result<Digest, &'static str> {
     match (plaintext, sha256) {
         (Some(_), Some(_)) => Err("administrator given as both plaintext and digest"),
-        (Some(bearer), None) => Ok(digest(bearer)),
+        (Some(bearer), None) => {
+            if bearer.is_empty() || bearer.bytes().any(|b| !b.is_ascii_graphic()) {
+                return Err("invalid administrator bearer");
+            }
+            Ok(digest(bearer))
+        }
         (None, Some(text)) => parse_digest(text),
         (None, None) => Err("administrator missing"),
     }
@@ -289,6 +298,15 @@ mod tests {
         }
     }
     #[test]
+    fn plaintext_administrators_must_be_non_empty_graphic() {
+        for bad in ["", "a b", "a\n", "é"] {
+            let mut c = digests_only();
+            c.host_administrator_sha256 = None;
+            c.host_administrator = Some(bad.into());
+            assert!(c.validate().is_err(), "{bad:?}");
+        }
+    }
+    #[test]
     fn both_or_neither_form_and_malformed_digests_are_refused() {
         let mut c = digests_only();
         c.host_administrator = Some("ha".into());
@@ -298,6 +316,7 @@ mod tests {
         assert!(c.validate().is_err());
         for bad in [
             "".to_string(),
+            hex(""),
             "ab".repeat(31),
             "ab".repeat(33),
             hex("ha").to_uppercase(),

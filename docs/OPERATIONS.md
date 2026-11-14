@@ -1347,7 +1347,11 @@ administrator bearer (the standalone authority) may instead carry
 64 lowercase hexadecimal characters (`printf %s "$BEARER" | sha256sum`). Per role, give
 the plaintext or the digest, never both; the distinctness check then compares digests
 in constant time. The daemon's own check of `host_administrator` against its `token` is
-unchanged, so the daemon's bundle keeps the host plaintext. Keep the file and private keys at
+unchanged, so the daemon's bundle keeps the host plaintext.
+The digest is unsalted: anyone who reads it can test guesses offline. Use a random
+high-entropy bearer (for example 32 random bytes in hex), never a chosen word, and keep
+the configuration and bundle at 0600 like any file that names an administrator. The
+digest of the empty string is refused. Keep the file and private keys at
 0600, owned by the service user. Verification keys are a JSON array of objects with
 `kid`, `role` (`central` or `authority`), `issuer`, `authority` (null for central), and
 `public_key` (32 raw byte values). Files are bounded and read once at startup.

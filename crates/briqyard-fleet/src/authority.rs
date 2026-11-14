@@ -275,6 +275,31 @@ mod tests {
         assert!(serde_json::from_value::<AuthorityConfig>(mixed).is_ok());
     }
     #[test]
+    fn authority_loads_a_real_legacy_bearer_file_and_hashes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("host-admin");
+        let fleet = dir.path().join("fleet-admin");
+        private_file(&host, b"host-admin");
+        private_file(&fleet, b"fleet-admin");
+        let mut value = configuration();
+        value["host_administrator_file"] = host.to_str().unwrap().into();
+        value["fleet_administrator_file"] = fleet.to_str().unwrap().into();
+        let config = load(&value).unwrap();
+        let d = api::execution::provision::digest;
+        assert_eq!(
+            config.administrators().unwrap(),
+            (d("host-admin"), d("fleet-admin"))
+        );
+        for bytes in [b"".as_slice(), b"host-admin\n", b"a b"] {
+            private_file(&host, bytes);
+            assert!(load(&value).is_err(), "{bytes:?}");
+        }
+        private_file(&host, b"host-admin");
+        std::fs::set_permissions(&host, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+            .unwrap();
+        assert!(load(&value).is_err());
+    }
+    #[test]
     fn authority_refuses_both_neither_or_malformed_administrator_forms() {
         let mut both = digest_configuration();
         both["host_administrator_file"] = "/host-admin".into();
@@ -288,6 +313,7 @@ mod tests {
             assert!(load(&neither).is_err(), "{role}");
             for bad in [
                 "".to_string(),
+                hex(""),
                 hex("x").to_uppercase(),
                 hex("x")[..63].to_string(),
                 format!("{}0", hex("x")),
