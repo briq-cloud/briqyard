@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.9 — 2026-11-14
+
+### Upgrade notes
+
+- A new namespace goes to the host with the lowest share of its memory in use, not the host with the most free memory (ADR 0132). Hosts of different sizes now fill at the same rate. Namespaces already pinned stay where they are. No configuration changes.
+- The guest init does not change, so its digest stays the same as 0.2.8 (ADR 0101): existing seeds stay valid.
+
+### Features
+
+- place a new namespace on the host with the lowest share of memory used (#239) ([4579bca0](https://github.com/briq-cloud/briqyard/commit/4579bca06c3e6367153f40a6d88bfb386ff78214))
+
 ## 0.2.8 — 2026-11-12
 
 ### Upgrade notes
