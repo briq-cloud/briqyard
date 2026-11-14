@@ -134,3 +134,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 - [0130: Placement spills a burst to the next allowed region when the preferred one is queueing boots](0130-placement-spills-a-burst.md)
 
 - [0131: `/tmp` on the root disk](0131-tmp-on-the-root-disk.md)
+
+- [0132: A new namespace goes to the host with the lowest share of memory used](0132-placement-by-memory-share.md)

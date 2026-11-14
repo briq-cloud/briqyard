@@ -278,7 +278,7 @@ type Checked = (Selector, String);
 
 /// The host a region's pick chooses among its `candidates`: a host with a validated seed first,
 /// then a default machine away from a host with a hypervisor of its own, then (with `spill`,
-/// the waves from which a host is deep) fewer whole waves, then the most free memory. A deep
+/// the waves from which a host is deep) fewer whole waves, then the lowest share of memory used (ADR 0132). A deep
 /// host loses the seed and the hypervisor preference (ADR 0130).
 fn pick<'a>(
     candidates: impl Iterator<Item = &'a HostRec>,
@@ -292,11 +292,10 @@ fn pick<'a>(
             seeded(h) && !deep,
             !(all_default && h.serves_nested()) && !deep,
             std::cmp::Reverse(spill.map_or(0, |_| h.waves())),
-            h.free_memory_mb(),
         )
     };
     candidates
-        .max_by(|a, b| key(a).cmp(&key(b)).then_with(|| b.id.cmp(&a.id)))
+        .max_by(|a, b| key(a).cmp(&key(b)).then_with(|| a.load_order(b)))
         .expect("a placed region has a candidate")
 }
 
@@ -928,5 +927,23 @@ mod tests {
             .unwrap()
             .get("depth")
             .is_none());
+    }
+
+    /// With every other key tied, the region's pick takes the lowest share of memory used, not
+    /// the most free memory (ADR 0132).
+    #[test]
+    fn the_pick_prefers_the_lowest_share_of_memory_used() {
+        let host = |id: &str, cap: u32, used: u32| {
+            let mut h = HostRec {
+                id: id.into(),
+                ..Default::default()
+            };
+            h.capacity.memory_mb = cap;
+            h.used.memory_mb = used;
+            h
+        };
+        let hosts = [host("big", 120_000, 36_000), host("small", 55_000, 0)];
+        let best = pick(hosts.iter(), false, |_| false, None);
+        assert_eq!(best.id, "small");
     }
 }

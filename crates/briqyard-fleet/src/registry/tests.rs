@@ -870,3 +870,78 @@ fn a_body_and_a_record_without_the_boot_figures_parse() {
     let rec: HostRec = serde_json::from_value(value).unwrap();
     assert_eq!((rec.boots_at_once, rec.boot_queue), (None, None));
 }
+
+#[test]
+fn a_new_namespace_goes_to_the_lowest_share_of_memory_used() {
+    let now = Utc::now();
+    let mut reg = Registry::default();
+    // The big host has the most free memory but carries 30 %; the small one is empty.
+    reg.heartbeat(host("big", 120_000, 36_000, 3), now);
+    reg.heartbeat(host("small", 55_000, 0, 0), now);
+    let p = Policy::default();
+    assert_eq!(reg.place("t1", "", 512, 0, 0, &p).as_deref(), Some("small"));
+}
+
+#[test]
+fn equal_shares_go_to_the_most_free_memory_then_the_lowest_id() {
+    let now = Utc::now();
+    let mut reg = Registry::default();
+    reg.heartbeat(host("b", 50_000, 25_000, 1), now);
+    reg.heartbeat(host("a", 100_000, 50_000, 1), now);
+    let p = Policy::default();
+    assert_eq!(reg.place("t1", "", 512, 0, 0, &p).as_deref(), Some("a"));
+    let mut reg = Registry::default();
+    reg.heartbeat(host("b", 100_000, 50_000, 1), now);
+    reg.heartbeat(host("a", 100_000, 50_000, 1), now);
+    assert_eq!(reg.place("t1", "", 512, 0, 0, &p).as_deref(), Some("a"));
+}
+
+#[test]
+fn a_burst_of_holds_spreads_across_hosts_by_share() {
+    let now = Utc::now();
+    let mut reg = Registry::default();
+    reg.heartbeat(host("big", 100_000, 0, 0), now);
+    reg.heartbeat(host("small", 50_000, 0, 0), now);
+    let mut counts = std::collections::BTreeMap::new();
+    for i in 0..9 {
+        let (h, _) = placed(&mut reg, &format!("t{i}"), 10_000, 0).unwrap();
+        *counts.entry(h).or_insert(0) += 1;
+    }
+    // Shares stay within one machine of each other: 6 on the big host, 3 on the small one.
+    assert_eq!(counts["big"], 6);
+    assert_eq!(counts["small"], 3);
+}
+
+#[test]
+fn nested_preference_still_comes_before_the_share() {
+    let now = Utc::now();
+    let mut reg = Registry::default();
+    let mut with = host("with", 100_000, 0, 0);
+    with.runtime_classes = vec![api::RuntimeClassInfo {
+        name: "nested".into(),
+        nested: true,
+        ..Default::default()
+    }];
+    reg.heartbeat(with, now);
+    reg.heartbeat(host("without", 100_000, 60_000, 1), now);
+    assert_eq!(
+        reg.place("t1", "", 512, 0, 0, &Policy::default())
+            .as_deref(),
+        Some("without")
+    );
+}
+
+#[test]
+fn a_host_without_capacity_never_divides_by_zero_and_loses() {
+    use std::cmp::Ordering;
+    let zero = host("z", 0, 0, 0);
+    let full = host("f", 100, 100, 0);
+    let some = host("s", 100, 99, 0);
+    assert_eq!(zero.load_order(&some), Ordering::Less);
+    assert_eq!(some.load_order(&zero), Ordering::Greater);
+    assert_ne!(zero.load_order(&full), Ordering::Equal);
+    // Very large figures do not overflow.
+    let a = host("a", u32::MAX, u32::MAX - 1, 0);
+    let b = host("b", u32::MAX - 1, u32::MAX - 2, 0);
+    let _ = a.load_order(&b);
+}
