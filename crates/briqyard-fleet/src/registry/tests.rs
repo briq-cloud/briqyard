@@ -942,10 +942,10 @@ fn a_host_without_capacity_never_divides_by_zero_and_loses() {
     // Equal share (full, 1/1): free memory ties at 0, the lower id wins.
     assert_eq!(zero.load_order(&full), Ordering::Less);
     assert_eq!(full.load_order(&zero), Ordering::Greater);
-    // Very large figures do not overflow: a is at (N-1)/N, b at (N-2)/(N-1), so a is emptier.
+    // Very large figures do not overflow: a is at (N-1)/N, b at (N-2)/(N-1), so b is emptier.
     let a = host("a", u32::MAX, u32::MAX - 1, 0);
     let b = host("b", u32::MAX - 1, u32::MAX - 2, 0);
-    assert_eq!(a.load_order(&b), Ordering::Greater);
+    assert_eq!(a.load_order(&b), Ordering::Less);
     // The order is antisymmetric.
     for (x, y) in [
         (&zero, &some),
