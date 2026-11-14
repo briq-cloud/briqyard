@@ -18,8 +18,17 @@ After every filter and key that exists (ready, under the fill ceiling, no pressu
 
 Not changed: `shortage` (which resource ran out, read from the roomiest host), `room` and the `largest_slot` signals (ADR 0042) report capacity, not a placement.
 
+## Alternatives
+
+- **Round robin**: ignores host size and current load.
+- **Most free MB** (the previous rule): fills the biggest host first.
+- **Share of the admission ceiling**: the same order today, since the fill ceiling is one fleet-wide value; revisit if it becomes per-host.
+
+The share is memory only. CPU and disk stay filters.
+
 ## Consequences
 
 - Hosts of different sizes fill in proportion to their size: with a 100 GB and a 50 GB host, nine 10 GB machines land 6 and 3.
 - A small host gets work as soon as the large one carries a share above it, not when the large one is full.
 - Placing on the lowest share can leave the largest free block on a smaller host than before; a machine larger than every host's free memory is refused as before, by the reservation filter.
+- Proportional fill uses the small host's largest free block sooner, so a large machine in a namespace pinned there is refused earlier; `largest_slot` is the signal to watch.

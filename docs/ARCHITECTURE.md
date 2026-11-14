@@ -414,7 +414,7 @@ installed version that stopped no machine, and puts the host back; the fleet is 
 that runs the machine. It places each namespace on one host: a namespace's machines share a host, so
 its private network needs no overlay. Placement picks, among ready hosts under the fill
 ceiling, with no condition true and of the create's `region` when it names one, the one with the
-most free memory; a fork lands where its source is, and a namespace's host or a fork's source's
+lowest share of memory used (ties by most free MB, then host id; ADR 0132); a fork lands where its source is, and a namespace's host or a fork's source's
 with a condition true answers 503 `capacity` before it is asked. A namespace's region is its host's:
 a create naming another answers 400 (ADR 0025). What a placement
 puts on a host is held there (counted as used) until a report of the host counts it, so a burst

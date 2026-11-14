@@ -946,4 +946,23 @@ mod tests {
         let best = pick(hosts.iter(), false, |_| false, None);
         assert_eq!(best.id, "small");
     }
+
+    /// Fewer whole waves come before the share: a host with a queue loses to a fuller one with none.
+    #[test]
+    fn fewer_waves_precede_the_share() {
+        let host = |id: &str, used: u32, queue: u32| {
+            let mut h = HostRec {
+                id: id.into(),
+                boots_at_once: Some(2),
+                boot_queue: Some(queue),
+                ..Default::default()
+            };
+            h.capacity.memory_mb = 100_000;
+            h.used.memory_mb = used;
+            h
+        };
+        let hosts = [host("queued", 0, 4), host("fuller", 90_000, 0)];
+        let best = pick(hosts.iter(), false, |_| false, Some(5));
+        assert_eq!(best.id, "fuller");
+    }
 }

@@ -939,9 +939,35 @@ fn a_host_without_capacity_never_divides_by_zero_and_loses() {
     let some = host("s", 100, 99, 0);
     assert_eq!(zero.load_order(&some), Ordering::Less);
     assert_eq!(some.load_order(&zero), Ordering::Greater);
-    assert_ne!(zero.load_order(&full), Ordering::Equal);
-    // Very large figures do not overflow.
+    // Equal share (full, 1/1): free memory ties at 0, the lower id wins.
+    assert_eq!(zero.load_order(&full), Ordering::Less);
+    assert_eq!(full.load_order(&zero), Ordering::Greater);
+    // Very large figures do not overflow: a is at (N-1)/N, b at (N-2)/(N-1), so a is emptier.
     let a = host("a", u32::MAX, u32::MAX - 1, 0);
     let b = host("b", u32::MAX - 1, u32::MAX - 2, 0);
-    let _ = a.load_order(&b);
+    assert_eq!(a.load_order(&b), Ordering::Greater);
+    // The order is antisymmetric.
+    for (x, y) in [
+        (&zero, &some),
+        (&zero, &full),
+        (&a, &b),
+        (&some, &full),
+        (&a, &a),
+    ] {
+        assert_eq!(x.load_order(y), y.load_order(x).reverse());
+    }
+}
+
+#[test]
+fn an_empty_draining_host_loses_to_a_loaded_ready_one() {
+    let now = Utc::now();
+    let mut reg = Registry::default();
+    reg.heartbeat(host("empty", 100_000, 0, 0), now);
+    reg.heartbeat(host("loaded", 100_000, 80_000, 1), now);
+    reg.hosts.get_mut("empty").unwrap().state = "draining".into();
+    assert_eq!(
+        reg.place("t1", "", 512, 0, 0, &Policy::default())
+            .as_deref(),
+        Some("loaded")
+    );
 }
