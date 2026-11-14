@@ -76,14 +76,15 @@ pub(super) enum Error {
 pub(super) struct TrustedHost<'a> {
     pub id: &'a str,
     pub tls_fingerprint: &'a str,
-    pub administrator: &'a str,
+    /// SHA-256 of the host administrator bearer; the bearer itself is never held.
+    pub administrator: api::execution::provision::Digest,
 }
 impl<'a> From<&'a HostRec> for TrustedHost<'a> {
     fn from(host: &'a HostRec) -> Self {
         Self {
             id: &host.id,
             tls_fingerprint: &host.tls_fingerprint,
-            administrator: &host.token,
+            administrator: api::execution::provision::digest(&host.token),
         }
     }
 }
@@ -93,7 +94,7 @@ pub(super) struct HostTransport {
     origin: Url,
     installer: header::HeaderValue,
     execution: header::HeaderValue,
-    administrator: String,
+    administrator: api::execution::provision::Digest,
     host_id: String,
     timeout: Duration,
 }
@@ -135,8 +136,14 @@ impl HostTransport {
             || installer.is_empty()
             || execution.is_empty()
             || installer == execution
-            || installer == host.administrator
-            || execution == host.administrator
+            || api::execution::provision::same(
+                &api::execution::provision::digest(installer),
+                &host.administrator,
+            )
+            || api::execution::provision::same(
+                &api::execution::provision::digest(execution),
+                &host.administrator,
+            )
             || timeout.is_zero()
             || timeout > Duration::from_secs(300)
         {
@@ -182,13 +189,13 @@ impl HostTransport {
             origin,
             installer: bearer(installer)?,
             execution: bearer(execution)?,
-            administrator: host.administrator.into(),
+            administrator: host.administrator,
             host_id: host.id.into(),
             timeout,
         })
     }
 
-    pub(super) fn administrator_token(&self) -> &str {
+    pub(super) fn administrator_digest(&self) -> &api::execution::provision::Digest {
         &self.administrator
     }
 
@@ -440,7 +447,10 @@ pub(super) mod tests {
         )
         .unwrap();
         assert_eq!(channel.host_id(), registered.id);
-        assert_eq!(channel.administrator_token(), registered.token);
+        assert_eq!(
+            channel.administrator_digest(),
+            &api::execution::provision::digest(&registered.token)
+        );
         assert_eq!(channel.origin.port(), Some(7441));
         assert_eq!(registered.url, "https://localhost:7420");
         let mut unpinned = registered.clone();

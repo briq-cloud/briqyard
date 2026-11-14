@@ -23,15 +23,15 @@ use tokio::sync::Mutex;
 
 pub(crate) mod renewal;
 
-use briqyard_api::execution::clock::ClockSource;
 #[cfg(test)]
 use briqyard_api::execution::clock::QualifiedClock;
+use briqyard_api::execution::{clock::ClockSource, provision};
 
 pub(super) struct Credentials {
     pub installer: String,
     pub gateway: String,
-    pub administrator: String,
-    pub host_administrator: String,
+    pub administrator: provision::Digest,
+    pub host_administrator: provision::Digest,
 }
 
 pub(super) struct TrustConfig {
@@ -91,19 +91,18 @@ impl LiveOperations {
 }
 
 fn valid_credentials(c: &Credentials) -> bool {
-    ![
-        &c.installer,
-        &c.gateway,
-        &c.administrator,
-        &c.host_administrator,
-    ]
-    .iter()
-    .any(|v| v.is_empty() || v.bytes().any(|b| !b.is_ascii_graphic()))
+    let (installer, gateway) = (
+        provision::digest(&c.installer),
+        provision::digest(&c.gateway),
+    );
+    ![&c.installer, &c.gateway]
+        .iter()
+        .any(|v| v.is_empty() || v.bytes().any(|b| !b.is_ascii_graphic()))
         && c.installer != c.gateway
-        && c.installer != c.administrator
-        && c.gateway != c.administrator
-        && c.installer != c.host_administrator
-        && c.gateway != c.host_administrator
+        && !provision::same(&installer, &c.administrator)
+        && !provision::same(&gateway, &c.administrator)
+        && !provision::same(&installer, &c.host_administrator)
+        && !provision::same(&gateway, &c.host_administrator)
 }
 
 /// One service owns the exclusive issuer journal for its entire lifetime.
@@ -113,7 +112,7 @@ pub(super) fn router(
     host: HostTransport,
     host_id: String,
     credentials: Credentials,
-    administrator: &str,
+    administrator: provision::Digest,
     trust: TrustConfig,
     clock: Arc<dyn ClockSource>,
 ) -> Result<Router, &'static str> {
@@ -135,7 +134,7 @@ pub(super) fn router_with_continuation(
     host: HostTransport,
     host_id: String,
     credentials: Credentials,
-    administrator: &str,
+    administrator: provision::Digest,
     trust: TrustConfig,
     clock: Arc<dyn ClockSource>,
     continuation: Option<Arc<dyn renewal::ContinuationProvider>>,
@@ -144,8 +143,8 @@ pub(super) fn router_with_continuation(
     let renewable = continuation.is_some();
     if host_id.is_empty()
         || host_id != host.host_id()
-        || credentials.host_administrator != host.administrator_token()
-        || credentials.administrator != administrator
+        || !provision::same(&credentials.host_administrator, host.administrator_digest())
+        || !provision::same(&credentials.administrator, &administrator)
         || !valid_credentials(&credentials)
         || trust.keys.is_empty()
         || trust.central_issuer.is_empty()

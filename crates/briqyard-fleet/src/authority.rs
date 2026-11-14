@@ -1,6 +1,6 @@
 //! Scoped authority process. Never opens a fleet registry or starts fleet management.
 use crate::{
-    api,
+    api::{self, execution::provision::Digest},
     config::Execution,
     execution_host::{HostTransport, TrustedHost},
     execution_service,
@@ -18,8 +18,16 @@ use std::{
 struct AuthorityConfig {
     execution: Execution,
     host_tls_fingerprint: String,
-    host_administrator_file: PathBuf,
-    fleet_administrator_file: PathBuf,
+    // Each administrator is given by SHA-256 digest (preferred: no bearer on disk) or, for one
+    // more release, by a file holding the bearer. Exactly one form per role.
+    #[serde(default)]
+    host_administrator_sha256: Option<String>,
+    #[serde(default)]
+    fleet_administrator_sha256: Option<String>,
+    #[serde(default)]
+    host_administrator_file: Option<PathBuf>,
+    #[serde(default)]
+    fleet_administrator_file: Option<PathBuf>,
 }
 impl AuthorityConfig {
     fn load(path: &Path) -> Result<Self> {
@@ -34,13 +42,43 @@ impl AuthorityConfig {
             .validate("")
             .map_err(anyhow::Error::msg)?;
         anyhow::ensure!(
-            config.host_administrator_file.is_absolute()
-                && config.host_administrator_file != config.fleet_administrator_file
-                && config.fleet_administrator_file.is_absolute()
-                && config.execution.signing_key.is_absolute(),
+            config.execution.signing_key.is_absolute()
+                && config
+                    .host_administrator_file
+                    .iter()
+                    .chain(&config.fleet_administrator_file)
+                    .all(|p| p.is_absolute())
+                && !(config.host_administrator_file.is_some()
+                    && config.host_administrator_file == config.fleet_administrator_file),
             "invalid authority file path"
         );
+        // Resolve both roles now: a missing, doubled or malformed form refuses startup.
+        config.administrators()?;
         Ok(config)
+    }
+    /// Digests of the host and fleet administrators. The bearer, when a file supplies it, is
+    /// hashed and dropped; nothing downstream holds it.
+    fn administrators(&self) -> Result<(Digest, Digest)> {
+        let role = |file: &Option<PathBuf>, sha: &Option<String>| -> Result<Digest> {
+            match (file, sha) {
+                (Some(_), Some(_)) => Err(anyhow!("administrator given as both file and digest")),
+                (Some(path), None) => Ok(api::execution::provision::digest(&administrator(path)?)),
+                (None, Some(text)) => {
+                    api::execution::provision::parse_digest(text).map_err(anyhow::Error::msg)
+                }
+                (None, None) => Err(anyhow!("administrator missing")),
+            }
+        };
+        Ok((
+            role(
+                &self.host_administrator_file,
+                &self.host_administrator_sha256,
+            )?,
+            role(
+                &self.fleet_administrator_file,
+                &self.fleet_administrator_sha256,
+            )?,
+        ))
     }
 }
 fn administrator(path: &Path) -> Result<String> {
@@ -56,14 +94,15 @@ fn administrator(path: &Path) -> Result<String> {
 pub(super) fn provision(
     execution: &Execution,
     host: TrustedHost<'_>,
-    administrator: &str,
+    administrator: Digest,
 ) -> Result<(axum_server::tls_rustls::RustlsConfig, Router)> {
     let channel = &execution.channel;
     let (credentials, keys, tls) = channel.load().map_err(anyhow::Error::msg)?;
+    let (bundle_host, bundle_fleet) = credentials.administrators().map_err(anyhow::Error::msg)?;
     anyhow::ensure!(
         execution.host_id == host.id
-            && credentials.host_administrator == host.administrator
-            && credentials.fleet_administrator == administrator,
+            && api::execution::provision::same(&bundle_host, &host.administrator)
+            && api::execution::provision::same(&bundle_fleet, &administrator),
         "execution administrator identity mismatch"
     );
     let transport = HostTransport::from_trusted(
@@ -119,8 +158,8 @@ pub(super) fn provision(
         execution_service::Credentials {
             installer: credentials.central_installer,
             gateway: credentials.gateway,
-            administrator: credentials.fleet_administrator,
-            host_administrator: credentials.host_administrator,
+            administrator: bundle_fleet,
+            host_administrator: bundle_host,
         },
         administrator,
         execution_service::TrustConfig {
@@ -141,16 +180,15 @@ pub(super) fn provision(
 
 pub(super) async fn run(path: &Path) -> Result<()> {
     let config = AuthorityConfig::load(path)?;
-    let host_admin = administrator(&config.host_administrator_file)?;
-    let fleet_admin = administrator(&config.fleet_administrator_file)?;
+    let (host_admin, fleet_admin) = config.administrators()?;
     let (tls, router) = provision(
         &config.execution,
         TrustedHost {
             id: &config.execution.host_id,
             tls_fingerprint: &config.host_tls_fingerprint,
-            administrator: &host_admin,
+            administrator: host_admin,
         },
-        &fleet_admin,
+        fleet_admin,
     )?;
     let listeners = api::listeners::Listeners::from_env();
     let listener = listeners
@@ -187,6 +225,108 @@ mod tests {
             "key_id":"key","signing_key":"/signing"},"host_tls_fingerprint":"ab".repeat(32),
             "host_administrator_file":"/host-admin","fleet_administrator_file":"/fleet-admin"})
     }
+    fn hex(bearer: &str) -> String {
+        api::execution::provision::digest(bearer)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+    fn digest_configuration() -> serde_json::Value {
+        let mut value = configuration();
+        let map = value.as_object_mut().unwrap();
+        map.remove("host_administrator_file");
+        map.remove("fleet_administrator_file");
+        map.insert("host_administrator_sha256".into(), hex("host-admin").into());
+        map.insert(
+            "fleet_administrator_sha256".into(),
+            hex("fleet-admin").into(),
+        );
+        value
+    }
+    fn load(value: &serde_json::Value) -> Result<AuthorityConfig> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("authority.yaml");
+        private_file(&path, &serde_json::to_vec(value).unwrap());
+        AuthorityConfig::load(&path)
+    }
+    #[test]
+    fn authority_starts_from_digests_with_no_administrator_plaintext() {
+        let value = digest_configuration();
+        let config = load(&value).unwrap();
+        assert!(config.host_administrator_file.is_none());
+        assert!(config.fleet_administrator_file.is_none());
+        assert_eq!(
+            config.administrators().unwrap(),
+            (
+                api::execution::provision::digest("host-admin"),
+                api::execution::provision::digest("fleet-admin")
+            )
+        );
+        // The plaintext never appears in the configuration text.
+        let text = serde_json::to_string(&value).unwrap();
+        assert!(!text.contains("host-admin\"") && !text.contains("fleet-admin\""));
+        // One role by digest and the other by file is allowed.
+        let mut mixed = value.clone();
+        mixed
+            .as_object_mut()
+            .unwrap()
+            .remove("fleet_administrator_sha256");
+        mixed["fleet_administrator_file"] = "/fleet-admin".into();
+        assert!(serde_json::from_value::<AuthorityConfig>(mixed).is_ok());
+    }
+    #[test]
+    fn authority_loads_a_real_legacy_bearer_file_and_hashes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("host-admin");
+        let fleet = dir.path().join("fleet-admin");
+        private_file(&host, b"host-admin");
+        private_file(&fleet, b"fleet-admin");
+        let mut value = configuration();
+        value["host_administrator_file"] = host.to_str().unwrap().into();
+        value["fleet_administrator_file"] = fleet.to_str().unwrap().into();
+        let config = load(&value).unwrap();
+        let d = api::execution::provision::digest;
+        assert_eq!(
+            config.administrators().unwrap(),
+            (d("host-admin"), d("fleet-admin"))
+        );
+        for bytes in [b"".as_slice(), b"host-admin\n", b"a b"] {
+            private_file(&host, bytes);
+            assert!(load(&value).is_err(), "{bytes:?}");
+        }
+        private_file(&host, b"host-admin");
+        std::fs::set_permissions(&host, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+            .unwrap();
+        assert!(load(&value).is_err());
+    }
+    #[test]
+    fn authority_refuses_both_neither_or_malformed_administrator_forms() {
+        let mut both = digest_configuration();
+        both["host_administrator_file"] = "/host-admin".into();
+        assert!(load(&both).is_err());
+        for role in ["host", "fleet"] {
+            let mut neither = digest_configuration();
+            neither
+                .as_object_mut()
+                .unwrap()
+                .remove(&format!("{role}_administrator_sha256"));
+            assert!(load(&neither).is_err(), "{role}");
+            for bad in [
+                "".to_string(),
+                hex(""),
+                hex("x").to_uppercase(),
+                hex("x")[..63].to_string(),
+                format!("{}0", hex("x")),
+                format!("{}\n", hex("x")),
+                format!("0x{}", &hex("x")[2..]),
+                "zz".repeat(32),
+            ] {
+                let mut malformed = digest_configuration();
+                malformed[format!("{role}_administrator_sha256")] = bad.clone().into();
+                assert!(load(&malformed).is_err(), "{role} {bad:?}");
+            }
+        }
+    }
     #[test]
     fn authority_configuration_rejects_normal_fleet_fields_and_missing_inputs() {
         let value = configuration();
@@ -210,12 +350,7 @@ mod tests {
                 "{field}"
             );
         }
-        for field in [
-            "execution",
-            "host_tls_fingerprint",
-            "host_administrator_file",
-            "fleet_administrator_file",
-        ] {
+        for field in ["execution", "host_tls_fingerprint"] {
             let mut changed = value.clone();
             changed.as_object_mut().unwrap().remove(field);
             assert!(
@@ -316,13 +451,14 @@ mod tests {
             continuation: None,
         };
         let pin = api::tls::fingerprint(cert.cert.der());
+        let d = api::execution::provision::digest;
         let host = |admin| TrustedHost {
             id: "host",
             tls_fingerprint: &pin,
-            administrator: admin,
+            administrator: d(admin),
         };
-        assert!(provision(&execution, host("wrong-admin"), "fleet-admin").is_err());
-        assert!(provision(&execution, host("host-admin"), "wrong-admin").is_err());
+        assert!(provision(&execution, host("wrong-admin"), d("fleet-admin")).is_err());
+        assert!(provision(&execution, host("host-admin"), d("wrong-admin")).is_err());
         assert!(
             !execution.channel.journal.exists(),
             "independent comparisons precede opening/rotating a journal"
@@ -332,12 +468,22 @@ mod tests {
             url: "https://example.invalid/continue".into(),
             credential_file: execution.channel.credentials.clone(),
         });
-        assert!(provision(&aliased, host("host-admin"), "fleet-admin").is_err());
+        assert!(provision(&aliased, host("host-admin"), d("fleet-admin")).is_err());
         assert!(
             !execution.channel.journal.exists(),
             "callback configuration cannot rotate journal authority"
         );
-        let (_, app) = provision(&execution, host("host-admin"), "fleet-admin").unwrap();
+        // A bundle holding digests only (no administrator plaintext) provisions identically,
+        // and a scoped credential equal to an administrator is refused by digest.
+        let digests = |gateway: &str| {
+            private_file(&execution.channel.credentials,&serde_json::to_vec(&serde_json::json!({"host_installer":"host-installer","host_execution":"host-execution","central_installer":"central-installer","gateway":gateway,"host_administrator_sha256":hex("host-admin"),"fleet_administrator_sha256":hex("fleet-admin")})).unwrap());
+        };
+        digests("fleet-admin");
+        assert!(provision(&execution, host("host-admin"), d("fleet-admin")).is_err());
+        digests("host-admin");
+        assert!(provision(&execution, host("host-admin"), d("fleet-admin")).is_err());
+        digests("gateway");
+        let (_, app) = provision(&execution, host("host-admin"), d("fleet-admin")).unwrap();
         for route in ["/v1/machines", "/v1/hosts", "/metrics", "/healthz"] {
             let response = app
                 .clone()

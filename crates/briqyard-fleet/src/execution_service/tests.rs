@@ -65,12 +65,12 @@ fn configured_fixture(
         std::time::Duration::from_secs(1),
     )
     .unwrap();
-    let host_administrator = host.token.clone();
+    let host_administrator = provision::digest(&host.token);
     let mut host_id = host.id;
     let mut credentials = Credentials {
         installer: "central-installer".into(),
         gateway: "gateway-only".into(),
-        administrator: "fleet-admin".into(),
+        administrator: provision::digest("fleet-admin"),
         host_administrator,
     };
     configure(&mut host_id, &mut credentials);
@@ -79,7 +79,7 @@ fn configured_fixture(
         transport,
         host_id,
         credentials,
-        "fleet-admin",
+        provision::digest("fleet-admin"),
         TrustConfig {
             keys: vec![VerificationKey {
                 kid: "central".into(),
@@ -111,14 +111,14 @@ fn constructor_checks_actual_host_and_fleet_administrator_credentials() {
                 if change == 0 {
                     *host_id = "another-host".into();
                 } else if change < 3 {
-                    credentials.host_administrator = "unrelated-placeholder".into();
+                    credentials.host_administrator = provision::digest("unrelated-placeholder");
                     if change == 1 {
                         credentials.installer = "host-admin".into();
                     } else {
                         credentials.gateway = "host-admin".into();
                     }
                 } else {
-                    credentials.administrator = "unrelated-placeholder".into();
+                    credentials.administrator = provision::digest("unrelated-placeholder");
                     if change == 3 {
                         credentials.installer = "fleet-admin".into();
                     } else {
@@ -555,8 +555,8 @@ fn credential_configuration_refuses_reuse_and_empty_values() {
     let c = Credentials {
         installer: "i".into(),
         gateway: "g".into(),
-        administrator: "a".into(),
-        host_administrator: "h".into(),
+        administrator: provision::digest("a"),
+        host_administrator: provision::digest("h"),
     };
     assert!(valid_credentials(&c));
     for (i, g, a, h) in [
@@ -569,8 +569,8 @@ fn credential_configuration_refuses_reuse_and_empty_values() {
         assert!(!valid_credentials(&Credentials {
             installer: i.into(),
             gateway: g.into(),
-            administrator: a.into(),
-            host_administrator: h.into()
+            administrator: provision::digest(a),
+            host_administrator: provision::digest(h)
         }));
     }
 }

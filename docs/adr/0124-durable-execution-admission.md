@@ -564,8 +564,11 @@ Mac unit checks or a mock guest do not qualify these paths.
 
 `briqyard-fleet --config <file> authority` branches before normal fleet configuration,
 registry state, AppState construction or background tasks. Its separate strict
-configuration requires `execution`, `host_tls_fingerprint`,
-`host_administrator_file` and `fleet_administrator_file`. No fields have defaults.
+configuration requires `execution`, `host_tls_fingerprint` and, per administrator role, a
+SHA-256 digest (`host_administrator_sha256`, `fleet_administrator_sha256`; the process never
+presents an administrator bearer, so it needs only the digest) or, for one more release, the
+bearer file (`host_administrator_file`, `fleet_administrator_file`). Exactly one form per role.
+No other fields have defaults.
 Fleet management, registry, placement, bootstrap, backup, administrator listener
 and metrics fields are rejected. The configured file must already exist.
 
