@@ -1,6 +1,59 @@
 use super::*;
 
 #[test]
+fn embedded_bootstrap_is_the_assembled_standalone_script() {
+    let assembled = concat!(
+        include_str!("../../../../hack/bootstrap/host.sh"),
+        "\n",
+        include_str!("../../../../hack/bootstrap/runtime.sh"),
+        "\n",
+        include_str!("../../../../hack/bootstrap/install.sh"),
+    );
+    assert_eq!(SCRIPT, assembled);
+    let delivered = script(&Default::default()).unwrap();
+    assert_eq!(delivered, assembled);
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("bootstrap.sh");
+    std::fs::write(&input, delivered).unwrap();
+    // SSH sends stdin; the receiving host has no checkout or adjacent fragments.
+    let output = std::process::Command::new("bash")
+        .arg("-s")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("BRIQYARD_RUNTIME_CLASSES", "bogus")
+        .current_dir(dir.path())
+        .stdin(std::fs::File::open(input).unwrap())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "BRIQYARD_RUNTIME_CLASSES: bogus is not a class the release builds (nested)\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn a_custom_bootstrap_remains_verbatim_and_missing_files_fail() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("custom.sh");
+    let custom = "#!/bin/bash\nprintf 'custom bootstrap\\n'\n";
+    std::fs::write(&path, custom).unwrap();
+    let config = crate::config::Bootstrap {
+        script: path.clone(),
+        ..Default::default()
+    };
+    assert_eq!(script(&config).unwrap(), custom);
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(
+        script(&config).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+}
+
+#[test]
 fn bootstrap_config_creation_preserves_existing_operator_warm_policy() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.yaml");

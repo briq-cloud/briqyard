@@ -26,6 +26,22 @@ dispatch can select `two_hosts_only` for targeted validation
 
 The `scale` job of the `more-suites` matrix runs `hack/native-ci-scale.sh` on its own runner (9 checks, [ADR 0099](adr/0099-leaf-goes-with-its-vmm.md), [ADR 0109](adr/0109-scale-on-its-own-runner.md)): 6500 idle machine cgroups with no record and 60 of stopped machines, a daemon restart; the daemon must open its barrier, report memory protection healthy, accept a create and retire the leaves in background after serving within 480 s. It runs from the workflow revision, so a manual dispatch with an older `ref` runs it against that source.
 
+## Bootstrap source
+
+Edit `hack/bootstrap/host.sh` (host setup), `runtime.sh` (installation helpers),
+or `install.sh` (installation and activation), then regenerate the standalone artifact:
+
+```sh
+python3 hack/assemble-bootstrap.py
+python3 hack/assemble-bootstrap.py --check
+python3 -m unittest discover -s hack -p 'test_bootstrap*.py'
+```
+
+Commit `hack/bootstrap-host.sh` with the fragments. The fleet embeds this file;
+SSH, join delivery, raw downloads and native suites require no adjacent files.
+The test entry point also checks the assembly, so CI and release checks reject stale output.
+Suites live in `hack/bootstrap_tests/` ([ADR 0134](adr/0134-bootstrap-source-fragments.md)).
+
 ## Scoped execution native proof
 
 On a fresh disposable native CI runner, build the normal native artifacts plus:
