@@ -729,7 +729,16 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 all,
                 release,
                 runtime_classes,
+                stay_draining,
+                require_ready,
             } => {
+                if stay_draining || require_ready {
+                    let status: serde_json::Value = c.call(GET, "/v1/status", NONE).await?;
+                    anyhow::ensure!(
+                        status["prepared_upgrade_v1"] == true,
+                        "fleet does not advertise prepared_upgrade_v1; nothing dispatched"
+                    );
+                }
                 let ids = match (id, all) {
                     (Some(id), _) => vec![id],
                     (None, _) => {
@@ -744,6 +753,8 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 let req = api::UpgradeHostRequest {
                     release,
                     runtime_classes,
+                    stay_draining,
+                    require_ready,
                 };
                 for (i, id) in ids.iter().enumerate() {
                     eprintln!("{id}: upgrading");

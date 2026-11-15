@@ -388,9 +388,18 @@ fn host_upgrade_takes_a_host_or_all() {
             all,
             release,
             runtime_classes,
+            stay_draining,
+            require_ready,
         }) => assert_eq!(
-            (id.as_deref(), all, release.as_str(), runtime_classes.len()),
-            (Some("h_a"), false, "0.2.0", 0)
+            (
+                id.as_deref(),
+                all,
+                release.as_str(),
+                runtime_classes.len(),
+                stay_draining,
+                require_ready
+            ),
+            (Some("h_a"), false, "0.2.0", 0, false, false)
         ),
         _ => panic!("not an upgrade"),
     }
@@ -706,4 +715,23 @@ fn the_endpoint_and_image_tables() {
         "a short digest is whole: {}",
         lines[2]
     );
+}
+
+#[test]
+fn host_upgrade_can_wait_for_external_readmission() {
+    assert!(matches!(
+        parse(&[
+            "host",
+            "upgrade",
+            "h_a",
+            "--release",
+            "0.2.0",
+            "--stay-draining"
+        ])
+        .cmd,
+        Cmd::Host(HostCmd::Upgrade {
+            stay_draining: true,
+            ..
+        })
+    ));
 }

@@ -208,6 +208,7 @@
           allOf: [{ $ref: "#/components/schemas/RuntimeObservation" }]
           description: "Serving runtime identity; absent on older daemons or unresolved recovery. Not a maintenance permit."
         egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
+        prepared_upgrade_v1: { type: boolean, default: false, description: "fleet with embedded bootstrap only: upgrade prepares with unchanged admission, withdraws only at activation, honors stay_draining on success and checks require_ready at ownership (ADR 0136). Callers MUST require true before sending stay_draining; older fleets ignore unknown request fields" }
         placement_admission_v1: { type: boolean, default: false, description: "fleet: it serves `/v1/namespaces/{namespace}/admissions/{request_id}` (ADR 0128); absent means the route is not there (404), never capacity" }
         placement_spill_v1: { type: boolean, default: false, description: "fleet: the admission body accepts `spill_when_busy` (ADR 0130); absent means it does not, and the body is refused" }
         named_memory_fork_v1: { type: boolean, default: false, description: "explicit availability of configured named memory cloning; supported profiles are listed separately; absent or stale reports are unsupported" }
@@ -262,6 +263,8 @@
       type: object
       required: [release]
       properties:
+        require_ready: { type: boolean, default: false, description: "refuse unless the host is ready when the upgrade takes ownership, before preparation. Requires prepared_upgrade_v1=true; prevents a concurrent manual drain from being taken over. Omitted/false allows ready or draining as before" }
+        stay_draining: { type: boolean, default: false, description: "keep the host draining after success for external verification; requires prepared_upgrade_v1=true on the running fleet. Absent or false restores the original state. Custom bootstrap refuses true. Explicit host undrain readmits after checks; never replay an ambiguous upgrade" }
         release: { type: string, description: "a URL where `<binary>-linux-<arch>` are, or a version of the project's releases (`0.2.0`, `v0.2.0`)" }
         runtime_classes:
           type: array

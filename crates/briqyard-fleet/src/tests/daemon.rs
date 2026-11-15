@@ -203,6 +203,7 @@ pub(super) async fn start_daemon_on(
         let figures = *d.boot_figures.lock().unwrap();
         let ms = d.machines.lock().unwrap();
         Json(api::Status {
+            prepared_upgrade_v1: false,
             observation: None,
             memory_policy: None,
             egress_siblings_v1: d.egress_siblings.load(Ordering::SeqCst),

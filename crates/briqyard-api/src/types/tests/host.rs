@@ -130,6 +130,8 @@ fn upgrade_request() {
     let r: UpgradeHostRequest = same(json!({"release": "0.2.0"}));
     assert_eq!(r.release, "0.2.0");
     assert!(r.runtime_classes.is_empty());
+    assert!(!r.stay_draining);
+    assert!(!r.require_ready);
     assert!(serde_json::from_value::<UpgradeHostRequest>(json!({})).is_err());
     // Classes to enable travel with the release; none are left out of the body.
     let r: UpgradeHostRequest = same(json!({"release": "0.2.0", "runtime_classes": ["nested"]}));
@@ -236,4 +238,32 @@ fn api_error() {
     // A cursor too old for the log names the oldest seq kept.
     let e: ApiError = same(json!({"error": "since 3 is gone", "code": "gone", "oldest": 120}));
     assert_eq!(e.oldest, Some(120));
+}
+
+#[test]
+fn upgrade_completion_policy_is_explicit() {
+    let explicit: UpgradeHostRequest =
+        serde_json::from_value(json!({"release":"0.2.0", "stay_draining":false})).unwrap();
+    assert!(!explicit.stay_draining);
+    let r: UpgradeHostRequest = same(json!({"release":"0.2.0", "stay_draining":true}));
+    assert!(r.stay_draining);
+    for bad in [json!(null), json!("true"), json!(1)] {
+        assert!(serde_json::from_value::<UpgradeHostRequest>(
+            json!({"release":"0.2.0", "stay_draining":bad})
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn ready_precondition_is_optional_and_typed() {
+    let r: UpgradeHostRequest = same(json!({"release":"0.2.0", "require_ready":true}));
+    assert!(r.require_ready);
+    assert!(
+        !serde_json::from_value::<UpgradeHostRequest>(
+            json!({"release":"0.2.0", "require_ready":false})
+        )
+        .unwrap()
+        .require_ready
+    );
 }

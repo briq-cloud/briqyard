@@ -221,6 +221,13 @@ pub struct UpgradeHostRequest {
     /// empty: the host's classes as they are.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_classes: Vec<String>,
+    /// Keep draining after success for external verification (ADR 0136). Requires the
+    /// fleet's prepared_upgrade_v1 capability; absent or false restores the original state.
+    #[serde(default, skip_serializing_if = "super::limits::is_false")]
+    pub stay_draining: bool,
+    /// Refuse unless ready when the upgrade takes ownership. Requires prepared_upgrade_v1.
+    #[serde(default, skip_serializing_if = "super::limits::is_false")]
+    pub require_ready: bool,
 }
 
 /// POST /v1/hosts (fleet only): a server bought by hand, for the fleet to bootstrap.
@@ -326,6 +333,9 @@ impl std::fmt::Debug for HostKey {
 /// GET /v1/status.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Status {
+    /// Fleet with embedded bootstrap: preparation retains admission; completion and ready preconditions are honored.
+    #[serde(default, skip_serializing_if = "super::limits::is_false")]
+    pub prepared_upgrade_v1: bool,
     /// Serving runtime identity; absent on older daemons or unresolved recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation: Option<RuntimeObservation>,

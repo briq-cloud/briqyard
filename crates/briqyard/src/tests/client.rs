@@ -339,3 +339,61 @@ async fn an_inherited_restore_policy_is_never_sent_to_a_legacy_server() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].path, "/v1/status");
 }
+
+#[tokio::test]
+async fn stay_draining_requires_exact_fleet_capability_before_dispatch() {
+    for value in [
+        serde_json::json!({}),
+        serde_json::json!({"prepared_upgrade_v1":false}),
+        serde_json::json!({"prepared_upgrade_v1":"true"}),
+    ] {
+        let body = value.to_string();
+        for flags in [
+            vec!["--stay-draining"],
+            vec!["--require-ready"],
+            vec!["--stay-draining", "--require-ready"],
+        ] {
+            let (url, seen) = stub(vec![(StatusCode::OK, JSON.to_vec(), &body)]).await;
+            let mut args = vec!["host", "upgrade", "h_a", "--release", "0.2.0"];
+            args.extend(flags);
+            let cmd = parse(&args).cmd;
+            assert!(run::run(&client(&url, None), cmd)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("nothing dispatched"));
+            let seen = seen.seen.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].path, "/v1/status");
+        }
+    }
+    let host = serde_json::json!({"id":"h_a","url":"http://host", "state":"draining", "capacity":{"memory_mb":4096,"vcpus":1}, "used":{"memory_mb":0,"vcpus":0},"machines":0,"last_seen":"2026-11-15T00:00:00Z"}).to_string();
+    let (url, seen) = stub(vec![
+        (
+            StatusCode::OK,
+            JSON.to_vec(),
+            r#"{"prepared_upgrade_v1":true}"#,
+        ),
+        (StatusCode::OK, JSON.to_vec(), &host),
+    ])
+    .await;
+    let cmd = parse(&[
+        "host",
+        "upgrade",
+        "h_a",
+        "--release",
+        "0.2.0",
+        "--stay-draining",
+        "--require-ready",
+        "--runtime-class",
+        "nested",
+    ])
+    .cmd;
+    run::run(&client(&url, None), cmd).await.unwrap();
+    let seen = seen.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&seen[1].body).unwrap(),
+        serde_json::json!({"release":"0.2.0","stay_draining":true,"require_ready":true,"runtime_classes":["nested"]})
+    );
+}

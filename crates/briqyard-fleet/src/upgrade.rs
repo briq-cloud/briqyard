@@ -3,7 +3,8 @@
 //! `upgrading` (placement stops). The bootstrap activates the prepared release (the one install path: the binaries, then the daemon hands its
 //! machines over to the new one), and the upgrade waits for a heartbeat from a new start of
 //! the installed version that adopted every machine left running. Then the host is back in the
-//! state it had; a failure leaves it `draining`, the reason in its note. One upgrade at a time.
+//! state it had, or stays `draining` when requested for external verification (ADR 0136).
+//! A failure after withdrawal leaves it `draining`, the reason in its note. One upgrade at a time.
 //!
 //! The upgrade runs in a task of its own that the request waits on: a caller that hangs up
 //! leaves it to finish, never a host half-moved.
@@ -26,6 +27,13 @@ pub async fn upgrade_host(
     Path(id): Path<String>,
     Json(req): Json<api::UpgradeHostRequest>,
 ) -> Result<Response, Refusal> {
+    if (req.stay_draining || req.require_ready) && !st.cfg.bootstrap.script.as_os_str().is_empty() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            "stay_draining and require_ready need the embedded prepared upgrade contract",
+        ));
+    }
     let release = bootstrap::release_url(&req.release).ok_or_else(|| {
         err(
             StatusCode::BAD_REQUEST,
@@ -71,6 +79,13 @@ pub async fn upgrade_host(
             .hosts
             .get(&id)
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "host not found"))?;
+        if req.require_ready && h.state != "ready" {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "conflict",
+                "require_ready: host is not ready; nothing prepared or activated",
+            ));
+        }
         if !matches!(h.state.as_str(), "ready" | "draining") {
             return Err(err(
                 StatusCode::CONFLICT,
@@ -108,7 +123,7 @@ pub async fn upgrade_host(
             .map(|(_, activate)| activate.as_str())
             .unwrap_or(&env);
         let outcome = run(&st, &current, &release, activation).await;
-        finish(&st, &was, &release, outcome).await
+        finish(&st, &was, &release, req.stay_draining, outcome).await
     });
     match task.await {
         Ok(Ok(host)) => Ok(Json(host).into_response()),
@@ -229,11 +244,12 @@ pub async fn come_back(
     }
 }
 
-/// The host back in the state it had, or `draining` with why.
+/// Restore the original state unless external verification was requested; failures drain.
 pub async fn finish(
     st: &AppState,
     was: &crate::registry::HostRec,
     release: &str,
+    stay_draining: bool,
     outcome: Result<(String, api::DaemonStart), String>,
 ) -> Result<api::Host, String> {
     let when = Utc::now().to_rfc3339();
@@ -244,7 +260,11 @@ pub async fn finish(
         };
         match &outcome {
             Ok((version, started)) => {
-                h.state = was.state.clone();
+                h.state = if stay_draining {
+                    "draining".into()
+                } else {
+                    was.state.clone()
+                };
                 h.note = format!(
                     "upgraded to {version} at {when}; machines handed over: {}",
                     started.adopted
