@@ -547,7 +547,7 @@ paths:
       summary: Remove the network of a namespace with no machine left, and its gateway
       responses:
         "204": { description: removed }
-        "409": { description: "`namespace_in_use`: the namespace still has machines" }
+        "409": { description: "`namespace_in_use`: the namespace still has machines; `namespace_protected`: a command granted through the namespace may still run, so its network cannot be removed yet (`Retry-After`, in seconds; at most about 65 s)" }
   /v1/namespaces/{id}/gateway:
     parameters: [{ $ref: "#/components/parameters/id" }]
     put:

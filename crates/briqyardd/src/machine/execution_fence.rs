@@ -12,6 +12,16 @@ const MAX_PENDING: usize = 4_096;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const CLOCK_UNCERTAINTY_MS: u64 = 5_000;
 
+/// A namespace's network cannot change yet: a command granted through it may still run.
+/// Expected and short (the command deadline plus the clock margin), so the API answers
+/// 409 `namespace_protected` with the wait, not a 500.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("namespace protected through command deadline")]
+pub struct NamespaceProtected {
+    /// Milliseconds until the protection can no longer hold, counted from the refusal.
+    pub retry_after_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GenerationSnapshot(pub Vec<(String, u64)>);
@@ -212,13 +222,15 @@ impl ExecutionFence {
         );
         if mode == MutationMode::Broaden {
             for name in namespaces {
-                anyhow::ensure!(
-                    self.record
-                        .protected_until_ms
-                        .get(name)
-                        .is_none_or(|end| now_ms.saturating_sub(CLOCK_UNCERTAINTY_MS) > *end),
-                    "namespace protected through command deadline"
-                );
+                if let Some(end) = self.record.protected_until_ms.get(name) {
+                    let free_at = end.saturating_add(CLOCK_UNCERTAINTY_MS);
+                    if now_ms <= free_at {
+                        return Err(NamespaceProtected {
+                            retry_after_ms: free_at - now_ms + 1,
+                        }
+                        .into());
+                    }
+                }
             }
         }
         let mut next = self.record.clone();
@@ -652,9 +664,14 @@ mod tests {
         assert!(fence.protect(&store, &first, 20_000, 10_001).is_err());
         let second = fence.snapshot(&store, &a, 10_001).unwrap();
         fence.protect(&store, &second, 20_000, 10_001).unwrap();
-        assert!(fence
+        let refused = fence
             .begin_mutation(&store, &a, MutationMode::Broaden, 25_000)
-            .is_err());
+            .unwrap_err();
+        // Protected through 20_000 plus the clock margin: free after 25_000.
+        assert_eq!(
+            refused.downcast_ref::<NamespaceProtected>(),
+            Some(&NamespaceProtected { retry_after_ms: 1 })
+        );
         assert!(fence
             .begin_mutation(&store, &a, MutationMode::Broaden, 24_000)
             .is_err());
