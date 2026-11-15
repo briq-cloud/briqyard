@@ -55,7 +55,7 @@ pub mod condition {
 /// A host condition as the daemon's tick last found it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Condition {
-    /// One of `condition::ALL`.
+    /// One of `condition::ALL`, or the name of a `conditions.probes` entry.
     #[serde(rename = "type")]
     pub kind: String,
     pub status: bool,
@@ -63,11 +63,34 @@ pub struct Condition {
     pub since: DateTime<Utc>,
     /// The figures it was decided on.
     pub message: String,
+    /// What a true condition asks of placement; absent is a pressure: nothing new is placed
+    /// on the host (ADR 0021).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<ConditionEffect>,
 }
 
-/// The first condition that is true, if any.
+/// The effect of a true condition on placement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionEffect {
+    /// A new namespace prefers another host, and still lands here when none is better (ADR 0133).
+    Avoid,
+}
+
+impl Condition {
+    pub fn is_avoid(&self) -> bool {
+        self.effect == Some(ConditionEffect::Avoid)
+    }
+}
+
+/// The first condition that is true and a pressure, if any: an `avoid` condition is not.
 pub fn under_pressure(conditions: &[Condition]) -> Option<&Condition> {
-    conditions.iter().find(|c| c.status)
+    conditions.iter().find(|c| c.status && !c.is_avoid())
+}
+
+/// Whether a true condition asks that new namespaces go elsewhere when they can (ADR 0133).
+pub fn avoided(conditions: &[Condition]) -> bool {
+    conditions.iter().any(|c| c.status && c.is_avoid())
 }
 
 /// A running machine's use over the tick's last window (ADR 0021). `GET /v1/top`.

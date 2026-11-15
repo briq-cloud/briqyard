@@ -395,7 +395,8 @@ mod tests {
             c.conditions,
             Conditions {
                 memory_pct: 95,
-                disk_free_pct: 10
+                disk_free_pct: 10,
+                probes: Vec::new(),
             }
         );
         assert_eq!(c.console_max_mb, 64);

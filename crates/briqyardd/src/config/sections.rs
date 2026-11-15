@@ -27,14 +27,17 @@ pub struct Templates {
     pub sandbox_recipes: Vec<SandboxRecipe>,
 }
 
-/// The thresholds of the host's conditions (ADR 0021), in percent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+/// The thresholds of the host's conditions (ADR 0021), in percent, and the probes of
+/// services the host runs (ADR 0133).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Conditions {
     /// `memory_pressure`: committed memory over this share of capacity.
     pub memory_pct: u32,
     /// `disk_pressure`: the pool's free space under this share of its size.
     pub disk_free_pct: u32,
+    /// Services of the host the daemon asks over HTTP; empty: none.
+    pub probes: Vec<Probe>,
 }
 
 impl Default for Conditions {
@@ -42,6 +45,34 @@ impl Default for Conditions {
         Self {
             memory_pct: 95,
             disk_free_pct: 10,
+            probes: Vec::new(),
+        }
+    }
+}
+
+/// A local service the daemon asks every `interval_sec` (ADR 0133). Its condition, named
+/// `name`, is true after `failures` misses in a row: a new namespace then goes to another
+/// host when one can take it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Probe {
+    /// The condition's type: a letter, then letters, digits and `_`, at most 63.
+    pub name: String,
+    /// A URL asked with GET; a miss is anything but a 200, no answer, or one too late.
+    pub http: String,
+    pub interval_sec: u64,
+    pub timeout_sec: u64,
+    pub failures: u32,
+}
+
+impl Default for Probe {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            http: String::new(),
+            interval_sec: 15,
+            timeout_sec: 5,
+            failures: 3,
         }
     }
 }
@@ -495,7 +526,8 @@ console_max_mb: 16
             c.conditions,
             Conditions {
                 memory_pct: 90,
-                disk_free_pct: 20
+                disk_free_pct: 20,
+                probes: Vec::new(),
             }
         );
         assert_eq!(c.console_max_mb, 16);

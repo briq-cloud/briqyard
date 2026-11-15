@@ -221,8 +221,14 @@ impl HostRec {
         self.capacity.memory_mb.saturating_sub(self.used.memory_mb)
     }
 
+    /// Whether a probed service of the host is down (ADR 0133): a new namespace goes elsewhere
+    /// when another host can take it. Not a refusal: `takes_new_namespaces` ignores it.
+    pub fn avoided(&self) -> bool {
+        api::avoided(&self.conditions)
+    }
+
     /// Which of two hosts a new namespace prefers once the other keys tie (ADR
-    /// 0132): `Greater` is the host to pick. The lower share of memory
+    /// 0132, 0133): `Greater` is the host to pick. The host that is not avoided, then the lower share of memory
     /// used, compared exactly by cross-multiplication (holds are in `used`), then the more free
     /// memory, then the lower id. A host without memory capacity counts as full.
     pub fn load_order(&self, other: &HostRec) -> std::cmp::Ordering {
@@ -232,8 +238,12 @@ impl HostRec {
         };
         let ((used_a, cap_a), (used_b, cap_b)) = (share(self), share(other));
         // used_a / cap_a < used_b / cap_b: self is the emptier.
-        (u128::from(used_b) * u128::from(cap_a))
-            .cmp(&(u128::from(used_a) * u128::from(cap_b)))
+        (!self.avoided())
+            .cmp(&!other.avoided())
+            .then_with(|| {
+                (u128::from(used_b) * u128::from(cap_a))
+                    .cmp(&(u128::from(used_a) * u128::from(cap_b)))
+            })
             .then_with(|| self.free_memory_mb().cmp(&other.free_memory_mb()))
             .then_with(|| other.id.cmp(&self.id))
     }
@@ -313,6 +323,7 @@ impl HostRec {
                 status: true,
                 since: self.last_seen,
                 message: "host memory accounting policy or pending holds unresolved".into(),
+                effect: None,
             });
         }
 

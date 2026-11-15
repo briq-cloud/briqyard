@@ -86,6 +86,7 @@ fn condition(kind: &str, status: bool) -> Condition {
         status,
         since: Utc::now(),
         message: "pool 4.0 GB free of 100.0 (4%), under 10%".into(),
+        effect: None,
     }
 }
 
@@ -970,4 +971,69 @@ fn an_empty_draining_host_loses_to_a_loaded_ready_one() {
             .as_deref(),
         Some("loaded")
     );
+}
+
+/// A true `avoid` condition, as a probe of the daemon reports it.
+fn avoid(status: bool) -> Condition {
+    Condition {
+        effect: Some(api::ConditionEffect::Avoid),
+        message: "GET http://127.0.0.1:9/health: connection refused, 3 misses".into(),
+        ..condition("registry", status)
+    }
+}
+
+#[test]
+fn a_new_namespace_prefers_a_host_that_is_not_avoided_but_still_lands_on_one() {
+    let now = Utc::now();
+    let mut reg = Registry::default();
+    let mut emptier = host("a", 100_000, 10_000, 1);
+    emptier.conditions = vec![avoid(true)];
+    reg.heartbeat(emptier, now);
+    reg.heartbeat(host("b", 100_000, 60_000, 6), now);
+    let p = Policy::default();
+    assert!(reg.hosts["a"].avoided());
+    assert!(reg.hosts["a"].pressure().is_none(), "not a pressure");
+    assert!(reg.hosts["a"].takes_new_namespaces(&p));
+    assert_eq!(reg.place("t1", "", 512, 0, 0, &p).as_deref(), Some("b"));
+    // Every host avoided: the share decides again.
+    reg.hosts.get_mut("b").unwrap().conditions = vec![avoid(true)];
+    assert_eq!(reg.place("t2", "", 512, 0, 0, &p).as_deref(), Some("a"));
+    // A host whose probe recovered counts as before.
+    reg.hosts.get_mut("b").unwrap().conditions = vec![avoid(false)];
+    assert_eq!(reg.place("t3", "", 512, 0, 0, &p).as_deref(), Some("b"));
+}
+
+#[test]
+fn a_namespace_pinned_to_an_avoided_host_stays_and_may_create() {
+    let now = Utc::now();
+    let mut reg = Registry::default();
+    reg.heartbeat(host("a", 100_000, 10_000, 1), now);
+    reg.heartbeat(host("b", 100_000, 60_000, 6), now);
+    let p = Policy::default();
+    assert_eq!(reg.place("t1", "", 512, 0, 0, &p).as_deref(), Some("a"));
+    reg.hosts.get_mut("a").unwrap().conditions = vec![avoid(true)];
+    assert_eq!(reg.place("t1", "", 512, 0, 0, &p).as_deref(), Some("a"));
+    assert!(
+        reg.hosts["a"].pressure().is_none(),
+        "creates are not refused"
+    );
+    // A pressure still refuses.
+    reg.hosts.get_mut("a").unwrap().conditions =
+        vec![avoid(true), condition(api::condition::DISK_PRESSURE, true)];
+    assert!(reg.hosts["a"].pressure().is_some());
+}
+
+#[test]
+fn a_condition_without_an_effect_is_a_pressure() {
+    let old =
+        r#"{"type":"disk_pressure","status":true,"since":"2026-11-01T00:00:00Z","message":"m"}"#;
+    let c: Condition = serde_json::from_str(old).unwrap();
+    assert_eq!(c.effect, None);
+    assert!(api::under_pressure(std::slice::from_ref(&c)).is_some());
+    assert!(!api::avoided(std::slice::from_ref(&c)));
+    assert!(!serde_json::to_string(&c).unwrap().contains("effect"));
+    let new = r#"{"type":"registry","status":true,"since":"2026-11-01T00:00:00Z","message":"m","effect":"avoid"}"#;
+    let c: Condition = serde_json::from_str(new).unwrap();
+    assert!(api::under_pressure(std::slice::from_ref(&c)).is_none());
+    assert!(api::avoided(&[c]));
 }

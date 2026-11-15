@@ -1,5 +1,6 @@
 //! The host's conditions (ADR 0021): memory and disk pressure, decided by the tick on what it
-//! measured, and a stalled pool (ADR 0046). Each is a pressure: true is trouble.
+//! measured, and a stalled pool (ADR 0046). Each is a pressure: true is trouble. A probe of a
+//! local service (ADR 0133) is a condition too, with the effect `avoid`: not a refusal.
 
 use crate::config;
 use crate::zfs::Pool;
@@ -16,7 +17,15 @@ pub struct Conditions {
 
 impl Conditions {
     /// Every condition false since `now`: the daemon's start, until a tick says otherwise.
-    pub fn new(now: DateTime<Utc>) -> Self {
+    /// A probe's condition is listed from the start, as `avoid`.
+    pub fn new(now: DateTime<Utc>, probes: &[config::Probe]) -> Self {
+        let probed = probes.iter().map(|p| api::Condition {
+            kind: p.name.clone(),
+            status: false,
+            since: now,
+            message: "not measured yet".into(),
+            effect: Some(api::ConditionEffect::Avoid),
+        });
         Self {
             list: condition::ALL
                 .iter()
@@ -29,7 +38,9 @@ impl Conditions {
                     status: false,
                     since: now,
                     message: "not measured yet".into(),
+                    effect: None,
                 })
+                .chain(probed)
                 .collect(),
         }
     }
@@ -105,6 +116,59 @@ pub fn storage(stalled: Option<(std::time::Duration, String)>) -> (bool, String)
     }
 }
 
+/// What a probe has seen: its misses in a row.
+#[derive(Debug, Default)]
+pub struct ProbeRun {
+    misses: u32,
+}
+
+impl ProbeRun {
+    /// Takes one answer: true after `failures` misses in a row, false on the first success. The
+    /// message says what was asked and what went wrong, never what came back.
+    pub fn observe(&mut self, p: &config::Probe, answer: Result<(), String>) -> (bool, String) {
+        match answer {
+            Ok(()) => {
+                self.misses = 0;
+                (false, format!("GET {} answered 200", p.http))
+            }
+            Err(why) => {
+                self.misses = self.misses.saturating_add(1);
+                let msg = format!(
+                    "GET {}: {why}, {} of {} misses",
+                    p.http,
+                    self.misses.min(p.failures),
+                    p.failures
+                );
+                (self.misses >= p.failures, msg)
+            }
+        }
+    }
+}
+
+/// The client of the probes: a redirect is a miss, and one probe waits `timeout_sec` at most.
+pub fn probe_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("http client")
+}
+
+/// Asks the service once: a 200 is up, anything else says why not.
+pub async fn probe_once(client: &reqwest::Client, p: &config::Probe) -> Result<(), String> {
+    let sent = client
+        .get(&p.http)
+        .timeout(std::time::Duration::from_secs(p.timeout_sec))
+        .send()
+        .await;
+    match sent {
+        Ok(r) if r.status() == reqwest::StatusCode::OK => Ok(()),
+        Ok(r) => Err(format!("answered {}", r.status().as_u16())),
+        Err(e) if e.is_timeout() => Err(format!("no answer in {} s", p.timeout_sec)),
+        Err(e) if e.is_connect() => Err("connection failed".into()),
+        Err(_) => Err("request failed".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +180,7 @@ mod tests {
     const DEFAULT: config::Conditions = config::Conditions {
         memory_pct: 95,
         disk_free_pct: 10,
+        probes: Vec::new(),
     };
 
     #[test]
@@ -182,7 +247,7 @@ mod tests {
 
     #[test]
     fn a_condition_changes_once_and_keeps_its_message_fresh() {
-        let mut c = Conditions::new(t("2026-10-21T10:00:00Z"));
+        let mut c = Conditions::new(t("2026-10-21T10:00:00Z"), &[]);
         assert_eq!(api::under_pressure(&c.list()), None);
         assert_eq!(c.list().len(), 3);
         // The same status: no change, the message follows the figures.
@@ -222,5 +287,129 @@ mod tests {
             c.set("pid_pressure", (true, String::new()), Utc::now()),
             None
         );
+    }
+
+    fn probe(failures: u32) -> config::Probe {
+        config::Probe {
+            name: "registry".into(),
+            http: "http://127.0.0.1:5000/v2/".into(),
+            failures,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_probe_is_true_after_its_misses_in_a_row_and_false_on_one_success() {
+        let p = probe(3);
+        let mut run = ProbeRun::default();
+        let miss = || Err("connection failed".to_string());
+        assert!(!run.observe(&p, miss()).0);
+        let (on, msg) = run.observe(&p, miss());
+        assert!(!on);
+        assert_eq!(
+            msg,
+            "GET http://127.0.0.1:5000/v2/: connection failed, 2 of 3 misses"
+        );
+        // A success in between starts the count again.
+        assert!(!run.observe(&p, Ok(())).0);
+        assert!(!run.observe(&p, miss()).0);
+        assert!(!run.observe(&p, miss()).0);
+        assert!(run.observe(&p, miss()).0);
+        assert!(run.observe(&p, Err("answered 503".into())).0);
+        let (on, msg) = run.observe(&p, Ok(()));
+        assert!(!on);
+        assert_eq!(msg, "GET http://127.0.0.1:5000/v2/ answered 200");
+    }
+
+    #[test]
+    fn a_probe_condition_is_listed_as_avoid_and_is_not_a_pressure() {
+        let mut c = Conditions::new(t("2026-11-15T10:00:00Z"), &[probe(1)]);
+        let listed = c.list();
+        assert_eq!(listed.len(), 4);
+        let mine = listed.iter().find(|c| c.kind == "registry").unwrap();
+        assert_eq!(mine.effect, Some(api::ConditionEffect::Avoid));
+        let on = c
+            .set("registry", (true, "down".into()), t("2026-11-15T10:00:15Z"))
+            .unwrap();
+        assert!(on.status);
+        assert_eq!(api::under_pressure(&c.list()), None);
+        assert!(api::avoided(&c.list()));
+    }
+
+    /// Answers each connection with the next canned reply, or none to hang up.
+    async fn serve(replies: Vec<Option<&'static str>>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/health", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            for reply in replies {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf).await;
+                if let Some(r) = reply {
+                    let _ = s.write_all(r.as_bytes()).await;
+                }
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn the_probe_asks_over_http_and_reports_what_failed() {
+        let ok = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok";
+        let down = "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 6\r\nconnection: close\r\n\r\nsecret";
+        let moved = "HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:1/\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+        let url = serve(vec![Some(ok), Some(down), Some(moved), None]).await;
+        let p = config::Probe {
+            http: url,
+            timeout_sec: 2,
+            ..probe(2)
+        };
+        let client = probe_client();
+        assert_eq!(probe_once(&client, &p).await, Ok(()));
+        assert_eq!(
+            probe_once(&client, &p).await,
+            Err("answered 503".to_string())
+        );
+        assert_eq!(
+            probe_once(&client, &p).await,
+            Err("answered 302".to_string())
+        );
+        assert_eq!(
+            probe_once(&client, &p).await,
+            Err("request failed".to_string())
+        );
+        // Nothing listens: the connection fails.
+        let gone = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}/", l.local_addr().unwrap())
+        };
+        let p = config::Probe { http: gone, ..p };
+        assert_eq!(
+            probe_once(&client, &p).await,
+            Err("connection failed".to_string())
+        );
+    }
+    #[tokio::test]
+    async fn a_probe_that_never_answers_ends_at_its_timeout() {
+        // Accepts and holds the connection without a byte back.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", l.local_addr().unwrap());
+        let held = tokio::spawn(async move {
+            let (_socket, _) = l.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let p = config::Probe {
+            http: url,
+            timeout_sec: 1,
+            ..probe(2)
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(
+            probe_once(&probe_client(), &p).await,
+            Err("no answer in 1 s".to_string())
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        held.abort();
     }
 }
