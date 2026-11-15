@@ -669,3 +669,52 @@ async fn a_heartbeat_carries_the_daemons_start() {
     f.st.reg.lock().unwrap().heartbeat(h.clone(), Utc::now());
     assert_eq!(hosts(&f.st)[0].started, h.started);
 }
+
+#[tokio::test]
+async fn slow_upgrade_preparation_keeps_the_host_ready() {
+    let f = fleet_with_key();
+    seed(&f.st, "h_a", 4096, 0, 0, &[]);
+    let was = f.st.reg.lock().unwrap().hosts["h_a"].clone();
+    let (downloading, download_started) = tokio::sync::oneshot::channel();
+    let (complete, completed) = tokio::sync::oneshot::channel();
+    let preparation = async {
+        downloading.send(()).unwrap();
+        completed.await.unwrap();
+        Ok(())
+    };
+    let observe = async {
+        download_started.await.unwrap();
+        assert_eq!(f.st.reg.lock().unwrap().hosts["h_a"].state, "ready");
+        complete.send(()).unwrap();
+    };
+    let (outcome, ()) = tokio::join!(
+        upgrade::prepare_before_withdraw(&f.st, &was, "file:///release", preparation),
+        observe
+    );
+    outcome.unwrap();
+    assert_eq!(f.st.reg.lock().unwrap().hosts["h_a"].state, "upgrading");
+}
+
+#[tokio::test]
+async fn failed_preparation_or_changed_host_state_never_activates() {
+    let f = fleet_with_key();
+    seed(&f.st, "h_a", 4096, 0, 0, &[]);
+    let was = f.st.reg.lock().unwrap().hosts["h_a"].clone();
+    let failed = async { Err("download failed".to_string()) };
+    assert!(
+        upgrade::prepare_before_withdraw(&f.st, &was, "file:///release", failed)
+            .await
+            .is_err()
+    );
+    assert_eq!(f.st.reg.lock().unwrap().hosts["h_a"].state, "ready");
+    let changed = async {
+        set_state(&f.st, "h_a", "retiring");
+        Ok(())
+    };
+    assert!(
+        upgrade::prepare_before_withdraw(&f.st, &was, "file:///release", changed)
+            .await
+            .is_err()
+    );
+    assert_eq!(f.st.reg.lock().unwrap().hosts["h_a"].state, "retiring");
+}

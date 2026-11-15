@@ -44,6 +44,19 @@ pub fn script(b: &crate::config::Bootstrap) -> std::io::Result<String> {
     }
 }
 
+/// Only the embedded installer implements the preparation protocol. Custom scripts
+/// keep their existing invocation; never assume they understand phase variables.
+pub fn upgrade_phases(b: &crate::config::Bootstrap, env: &str) -> Option<(String, String)> {
+    if !b.script.as_os_str().is_empty() {
+        return None;
+    }
+    let identity = new_token();
+    Some((
+        format!("{env} BRIQYARD_INSTALL_PHASE=prepare BRIQYARD_PREPARE_ID={identity}"),
+        format!("{env} BRIQYARD_INSTALL_PHASE=activate BRIQYARD_PREPARE_ID={identity}"),
+    ))
+}
+
 /// Where the project's releases are, `<RELEASES>/v<version>/briqyardd-linux-<arch>`.
 const RELEASES: &str = "https://github.com/briq-cloud/briqyard/releases/download";
 

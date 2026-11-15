@@ -341,7 +341,7 @@ cleanup_runtime_install() {
     if [ -z "$retained_sha" ] || ! runtime_assignment_compatible "$rollback/briqyardd" "$config_path" "$rollback/config.yaml" ||
        ! echo "$retained_sha  $rollback/briqyardd" | sha256sum -c --quiet -; then
       echo "   activation failed; retained daemon is incompatible with current state; compatible replacement left installed ($rollback)" >&2
-      rm -rf "$new"
+      [ -z "$new" ] || rm -rf "$new"
       [ -z "$candidate" ] || rm -f "$candidate"
       exit "$result"
     fi
@@ -359,9 +359,55 @@ cleanup_runtime_install() {
       echo "   activation failed; previous executables and configuration restored ($rollback)" >&2
     fi
   fi
-  rm -rf "$new"
+  [ -z "$new" ] || rm -rf "$new"
   [ -z "$candidate" ] || rm -f "$candidate"
   if [ -n "$rollback" ] && [ "$rollback_ready" = 0 ]; then rm -rf "$rollback"; fi
   exit "$result"
+}
+# One bounded, root-private preparation per host, protected by runtime-install.lock.
+# Receipt hashes bind the verified local files and config; they are not release signatures.
+prepared_receipt() {
+  python3 - "$1" "$prepared" "$prepare_id" "$RELEASE" "$ARCH" "$NESTED" "$KERNEL_URL" "$KERNEL_SHA256" <<'PYPREPARED'
+import hashlib, json, os, pathlib, stat, sys, time
+operation, directory, identity, *settings = sys.argv[1:]
+root = pathlib.Path(directory)
+config = root.parent / "config.yaml"
+def digest(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+def files():
+    result = {}
+    for path in root.rglob("*"):
+        info = path.lstat()
+        if path.is_symlink() or not (path.is_dir() or path.is_file()) or info.st_uid != os.geteuid():
+            raise ValueError("unsafe prepared file")
+        if path.is_file() and path != root / "receipt.json":
+            result[str(path.relative_to(root))] = digest(path)
+    return result
+try:
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise ValueError("unsafe preparation directory")
+    receipt = root / "receipt.json"
+    if operation == "write":
+        value = dict(schema=1, identity=identity, settings=settings, config=digest(config),
+                     created=time.time(), files=files())
+        receipt.write_text(json.dumps(value))
+        receipt.chmod(0o600)
+    else:
+        if receipt.is_symlink():
+            raise ValueError("unsafe receipt")
+        value = json.loads(receipt.read_bytes())
+        age = time.time() - value["created"]
+        if operation == "expire":
+            if not 3600 < age:
+                raise ValueError("another preparation owns host mutation; wait or explicitly discard it")
+        elif (value["schema"] != 1 or value["identity"] != identity
+              or value["settings"] != settings or value["config"] != digest(config)
+              or not 0 <= age <= 3600 or value["files"] != files()):
+            raise ValueError("stale or changed preparation")
+except Exception as error:
+    raise SystemExit("prepared upgrade refused: " + str(error)) from None
+PYPREPARED
 }
 # End runtime installation helpers.

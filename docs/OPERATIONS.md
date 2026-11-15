@@ -363,8 +363,9 @@ What one upgrade does (`POST /v1/hosts/{id}/upgrade`; the call answers when it i
 
 | Step | |
 |---|---|
+| Prepare | The embedded installer downloads and verifies release binaries, checked runtime, kernel and requested nested assets while the host retains its state. It reserves host installation and binds a one-use receipt to the files, release, pins, classes and current config |
 | `upgrading` | Placement stops; the host's machines are served |
-| Install | `hack/bootstrap-host.sh` over SSH with the release (`bootstrap.ssh_key`, the pinned host key), as at a bootstrap: packages, Firecracker and kernel pins, the binaries put in place by a rename, the unit |
+| Install | `hack/bootstrap-host.sh` over SSH with the release (`bootstrap.ssh_key`, the pinned host key), packages and host provisioning, then the exact prepared artifacts put in place by a rename, the unit. No artifact downloads in this phase |
 | Hand-over | The script sends the running daemon SIGUSR2: it stops accepting, drains for up to 2 s, exits 75 and leaves every machine running; the unit starts the new one at once, which adopts them. Its listeners stay in systemd's store meanwhile (ADR 0051) |
 | Back | `briqyardd --version` over SSH, then a heartbeat from a new start of that version that stopped nothing, within 5 minutes |
 | Undrained | The host is back in its state; its note says `upgraded to <version> at <time>; machines handed over: N` |
@@ -376,7 +377,7 @@ stopped and masked, `zfs_arc_max` set. A binary replaced without it (by hand) le
 `arc_ceiling_unverified`, …): the host serves its machines, takes nothing new, and the fleet
 places nothing there. Run the bootstrap, or the missing step, and the condition clears on the next tick.
 
-A failure leaves the host `draining` with the reason in its note: fix it, then
+A preparation failure leaves admission unchanged and returns its reason. After admission withdrawal, a failure leaves the host `draining` with the reason in its note: fix it, then
 `briqyard host undrain <id>`. `--all` stops at the first failure and names the hosts left. One
 upgrade at a time per fleet. A static host (`hosts:`) needs the fleet's SSH key in root's
 `authorized_keys`; its host key is pinned at its first upgrade. After a roll, set
@@ -387,6 +388,30 @@ A release is a URL where `<binary>-linux-<arch>` are (`briqyardd`, `briqyard-ini
 `SHA256SUMS-<arch>`, or a version of the project's releases; a
 private repository's is read with `bootstrap.release_token`. Without a fleet, on the host:
 `BRIQYARD_RELEASE=<url> bash bootstrap-host.sh` does the same install and hand-over.
+
+Standalone installation retains its provisioning and download flow. An installed host can
+also use the same preparation protocol directly. Set a fresh 32-character lowercase hex
+`BRIQYARD_PREPARE_ID`, `BRIQYARD_INSTALL_PHASE=prepare`, and `BRIQYARD_RELEASE` when running
+the current bootstrap. Then run it with the identical identity, release and runtime/kernel
+settings and `BRIQYARD_INSTALL_PHASE=activate`. Keep admission withdrawn during activation.
+`bootstrap.script` overrides retain their single invocation after withdrawal; custom scripts
+are not assumed to implement preparation.
+
+The root-private `/etc/briqyard/prepared-upgrade` reserves all current installer operations
+between phases. A completed receipt expires after one hour. A new install may remove an
+expired completed preparation under the installer lock. Changed config, files, identity,
+settings, symlinks or an expired receipt refuse activation. Activation consumes the receipt
+before provisioning; a lost response is never permission to replay it. A killed preparation
+or activation can leave this single directory without a usable receipt. Inspect the running
+installer, installed version, config and daemon start before recovery. With no installer
+running, take `/etc/briqyard/runtime-install.lock` exclusively and explicitly discard that
+directory before a fresh operation. Do not edit a receipt to resume it.
+
+Preparation changes no packages, firewall, live config, executables or guests. Package and
+host provisioning still occur after withdrawal and can perform network requests. Preparation
+is not zero downtime: long daemon streams still end at handover's bound, and admission for
+namespaces pinned to the host still needs a future handover mechanism.
+
 
 From v0.1.11, a release install requires the checked Firecracker bundle; a missing bundle is
 an error, with no fallback to upstream binaries. Both Firecracker and jailer are checked by

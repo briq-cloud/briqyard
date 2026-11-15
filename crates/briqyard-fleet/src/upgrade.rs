@@ -1,6 +1,6 @@
 //! `POST /v1/hosts/{id}/upgrade` (ADR 0027): a host's daemon moved to another release with its
-//! machines running. The host is `upgrading` (placement stops), the bootstrap script runs on
-//! it again with the release (the one install path: the binaries, then the daemon hands its
+//! machines running. Artifacts are prepared while admission is unchanged, then the host is
+//! `upgrading` (placement stops). The bootstrap activates the prepared release (the one install path: the binaries, then the daemon hands its
 //! machines over to the new one), and the upgrade waits for a heartbeat from a new start of
 //! the installed version that adopted every machine left running. Then the host is back in the
 //! state it had; a failure leaves it `draining`, the reason in its note. One upgrade at a time.
@@ -8,7 +8,7 @@
 //! The upgrade runs in a task of its own that the request waits on: a caller that hangs up
 //! leaves it to finish, never a host half-moved.
 
-use crate::{bootstrap, err, registry_error, AppState, Refusal};
+use crate::{bootstrap, err, AppState, Refusal};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -66,10 +66,10 @@ pub async fn upgrade_host(
         )
     })?;
     let was = {
-        let mut reg = st.reg.lock().unwrap();
+        let reg = st.reg.lock().unwrap();
         let h = reg
             .hosts
-            .get_mut(&id)
+            .get(&id)
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "host not found"))?;
         if !matches!(h.state.as_str(), "ready" | "draining") {
             return Err(err(
@@ -81,22 +81,33 @@ pub async fn upgrade_host(
                 ),
             ));
         }
-        let was = h.clone();
-        h.state = "upgrading".into();
-        h.note = format!("upgrading to {release}");
-        was
+        h.clone()
     };
-    if let Err(e) = st.save().await {
-        // Not recorded: nothing starts, and the host is as it was.
-        if let Some(h) = st.reg.lock().unwrap().hosts.get_mut(&id) {
-            (h.state, h.note) = (was.state.clone(), was.note.clone());
-        }
-        return Err(registry_error(e));
-    }
     let classes = req.runtime_classes;
     let task = tokio::spawn(async move {
         let _turn = turn;
-        let outcome = run(&st, &was, &release, &classes).await;
+        let env = bootstrap::upgrade_env(
+            &release,
+            &st.cfg.bootstrap.release_token,
+            &was.runtime_classes,
+            &classes,
+        );
+        // Custom bootstrap scripts retain their single invocation and drain-first contract.
+        let phases = bootstrap::upgrade_phases(&st.cfg.bootstrap, &env);
+        let preparation = async {
+            if let Some((prepare, _)) = &phases {
+                bootstrap::install(&st, &was.id, bootstrap::ssh_address(&was), prepare)
+                    .await
+                    .map_err(|e| format!("prepare: {e:#}"))?;
+            }
+            Ok(())
+        };
+        let current = prepare_before_withdraw(&st, &was, &release, preparation).await?;
+        let activation = phases
+            .as_ref()
+            .map(|(_, activate)| activate.as_str())
+            .unwrap_or(&env);
+        let outcome = run(&st, &current, &release, activation).await;
         finish(&st, &was, &release, outcome).await
     });
     match task.await {
@@ -110,24 +121,52 @@ pub async fn upgrade_host(
     }
 }
 
+/// Preparation leaves admission unchanged. Recheck ownership before withdrawing it:
+/// an operator may have drained or retired the host while downloads ran.
+pub(crate) async fn prepare_before_withdraw(
+    st: &AppState,
+    was: &crate::registry::HostRec,
+    release: &str,
+    preparation: impl std::future::Future<Output = Result<(), String>>,
+) -> Result<crate::registry::HostRec, String> {
+    preparation.await?;
+    let current = {
+        let mut reg = st.reg.lock().unwrap();
+        let h = reg
+            .hosts
+            .get_mut(&was.id)
+            .ok_or("host forgotten during preparation")?;
+        if h.state != was.state || h.url != was.url || h.ssh != was.ssh || h.token != was.token {
+            return Err(
+                "host state or identity changed during preparation; nothing activated".into(),
+            );
+        }
+        let current = h.clone();
+        h.state = "upgrading".into();
+        h.note = format!("upgrading to {release}");
+        current
+    };
+    if let Err(e) = st.save().await {
+        if let Some(h) = st.reg.lock().unwrap().hosts.get_mut(&was.id) {
+            (h.state, h.note) = (was.state.clone(), was.note.clone());
+        }
+        return Err(format!("record upgrade: {e:#}"));
+    }
+    Ok(current)
+}
+
 /// The steps; the version and start the host came back with, or why it did not.
 async fn run(
     st: &AppState,
     was: &crate::registry::HostRec,
     release: &str,
-    classes: &[String],
+    env: &str,
 ) -> Result<(String, api::DaemonStart), String> {
     // Over SSH where the bootstrap reached it: a host added by hand has an SSH address of its
     // own, the API on the private network.
     let ip = bootstrap::ssh_address(was).to_string();
     tracing::info!(host = was.id, release, "host upgrade");
-    let env = bootstrap::upgrade_env(
-        release,
-        &st.cfg.bootstrap.release_token,
-        &was.runtime_classes,
-        classes,
-    );
-    let installed = bootstrap::install(st, &was.id, &ip, &env)
+    let installed = bootstrap::install(st, &was.id, &ip, env)
         .await
         .map_err(|e| format!("install: {e:#}"))?;
     // What the install says of the SSH host key: pinned now (a static host's first upgrade),

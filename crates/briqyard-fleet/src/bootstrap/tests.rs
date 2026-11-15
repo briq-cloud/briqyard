@@ -637,3 +637,20 @@ fn host_keys_are_found_and_fingerprinted_as_ssh_keygen_does() {
         Vec::<String>::new()
     );
 }
+
+#[test]
+fn upgrade_phases_share_an_identity_and_custom_scripts_keep_one_invocation() {
+    let (prepare, activate) =
+        upgrade_phases(&Default::default(), "BRIQYARD_RELEASE='file:///r'").unwrap();
+    assert!(prepare.contains("BRIQYARD_INSTALL_PHASE=prepare"));
+    assert!(activate.contains("BRIQYARD_INSTALL_PHASE=activate"));
+    assert_eq!(
+        prepare.split("BRIQYARD_PREPARE_ID=").nth(1),
+        activate.split("BRIQYARD_PREPARE_ID=").nth(1)
+    );
+    let custom = crate::config::Bootstrap {
+        script: "custom.sh".into(),
+        ..Default::default()
+    };
+    assert!(upgrade_phases(&custom, "BRIQYARD_RELEASE='file:///r'").is_none());
+}

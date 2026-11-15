@@ -1,4 +1,6 @@
 import io
+import concurrent.futures
+import select
 import json
 import os
 from pathlib import Path
@@ -88,14 +90,131 @@ if os.environ.get("REJECT_CONFIG") == "1":
         script = '''set -euo pipefail
 fail() { echo "$*" >&2; exit 1; }
 put() { install -m 0755 "$1" "$2.new"; mv -f "$2.new" "$2"; }
-release_file() { cp "$RELEASE/$1" "$2"; }
-fetch() { cp "$KERNEL_URL" "$3"; echo "$2  $3" | sha256sum -c --quiet -; }
+host_provision() { printf provisioning > "$PROVISIONED"; }
+release_file() {
+  [ "${NO_ARTIFACT_NETWORK:-0}" != 1 ] || exit 99
+  if [ -n "${DOWNLOAD_SIGNAL:-}" ]; then
+    printf downloading > "$DOWNLOAD_SIGNAL"
+    IFS= read -r _ < "$DOWNLOAD_GATE"
+    unset DOWNLOAD_SIGNAL
+  fi
+  cp "$RELEASE/$1" "$2"; }
+fetch() { [ "${NO_ARTIFACT_NETWORK:-0}" != 1 ] || exit 99; cp "$KERNEL_URL" "$3"; echo "$2  $3" | sha256sum -c --quiet -; }
 ''' + HELPERS + section + '\n[ "${FAULT_AFTER_CONFIG:-0}" != 1 ] || false\nprintf handed-over > "$HANDOVER"\n'
         env = dict(os.environ, RELEASE=str(self.release), RELEASE_TOKEN="", ARCH="x86_64",
                    KERNEL_SHA256=self.kernel_sha, KERNEL_URL=str(self.root / "new-kernel"),
                    LIVE_CONFIG=str(self.config), OLD_CONFIG=str(self.old_config),
-                   VALIDATED_CONFIG=str(self.root / "validated"), HANDOVER=str(self.root / "handover"), **({"NESTED": "0"} | extra))
-        return subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
+                   VALIDATED_CONFIG=str(self.root / "validated"), HANDOVER=str(self.root / "handover"), PROVISIONED=str(self.root / "provisioned"), NESTED="0")
+        env.update(extra)
+        return subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True, timeout=30)
+
+    def prepare(self, **extra):
+        return self.run_install(BRIQYARD_INSTALL_PHASE="prepare", BRIQYARD_PREPARE_ID="a" * 32, **extra)
+
+    def activate(self, **extra):
+        return self.run_install(BRIQYARD_INSTALL_PHASE="activate", BRIQYARD_PREPARE_ID="a" * 32,
+                                NO_ARTIFACT_NETWORK="1", **extra)
+
+    def test_slow_download_precedes_any_host_mutation(self):
+        signal, gate = self.root / "download-signal", self.root / "download-gate"
+        os.mkfifo(signal)
+        os.mkfifo(gate)
+        signal_fd = os.open(signal, os.O_RDWR | os.O_NONBLOCK)
+        gate_fd = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as worker:
+                pending = worker.submit(self.prepare, DOWNLOAD_SIGNAL=str(signal), DOWNLOAD_GATE=str(gate))
+                try:
+                    self.assertTrue(select.select([signal_fd], [], [], 10)[0], "download did not start")
+                    self.assertEqual(os.read(signal_fd, 128), b"downloading")
+                    self.assertFalse(pending.done())
+                    self.assertEqual(self.config.read_bytes(), self.original)
+                    self.assertFalse((self.root / "provisioned").exists())
+                finally:
+                    os.write(gate_fd, b"continue\n")
+                result = pending.result(timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            os.close(signal_fd)
+            os.close(gate_fd)
+
+    def test_prepare_keeps_host_untouched_and_activation_uses_local_bytes(self):
+        result = self.prepare()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertFalse((self.root / "provisioned").exists())
+        self.assertFalse((self.root / "usr/local/lib/briqyard/runtime").exists())
+        for name, content in self.old_binaries.items():
+            self.assertEqual((self.root / "usr/local/bin" / name).read_text(), content)
+        shutil.rmtree(self.release)  # Artifact origin is gone during activation.
+        result = self.activate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / "provisioned").exists())
+        self.assertTrue((self.root / "handover").exists())
+        self.assertNotEqual(self.config.read_bytes(), self.original)
+        result = self.activate()
+        self.assertNotEqual(result.returncode, 0)  # One use only.
+
+    def test_prepared_corruption_config_change_identity_and_expiry_fail_closed(self):
+        for change in ("binary", "config", "identity", "expiry", "symlink"):
+            with self.subTest(change=change):
+                prepared = self.config.parent / "prepared-upgrade"
+                if prepared.exists():
+                    shutil.rmtree(prepared)
+                self.config.write_bytes(self.original)
+                self.assertEqual(self.prepare().returncode, 0)
+                receipt = prepared / "receipt.json"
+                value = json.loads(receipt.read_text())
+                if change == "binary":
+                    (prepared / "briqyardd").write_text("corrupt")
+                elif change == "config":
+                    self.config.write_bytes(self.original + b"# changed\n")
+                elif change == "symlink":
+                    (prepared / "vmlinux").unlink()
+                    (prepared / "vmlinux").symlink_to(self.old_paths["kernel"])
+                else:
+                    value["identity" if change == "identity" else "created"] = "b" * 32 if change == "identity" else 0
+                    receipt.write_text(json.dumps(value))
+                result = self.activate()
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((self.root / "provisioned").exists())
+                self.assertFalse((self.root / "handover").exists())
+
+    def test_preparation_stages_new_kernel_and_nested_assets(self):
+        self.nested_assets()
+        kernel = self.root / "new-kernel"
+        kernel.write_bytes(b"new pinned kernel")
+        digest = sha(kernel)
+        result = self.prepare(NESTED="1", KERNEL_SHA256=digest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        kernel.unlink()
+        shutil.rmtree(self.release)
+        self.assertEqual(self.old_paths["kernel"].read_bytes(), b"kernel old\n")
+        self.assertFalse((self.root / "var/lib/briqyard/classes").exists())
+        result = self.activate(NESTED="1", KERNEL_SHA256=digest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = yaml.safe_load(self.config.read_text())
+        self.assertEqual(Path(config["kernel"]).read_bytes(), b"new pinned kernel")
+        self.assertEqual(Path(config["runtime_classes"]["nested"]["modules"]).read_bytes(), b"nested modules\n")
+
+    def test_expired_completed_preparation_is_replaced_but_wrong_settings_are_refused(self):
+        self.assertEqual(self.prepare().returncode, 0)
+        self.assertNotEqual(self.activate(NESTED="1").returncode, 0)
+        receipt = self.config.parent / "prepared-upgrade/receipt.json"
+        value = json.loads(receipt.read_text())
+        value["created"] = 0
+        receipt.write_text(json.dumps(value))
+        self.assertEqual(self.prepare().returncode, 0)
+        self.assertEqual(self.activate().returncode, 0)
+
+    def test_reservation_blocks_install_and_interrupted_activation_replay(self):
+        self.assertEqual(self.prepare().returncode, 0)
+        self.assertNotEqual(self.run_install().returncode, 0)
+        self.assertFalse((self.root / "provisioned").exists())
+        prepared = self.config.parent / "prepared-upgrade"
+        (prepared / "receipt.json").rename(prepared / "activating.json")
+        self.assertNotEqual(self.activate().returncode, 0)
+        self.assertNotEqual(self.prepare().returncode, 0)
 
     def assert_untouched(self, result):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
