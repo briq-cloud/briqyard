@@ -343,17 +343,18 @@ tunnel_only() {
   tunnel_verify
 }
 # The fleet's upgrades rewrite the same firewall file: one writer at a time.
-if [ "$WIREGUARD_ONLY" = 1 ]; then runtime_install_lock /etc/briqyard; tunnel_only; exit 0; fi
+if [ "$WIREGUARD_ONLY" = 1 ]; then runtime_install_lock /etc/briqyard; [ ! -e /etc/briqyard/prepared-upgrade ] && [ ! -L /etc/briqyard/prepared-upgrade ] || fail "prepared upgrade owns host mutation"; tunnel_only; exit 0; fi
 
 # Downloads a file and checks its digest against the pin before it lands anywhere.
 fetch() {
   local url=$1 sha=$2 dest=$3 tmp
-  tmp=$(mktemp)
-  curl -fsSL -o "$tmp" "$url"
+  tmp=$(mktemp "${dest}.download.XXXXXX")
+  curl -fsSL --connect-timeout 20 --max-time 300 -o "$tmp" "$url" || { rm -f "$tmp"; return 1; }
   echo "$sha  $tmp" | sha256sum -c --quiet - || { rm -f "$tmp"; echo "   $url: digest differs from the pin"; exit 1; }
   mv "$tmp" "$dest"
 }
 
+host_provision() {
 # Read-only safety checks before maintenance which could reclaim host memory.
 # Memory ancestor policy preflight.
 for property in ManagedOOMSwap ManagedOOMMemoryPressure; do
@@ -725,3 +726,5 @@ elif [ "$(zfs get -H -o value keystatus "$POOL")" = unavailable ]; then
   unset key
   echo "   key loaded"
 fi
+
+}

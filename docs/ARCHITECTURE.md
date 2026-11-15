@@ -404,8 +404,9 @@ renamed or removed, unknown fields and values are ignored. The daemon's stop (SI
 every running machine, and its next start boots each one again; SIGUSR2 hands them over instead,
 once every transition under way has ended:
 the daemon exits and leaves them running, and the next one adopts them. `host upgrade` through
-the fleet (`upgrade.rs`) marks the host `upgrading`, runs the bootstrap script on it again with
-the release (whose last step is that hand-over), waits for a heartbeat from a new start of the
+the fleet (`upgrade.rs`) prepares verified artifacts while the host retains its state, then
+marks it `upgrading` and activates those local bytes through the same bootstrap (ADR 0135;
+custom scripts retain their single invocation after withdrawal), waits for a heartbeat from a new start of the
 installed version that stopped no machine, and puts the host back; the fleet is upgraded first.
 
 ## Several servers

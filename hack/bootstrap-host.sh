@@ -343,17 +343,18 @@ tunnel_only() {
   tunnel_verify
 }
 # The fleet's upgrades rewrite the same firewall file: one writer at a time.
-if [ "$WIREGUARD_ONLY" = 1 ]; then runtime_install_lock /etc/briqyard; tunnel_only; exit 0; fi
+if [ "$WIREGUARD_ONLY" = 1 ]; then runtime_install_lock /etc/briqyard; [ ! -e /etc/briqyard/prepared-upgrade ] && [ ! -L /etc/briqyard/prepared-upgrade ] || fail "prepared upgrade owns host mutation"; tunnel_only; exit 0; fi
 
 # Downloads a file and checks its digest against the pin before it lands anywhere.
 fetch() {
   local url=$1 sha=$2 dest=$3 tmp
-  tmp=$(mktemp)
-  curl -fsSL -o "$tmp" "$url"
+  tmp=$(mktemp "${dest}.download.XXXXXX")
+  curl -fsSL --connect-timeout 20 --max-time 300 -o "$tmp" "$url" || { rm -f "$tmp"; return 1; }
   echo "$sha  $tmp" | sha256sum -c --quiet - || { rm -f "$tmp"; echo "   $url: digest differs from the pin"; exit 1; }
   mv "$tmp" "$dest"
 }
 
+host_provision() {
 # Read-only safety checks before maintenance which could reclaim host memory.
 # Memory ancestor policy preflight.
 for property in ManagedOOMSwap ManagedOOMMemoryPressure; do
@@ -726,6 +727,8 @@ elif [ "$(zfs get -H -o value keystatus "$POOL")" = unavailable ]; then
   echo "   key loaded"
 fi
 
+}
+
 # Runtime installation helpers. Kept here because the fleet embeds this standalone script.
 checked_bundle() {
   python3 - "$@" <<'PY'
@@ -1069,7 +1072,7 @@ cleanup_runtime_install() {
     if [ -z "$retained_sha" ] || ! runtime_assignment_compatible "$rollback/briqyardd" "$config_path" "$rollback/config.yaml" ||
        ! echo "$retained_sha  $rollback/briqyardd" | sha256sum -c --quiet -; then
       echo "   activation failed; retained daemon is incompatible with current state; compatible replacement left installed ($rollback)" >&2
-      rm -rf "$new"
+      [ -z "$new" ] || rm -rf "$new"
       [ -z "$candidate" ] || rm -f "$candidate"
       exit "$result"
     fi
@@ -1087,22 +1090,75 @@ cleanup_runtime_install() {
       echo "   activation failed; previous executables and configuration restored ($rollback)" >&2
     fi
   fi
-  rm -rf "$new"
+  [ -z "$new" ] || rm -rf "$new"
   [ -z "$candidate" ] || rm -f "$candidate"
   if [ -n "$rollback" ] && [ "$rollback_ready" = 0 ]; then rm -rf "$rollback"; fi
   exit "$result"
 }
+# One bounded, root-private preparation per host, protected by runtime-install.lock.
+# Receipt hashes bind the verified local files and config; they are not release signatures.
+prepared_receipt() {
+  python3 - "$1" "$prepared" "$prepare_id" "$RELEASE" "$ARCH" "$NESTED" "$KERNEL_URL" "$KERNEL_SHA256" <<'PYPREPARED'
+import hashlib, json, os, pathlib, re, stat, sys, time
+operation, directory, identity, *settings = sys.argv[1:]
+root = pathlib.Path(directory)
+config = root.parent / "config.yaml"
+def digest(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+def files():
+    result = {}
+    for path in root.rglob("*"):
+        info = path.lstat()
+        if path.is_symlink() or not (path.is_dir() or path.is_file()) or info.st_uid != os.geteuid():
+            raise ValueError("unsafe prepared file")
+        if path.is_file() and path != root / "receipt.json":
+            result[str(path.relative_to(root))] = digest(path)
+    return result
+try:
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise ValueError("unsafe preparation directory")
+    receipt = root / "receipt.json"
+    if operation == "write":
+        value = dict(schema=1, identity=identity, settings=settings, config=digest(config),
+                     created=time.time(), files=files())
+        receipt.write_text(json.dumps(value))
+        receipt.chmod(0o600)
+    else:
+        if receipt.is_symlink():
+            raise ValueError("unsafe receipt")
+        value = json.loads(receipt.read_bytes())
+        if (set(value) != {"schema", "identity", "settings", "config", "created", "files"}
+              or type(value["schema"]) is not int or value["schema"] != 1
+              or not isinstance(value["identity"], str) or not re.fullmatch("[a-f0-9]{32}", value["identity"])
+              or not isinstance(value["settings"], list) or len(value["settings"]) != 5
+              or not all(isinstance(setting, str) for setting in value["settings"])
+              or value["config"] != digest(config) or value["files"] != files()):
+            raise ValueError("incomplete or changed preparation")
+        age = time.time() - value["created"]
+        if operation == "expire":
+            if not 3600 < age:
+                raise ValueError("another preparation owns host mutation; wait or explicitly discard it")
+        elif (value["schema"] != 1 or value["identity"] != identity
+              or value["settings"] != settings or value["config"] != digest(config)
+              or not 0 <= age <= 3600 or value["files"] != files()):
+            raise ValueError("stale or changed preparation")
+except Exception as error:
+    raise SystemExit("prepared upgrade refused: " + str(error)) from None
+PYPREPARED
+}
 # End runtime installation helpers.
 
 # A request to GitHub's API with BRIQYARD_RELEASE_TOKEN, the token on stdin, off the command line.
-github() { printf 'Authorization: Bearer %s\n' "$RELEASE_TOKEN" | curl -fsSL -H @- "$@"; }
+github() { printf 'Authorization: Bearer %s\n' "$RELEASE_TOKEN" | curl -fsSL --connect-timeout 20 --max-time 300 -H @- "$@"; }
 
 # A file of the release. With BRIQYARD_RELEASE_TOKEN, through GitHub's API: a private
 # repository's assets are not served at their download URL.
 # `assets` is the release's JSON from GitHub's API, read once below when there is a token.
 release_file() {
   local name=$1 dest=$2 id
-  if [ -z "$RELEASE_TOKEN" ]; then curl -fsSL -o "$dest" "$RELEASE/$name"; return; fi
+  if [ -z "$RELEASE_TOKEN" ]; then curl -fsSL --connect-timeout 20 --max-time 300 -o "$dest" "$RELEASE/$name"; return; fi
   id=$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id' <<<"$assets")
   [ -n "$id" ] || fail "release $tag of $repo has no $name"
   github -H "Accept: application/octet-stream" -o "$dest" "https://api.github.com/repos/$repo/releases/assets/$id"
@@ -1111,7 +1167,31 @@ release_file() {
 echo "== binaries${RELEASE:+ from $RELEASE}"
 # Serialize preflight, rollback capture, replacement, handover and EXIT cleanup.
 runtime_install_lock /etc/briqyard
-new=$(mktemp -d)
+phase=${BRIQYARD_INSTALL_PHASE:-install}
+prepare_id=${BRIQYARD_PREPARE_ID:-}
+prepared=/etc/briqyard/prepared-upgrade
+case "$phase" in install|prepare|activate) ;; *) fail "unknown install phase" ;; esac
+if [ "$phase" != install ]; then
+  [[ "$prepare_id" =~ ^[a-f0-9]{32}$ ]] || fail "preparation needs a 32-character identity"
+  [ -f /etc/briqyard/config.yaml ] && [ -n "$RELEASE" ] || fail "preparation requires an installed host and release"
+fi
+if [ "$phase" = activate ]; then
+  prepared_receipt verify
+  new=$prepared
+  # Consume before any host mutation. A lost dispatch must never replay activation.
+  mv "$prepared/receipt.json" "$prepared/activating.json"
+else
+  if [ -e "$prepared" ] || [ -L "$prepared" ]; then
+    prepared_receipt expire
+    rm -rf "$prepared"
+  fi
+  if [ "$phase" = prepare ]; then
+    mkdir -m 0700 "$prepared"
+    new=$prepared
+  else
+    new=$(mktemp -d)
+  fi
+fi
 chmod 0700 "$new"
 candidate=""
 rollback=""
@@ -1120,6 +1200,8 @@ activation_pending=0
 config_path=/etc/briqyard/config.yaml
 binary_dir=/usr/local/bin
 trap cleanup_runtime_install EXIT
+[ "$phase" != install ] || host_provision
+if [ "$phase" != activate ]; then
 if [ -n "$RELEASE" ]; then
   if [ -n "$RELEASE_TOKEN" ]; then
     repo=${RELEASE#https://github.com/}; tag=${repo##*/releases/download/}; repo=${repo%%/releases/download/*}
@@ -1153,7 +1235,26 @@ else
   cp "$new/release-${FIRECRACKER_VERSION}-${ARCH}/firecracker-${FIRECRACKER_VERSION}-${ARCH}" "$new/firecracker"
   cp "$new/release-${FIRECRACKER_VERSION}-${ARCH}/jailer-${FIRECRACKER_VERSION}-${ARCH}" "$new/jailer"
 fi
+# Bind even a reused kernel to the prepared bytes, never a mutable live path.
+kernel=/var/lib/briqyard/vmlinux
+[ ! -f "$config_path" ] || kernel=$(runtime_kernel "$config_path")
+if echo "$KERNEL_SHA256  $kernel" | sha256sum -c --quiet - 2>/dev/null; then
+  cp "$kernel" "$new/vmlinux"
+else
+  fetch "$KERNEL_URL" "$KERNEL_SHA256" "$new/vmlinux"
+fi
 chmod 0755 "$new"/briq*
+if [ "$phase" = prepare ]; then
+  prepared_receipt write
+  # Keep only the complete receipt. The EXIT trap removes incomplete downloads.
+  new=""
+  echo "== artifacts prepared"
+  exit 0
+fi
+fi
+# Preparation never invokes packages, firewall, guest or host provisioning.
+[ "$phase" != activate ] || host_provision
+
 runtime_root=/usr/local/lib/briqyard/runtime
 firecracker=$(immutable_runtime "$new/firecracker" firecracker)
 jailer=$(immutable_runtime "$new/jailer" jailer)
@@ -1164,7 +1265,6 @@ if [ -f /etc/briqyard/config.yaml ]; then
   kernel=$(runtime_kernel /etc/briqyard/config.yaml)
 fi
 if ! echo "$KERNEL_SHA256  $kernel" | sha256sum -c --quiet - 2>/dev/null; then
-  fetch "$KERNEL_URL" "$KERNEL_SHA256" "$new/vmlinux"
   kernel=$(immutable_runtime "$new/vmlinux" vmlinux)
 fi
 

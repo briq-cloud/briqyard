@@ -40,6 +40,8 @@ python3 -m unittest discover -s hack -p 'test_bootstrap*.py'
 Commit `hack/bootstrap-host.sh` with the fragments. The fleet embeds this file;
 SSH, join delivery, raw downloads and native suites require no adjacent files.
 The test entry point also checks the assembly, so CI and release checks reject stale output.
+Preparation tests in the runtime suite cover stalled downloads before host mutation, local-only artifact activation, receipt integrity and replay refusal (ADR 0135).
+
 Suites live in `hack/bootstrap_tests/` ([ADR 0134](adr/0134-bootstrap-source-fragments.md)).
 
 ## Scoped execution native proof

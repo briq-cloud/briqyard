@@ -1,12 +1,12 @@
 # A request to GitHub's API with BRIQYARD_RELEASE_TOKEN, the token on stdin, off the command line.
-github() { printf 'Authorization: Bearer %s\n' "$RELEASE_TOKEN" | curl -fsSL -H @- "$@"; }
+github() { printf 'Authorization: Bearer %s\n' "$RELEASE_TOKEN" | curl -fsSL --connect-timeout 20 --max-time 300 -H @- "$@"; }
 
 # A file of the release. With BRIQYARD_RELEASE_TOKEN, through GitHub's API: a private
 # repository's assets are not served at their download URL.
 # `assets` is the release's JSON from GitHub's API, read once below when there is a token.
 release_file() {
   local name=$1 dest=$2 id
-  if [ -z "$RELEASE_TOKEN" ]; then curl -fsSL -o "$dest" "$RELEASE/$name"; return; fi
+  if [ -z "$RELEASE_TOKEN" ]; then curl -fsSL --connect-timeout 20 --max-time 300 -o "$dest" "$RELEASE/$name"; return; fi
   id=$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id' <<<"$assets")
   [ -n "$id" ] || fail "release $tag of $repo has no $name"
   github -H "Accept: application/octet-stream" -o "$dest" "https://api.github.com/repos/$repo/releases/assets/$id"
@@ -15,7 +15,31 @@ release_file() {
 echo "== binaries${RELEASE:+ from $RELEASE}"
 # Serialize preflight, rollback capture, replacement, handover and EXIT cleanup.
 runtime_install_lock /etc/briqyard
-new=$(mktemp -d)
+phase=${BRIQYARD_INSTALL_PHASE:-install}
+prepare_id=${BRIQYARD_PREPARE_ID:-}
+prepared=/etc/briqyard/prepared-upgrade
+case "$phase" in install|prepare|activate) ;; *) fail "unknown install phase" ;; esac
+if [ "$phase" != install ]; then
+  [[ "$prepare_id" =~ ^[a-f0-9]{32}$ ]] || fail "preparation needs a 32-character identity"
+  [ -f /etc/briqyard/config.yaml ] && [ -n "$RELEASE" ] || fail "preparation requires an installed host and release"
+fi
+if [ "$phase" = activate ]; then
+  prepared_receipt verify
+  new=$prepared
+  # Consume before any host mutation. A lost dispatch must never replay activation.
+  mv "$prepared/receipt.json" "$prepared/activating.json"
+else
+  if [ -e "$prepared" ] || [ -L "$prepared" ]; then
+    prepared_receipt expire
+    rm -rf "$prepared"
+  fi
+  if [ "$phase" = prepare ]; then
+    mkdir -m 0700 "$prepared"
+    new=$prepared
+  else
+    new=$(mktemp -d)
+  fi
+fi
 chmod 0700 "$new"
 candidate=""
 rollback=""
@@ -24,6 +48,8 @@ activation_pending=0
 config_path=/etc/briqyard/config.yaml
 binary_dir=/usr/local/bin
 trap cleanup_runtime_install EXIT
+[ "$phase" != install ] || host_provision
+if [ "$phase" != activate ]; then
 if [ -n "$RELEASE" ]; then
   if [ -n "$RELEASE_TOKEN" ]; then
     repo=${RELEASE#https://github.com/}; tag=${repo##*/releases/download/}; repo=${repo%%/releases/download/*}
@@ -57,7 +83,26 @@ else
   cp "$new/release-${FIRECRACKER_VERSION}-${ARCH}/firecracker-${FIRECRACKER_VERSION}-${ARCH}" "$new/firecracker"
   cp "$new/release-${FIRECRACKER_VERSION}-${ARCH}/jailer-${FIRECRACKER_VERSION}-${ARCH}" "$new/jailer"
 fi
+# Bind even a reused kernel to the prepared bytes, never a mutable live path.
+kernel=/var/lib/briqyard/vmlinux
+[ ! -f "$config_path" ] || kernel=$(runtime_kernel "$config_path")
+if echo "$KERNEL_SHA256  $kernel" | sha256sum -c --quiet - 2>/dev/null; then
+  cp "$kernel" "$new/vmlinux"
+else
+  fetch "$KERNEL_URL" "$KERNEL_SHA256" "$new/vmlinux"
+fi
 chmod 0755 "$new"/briq*
+if [ "$phase" = prepare ]; then
+  prepared_receipt write
+  # Keep only the complete receipt. The EXIT trap removes incomplete downloads.
+  new=""
+  echo "== artifacts prepared"
+  exit 0
+fi
+fi
+# Preparation never invokes packages, firewall, guest or host provisioning.
+[ "$phase" != activate ] || host_provision
+
 runtime_root=/usr/local/lib/briqyard/runtime
 firecracker=$(immutable_runtime "$new/firecracker" firecracker)
 jailer=$(immutable_runtime "$new/jailer" jailer)
@@ -68,7 +113,6 @@ if [ -f /etc/briqyard/config.yaml ]; then
   kernel=$(runtime_kernel /etc/briqyard/config.yaml)
 fi
 if ! echo "$KERNEL_SHA256  $kernel" | sha256sum -c --quiet - 2>/dev/null; then
-  fetch "$KERNEL_URL" "$KERNEL_SHA256" "$new/vmlinux"
   kernel=$(immutable_runtime "$new/vmlinux" vmlinux)
 fi
 
