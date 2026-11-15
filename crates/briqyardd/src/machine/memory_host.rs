@@ -131,6 +131,7 @@ impl Manager {
             status,
             since,
             message: message.into(),
+            effect: None,
         };
         *cached = Some(current.clone());
         current

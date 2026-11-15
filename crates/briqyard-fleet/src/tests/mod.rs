@@ -280,6 +280,7 @@ fn pressure(kind: &str, status: bool) -> api::Condition {
         status,
         since: Utc::now(),
         message: "pool 4.0 GB free of 100.0 (4%), under 10%".into(),
+        effect: None,
     }
 }
 

@@ -45,6 +45,7 @@ impl Manager {
             cfg.network.egress.clone()
         };
         tokio::fs::create_dir_all(cfg.run_dir()).await?;
+        let conditions = Conditions::new(Utc::now(), &cfg.conditions.probes);
         let boots_at_once = if cfg.boots_at_once > 0 {
             cfg.boots_at_once
         } else {
@@ -151,7 +152,7 @@ impl Manager {
             usage: Mutex::new(ledger),
             events,
             pool: Mutex::new(None),
-            conditions: Mutex::new(Conditions::new(Utc::now())),
+            conditions: Mutex::new(conditions),
             memory_host: Mutex::new(None),
             recovery_fault: Mutex::new(None),
             memory_condition: Mutex::new(None),
@@ -227,6 +228,10 @@ impl Manager {
         );
         let watch = m.clone();
         tokio::spawn(async move { watch.storage_watch().await });
+        for probe in m.inner.cfg.conditions.probes.clone() {
+            let watch = m.clone();
+            tokio::spawn(async move { watch.probe_watch(probe).await });
+        }
         // Backups a previous process was making: their streams have no record. Read now, before
         // a backup of this process writes a marker; the store is asked off the start's path.
         let left = m.attempts_left();

@@ -965,4 +965,31 @@ mod tests {
         let best = pick(hosts.iter(), false, |_| false, Some(5));
         assert_eq!(best.id, "fuller");
     }
+
+    /// A host with a probed service down loses to another when the other keys tie (ADR 0133).
+    #[test]
+    fn the_pick_avoids_a_host_with_a_service_down() {
+        let host = |id: &str, used: u32, avoided: bool| {
+            let mut h = HostRec {
+                id: id.into(),
+                ..Default::default()
+            };
+            h.capacity.memory_mb = 100_000;
+            h.used.memory_mb = used;
+            if avoided {
+                h.conditions = vec![api::Condition {
+                    kind: "registry".into(),
+                    status: true,
+                    since: Utc::now(),
+                    message: "down".into(),
+                    effect: Some(api::ConditionEffect::Avoid),
+                }];
+            }
+            h
+        };
+        let hosts = [host("empty", 0, true), host("fuller", 90_000, false)];
+        assert_eq!(pick(hosts.iter(), false, |_| false, None).id, "fuller");
+        let all = [host("empty", 0, true), host("fuller", 90_000, true)];
+        assert_eq!(pick(all.iter(), false, |_| false, None).id, "empty");
+    }
 }

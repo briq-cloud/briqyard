@@ -335,7 +335,7 @@ readings, 15 s apart. After the measure the tick reads the pool once and decides
 conditions (`conditions.rs`): `memory_pressure`, committed memory over `memory_pct` of
 capacity; `disk_pressure`, the pool's free space under `disk_free_pct`. A task of its own
 decides `storage_stalled` every 15 s, a `zfs` command running for over a minute (ADR 0046):
-the tick would wait on the same pool. A change is a
+the tick would wait on the same pool. A task per `conditions.probes` entry asks a local URL on its interval and sets a condition with the effect `avoid`: placement prefers another host for a new namespace, without refusing one (ADR 0133). A change is a
 `host_condition` event; `/v1/status` and the heartbeat carry them. Under disk pressure the tick
 removes unused images (no clone, no record naming them), oldest first, counting what each took
 as freed, until the pool is back over the threshold. The console is written by the daemon's

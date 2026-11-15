@@ -269,13 +269,14 @@
           description: "runtime classes (ADR 0088) the host serves from this upgrade on, besides the ones it reports: the upgrade enables a class on a running host, to the same version too. Each a class name the release builds (`nested`), refused by the bootstrap before anything changes otherwise. Absent or empty: the host's classes as they are"
     Condition:
       type: object
-      description: "A host condition (ADR 0021), decided by the daemon's tick. Each is a pressure: the fleet places nothing new on a host while one is true"
+      description: "A host condition (ADR 0021), decided by the daemon's tick. Without `effect` it is a pressure: the fleet places nothing new on a host while it is true. With `effect: avoid` (ADR 0133) the fleet prefers other hosts for a new namespace"
       required: [type, status, since, message]
       properties:
-        type: { type: string, enum: [memory_pressure, disk_pressure, storage_stalled, memory_protection, memory_accounting], description: "`memory_pressure`: committed memory over `conditions.memory_pct` of capacity; `disk_pressure`: the pool's free space under `conditions.disk_free_pct` of its size; `storage_stalled`: a `zfs` command of the daemon's running for over a minute (ADR 0046)" }
+        type: { type: string, enum: [memory_pressure, disk_pressure, storage_stalled, memory_protection, memory_accounting], description: "`memory_pressure`: committed memory over `conditions.memory_pct` of capacity; `disk_pressure`: the pool's free space under `conditions.disk_free_pct` of its size; `storage_stalled`: a `zfs` command of the daemon's running for over a minute (ADR 0046); a `conditions.probes` entry reports under its own name" }
         status: { type: boolean }
         since: { type: string, format: date-time, description: "when `status` last changed; the daemon's start until it does" }
         message: { type: string, description: the figures it was decided on }
+        effect: { type: string, enum: [avoid], description: "what a true condition asks of placement: `avoid` places a new namespace elsewhere when another host can take it. Absent: a pressure" }
     TopMachine:
       type: object
       properties:

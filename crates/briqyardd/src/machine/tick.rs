@@ -181,9 +181,9 @@ impl Manager {
     /// pressure, unused images go, oldest first, until the pool is back over the threshold.
     /// A pool that cannot be read leaves `disk_pressure` as it was.
     pub(super) async fn assess(&self, now: DateTime<Utc>) {
-        let t = self.inner.cfg.conditions;
+        let t = &self.inner.cfg.conditions;
         let (used, _, _) = self.usage();
-        let memory = conditions::memory(used.memory_mb, self.capacity().memory_mb, &t);
+        let memory = conditions::memory(used.memory_mb, self.capacity().memory_mb, t);
         let pool = match self.inner.zfs.pool().await {
             Ok(p) => Some(p),
             Err(err) => {
@@ -196,7 +196,7 @@ impl Manager {
         }
         let changed: Vec<api::Condition> = {
             let mut c = self.inner.conditions.lock().unwrap();
-            let disk = pool.map(|p| conditions::disk(p, &t));
+            let disk = pool.map(|p| conditions::disk(p, t));
             [
                 (api::condition::MEMORY_PRESSURE, Some(memory)),
                 (api::condition::DISK_PRESSURE, disk),
@@ -208,7 +208,7 @@ impl Manager {
         for c in changed {
             self.note_condition(c);
         }
-        let short = pool.map_or(0, |p| conditions::disk_short(p, &t));
+        let short = pool.map_or(0, |p| conditions::disk_short(p, t));
         if short > 0 {
             self.free_images(short).await;
         }
@@ -247,6 +247,28 @@ impl Manager {
         loop {
             tick.tick().await;
             self.assess_storage(crate::zfs::STALL_AFTER, Utc::now());
+        }
+    }
+
+    /// Asks one local service every `interval_sec` and sets its condition (ADR 0133): a probe
+    /// that never answers is `avoid` after `failures` misses, and clears on the first answer.
+    pub(super) async fn probe_watch(self, probe: crate::config::Probe) {
+        let client = conditions::probe_client();
+        let mut run = conditions::ProbeRun::default();
+        let mut tick = tokio::time::interval(Duration::from_secs(probe.interval_sec));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let found = run.observe(&probe, conditions::probe_once(&client, &probe).await);
+            let changed = self
+                .inner
+                .conditions
+                .lock()
+                .unwrap()
+                .set(&probe.name, found, Utc::now());
+            if let Some(c) = changed {
+                self.note_condition(c);
+            }
         }
     }
 

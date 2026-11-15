@@ -1,5 +1,67 @@
 use super::*;
 
+impl Conditions {
+    /// The probes (ADR 0133): each named like a condition type, no name twice or one of the
+    /// daemon's own, a plain `http(s)` URL, and bounds that keep the loop meaningful.
+    pub(super) fn validate(&self) -> Result<()> {
+        for (i, p) in self.probes.iter().enumerate() {
+            let field = |f: &str| format!("conditions.probes[{i}].{f}");
+            let mut chars = p.name.chars();
+            let first = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
+            if !first || p.name.len() > 63 || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                bail!(
+                    "{}: {:?} is not a condition type (a letter, then letters, digits and _, at most 63)",
+                    field("name"),
+                    p.name
+                );
+            }
+            if briqyard_api::condition::ALL.contains(&p.name.as_str()) {
+                bail!(
+                    "{}: {:?} is a condition of the daemon",
+                    field("name"),
+                    p.name
+                );
+            }
+            if self.probes[..i].iter().any(|q| q.name == p.name) {
+                bail!("{}: {:?} is already a probe", field("name"), p.name);
+            }
+            match reqwest::Url::parse(&p.http) {
+                Ok(u)
+                    if matches!(u.scheme(), "http" | "https")
+                        && u.has_host()
+                        && u.username().is_empty()
+                        && u.password().is_none()
+                        && u.query().is_none()
+                        && u.fragment().is_none() => {}
+                _ => bail!(
+                    "{}: an http or https URL without credentials or a query (the status shows it)",
+                    field("http")
+                ),
+            }
+            if !(1..=3600).contains(&p.interval_sec) {
+                bail!(
+                    "{}: seconds between probes, 1 to 3600",
+                    field("interval_sec")
+                );
+            }
+            if !(1..=15).contains(&p.timeout_sec) {
+                bail!(
+                    "{}: seconds to wait for an answer, 1 to 15",
+                    field("timeout_sec")
+                );
+            }
+            if !(1..=100).contains(&p.failures) {
+                bail!(
+                    "{}: misses in a row before it is true, 1 to 100",
+                    field("failures")
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Config {
     pub(super) fn validate(&self) -> Result<()> {
         if let Some(execution) = &self.execution {
@@ -53,6 +115,7 @@ impl Config {
         if self.conditions.disk_free_pct > 99 {
             bail!("conditions.disk_free_pct: a share of the pool, 0 to 99");
         }
+        self.conditions.validate()?;
         for (name, p) in [
             ("firecracker", &self.firecracker),
             ("kernel", &self.kernel),
@@ -255,6 +318,73 @@ mod tests {
         assert_eq!(
             (c.conditions.memory_pct, c.conditions.disk_free_pct),
             (95, 0)
+        );
+        let probe = |extra: &str| {
+            let mut y = String::from(
+                "conditions:\n  probes:\n    - name: registry\n      http: http://127.0.0.1:5000/v2/\n",
+            );
+            y.push_str(extra);
+            load(&y)
+        };
+        let c = probe("").unwrap();
+        let p = &c.conditions.probes[0];
+        assert_eq!((p.interval_sec, p.timeout_sec, p.failures), (15, 5, 3));
+        assert!(
+            probe("      interval_sec: 3600\n      timeout_sec: 15\n      failures: 100\n").is_ok()
+        );
+        for (extra, want) in [
+            ("      interval_sec: 0\n", "interval_sec"),
+            ("      interval_sec: 3601\n", "interval_sec"),
+            ("      timeout_sec: 0\n", "timeout_sec"),
+            ("      timeout_sec: 16\n", "timeout_sec"),
+            ("      failures: 0\n", "failures"),
+            ("      failures: 101\n", "failures"),
+        ] {
+            let err = probe(extra).unwrap_err();
+            assert!(
+                err.to_string()
+                    .starts_with(&format!("conditions.probes[0].{want}")),
+                "{extra}: {err}"
+            );
+        }
+        for name in [
+            "",
+            "9lives",
+            "has space",
+            "a-b",
+            "disk_pressure",
+            "memory_pressure",
+            "storage_stalled",
+            "memory_protection",
+        ] {
+            let y = format!(
+                "conditions:\n  probes:\n    - name: \"{name}\"\n      http: http://127.0.0.1:1/\n"
+            );
+            let err = load(&y).unwrap_err();
+            assert!(
+                err.to_string().starts_with("conditions.probes[0].name"),
+                "{name}: {err}"
+            );
+        }
+        for http in [
+            "",
+            "ftp://x/",
+            "127.0.0.1:1",
+            "http://u:p@h/",
+            "http://h/?token=1",
+        ] {
+            let y = format!("conditions:\n  probes:\n    - name: a\n      http: \"{http}\"\n");
+            let err = load(&y).unwrap_err();
+            assert!(
+                err.to_string().starts_with("conditions.probes[0].http"),
+                "{http}: {err}"
+            );
+        }
+        let twice = "conditions:\n  probes:\n    - {name: a, http: \"http://h/\"}\n    - {name: a, http: \"http://h/\"}\n";
+        let err = load(twice).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "conditions.probes[1].name: \"a\" is already a probe"
         );
         let err = load("egress_limits:\n  blocked_ports: [0]\n").unwrap_err();
         assert_eq!(
