@@ -36,6 +36,7 @@ mod create;
 mod endpoints;
 mod exec;
 mod execution_fence;
+pub(crate) use execution_fence::NamespaceProtected;
 mod execution_mutations;
 mod execution_resources;
 mod gateway;
@@ -160,8 +161,21 @@ pub enum MError {
     /// An event cursor the log cannot answer from, with the oldest seq it keeps.
     #[error("{message}")]
     Gone { oldest: u64, message: String },
+    /// A command granted through the namespace may still run: its network cannot change
+    /// until the protection ends. 409 `namespace_protected`, `Retry-After` in seconds.
+    #[error("namespace protected through command deadline: retry in {} ms", .0.retry_after_ms)]
+    NamespaceProtected(execution_fence::NamespaceProtected),
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for MError {
+    fn from(e: anyhow::Error) -> Self {
+        match e.downcast::<execution_fence::NamespaceProtected>() {
+            Ok(p) => MError::NamespaceProtected(p),
+            Err(e) => MError::Other(e),
+        }
+    }
 }
 
 fn invalid(msg: impl Into<String>) -> MError {

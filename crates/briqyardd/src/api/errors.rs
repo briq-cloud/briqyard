@@ -11,6 +11,8 @@ pub struct AppError {
     pub(super) machine: Option<Box<api::Machine>>,
     /// With `gone`: the oldest event seq kept.
     pub(super) oldest: Option<u64>,
+    /// With `namespace_protected`: seconds until the protection ends, as `Retry-After`.
+    pub(super) retry_after: Option<u64>,
 }
 
 /// The status and code of each manager error. `boot_failed` is a 409 like the other
@@ -38,6 +40,7 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
         MError::Capacity(_) => (StatusCode::SERVICE_UNAVAILABLE, "capacity"),
         MError::Quota(_) => (StatusCode::FORBIDDEN, "quota"),
         MError::NamespaceInUse => (StatusCode::CONFLICT, "namespace_in_use"),
+        MError::NamespaceProtected(_) => (StatusCode::CONFLICT, "namespace_protected"),
         MError::GatewayInUse => (StatusCode::CONFLICT, "gateway_in_use"),
         MError::Gateway(_) => (StatusCode::CONFLICT, "gateway"),
         MError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
@@ -53,6 +56,10 @@ impl From<MError> for AppError {
         };
         let oldest = match &e {
             MError::Gone { oldest, .. } => Some(*oldest),
+            _ => None,
+        };
+        let retry_after = match &e {
+            MError::NamespaceProtected(p) => Some(p.retry_after_ms.div_ceil(1000)),
             _ => None,
         };
         let machine = match e {
@@ -79,6 +86,7 @@ impl From<MError> for AppError {
             error,
             machine,
             oldest,
+            retry_after,
         }
     }
 }
@@ -96,6 +104,10 @@ impl IntoResponse for AppError {
             }),
         )
             .into_response();
+        if let Some(secs) = self.retry_after {
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, secs.into());
+        }
         resp.extensions_mut().insert(IsError);
         resp
     }

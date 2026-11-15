@@ -233,6 +233,20 @@ fn error_codes() {
             "no such file or directory"
         )
     );
+    let e = AppError::from(MError::from(anyhow::Error::new(
+        crate::machine::NamespaceProtected {
+            retry_after_ms: 1_001,
+        },
+    )));
+    assert_eq!(
+        (e.status, e.code, e.retry_after),
+        (StatusCode::CONFLICT, "namespace_protected", Some(2))
+    );
+    let e = AppError::from(MError::from(anyhow::anyhow!("namespace mutation capacity")));
+    assert_eq!(
+        (e.status, e.code),
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+    );
     let e = AppError::from(MError::GatewayInUse);
     assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "gateway_in_use"));
     let e = AppError::from(MError::Refused(
