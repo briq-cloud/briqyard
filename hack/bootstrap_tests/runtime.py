@@ -216,6 +216,33 @@ fetch() { [ "${NO_ARTIFACT_NETWORK:-0}" != 1 ] || exit 99; cp "$KERNEL_URL" "$3"
         self.assertNotEqual(self.activate().returncode, 0)
         self.assertNotEqual(self.prepare().returncode, 0)
 
+    def test_expiry_preserves_incomplete_or_changed_preparation(self):
+        for damage in ("missing", "corrupt", "receipt", "config"):
+            for phase in ("prepare", "install"):
+                with self.subTest(damage=damage, phase=phase):
+                    prepared = self.config.parent / "prepared-upgrade"
+                    shutil.rmtree(prepared, ignore_errors=True)
+                    self.config.write_bytes(self.original)
+                    self.assertEqual(self.prepare().returncode, 0)
+                    receipt = prepared / "receipt.json"
+                    value = json.loads(receipt.read_text())
+                    value["created"] = 0
+                    receipt.write_text(json.dumps(value))
+                    if damage == "missing":
+                        (prepared / "briqyardd").unlink()
+                    elif damage == "corrupt":
+                        (prepared / "briqyardd").write_text("corrupt")
+                    elif damage == "receipt":
+                        receipt.write_text('{"created":0}')
+                    else:
+                        self.config.write_bytes(self.original + b"\n# changed\n")
+                    original_receipt = receipt.read_bytes()
+                    result = self.prepare() if phase == "prepare" else self.run_install()
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertTrue(prepared.is_dir())
+                    self.assertEqual(receipt.read_bytes(), original_receipt)
+                    self.assertFalse((self.root / "provisioned").exists())
+
     def assert_untouched(self, result):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.config.read_bytes(), self.original)

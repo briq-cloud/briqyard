@@ -368,7 +368,7 @@ cleanup_runtime_install() {
 # Receipt hashes bind the verified local files and config; they are not release signatures.
 prepared_receipt() {
   python3 - "$1" "$prepared" "$prepare_id" "$RELEASE" "$ARCH" "$NESTED" "$KERNEL_URL" "$KERNEL_SHA256" <<'PYPREPARED'
-import hashlib, json, os, pathlib, stat, sys, time
+import hashlib, json, os, pathlib, re, stat, sys, time
 operation, directory, identity, *settings = sys.argv[1:]
 root = pathlib.Path(directory)
 config = root.parent / "config.yaml"
@@ -398,6 +398,13 @@ try:
         if receipt.is_symlink():
             raise ValueError("unsafe receipt")
         value = json.loads(receipt.read_bytes())
+        if (set(value) != {"schema", "identity", "settings", "config", "created", "files"}
+              or type(value["schema"]) is not int or value["schema"] != 1
+              or not isinstance(value["identity"], str) or not re.fullmatch("[a-f0-9]{32}", value["identity"])
+              or not isinstance(value["settings"], list) or len(value["settings"]) != 5
+              or not all(isinstance(setting, str) for setting in value["settings"])
+              or value["config"] != digest(config) or value["files"] != files()):
+            raise ValueError("incomplete or changed preparation")
         age = time.time() - value["created"]
         if operation == "expire":
             if not 3600 < age:
