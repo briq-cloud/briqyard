@@ -21,6 +21,9 @@ pub struct CreateMachineRequest {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub files: Vec<File>,
+    /// Absent or all-zero: inherit a named memory template's or backup's size.
+    /// An ordinary create still requires a valid size.
+    #[serde(default)]
     pub size: Size,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<VolumeSpec>,

@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn omitted_create_size_reaches_inheritance_without_defaulting_size_members() {
+    // A named-template client sends no image or size; the source owns both.
+    let clone = json!({
+        "tenant": "team_one", "name": "clone",
+        "fork": {"machine_id": "m_source", "snapshot": "s_ready"},
+        "metadata": {"briq_id": "bq_clone", "team": "team_one", "stack": "test", "name": "clone"},
+        "start": true
+    });
+    let request: CreateMachineRequest = serde_json::from_value(clone.clone()).unwrap();
+    assert_eq!(request.size, Size::default());
+    let mut explicit = clone.clone();
+    explicit["size"] = json!({"vcpus": 0, "memory_mb": 0});
+    let request: CreateMachineRequest = serde_json::from_value(explicit).unwrap();
+    assert_eq!(request.size, Size::default());
+    let mut empty = clone;
+    empty["size"] = json!({});
+    assert!(serde_json::from_value::<CreateMachineRequest>(empty).is_err());
+    let ordinary: CreateMachineRequest = serde_json::from_value(json!({
+        "namespace": "team_one", "name": "cold", "image": "alpine:3.22"
+    }))
+    .unwrap();
+    assert!(ordinary.size.check().is_err());
+}
+
+#[test]
 fn size_and_capacity() {
     let s: Size = same(json!({"vcpus": 2, "memory_mb": 1024}));
     assert_eq!(s.vcpus, 2);
@@ -112,7 +137,6 @@ fn create_machine_request_minimal() {
     for missing in [
         json!({"name": "db", "size": {"vcpus": 1, "memory_mb": 256}}),
         json!({"namespace": "t1", "size": {"vcpus": 1, "memory_mb": 256}}),
-        json!({"namespace": "t1", "name": "db"}),
     ] {
         assert!(
             serde_json::from_value::<CreateMachineRequest>(missing.clone()).is_err(),

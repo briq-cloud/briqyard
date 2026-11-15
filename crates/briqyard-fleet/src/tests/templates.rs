@@ -1,4 +1,100 @@
 use super::*;
+use serde_json::json;
+
+#[tokio::test]
+async fn named_clone_inherits_omitted_or_default_size_and_refuses_mismatch() {
+    for (profile, advertised) in [
+        ("init-ready-v1", "init-ready-v1"),
+        ("service-ready-v1", "service-ready-v1"),
+        ("service-ready-v1", "init-ready-v1"),
+        ("sandbox-ready-v1", "sandbox-ready-v1"),
+    ] {
+        for size in [
+            None,
+            Some(json!({"vcpus":0,"memory_mb":0})),
+            Some(json!({"vcpus":1,"memory_mb":256})),
+            Some(json!({"vcpus":1,"memory_mb":512})),
+        ] {
+            let (f, ds) = fleet_with_daemons(1).await;
+            let intrinsic = ds[0].stub.id.clone();
+            let registered = "h_registered".to_string();
+            {
+                let mut reg = f.st.reg.lock().unwrap();
+                let mut host = reg.hosts.remove(&intrinsic).unwrap();
+                host.id = registered.clone();
+                host.named_memory_fork_v1 = true;
+                host.named_memory_profiles = vec![advertised.into()];
+                reg.hosts.insert(registered.clone(), host);
+                reg.machines.insert("m_source".into(), registered.clone());
+            }
+            ds[0].stub.snapshots.lock().unwrap().push(api::Snapshot {
+                copy_consistency: Default::default(),
+                id: "s_ready".into(),
+                machine_id: "m_source".into(),
+                name: None,
+                created_at: Utc::now(),
+                disks: vec!["root".into()],
+                memory: true,
+                clone_profile: Some(profile.into()),
+                source_host: Some(intrinsic),
+                clone_size: Some(api::Size {
+                    vcpus: 1,
+                    memory_mb: 256,
+                    cpu_millis: None,
+                }),
+                clone_ram_marker: None,
+                clone_generation: Some("g_one".into()),
+            });
+            let mismatch = size.as_ref().is_some_and(|s| s["memory_mb"] == 512);
+            let mut body = json!({
+                "tenant":"team_one", "name":"clone",
+                "fork":{"machine_id":"m_source","snapshot":"s_ready"},
+                "metadata":{"briq_id":"bq_clone","team":"team_one","stack":"test","name":"clone"},
+                "start":true
+            });
+            if let Some(size) = size {
+                body["size"] = size;
+            }
+            let (status, headers, response) =
+                call(&f.st, "POST", "/v1/machines", "api", Some(body)).await;
+            if profile != advertised || profile == "sandbox-ready-v1" {
+                assert_eq!(status, StatusCode::CONFLICT, "{response}");
+                assert!(ds[0].stub.creates.lock().unwrap().is_empty());
+                assert!(!f.st.reg.lock().unwrap().namespaces.contains_key("team_one"));
+            } else if mismatch {
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+                assert!(ds[0].stub.creates.lock().unwrap().is_empty());
+                assert!(!f.st.reg.lock().unwrap().namespaces.contains_key("team_one"));
+            } else {
+                assert_eq!(status, StatusCode::CREATED, "{response}");
+                assert_eq!(headers["x-briqyard-host"], registered);
+                let creates = ds[0].stub.creates.lock().unwrap();
+                assert_eq!(creates.len(), 1);
+                assert_eq!(creates[0].size.memory_mb, 256);
+                assert_eq!(creates[0].size.vcpus, 1);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn ordinary_create_with_omitted_or_default_size_is_refused_before_placement() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    for size in [None, Some(json!({"vcpus":0,"memory_mb":0}))] {
+        let mut body = json!({"namespace":"team_one","name":"cold","image":"alpine:3.22"});
+        if let Some(size) = size {
+            body["size"] = size;
+        }
+        let (status, _, response) = call(&f.st, "POST", "/v1/machines", "api", Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        assert!(json(&response)["error"]
+            .as_str()
+            .unwrap()
+            .contains("size.vcpus"));
+        assert!(ds[0].stub.creates.lock().unwrap().is_empty());
+        assert!(!f.st.reg.lock().unwrap().namespaces.contains_key("team_one"));
+    }
+}
 
 #[tokio::test]
 async fn template_build_never_reaches_hosts_without_explicit_capability() {

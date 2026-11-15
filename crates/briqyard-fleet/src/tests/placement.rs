@@ -359,7 +359,7 @@ fn sized_restore_backup(id: &str, millis: u32) -> serde_json::Value {
 
 #[tokio::test]
 async fn restore_placement_uses_backup_cpu_and_pins_the_selected_backup() {
-    for which in ["latest", "", "b1"] {
+    for (which, explicit_default) in [("latest", false), ("", false), ("b1", false), ("b1", true)] {
         let (f, ds) = fleet_with_daemons(2).await;
         for daemon in &ds {
             *daemon.stub.backup_records.lock().unwrap() = vec![
@@ -385,9 +385,15 @@ async fn restore_placement_uses_backup_cpu_and_pins_the_selected_backup() {
                 held.store(true, Ordering::SeqCst);
             }));
         }
-        let (status, headers, body) = call(&f.st, "POST", "/v1/machines", "api", Some(serde_json::json!({
-            "namespace":"restored", "name":"copy", "size":{"vcpus":0,"memory_mb":0}, "restore":{"machine_id":"m_gone","backup":which}
-        }))).await;
+        let mut request = serde_json::json!({
+            "namespace":"restored", "name":"copy",
+            "restore":{"machine_id":"m_gone","backup":which}
+        });
+        if explicit_default {
+            request["size"] = serde_json::json!({"vcpus":0,"memory_mb":0});
+        }
+        let (status, headers, body) =
+            call(&f.st, "POST", "/v1/machines", "api", Some(request)).await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
         assert_eq!(headers["x-briqyard-host"], "d2");
         assert!(held.load(Ordering::SeqCst));
