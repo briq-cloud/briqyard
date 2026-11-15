@@ -52,6 +52,7 @@ pub(super) async fn status(State(st): S) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version": briqyard_version::VERSION, "host_id": "fleet", "egress_siblings_v1": true, "placement_admission_v1": true, "placement_spill_v1": true,
         "prepared_upgrade_v1": st.cfg.bootstrap.script.as_os_str().is_empty(),
+        "observation": st.observation,
         "capacity": cap, "used": used, "machines": machines, "running": machines,
         "hosts": reg.hosts.len(), "ready": ready, "namespaces": reg.namespaces.len(),
         "regions": signals::regions(&reg, &st.policy, &st.refusals),

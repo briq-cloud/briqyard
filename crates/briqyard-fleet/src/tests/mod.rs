@@ -28,6 +28,7 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
         reg.heartbeat(static_host(h, now), now);
     }
     let st = Arc::new(AppState {
+        observation: crate::observation::new(&cfg),
         state_path,
         policy: Policy {
             require_egress_siblings: false,
@@ -249,6 +250,7 @@ mod join_trust;
 mod listings;
 mod locate;
 mod metrics;
+mod observation;
 mod placement;
 mod placement_admission;
 mod placement_seed_spill;
