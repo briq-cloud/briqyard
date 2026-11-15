@@ -206,7 +206,7 @@
       properties:
         observation:
           allOf: [{ $ref: "#/components/schemas/RuntimeObservation" }]
-          description: "Serving runtime identity; absent on older daemons or unresolved recovery. Not a maintenance permit."
+          description: "Serving daemon or central-fleet identity; loaded input hash is captured at startup, not reread from disk. Absent on older runtimes or unresolved daemon recovery. Not a maintenance permit."
         egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
         prepared_upgrade_v1: { type: boolean, default: false, description: "fleet with embedded bootstrap only: upgrade prepares with unchanged admission, withdraws only at activation, honors stay_draining on success and checks require_ready at ownership (ADR 0136). Callers MUST require true before sending stay_draining; older fleets ignore unknown request fields" }
         placement_admission_v1: { type: boolean, default: false, description: "fleet: it serves `/v1/namespaces/{namespace}/admissions/{request_id}` (ADR 0128); absent means the route is not there (404), never capacity" }

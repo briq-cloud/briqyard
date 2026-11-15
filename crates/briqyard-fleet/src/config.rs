@@ -1,5 +1,7 @@
 //! The fleet's configuration file.
 
+mod loading;
+
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -8,6 +10,8 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    #[serde(skip)]
+    pub loaded_identity: briqyard_api::LoadedConfigIdentity,
     pub execution: Option<Execution>,
     pub listen: String,
     /// The fleet's own listener: `{ cert, key }` serves TLS; without it, plain HTTP, refused
@@ -318,6 +322,7 @@ impl Default for Bootstrap {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            loaded_identity: briqyard_api::LoadedConfigIdentity::Unobserved,
             execution: None,
             listen: "127.0.0.1:7430".into(),
             tls: Tls::Unset,
@@ -334,28 +339,7 @@ impl Default for Config {
 
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
-        let mut cfg: Self = match path {
-            None => Self::default(),
-            Some(p) => {
-                let text = std::fs::read_to_string(p)
-                    .with_context(|| format!("read config {}", p.display()))?;
-                let parse = || format!("parse config {}", p.display());
-                let mut doc: serde_yaml::Value = serde_yaml::from_str(&text).with_context(parse)?;
-                match old_provisioner(&mut doc).with_context(parse)? {
-                    // From the text, so that an error says where.
-                    None => serde_yaml::from_str(&text).with_context(parse)?,
-                    Some(warning) => {
-                        tracing::warn!(config = %p.display(), "{warning}");
-                        serde_yaml::from_value(doc).with_context(parse)?
-                    }
-                }
-            }
-        };
-        if let Ok(v) = std::env::var("BRIQYARD_RELEASE_TOKEN") {
-            cfg.bootstrap.release_token = v;
-        }
-        cfg.validate()?;
-        Ok(cfg)
+        loading::load(path)
     }
 
     fn validate(&mut self) -> Result<()> {

@@ -26,6 +26,7 @@ mod lists;
 mod locate;
 mod moves;
 mod namespaces;
+mod observation;
 mod registry;
 mod restores;
 mod sandbox_admissions;
@@ -90,6 +91,7 @@ enum Cmd {
 }
 
 struct AppState {
+    observation: api::RuntimeObservation,
     cfg: config::Config,
     reg: RegLock,
     policy: Policy,
@@ -390,6 +392,7 @@ async fn run(args: Args) -> Result<()> {
         backup::drop_acks(&acks_file);
     }
     let state = Arc::new(AppState {
+        observation: observation::new(&cfg),
         cfg: cfg.clone(),
         reg: RegLock::new(reg),
         policy,

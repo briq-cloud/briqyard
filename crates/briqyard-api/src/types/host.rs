@@ -336,7 +336,7 @@ pub struct Status {
     /// Fleet with embedded bootstrap: preparation retains admission; completion and ready preconditions are honored.
     #[serde(default, skip_serializing_if = "super::limits::is_false")]
     pub prepared_upgrade_v1: bool,
-    /// Serving runtime identity; absent on older daemons or unresolved recovery.
+    /// Serving daemon or central-fleet identity; absent on older runtimes or unresolved daemon recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation: Option<RuntimeObservation>,
     /// Supports explicit via-mode access to pinned namespace siblings (ADR 0064).
