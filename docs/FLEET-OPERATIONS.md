@@ -188,7 +188,7 @@ trust: each host's id, url, pin prefix, token and pool key there or not, and the
 heartbeat in the backup. Check them, then start the fleet and remove the identity from the
 host. From the backup's last minute, a restore does not bring back an added host not yet
 keyed (add it again), a rotated token (put it in the record), a drain, or a forget. Placements made since the backup come back from the hosts' heartbeats.
-`age -d -i fleet-backup.key registry.json.age` reads a backup without us.
+`age -d -i fleet-backup.key registry.json.age | zstd -dcf` reads a backup without us (the sealed plaintext is zstd-compressed JSON since 0.2.11; `-f` passes an older, plain one through).
 
 Where the fleet terminates the connection (its `tls`, or plain on loopback), a host's
 heartbeat and key request must come from the address in its `url`: a host is listed by its

@@ -440,9 +440,7 @@ impl Backup {
             if telemetry_only {
                 return Ok(false);
             }
-            let sealed: Arc<[u8]> = age::encrypt(&self.recipient, &data)
-                .context("encrypt the registry")?
-                .into();
+            let sealed: Arc<[u8]> = seal(&self.recipient, &data)?.into();
             let mut written = Written {
                 ack_timestamp_seconds: None,
                 digest: Some(digest),
@@ -535,11 +533,42 @@ impl Backup {
     }
 }
 
-/// A sealed registry opened: decrypted with the identity, parsed as a registry.
+/// The magic number that starts every zstd frame.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+/// The most a sealed registry may expand to: a corrupt or hostile object stops here.
+const MAX_REGISTRY_BYTES: u64 = 1 << 30;
+
+/// The registry's JSON compressed with zstd, then encrypted to the recipient.
+fn seal(recipient: &age::x25519::Recipient, json: &[u8]) -> Result<Vec<u8>> {
+    let packed = zstd::bulk::compress(json, 3).context("compress the registry")?;
+    age::encrypt(recipient, &packed).context("encrypt the registry")
+}
+
+/// The registry's JSON from a decrypted plaintext: zstd-compressed (since 0.2.11) or plain.
+fn unpack(data: Vec<u8>, cap: u64) -> Result<Vec<u8>> {
+    use std::io::Read;
+    if !data.starts_with(&ZSTD_MAGIC) {
+        return Ok(data);
+    }
+    let decoder = zstd::stream::read::Decoder::new(data.as_slice())
+        .context("start decompressing the registry")?;
+    let mut json = Vec::new();
+    decoder
+        .take(cap + 1)
+        .read_to_end(&mut json)
+        .context("decompress the registry")?;
+    if json.len() as u64 > cap {
+        bail!("the registry expands to more than {cap} bytes");
+    }
+    Ok(json)
+}
+
+/// A sealed registry opened: decrypted with the identity, decompressed when it is
+/// (older backups are plain JSON), parsed as a registry.
 pub fn open(sealed: &[u8], identity: &age::x25519::Identity) -> Result<Registry> {
     let data = age::decrypt(identity, sealed)
         .map_err(|e| anyhow!("decrypt: {e} (not the identity of backup.recipient?)"))?;
-    serde_json::from_slice(&data).context("parse the registry")
+    serde_json::from_slice(&unpack(data, MAX_REGISTRY_BYTES)?).context("parse the registry")
 }
 
 fn store(cfg: &crate::config::Backup) -> Result<ObjectStore> {
@@ -1754,6 +1783,52 @@ pub(super) mod tests {
         })
         .unwrap()
         .unwrap()
+    }
+
+    fn many_hosts() -> Registry {
+        let mut reg = Registry::default();
+        for i in 0..2000 {
+            reg.namespaces
+                .insert(format!("ns-{i}"), format!("h{}", i % 7));
+        }
+        reg
+    }
+
+    /// The sealed plaintext is zstd; it round-trips and is far smaller than the JSON.
+    #[tokio::test]
+    async fn a_compressed_backup_round_trips_and_is_small() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = age::x25519::Identity::generate();
+        let b = backup(dir.path(), &identity.to_public().to_string());
+        let reg = many_hosts();
+        let json = encode(&reg);
+        let reg = RegLock::new(reg);
+        assert!(b.push(&reg).await.unwrap());
+        let sealed = std::fs::read(dir.path().join(LATEST)).unwrap();
+        let plain = age::decrypt(&identity, &sealed).unwrap();
+        assert!(plain.starts_with(&ZSTD_MAGIC));
+        eprintln!("json {} bytes, sealed {} bytes", json.len(), sealed.len());
+        assert!(sealed.len() * 5 < json.len());
+        let back = b.fetch(LATEST, &identity).await.unwrap();
+        assert_eq!(back.namespaces.len(), 2000);
+        assert_eq!(open(&sealed, &identity).unwrap().namespaces.len(), 2000);
+    }
+
+    /// A backup written before compression (plain sealed JSON) still opens.
+    #[test]
+    fn an_uncompressed_backup_still_opens() {
+        let identity = age::x25519::Identity::generate();
+        let sealed = age::encrypt(&identity.to_public(), &encode(&many_hosts())).unwrap();
+        assert_eq!(open(&sealed, &identity).unwrap().namespaces.len(), 2000);
+    }
+
+    /// A zstd bomb is refused past the cap rather than expanded in memory.
+    #[test]
+    fn a_decompression_bomb_is_refused() {
+        let packed = zstd::bulk::compress(&vec![0u8; 1 << 20], 1).unwrap();
+        let err = unpack(packed.clone(), 1 << 19).unwrap_err().to_string();
+        assert!(err.contains("expands to more than"), "{err}");
+        assert_eq!(unpack(packed, 1 << 20).unwrap().len(), 1 << 20);
     }
 
     /// Written encrypted, only when it changed, read back with the identity and with no other.
