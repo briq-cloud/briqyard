@@ -140,3 +140,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 - [0133: A host whose probed service is down is avoided for new namespaces](0133-avoid-conditions.md)
 
 - [0134: Assemble the standalone bootstrap from source fragments](0134-bootstrap-source-fragments.md)
+
+- [0139: Omitted create size reaches source inheritance](0139-omitted-create-size-inheritance.md)
