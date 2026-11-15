@@ -164,14 +164,14 @@ pub enum MError {
     /// A command granted through the namespace may still run: its network cannot change
     /// until the protection ends. 409 `namespace_protected`, `Retry-After` in seconds.
     #[error("namespace protected through command deadline: retry in {} ms", .0.retry_after_ms)]
-    NamespaceProtected(execution_fence::NamespaceProtected),
+    NamespaceProtected(NamespaceProtected),
     #[error(transparent)]
     Other(anyhow::Error),
 }
 
 impl From<anyhow::Error> for MError {
     fn from(e: anyhow::Error) -> Self {
-        match e.downcast::<execution_fence::NamespaceProtected>() {
+        match e.downcast::<NamespaceProtected>() {
             Ok(p) => MError::NamespaceProtected(p),
             Err(e) => MError::Other(e),
         }
