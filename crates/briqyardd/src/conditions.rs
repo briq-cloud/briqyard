@@ -390,4 +390,26 @@ mod tests {
             Err("connection failed".to_string())
         );
     }
+    #[tokio::test]
+    async fn a_probe_that_never_answers_ends_at_its_timeout() {
+        // Accepts and holds the connection without a byte back.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", l.local_addr().unwrap());
+        let held = tokio::spawn(async move {
+            let (_socket, _) = l.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let p = config::Probe {
+            http: url,
+            timeout_sec: 1,
+            ..probe(2)
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(
+            probe_once(&probe_client(), &p).await,
+            Err("no answer in 1 s".to_string())
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        held.abort();
+    }
 }
