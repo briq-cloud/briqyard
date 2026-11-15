@@ -793,6 +793,17 @@ paths:
         "409": { description: "the host is neither draining nor retiring (`conflict`)" }
   /v1/hosts/{id}/upgrade:
     parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [Hosts]
+      summary: Latest durable upgrade timing attempt (fleet)
+      responses:
+        '200':
+          description: Append-only observations; an unmatched running phase is ambiguous. Earlier attempts remain in the fleet state directory. No admission-unavailability duration is inferred.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/UpgradeTimingEvent" }
     post:
       summary: "Install another release on a ready or draining host, its machines running (fleet only, ADR 0027): the host `upgrading`, `hack/bootstrap-host.sh` run over SSH with the release, the daemon handing its machines over to the new one, then a heartbeat from a new start of the installed version that stopped no machine; the host back in its state unless stay_draining=true. Embedded preparation retains admission until activation (prepared_upgrade_v1). Answers when it is done; one upgrade at a time"
       requestBody:

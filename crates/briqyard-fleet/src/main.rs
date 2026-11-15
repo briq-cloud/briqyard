@@ -32,6 +32,7 @@ mod sandbox_admissions;
 mod scrape;
 mod signals;
 mod upgrade;
+mod upgrade_timing;
 mod warm;
 
 use anyhow::{anyhow, Context, Result};
@@ -667,7 +668,19 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/bootstrap-host.sh", get(bootstrap_script))
         .route("/v1/hosts/:id/drain", post(drain_host))
         .route("/v1/hosts/:id/undrain", post(undrain_host))
-        .route("/v1/hosts/:id/upgrade", post(upgrade::upgrade_host))
+        .route(
+            "/v1/hosts/:id/upgrade",
+            // Bind server-owned configuration at router construction. Only the host ID and
+            // upgrade body come from request extractors; journal paths are never request data.
+            post({
+                let st = state.clone();
+                move |id, req| upgrade::upgrade_host(st.clone(), id, req)
+            })
+            .get({
+                let st = state.clone();
+                move |id| upgrade::timings(st.clone(), id)
+            }),
+        )
         .route("/v1/hosts/:id/retire", post(retire_host))
         .route("/v1/hosts/:id/metrics", get(scrape::host_metrics))
         .route("/v1/hosts/:id", axum::routing::delete(forget_host))

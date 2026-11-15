@@ -572,3 +572,19 @@
         status: { type: string, enum: [creating, ready, claimed, failed] }
         machine_state: { type: string }
         request_id: { type: string }
+
+    UpgradeTimingEvent:
+      type: object
+      required: [event, at]
+      additionalProperties: false
+      properties:
+        event: { type: string, enum: [attempt, phase] }
+        at: { type: string, format: date-time }
+        schemaVersion: { type: integer, enum: [1] }
+        attempt: { type: string }
+        host: { type: string }
+        fromVersion: { type: string }
+        release: { type: string, description: "Requested version, or custom for a URL" }
+        phase: { type: string, enum: [prepare, withdrawal, activation, installed_version, adoption_readiness, completion] }
+        outcome: { type: string, enum: [running, succeeded, failed] }
+        elapsedMs: { type: integer, nullable: true, minimum: 0 }

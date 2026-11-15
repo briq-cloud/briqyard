@@ -10,7 +10,7 @@
 //! leaves it to finish, never a host half-moved.
 
 use crate::{bootstrap, err, AppState, Refusal};
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -23,7 +23,7 @@ use std::time::Duration;
 const COME_BACK: Duration = Duration::from_secs(300);
 
 pub async fn upgrade_host(
-    State(st): State<Arc<AppState>>,
+    st: Arc<AppState>,
     Path(id): Path<String>,
     Json(req): Json<api::UpgradeHostRequest>,
 ) -> Result<Response, Refusal> {
@@ -98,6 +98,15 @@ pub async fn upgrade_host(
         }
         h.clone()
     };
+    let mut timing =
+        crate::upgrade_timing::Timing::new(&st.cfg.state_dir, &was.id, &was.version, &req.release)
+            .map_err(|_| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "cannot initialize upgrade timing journal; nothing dispatched",
+                )
+            })?;
     let classes = req.runtime_classes;
     let task = tokio::spawn(async move {
         let _turn = turn;
@@ -109,6 +118,9 @@ pub async fn upgrade_host(
         );
         // Custom bootstrap scripts retain their single invocation and drain-first contract.
         let phases = bootstrap::upgrade_phases(&st.cfg.bootstrap, &env);
+        if phases.is_some() {
+            timing.start("prepare");
+        }
         let preparation = async {
             if let Some((prepare, _)) = &phases {
                 bootstrap::install(&st, &was.id, bootstrap::ssh_address(&was), prepare)
@@ -117,13 +129,24 @@ pub async fn upgrade_host(
             }
             Ok(())
         };
-        let current = prepare_before_withdraw(&st, &was, &release, preparation).await?;
+        let prepared: Result<(), String> = preparation.await;
+        if phases.is_some() {
+            timing.end(prepared.is_ok());
+        }
+        prepared?;
+        timing.start("withdrawal");
+        let withdrawn = prepare_before_withdraw(&st, &was, &release, async { Ok(()) }).await;
+        timing.end(withdrawn.is_ok());
+        let current = withdrawn?;
         let activation = phases
             .as_ref()
             .map(|(_, activate)| activate.as_str())
             .unwrap_or(&env);
-        let outcome = run(&st, &current, &release, activation).await;
-        finish(&st, &was, &release, req.stay_draining, outcome).await
+        let outcome = run(&st, &current, &release, activation, &mut timing).await;
+        timing.start("completion");
+        let result = finish(&st, &was, &release, req.stay_draining, outcome).await;
+        timing.end(result.is_ok());
+        result
     });
     match task.await {
         Ok(Ok(host)) => Ok(Json(host).into_response()),
@@ -176,20 +199,23 @@ async fn run(
     was: &crate::registry::HostRec,
     release: &str,
     env: &str,
+    timing: &mut crate::upgrade_timing::Timing,
 ) -> Result<(String, api::DaemonStart), String> {
     // Over SSH where the bootstrap reached it: a host added by hand has an SSH address of its
     // own, the API on the private network.
     let ip = bootstrap::ssh_address(was).to_string();
     tracing::info!(host = was.id, release, "host upgrade");
-    let installed = bootstrap::install(st, &was.id, &ip, env)
-        .await
-        .map_err(|e| format!("install: {e:#}"))?;
+    timing.start("activation");
+    let installed = bootstrap::install(st, &was.id, &ip, env).await;
+    timing.end(installed.is_ok());
+    let installed = installed.map_err(|e| format!("install: {e:#}"))?;
     // What the install says of the SSH host key: pinned now (a static host's first upgrade),
     // or already.
     tracing::info!(host = was.id, note = installed, "host upgrade installed");
-    let version = bootstrap::installed_version(st, &ip)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    timing.start("installed_version");
+    let version = bootstrap::installed_version(st, &ip).await;
+    timing.end(version.is_ok());
+    let version = version.map_err(|e| format!("{e:#}"))?;
     if api::version::newer(&version, briqyard_version::VERSION) {
         return Err(format!(
             "the host now runs {version}, newer than this fleet ({}): upgrade the fleet first",
@@ -197,7 +223,10 @@ async fn run(
         ));
     }
     let before = was.started.map(|s| s.at);
-    let started = come_back(st, &was.id, before, &version, COME_BACK).await?;
+    timing.start("adoption_readiness");
+    let started = come_back(st, &was.id, before, &version, COME_BACK).await;
+    timing.end(started.is_ok());
+    let started = started?;
     Ok((version, started))
 }
 
@@ -300,4 +329,19 @@ pub fn interrupted(reg: &mut crate::registry::Registry) {
             h.note
         );
     }
+}
+
+/// Safe structured observations, including an unmatched start after interruption.
+pub async fn timings(st: Arc<AppState>, Path(id): Path<String>) -> Result<Response, Refusal> {
+    if !st.reg.lock().unwrap().hosts.contains_key(&id) {
+        return Err(err(StatusCode::NOT_FOUND, "not_found", "host not found"));
+    }
+    let record = crate::upgrade_timing::latest(&st.cfg.state_dir, &id).map_err(|_| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "upgrade timing unavailable",
+        )
+    })?;
+    Ok(Json(record).into_response())
 }

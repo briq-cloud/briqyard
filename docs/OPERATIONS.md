@@ -428,6 +428,18 @@ host provisioning still occur after withdrawal and can perform network requests.
 is not zero downtime: long daemon streams still end at handover's bound, and admission for
 namespaces pinned to the host still needs a future handover mechanism.
 
+### Upgrade timing records
+
+`GET /v1/hosts/{id}/upgrade` returns the latest attempt's safe structured phase observations.
+The fleet retains every attempt under `state_dir/upgrade-timings/<hex-host-id>/*.jsonl`.
+Archive those files with the registry when comparing upgrades. Each record has UTC time;
+completed phases have monotonic `elapsedMs` and `succeeded` or `failed`. An unmatched
+`running` is unknown, including after a fleet interruption or telemetry persistence failure.
+No failed attempt is overwritten. See [ADR 0137](adr/0137-durable-upgrade-phase-observations.md)
+for phase boundaries and storage failure semantics. The CLI still prints the lifecycle note;
+fetch the timing endpoint with the same authenticated client for machine-readable records.
+
+
 
 From v0.1.11, a release install requires the checked Firecracker bundle; a missing bundle is
 an error, with no fallback to upstream binaries. Both Firecracker and jailer are checked by
