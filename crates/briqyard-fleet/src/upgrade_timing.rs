@@ -2,6 +2,7 @@
 use briqyard_api::UpgradeTimingEvent;
 use chrono::Utc;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
@@ -18,7 +19,8 @@ pub(crate) struct Timing {
 }
 
 fn directory(root: &Path, host: &str) -> PathBuf {
-    let key: String = host.bytes().map(|b| format!("{b:02x}")).collect();
+    // A fixed-width digest keeps empty, long and separator-bearing identifiers inside one component.
+    let key = format!("{:x}", Sha256::digest(host.as_bytes()));
     root.join("upgrade-timings").join(key)
 }
 
@@ -148,6 +150,19 @@ pub(crate) fn latest(root: &Path, host: &str) -> std::io::Result<Vec<UpgradeTimi
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn host_directory_is_a_bounded_nonempty_component() {
+        let root = Path::new("/state");
+        for host in ["", "..", "../escape", "a/b", "a\\b", "☃"] {
+            let path = directory(root, host);
+            assert_eq!(path.parent(), Some(root.join("upgrade-timings").as_path()));
+            let key = path.file_name().unwrap().to_str().unwrap();
+            assert_eq!(key.len(), 64);
+            assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        }
+        assert_ne!(directory(root, "a"), directory(root, "a/"));
+    }
+
     #[test]
     fn duration_is_monotonic_arithmetic() {
         assert_eq!(
