@@ -440,7 +440,7 @@ impl Backup {
             if telemetry_only {
                 return Ok(false);
             }
-            let sealed: Arc<[u8]> = seal(&self.recipient, &data)?.into();
+            let recipient = self.recipient.clone();
             let mut written = Written {
                 ack_timestamp_seconds: None,
                 digest: Some(digest),
@@ -473,6 +473,12 @@ impl Backup {
             let worker = tokio::spawn(async move {
                 let mut reply = Some(reply);
                 let result = async {
+                    // Compressed and encrypted here, off the caller's path and its thread.
+                    let sealed: Arc<[u8]> =
+                        tokio::task::spawn_blocking(move || seal(&recipient, &data))
+                            .await
+                            .map_err(|e| anyhow!("seal the registry: {e}"))??
+                            .into();
                     for object in objects {
                         let future = put(object.clone(), sealed.clone());
                         tokio::pin!(future);
@@ -1733,20 +1739,34 @@ pub(super) mod tests {
         let identity = age::x25519::Identity::generate();
         let b = backup(dir.path(), &identity.to_public().to_string());
         let mut reg = Registry::default();
-        // Above the object store's 32 MiB part boundary after age encryption.
-        reg.unknown.insert(
-            "multipart-marker".into(),
-            serde_json::Value::String("m".repeat(33 << 20)),
-        );
+        // Above the object store's 32 MiB part boundary once compressed and encrypted: random
+        // characters from 64 compress to about 6 bits each, so 48 MiB stays above 32 MiB.
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let noise: String = (0..48 << 20)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                alphabet[(x & 63) as usize] as char
+            })
+            .collect();
+        reg.unknown
+            .insert("multipart-marker".into(), serde_json::Value::String(noise));
         reg.namespaces
             .insert("multipart-snapshot".into(), "h1".into());
         let reg = RegLock::new(reg);
         assert!(b.push(&reg).await.unwrap());
+        let sealed = std::fs::metadata(dir.path().join(LATEST)).unwrap().len();
+        assert!(
+            sealed > 32 << 20,
+            "sealed {sealed} bytes: no multipart upload"
+        );
         let latest = b.fetch(LATEST, &identity).await.unwrap();
         assert!(latest.namespaces.contains_key("multipart-snapshot"));
         assert_eq!(
             latest.unknown["multipart-marker"].as_str().unwrap().len(),
-            33 << 20
+            48 << 20
         );
         assert!(!b.push(&reg).await.unwrap());
     }
