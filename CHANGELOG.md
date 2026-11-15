@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.11 — 2026-11-15
+
+### Upgrade notes
+
+- Upgrade the fleet before adding `conditions.probes` to any daemon (ADR 0133): an older fleet reads a probe's true condition as pressure and refuses creates for the namespaces on that host. Without probes nothing changes.
+- A protected namespace's network removal now answers 409 `namespace_protected` with `Retry-After` instead of 500; clients that retried on 500 should retry on this 409.
+- The fleet's registry backup is now zstd-compressed JSON inside the age envelope (ADR 0032). This release reads both formats; an older fleet cannot read a backup this release wrote, so to restore one with an older fleet, decrypt and decompress it by hand (`age -d … | zstd -dcf`, docs/FLEET-OPERATIONS.md). No configuration changes.
+- The guest init does not change, so its digest stays the same as 0.2.10 (ADR 0101): existing seeds stay valid.
+
+### Features
+
+- avoid hosts whose probed service is down when placing a new namespace (#244) ([47b56de3](https://github.com/briq-cloud/briqyard/commit/47b56de354b00c641c42286a67fff5f488a116b8))
+
+### Fixes
+
+- answer a protected namespace with 409 namespace_protected (#243) ([6fee9ce0](https://github.com/briq-cloud/briqyard/commit/6fee9ce01bf67fccae69e914256216781d6fda94))
+- compress the registry backup before sealing it (#246) ([1eea628d](https://github.com/briq-cloud/briqyard/commit/1eea628daabf7145d1a9152568d075cfc3d48733))
+
 ## 0.2.10 — 2026-11-14
 
 ### Upgrade notes
