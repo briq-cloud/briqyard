@@ -407,7 +407,8 @@ the daemon exits and leaves them running, and the next one adopts them. `host up
 the fleet (`upgrade.rs`) prepares verified artifacts while the host retains its state, then
 marks it `upgrading` and activates those local bytes through the same bootstrap (ADR 0135;
 custom scripts retain their single invocation after withdrawal), waits for a heartbeat from a new start of the
-installed version that stopped no machine, and puts the host back; the fleet is upgraded first.
+installed version that stopped no machine, and puts the host back (or keeps it draining
+with `stay_draining`, gated by `prepared_upgrade_v1`, ADR 0136); the fleet is upgraded first.
 
 ## Several servers
 

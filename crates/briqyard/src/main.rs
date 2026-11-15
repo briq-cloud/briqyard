@@ -778,6 +778,12 @@ enum HostCmd {
         /// for several. One host only: a class is chosen per host
         #[arg(long = "runtime-class", conflicts_with = "all")]
         runtime_classes: Vec<String>,
+        /// Keep the host draining after success until external checks and host undrain
+        #[arg(long)]
+        stay_draining: bool,
+        /// Refuse if the host is no longer ready when the upgrade takes ownership
+        #[arg(long)]
+        require_ready: bool,
     },
     /// Take no new namespace on a host and forget it once nothing runs on it (the server is yours
     /// to give back)

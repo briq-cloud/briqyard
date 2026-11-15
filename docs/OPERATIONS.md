@@ -368,7 +368,23 @@ What one upgrade does (`POST /v1/hosts/{id}/upgrade`; the call answers when it i
 | Install | `hack/bootstrap-host.sh` over SSH with the release (`bootstrap.ssh_key`, the pinned host key), packages and host provisioning, then the exact prepared artifacts put in place by a rename, the unit. No artifact downloads in this phase |
 | Hand-over | The script sends the running daemon SIGUSR2: it stops accepting, drains for up to 2 s, exits 75 and leaves every machine running; the unit starts the new one at once, which adopts them. Its listeners stay in systemd's store meanwhile (ADR 0051) |
 | Back | `briqyardd --version` over SSH, then a heartbeat from a new start of that version that stopped nothing, within 5 minutes |
-| Undrained | The host is back in its state; its note says `upgraded to <version> at <time>; machines handed over: N` |
+| Completion | With `stay_draining: true`, the host stays `draining` for external checks. Otherwise it is back in its state; its note says `upgraded to <version> at <time>; machines handed over: N` |
+
+For external verification before readmission:
+
+```sh
+briqyard host upgrade h_123456 --release 0.2.0 --stay-draining --require-ready
+# Verify the host and preserved workloads, then:
+briqyard host undrain h_123456
+```
+
+The CLI requires `prepared_upgrade_v1: true` from the running fleet's `/v1/status`
+before dispatch. API callers must do the same: an older fleet ignores unknown request
+fields and could restore `ready` early. The capability is false for custom bootstrap
+scripts, which refuse either safety option when true. Omitted or false keeps existing behavior.
+`--require-ready` refuses a host already drained when the runtime takes ownership,
+before preparation. Omit it only with authority to upgrade a pre-existing drain. A lost upgrade response permits
+observation and verification only, never automatic redispatch.
 
 The install is also what sets the memory prerequisites (ADR 0065): the unit's
 `OOMScoreAdjust=-900` before the new daemon starts, then swap off, KSM and `systemd-oomd`

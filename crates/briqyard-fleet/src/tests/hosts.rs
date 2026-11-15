@@ -590,6 +590,7 @@ async fn status_sums_the_ready_hosts_and_hosts_are_sorted() {
     assert_eq!(s, StatusCode::OK);
     let v = json(&body);
     assert_eq!(v["host_id"], "fleet");
+    assert_eq!(v["prepared_upgrade_v1"], true);
     assert_eq!(v["hosts"], 3);
     assert_eq!(v["ready"], 1, "only b is ready");
     assert_eq!(v["capacity"]["memory_mb"], 64_000);

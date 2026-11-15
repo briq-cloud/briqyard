@@ -606,9 +606,15 @@ async fn an_upgrade_ends_in_the_hosts_state_or_drained() {
         stopped: 0,
         gone: 0,
     };
-    let h = upgrade::finish(&f.st, &was, "file:///r", Ok(("0.2.0+b".into(), started)))
-        .await
-        .unwrap();
+    let h = upgrade::finish(
+        &f.st,
+        &was,
+        "file:///r",
+        false,
+        Ok(("0.2.0+b".into(), started)),
+    )
+    .await
+    .unwrap();
     assert_eq!(h.state, "ready");
     assert!(h.note.starts_with("upgraded to 0.2.0+b at "), "{}", h.note);
     assert!(h.note.ends_with("; machines handed over: 3"), "{}", h.note);
@@ -618,6 +624,7 @@ async fn an_upgrade_ends_in_the_hosts_state_or_drained() {
         &f.st,
         &was,
         "file:///r",
+        false,
         Err("install: ssh exited 255".into()),
     )
     .await
@@ -707,6 +714,17 @@ async fn failed_preparation_or_changed_host_state_never_activates() {
             .is_err()
     );
     assert_eq!(f.st.reg.lock().unwrap().hosts["h_a"].state, "ready");
+    let drained = async {
+        set_state(&f.st, "h_a", "draining");
+        Ok(())
+    };
+    assert!(
+        upgrade::prepare_before_withdraw(&f.st, &was, "file:///release", drained)
+            .await
+            .is_err()
+    );
+    assert_eq!(f.st.reg.lock().unwrap().hosts["h_a"].state, "draining");
+    set_state(&f.st, "h_a", "ready");
     let changed = async {
         set_state(&f.st, "h_a", "retiring");
         Ok(())
@@ -717,4 +735,74 @@ async fn failed_preparation_or_changed_host_state_never_activates() {
             .is_err()
     );
     assert_eq!(f.st.reg.lock().unwrap().hosts["h_a"].state, "retiring");
+}
+
+#[tokio::test]
+async fn successful_upgrade_can_require_external_readmission() {
+    for original in ["ready", "draining"] {
+        for stay_draining in [false, true] {
+            let f = fleet_with_key();
+            seed(&f.st, "h_a", 4096, 0, 0, &[]);
+            set_state(&f.st, "h_a", original);
+            let was = f.st.reg.lock().unwrap().hosts["h_a"].clone();
+            set_state(&f.st, "h_a", "upgrading");
+            let started = api::DaemonStart {
+                at: Utc::now(),
+                adopted: 1,
+                stopped: 0,
+                gone: 0,
+            };
+            let h = upgrade::finish(
+                &f.st,
+                &was,
+                "file:///r",
+                stay_draining,
+                Ok(("0.2.0+b".into(), started)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(h.state, if stay_draining { "draining" } else { original });
+        }
+    }
+}
+
+#[tokio::test]
+async fn custom_bootstrap_cannot_advertise_or_accept_prepared_upgrade() {
+    let mut cfg = config::Config::default();
+    cfg.bootstrap.script = "/custom.sh".into();
+    let f = fleet(cfg);
+    let (_, _, body) = call(&f.st, "GET", "/v1/status", "", None).await;
+    assert_eq!(json(&body)["prepared_upgrade_v1"], false);
+    for field in ["stay_draining", "require_ready"] {
+        let mut request = serde_json::json!({"release":"0.2.0"});
+        request[field] = true.into();
+        let (status, _, body) =
+            call(&f.st, "POST", "/v1/hosts/h_a/upgrade", "", Some(request)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json(&body)["error"]
+            .as_str()
+            .unwrap()
+            .contains("embedded prepared upgrade"));
+    }
+}
+
+#[tokio::test]
+async fn a_manual_drain_before_upgrade_ownership_refuses_ready_precondition() {
+    let f = fleet_with_key();
+    seed(&f.st, "h_a", 4096, 0, 0, &[]);
+    set_state(&f.st, "h_a", "draining");
+    let (status, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/hosts/h_a/upgrade",
+        "",
+        Some(serde_json::json!({"release":"0.2.0", "stay_draining":true, "require_ready":true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(json(&body)["error"]
+        .as_str()
+        .unwrap()
+        .contains("require_ready"));
+    assert_eq!(hosts(&f.st)[0].state, "draining");
 }

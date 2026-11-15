@@ -794,7 +794,7 @@ paths:
   /v1/hosts/{id}/upgrade:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: "Install another release on a ready or draining host, its machines running (fleet only, ADR 0027): the host `upgrading`, `hack/bootstrap-host.sh` run over SSH with the release, the daemon handing its machines over to the new one, then a heartbeat from a new start of the installed version that stopped no machine; the host back in its state. Answers when it is done; one upgrade at a time"
+      summary: "Install another release on a ready or draining host, its machines running (fleet only, ADR 0027): the host `upgrading`, `hack/bootstrap-host.sh` run over SSH with the release, the daemon handing its machines over to the new one, then a heartbeat from a new start of the installed version that stopped no machine; the host back in its state unless stay_draining=true. Embedded preparation retains admission until activation (prepared_upgrade_v1). Answers when it is done; one upgrade at a time"
       requestBody:
         required: true
         content:
@@ -802,10 +802,10 @@ paths:
             schema: { $ref: "#/components/schemas/UpgradeHostRequest" }
       responses:
         "200": { description: "upgraded; the note says to what and how many machines were handed over", content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
-        "400": { description: "a release that is neither a URL nor a version, a class name that is not a name (`runtime_classes`), or no SSH key (`bootstrap.ssh_key`)" }
+        "400": { description: "a release that is neither a URL nor a version, a class name that is not a name (`runtime_classes`), no SSH key (`bootstrap.ssh_key`), or stay_draining/require_ready with a custom bootstrap" }
         "404": { description: no such host }
-        "409": { description: "another upgrade under way, or the host is neither ready nor draining (`conflict`)" }
-        "502": { description: "the upgrade failed (`upgrade_failed`): the host is `draining`, the reason in its note" }
+        "409": { description: "another upgrade under way, require_ready with a non-ready host, or the host is neither ready nor draining (`conflict`)" }
+        "502": { description: "the upgrade failed (`upgrade_failed`): preparation leaves admission unchanged; after withdrawal the host is `draining`, the reason in its note" }
   /v1/hosts/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     delete:

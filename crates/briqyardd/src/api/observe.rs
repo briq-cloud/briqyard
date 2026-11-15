@@ -20,6 +20,7 @@ pub(super) async fn metrics(State(st): S) -> Response {
 pub(super) async fn status(State(st): S) -> Json<api::Status> {
     let (used, running, machines) = st.mgr.usage();
     Json(api::Status {
+        prepared_upgrade_v1: false,
         observation: st
             .mgr
             .recovery_fault()
