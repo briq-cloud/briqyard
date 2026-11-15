@@ -79,8 +79,13 @@ pub(super) async fn create_machine(
     let needs_named_memory = req.template_build.is_some()
         || req.sandbox_seed.is_some()
         || req.fork.as_ref().is_some_and(|f| f.snapshot.is_some());
+    let mut named_memory_profile = req
+        .template_build
+        .clone()
+        .unwrap_or_else(|| "init-ready-v1".into());
     if req.fork.as_ref().is_some_and(|f| f.snapshot.is_some()) {
-        let (size, snapshot) = named_memory_size(&st, req.fork.as_ref().unwrap()).await?;
+        let (size, snapshot, profile) = named_memory_size(&st, req.fork.as_ref().unwrap()).await?;
+        named_memory_profile = profile;
         if req.size != api::Size::default() && req.size != size {
             return Err(err(
                 StatusCode::BAD_REQUEST,
@@ -136,10 +141,8 @@ pub(super) async fn create_machine(
         require_named_memory: needs_named_memory,
         named_memory_profile: if sandbox_profile {
             "sandbox-ready-v1".into()
-        } else if req.template_build.as_deref() == Some("service-ready-v1") {
-            "service-ready-v1".into()
         } else {
-            "init-ready-v1".into()
+            named_memory_profile
         },
         runtime_class: req.runtime_class.clone(),
         ..st.policy.clone()
@@ -666,6 +669,7 @@ pub(super) async fn first_refused(
 
 fn require_named_memory(host: &HostRec, down_after: chrono::Duration) -> Result<(), Refusal> {
     require_memory_profile(host, down_after, "init-ready-v1")
+        .or_else(|_| require_memory_profile(host, down_after, "service-ready-v1"))
 }
 pub(super) fn require_memory_profile(
     host: &HostRec,
@@ -689,7 +693,7 @@ pub(super) fn require_memory_profile(
 async fn named_memory_size(
     st: &Arc<AppState>,
     fork: &api::ForkSpec,
-) -> Result<(api::Size, String), Refusal> {
+) -> Result<(api::Size, String, String), Refusal> {
     if !api::valid_id(&fork.machine_id) {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -746,8 +750,10 @@ async fn named_memory_size(
                 "named memory snapshot not found",
             )
         })?;
-    if snapshot.clone_profile.as_deref() != Some("init-ready-v1")
-        || !snapshot.memory
+    if !matches!(
+        snapshot.clone_profile.as_deref(),
+        Some("init-ready-v1" | "service-ready-v1")
+    ) || !snapshot.memory
         || snapshot.source_host.as_deref().is_none_or(str::is_empty)
     {
         return Err(err(
@@ -756,6 +762,8 @@ async fn named_memory_size(
             "snapshot is not a compatible source-host memory template",
         ));
     }
+    let profile = snapshot.clone_profile.expect("validated template profile");
+    require_memory_profile(&host, st.policy.down_after, &profile)?;
     let size = snapshot.clone_size.ok_or_else(|| {
         err(
             StatusCode::BAD_REQUEST,
@@ -763,7 +771,7 @@ async fn named_memory_size(
             "template has no immutable size",
         )
     })?;
-    Ok((size, snapshot.id))
+    Ok((size, snapshot.id, profile))
 }
 
 pub(super) async fn check_sandbox_selector(

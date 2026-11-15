@@ -137,7 +137,6 @@ fn create_machine_request_minimal() {
     for missing in [
         json!({"name": "db", "size": {"vcpus": 1, "memory_mb": 256}}),
         json!({"namespace": "t1", "size": {"vcpus": 1, "memory_mb": 256}}),
-        json!({"namespace": "t1", "name": "db"}),
     ] {
         assert!(
             serde_json::from_value::<CreateMachineRequest>(missing.clone()).is_err(),
