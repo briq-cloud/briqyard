@@ -60,14 +60,17 @@ fn the_description_lists_the_reasons_the_daemon_has() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert_eq!(listed, api::reason::ALL);
-    let conditions: Vec<&str> = doc["components"]["schemas"]["Condition"]["properties"]["type"]
-        ["enum"]
-        .as_sequence()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
-    assert_eq!(conditions, api::condition::ALL);
+    // A probe reports under its own name (ADR 0133): the type is open, its description names
+    // every built-in condition.
+    let condition = &doc["components"]["schemas"]["Condition"]["properties"]["type"];
+    assert!(condition["enum"].is_null());
+    let described = condition["description"].as_str().unwrap();
+    for kind in api::condition::ALL {
+        assert!(
+            described.contains(&format!("`{kind}`")),
+            "{kind} is not described"
+        );
+    }
     for schema in ["Status", "Host", "RegisterHostRequest"] {
         assert_eq!(
             doc["components"]["schemas"][schema]["properties"]["memory_policy"]["$ref"].as_str(),
