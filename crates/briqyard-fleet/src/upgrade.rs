@@ -10,7 +10,7 @@
 //! leaves it to finish, never a host half-moved.
 
 use crate::{bootstrap, err, AppState, Refusal};
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -23,7 +23,7 @@ use std::time::Duration;
 const COME_BACK: Duration = Duration::from_secs(300);
 
 pub async fn upgrade_host(
-    State(st): State<Arc<AppState>>,
+    st: Arc<AppState>,
     Path(id): Path<String>,
     Json(req): Json<api::UpgradeHostRequest>,
 ) -> Result<Response, Refusal> {
@@ -332,10 +332,7 @@ pub fn interrupted(reg: &mut crate::registry::Registry) {
 }
 
 /// Safe structured observations, including an unmatched start after interruption.
-pub async fn timings(
-    State(st): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Response, Refusal> {
+pub async fn timings(st: Arc<AppState>, Path(id): Path<String>) -> Result<Response, Refusal> {
     if !st.reg.lock().unwrap().hosts.contains_key(&id) {
         return Err(err(StatusCode::NOT_FOUND, "not_found", "host not found"));
     }
