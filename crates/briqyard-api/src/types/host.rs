@@ -448,3 +448,27 @@ pub struct ApiError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oldest: Option<u64>,
 }
+
+/// Durable upgrade observations. A phase without a terminal observation is ambiguous.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "event",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum UpgradeTimingEvent {
+    Attempt {
+        schema_version: u32,
+        attempt: String,
+        host: String,
+        from_version: String,
+        release: String,
+        at: chrono::DateTime<chrono::Utc>,
+    },
+    Phase {
+        phase: String,
+        outcome: String,
+        elapsed_ms: Option<u64>,
+        at: chrono::DateTime<chrono::Utc>,
+    },
+}
