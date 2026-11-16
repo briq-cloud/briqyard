@@ -414,6 +414,52 @@ fn uncertain_persistence_poisoning_never_licenses_replay_or_silent_recovery() {
     assert!(Journal::open(&path, Role::Host("host-1".into())).is_err());
 }
 #[test]
+fn a_reader_sees_published_actions_and_never_an_uncommitted_or_unpublished_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host");
+    let f = Fixture::new("epoch");
+    let mut j = host(&path, &f);
+    let id = f.permit.admission.clone();
+    let reader = j.reader();
+    let before = reader.view();
+    assert_eq!(before.status(&id).unwrap(), None);
+    j.consume(&f.bundle(), clock()).unwrap();
+    // A commit is durable but not visible until the action publishes it.
+    assert_eq!(reader.view().status(&id).unwrap(), None);
+    assert_eq!(j.status(&id).unwrap(), Some(Status::Consumed));
+    j.publish();
+    // A view is one committed state: it does not move when a later action lands.
+    assert_eq!(before.status(&id).unwrap(), None);
+    assert_eq!(reader.view().status(&id).unwrap(), Some(Status::Consumed));
+    assert_eq!(reader.view().instance(), j.instance());
+    // A write that fails to persist publishes nothing, and its journal and every
+    // reader refuse from then on, as the writer does.
+    std::fs::write(path.join("journal.next"), b"unresolved").unwrap();
+    assert!(matches!(
+        j.finish(&f.permit, clock()),
+        Err(Error::Persistence)
+    ));
+    j.publish();
+    assert!(matches!(reader.view().status(&id), Err(Error::Persistence)));
+    assert!(matches!(reader.view().owned(), Err(Error::Persistence)));
+    assert!(matches!(j.status(&id), Err(Error::Persistence)));
+}
+#[test]
+fn a_reader_applies_the_writers_ownership_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host");
+    let f = Fixture::new("epoch");
+    let j = host(&path, &f);
+    let reader = j.reader();
+    assert_eq!(reader.view().status("unknown").unwrap(), None);
+    std::fs::rename(path.join("writer.lock"), path.join("old.lock")).unwrap();
+    std::os::unix::fs::symlink(path.join("old.lock"), path.join("writer.lock")).unwrap();
+    assert!(matches!(
+        reader.view().status("unknown"),
+        Err(Error::Ownership)
+    ));
+}
+#[test]
 fn prune_never_refunds_and_clock_rollback_cannot_revive_expired_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let f = Fixture::new("epoch");

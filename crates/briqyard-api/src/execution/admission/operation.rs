@@ -34,11 +34,6 @@ pub struct OperationIntent {
 }
 
 impl Journal {
-    pub fn operation_intent(&self, id: &str) -> Result<Option<&OperationIntent>, Error> {
-        self.ownership()?;
-        Ok(self.state.operation_intents.get(id))
-    }
-
     pub fn begin_operation(&mut self, intent: OperationIntent, clock: Clock) -> Result<(), Error> {
         self.check(clock)?;
         if !matches!(self.role(), Role::Authority(_))
@@ -98,7 +93,7 @@ impl Journal {
         if self.state.operation_intents.len() >= MAX_RECORDS {
             return Err(Error::Full);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.operation_intents.insert(intent.id.clone(), intent);
         next.clock_floor = clock.now;
         self.commit(next)
@@ -118,7 +113,7 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         let op = next.operation_intents.get_mut(id).ok_or(Error::Binding)?;
         op.permit_digest = Some(permit_digest);
         op.phase = OperationPhase::Reserved;
@@ -157,7 +152,7 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         let op = next.operation_intents.get_mut(id).ok_or(Error::Binding)?;
         op.prepared = Some(ack);
         op.phase = OperationPhase::Prepared;
@@ -174,7 +169,7 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.operation_intents
             .get_mut(id)
             .ok_or(Error::Binding)?
@@ -201,7 +196,7 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         let op = next.operation_intents.get_mut(id).ok_or(Error::Binding)?;
         op.phase = phase;
         op.outcome_digest = outcome_digest;
@@ -211,12 +206,19 @@ impl Journal {
 
     pub fn mark_operation_unconfirmed(&mut self, id: &str, clock: Clock) -> Result<(), Error> {
         self.check(clock)?;
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.operation_intents
             .get_mut(id)
             .ok_or(Error::Binding)?
             .unconfirmed = true;
         next.clock_floor = clock.now;
         self.commit(next)
+    }
+}
+
+impl JournalView {
+    pub fn operation_intent(&self, id: &str) -> Result<Option<&OperationIntent>, Error> {
+        self.ownership()?;
+        Ok(self.state.operation_intents.get(id))
     }
 }

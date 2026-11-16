@@ -199,17 +199,12 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.authority_highwater.insert(key, generation);
         next.authority_intents.insert(id.into(), intended);
         next.clock_floor = clock.now;
         self.commit(next)?;
         Ok(true)
-    }
-
-    pub fn authority_intent(&self, id: &str) -> Result<Option<&AuthorityIntent>, Error> {
-        self.ownership()?;
-        Ok(self.state.authority_intents.get(id))
     }
 
     /// Only the exact typed host ACK can turn a persisted pending intent ready.
@@ -242,13 +237,50 @@ impl Journal {
         if intent.acknowledgement.is_some() {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.authority_intents
             .get_mut(id)
             .ok_or(Error::Binding)?
             .acknowledgement = Some(ack);
         next.clock_floor = clock.now;
         self.commit(next)
+    }
+
+    /// Invalidation and revocation return the current host instance only.
+    pub fn confirm_authority_instance(
+        &mut self,
+        id: &str,
+        host_instance: &str,
+        clock: Clock,
+    ) -> Result<(), Error> {
+        self.check(clock)?;
+        let intent = self.state.authority_intents.get(id).ok_or(Error::Binding)?;
+        if intent.authority_epoch != self.instance()
+            || intent.host_instance != host_instance
+            || !matches!(
+                intent.payload,
+                AuthorityPayload::Invalidate { .. } | AuthorityPayload::Revoke { .. }
+            )
+        {
+            return Err(Error::Binding);
+        }
+        if intent.instance_confirmed {
+            return Ok(());
+        }
+        let mut next = State::clone(&self.state);
+        next.authority_intents
+            .get_mut(id)
+            .ok_or(Error::Binding)?
+            .instance_confirmed = true;
+        next.clock_floor = clock.now;
+        self.commit(next)
+    }
+}
+
+impl JournalView {
+    pub fn authority_intent(&self, id: &str) -> Result<Option<&AuthorityIntent>, Error> {
+        self.ownership()?;
+        Ok(self.state.authority_intents.get(id))
     }
 
     pub fn authority_intent_ready(&self, id: &str) -> Result<bool, Error> {
@@ -302,36 +334,6 @@ impl Journal {
             && !invalidated
             && registration_current
             && discovery_current)
-    }
-
-    /// Invalidation and revocation return the current host instance only.
-    pub fn confirm_authority_instance(
-        &mut self,
-        id: &str,
-        host_instance: &str,
-        clock: Clock,
-    ) -> Result<(), Error> {
-        self.check(clock)?;
-        let intent = self.state.authority_intents.get(id).ok_or(Error::Binding)?;
-        if intent.authority_epoch != self.instance()
-            || intent.host_instance != host_instance
-            || !matches!(
-                intent.payload,
-                AuthorityPayload::Invalidate { .. } | AuthorityPayload::Revoke { .. }
-            )
-        {
-            return Err(Error::Binding);
-        }
-        if intent.instance_confirmed {
-            return Ok(());
-        }
-        let mut next = self.state.clone();
-        next.authority_intents
-            .get_mut(id)
-            .ok_or(Error::Binding)?
-            .instance_confirmed = true;
-        next.clock_floor = clock.now;
-        self.commit(next)
     }
 }
 
@@ -521,8 +523,7 @@ mod tests {
                 })
             );
             // Legacy records missing the dependency fail closed.
-            journal
-                .state
+            Arc::make_mut(&mut journal.view.state)
                 .authority_intents
                 .get_mut("owner-2")
                 .unwrap()

@@ -30,6 +30,10 @@ use std::{
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, PoisonError, RwLock,
+    },
 };
 
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -204,14 +208,79 @@ pub enum Error {
 /// One exclusive writer for a bounded private journal. Keep this alive for the service
 /// lifetime. Never copy a live journal or restore it under an acknowledged old instance.
 /// An instance change must be fenced at every dispatch host before capacity is reused.
+///
+/// Every commit is durable at once but visible to a `JournalReader` only after
+/// `publish`, which the owner calls when it ends the action that made the commits
+/// (before it releases the writer lock). A reader therefore never sees an intermediate
+/// state of an action that has not returned.
+///
+/// The writer lock lives in the shared fence, so it is released when the `Journal` and
+/// every `JournalReader` and `JournalView` made from it are dropped, not when the
+/// `Journal` alone is. A retained reader makes a second `open` of the same directory in
+/// this process fail with `Ownership`, and keeps answering the last published state.
 pub struct Journal {
+    view: JournalView,
+    published: Arc<RwLock<JournalView>>,
+}
+
+/// What proves this process still owns the journal directory. Shared by the writer and
+/// every reader, so a read applies the same checks as a write.
+struct Fence {
     root: PathBuf,
     directory: File,
     lock: File,
-    state: State,
-    poisoned: bool,
+    poisoned: AtomicBool,
+}
+
+/// An immutable committed state with the read-only half of the journal's methods. A
+/// view never changes after it is made; the writer replaces it on every commit.
+#[derive(Clone)]
+pub struct JournalView {
+    state: Arc<State>,
+    fence: Arc<Fence>,
+}
+
+/// Reads the latest published state of a journal without its writer. A state is
+/// published only after it is durable and its action has ended, so a reader never sees
+/// a write that can still fail, nor part of an action that has not returned. A read is
+/// ordered before any action that has not returned and sees every action that has.
+#[derive(Clone)]
+pub struct JournalReader(Arc<RwLock<JournalView>>);
+impl JournalReader {
+    pub fn view(&self) -> JournalView {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl std::ops::Deref for Journal {
+    type Target = JournalView;
+    fn deref(&self) -> &JournalView {
+        &self.view
+    }
 }
 impl Journal {
+    /// A handle that reads published states without waiting for a write.
+    pub fn reader(&self) -> JournalReader {
+        JournalReader(self.published.clone())
+    }
+
+    /// Makes every commit so far visible to readers. Call it once per action, after its
+    /// last commit and before releasing the writer lock. Commits are durable before it
+    /// runs, and a commit that failed never reached the writer's state, so it publishes
+    /// only durable evidence; a poisoned journal still refuses every read.
+    pub fn publish(&self) {
+        let mut published = self
+            .published
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !Arc::ptr_eq(&published.state, &self.view.state) {
+            *published = self.view.clone();
+        }
+    }
+
     /// Clock loss after a durable host ACK must never promote that uncertain
     /// intent again. Retain its full evidence and a permanent bounded refusal.
     pub fn refuse_installation_readiness(&mut self, kind: &str, id: &str) -> Result<(), Error> {
@@ -224,18 +293,13 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.uncertain_installations.insert(format!("{kind}:{id}"));
         let result = self.commit(next);
         if result.is_err() {
-            self.poisoned = true;
+            self.fence.poisoned.store(true, Ordering::SeqCst);
         }
         result
-    }
-    fn installation_uncertain(&self, kind: &str, id: &str) -> bool {
-        self.state
-            .uncertain_installations
-            .contains(&format!("{kind}:{id}"))
     }
     /// Retained ordering evidence for explicit revocation/removal only. This is
     /// never qualified time and must not authorize admission or release protection.
@@ -366,21 +430,22 @@ impl Journal {
         // A host restart retires the old registration. Ownership and prepared
         // records remain as rejection evidence, never as current authority.
         state.registration = None;
-        let mut journal = Self {
-            root,
-            directory,
-            lock,
-            state,
-            poisoned: false,
+        let view = JournalView {
+            state: Arc::new(state),
+            fence: Arc::new(Fence {
+                root,
+                directory,
+                lock,
+                poisoned: AtomicBool::new(false),
+            }),
         };
-        journal.commit(journal.state.clone())?;
+        let mut journal = Self {
+            published: Arc::new(RwLock::new(view.clone())),
+            view,
+        };
+        journal.commit(State::clone(&journal.state))?;
+        journal.publish();
         Ok(journal)
-    }
-    pub fn instance(&self) -> &str {
-        &self.state.instance
-    }
-    pub fn role(&self) -> &Role {
-        &self.state.role
     }
 
     pub fn registration(&self) -> Result<Option<&HostRegistration>, Error> {
@@ -413,7 +478,7 @@ impl Journal {
             &record.host_instance,
             clock,
         )?;
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.registration_highwater = record.generation;
         next.registration = Some(record);
         for operation in next.active_operations.values_mut() {
@@ -476,7 +541,7 @@ impl Journal {
         }) {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.ownership_highwater
             .insert(record.installation.clone(), record.generation);
         next.delegations
@@ -507,7 +572,7 @@ impl Journal {
         if generation < high {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.ownership_highwater
             .insert(installation.into(), generation);
         next.ownership.remove(installation);
@@ -562,7 +627,7 @@ impl Journal {
         if self.state.protections.contains_key(&record.admission) {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.protections.insert(record.admission.clone(), record);
         next.clock_floor = clock.now;
         self.commit(next)
@@ -573,7 +638,7 @@ impl Journal {
         if !valid_id(id) || version == 0 {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         let high = next.delegation_tombstones.get(id).copied().unwrap_or(0);
         if version < high {
             return Err(Error::Binding);
@@ -621,7 +686,7 @@ impl Journal {
         if self.state.prepared.contains_key(&record.admission) {
             return Err(Error::AlreadyAdmitted);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.prepared.insert(record.admission.clone(), record);
         next.clock_floor = clock.now;
         self.commit(next)
@@ -653,7 +718,7 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         let saved = next.prepared.get_mut(id).ok_or(Error::Binding)?;
         if saved.dispatched {
             return Err(Error::AlreadyAdmitted);
@@ -691,7 +756,7 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         if let Some(previous) = next.fences.get(authority).filter(|old| *old != epoch) {
             next.retired
                 .entry(authority.into())
@@ -762,7 +827,7 @@ impl Journal {
         allocations: impl Iterator<Item = (&'a Allocation, &'a str)>,
         clock: Clock,
     ) -> Result<(), Error> {
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         for (allocation, digest) in allocations {
             if allocation.exp <= clock.now.saturating_add(clock.uncertainty) {
                 return Err(Error::Binding);
@@ -833,7 +898,7 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         for (allocation, reference) in bundle.allocations().iter().zip(&permit.allocations) {
             let installed = next
                 .allocations
@@ -864,10 +929,6 @@ impl Journal {
         self.commit(next)
     }
 
-    pub fn status(&self, id: &str) -> Result<Option<Status>, Error> {
-        self.ownership()?;
-        Ok(self.state.admissions.get(id).map(|a| a.status))
-    }
     /// Completion records evidence only; capacity is never refunded. Absence of this
     /// record after consume remains uncertain and can never license a second dispatch.
     pub fn finish(&mut self, permit: &Permit, clock: Clock) -> Result<(), Error> {
@@ -883,7 +944,7 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         let saved = next
             .admissions
             .get_mut(&permit.admission)
@@ -908,7 +969,7 @@ impl Journal {
             .now
             .checked_sub(clock.uncertainty)
             .ok_or(Error::Binding)?;
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.admissions
             .retain(|id, a| a.permit.exp > earliest || next.active_operations.contains_key(id));
         next.allocations.retain(|_, a| a.allocation.exp > earliest);
@@ -933,36 +994,6 @@ impl Journal {
                     && self.state.fences.get(authority).map(String::as_str) == Some(epoch)
             }
         }
-    }
-    fn check(&self, clock: Clock) -> Result<(), Error> {
-        self.ownership()?;
-        if clock.now < self.state.clock_floor
-            || clock.now > MAX_SAFE_INTEGER
-            || clock.uncertainty > MAX_SAFE_INTEGER
-        {
-            return Err(Error::Binding);
-        }
-        Ok(())
-    }
-    fn ownership(&self) -> Result<(), Error> {
-        if self.poisoned {
-            return Err(Error::Persistence);
-        }
-        let same = |a: &File, path: &Path| -> Result<bool, Error> {
-            let a = a.metadata().map_err(|_| Error::Ownership)?;
-            let b = std::fs::symlink_metadata(path).map_err(|_| Error::Ownership)?;
-            Ok(a.dev() == b.dev()
-                && a.ino() == b.ino()
-                && a.nlink() > 0
-                && b.uid() == unsafe { libc::geteuid() }
-                && b.mode() & 0o077 == 0
-                && !b.file_type().is_symlink())
-        };
-        if !same(&self.directory, &self.root)? || !same(&self.lock, &self.root.join("writer.lock"))?
-        {
-            return Err(Error::Ownership);
-        }
-        Ok(())
     }
     fn commit(&mut self, next: State) -> Result<(), Error> {
         self.ownership()?;
@@ -1002,21 +1033,22 @@ impl Journal {
                 .create_new(true)
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW)
-                .open(self.root.join("journal.next"))?;
+                .open(self.fence.root.join("journal.next"))?;
             file.write_all(&bytes)?;
             file.sync_all()?;
             std::fs::rename(
-                self.root.join("journal.next"),
-                self.root.join("journal.json"),
+                self.fence.root.join("journal.next"),
+                self.fence.root.join("journal.json"),
             )?;
-            self.directory.sync_all()
+            self.fence.directory.sync_all()
         };
         // A retained temp file is uncertain evidence. It is not silently removed or retried.
         if write().is_err() {
-            self.poisoned = true;
+            self.fence.poisoned.store(true, Ordering::SeqCst);
             return Err(Error::Persistence);
         }
-        self.state = next;
+        // Visible to readers only at `publish`, once the whole action has returned.
+        self.view.state = Arc::new(next);
         Ok(())
     }
 }
@@ -1058,6 +1090,66 @@ fn read_state(path: &Path) -> Result<Option<State>, Error> {
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|_| Error::Persistence)
+}
+
+impl JournalView {
+    pub fn instance(&self) -> &str {
+        &self.state.instance
+    }
+
+    pub fn role(&self) -> &Role {
+        &self.state.role
+    }
+
+    pub fn status(&self, id: &str) -> Result<Option<Status>, Error> {
+        self.ownership()?;
+        Ok(self.state.admissions.get(id).map(|a| a.status))
+    }
+
+    fn check(&self, clock: Clock) -> Result<(), Error> {
+        self.ownership()?;
+        if clock.now < self.state.clock_floor
+            || clock.now > MAX_SAFE_INTEGER
+            || clock.uncertainty > MAX_SAFE_INTEGER
+        {
+            return Err(Error::Binding);
+        }
+        Ok(())
+    }
+
+    /// Whether this process still owns the journal and no write has failed.
+    pub fn owned(&self) -> Result<(), Error> {
+        self.ownership()
+    }
+
+    fn ownership(&self) -> Result<(), Error> {
+        let fence = &self.fence;
+        if fence.poisoned.load(Ordering::SeqCst) {
+            return Err(Error::Persistence);
+        }
+        let same = |a: &File, path: &Path| -> Result<bool, Error> {
+            let a = a.metadata().map_err(|_| Error::Ownership)?;
+            let b = std::fs::symlink_metadata(path).map_err(|_| Error::Ownership)?;
+            Ok(a.dev() == b.dev()
+                && a.ino() == b.ino()
+                && a.nlink() > 0
+                && b.uid() == unsafe { libc::geteuid() }
+                && b.mode() & 0o077 == 0
+                && !b.file_type().is_symlink())
+        };
+        if !same(&fence.directory, &fence.root)?
+            || !same(&fence.lock, &fence.root.join("writer.lock"))?
+        {
+            return Err(Error::Ownership);
+        }
+        Ok(())
+    }
+
+    fn installation_uncertain(&self, kind: &str, id: &str) -> bool {
+        self.state
+            .uncertain_installations
+            .contains(&format!("{kind}:{id}"))
+    }
 }
 
 #[cfg(test)]

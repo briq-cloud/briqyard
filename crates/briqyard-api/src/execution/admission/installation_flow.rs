@@ -231,16 +231,11 @@ impl Journal {
             }
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.discovery_intents.insert(id.into(), intended);
         next.clock_floor = clock.now;
         self.commit(next)?;
         Ok(true)
-    }
-
-    pub fn discovery_intent(&self, id: &str) -> Result<Option<&DiscoveryIntent>, Error> {
-        self.ownership()?;
-        Ok(self.state.discovery_intents.get(id))
     }
 
     pub fn acknowledge_discovery_intent(
@@ -263,25 +258,13 @@ impl Journal {
         if intent.receipt.is_some() {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.discovery_intents
             .get_mut(id)
             .ok_or(Error::Binding)?
             .receipt = Some(receipt);
         next.clock_floor = clock.now;
         self.commit(next)
-    }
-
-    pub fn discovery_intent_ready(&self, id: &str) -> Result<bool, Error> {
-        if self.installation_uncertain("discovery", id) {
-            return Ok(false);
-        }
-        let Some(intent) = self.discovery_intent(id)? else {
-            return Ok(false);
-        };
-        Ok(intent.authority_epoch == self.instance()
-            && intent.receipt.is_some()
-            && self.authority_intent_ready(&intent.registration)?)
     }
 
     pub fn begin_protection_intent(
@@ -350,16 +333,11 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.protection_intents.insert(id.into(), intended);
         next.clock_floor = clock.now;
         self.commit(next)?;
         Ok(true)
-    }
-
-    pub fn protection_intent(&self, id: &str) -> Result<Option<&ProtectionIntent>, Error> {
-        self.ownership()?;
-        Ok(self.state.protection_intents.get(id))
     }
 
     pub fn acknowledge_protection_intent(
@@ -389,13 +367,37 @@ impl Journal {
         if intent.acknowledgement.is_some() {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.protection_intents
             .get_mut(id)
             .ok_or(Error::Binding)?
             .acknowledgement = Some(ack);
         next.clock_floor = clock.now;
         self.commit(next)
+    }
+}
+
+impl JournalView {
+    pub fn discovery_intent(&self, id: &str) -> Result<Option<&DiscoveryIntent>, Error> {
+        self.ownership()?;
+        Ok(self.state.discovery_intents.get(id))
+    }
+
+    pub fn discovery_intent_ready(&self, id: &str) -> Result<bool, Error> {
+        if self.installation_uncertain("discovery", id) {
+            return Ok(false);
+        }
+        let Some(intent) = self.discovery_intent(id)? else {
+            return Ok(false);
+        };
+        Ok(intent.authority_epoch == self.instance()
+            && intent.receipt.is_some()
+            && self.authority_intent_ready(&intent.registration)?)
+    }
+
+    pub fn protection_intent(&self, id: &str) -> Result<Option<&ProtectionIntent>, Error> {
+        self.ownership()?;
+        Ok(self.state.protection_intents.get(id))
     }
 
     pub fn protection_intent_ready(&self, id: &str) -> Result<bool, Error> {

@@ -72,7 +72,7 @@ pub struct ProjectionEvidence {
     pub projection: Projection,
 }
 
-impl Journal {
+impl JournalView {
     /// Resolve only the exact presented grant. A historical or pending match
     /// refuses; it never falls back to another ready installation.
     pub fn lookup_projection(

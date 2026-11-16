@@ -399,7 +399,7 @@ fn installed_policy_cannot_change_under_same_grant_and_is_required_for_activity(
         .clone();
     policy.policy_revision = "changed".into();
     assert!(j.install_operation_policy(policy, clock()).is_err());
-    j.state.operation_policies.clear();
+    Arc::make_mut(&mut j.view.state).operation_policies.clear();
     j.consume(&f.bundle(), clock()).unwrap();
     assert!(j
         .record_consumed_operation(&f.bundle(), b, p, clock())

@@ -13,13 +13,13 @@ use axum::{
     Json, Router,
 };
 use briqyard_api::execution::{
-    admission::{HostRegistration, OwnershipControl},
+    admission::{HostRegistration, JournalReader, JournalView, OwnershipControl, Role},
     channel::{Invalidate, Revoke},
     Clock, Source, Trust, VerificationKey, MAX_BODY_BYTES,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{sync::Arc, time::Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
 pub(crate) mod renewal;
 
@@ -51,8 +51,40 @@ impl TrustConfig {
     }
 }
 
+/// The issuer behind the write lock. Releasing the guard publishes what the action
+/// committed, so a read sees the state before the action or after it, never between.
+struct Issuer(Mutex<briqyard_api::execution::DurableIssuer>);
+impl Issuer {
+    async fn lock(&self) -> Held<'_> {
+        Held(self.0.lock().await)
+    }
+}
+struct Held<'a>(MutexGuard<'a, briqyard_api::execution::DurableIssuer>);
+impl std::ops::Deref for Held<'_> {
+    type Target = briqyard_api::execution::DurableIssuer;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Held<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Drop for Held<'_> {
+    /// Runs before the inner guard releases the lock, on success, refusal and early return.
+    fn drop(&mut self) {
+        self.0.publish();
+    }
+}
+
 struct Service {
-    issuer: Mutex<briqyard_api::execution::DurableIssuer>,
+    /// Every durable write, one at a time. Reads that need no write go through
+    /// `reader`, which never waits for this lock.
+    issuer: Issuer,
+    reader: JournalReader,
+    authority: String,
+    authority_epoch: String,
     host: HostTransport,
     host_id: String,
     credentials: Credentials,
@@ -141,6 +173,12 @@ pub(super) fn router_with_continuation(
 ) -> Result<Router, &'static str> {
     // Only explicitly provisioned callbacks negotiate renewable operation authority.
     let renewable = continuation.is_some();
+    // The authority name and epoch are fixed when the journal opens.
+    let reader = issuer.reader();
+    let Role::Authority(authority) = reader.view().role().clone() else {
+        return Err("invalid authority configuration");
+    };
+    let authority_epoch = issuer.instance().to_owned();
     if host_id.is_empty()
         || host_id != host.host_id()
         || !provision::same(&credentials.host_administrator, host.administrator_digest())
@@ -154,7 +192,10 @@ pub(super) fn router_with_continuation(
         return Err("invalid authority configuration");
     }
     let state = Arc::new(Service {
-        issuer: Mutex::new(issuer),
+        issuer: Issuer(Mutex::new(issuer)),
+        reader,
+        authority,
+        authority_epoch,
         host,
         host_id,
         credentials,
@@ -416,15 +457,15 @@ async fn run(
     if action == "exec" {
         return execute(service, parse(body)?).await;
     }
-    let mut issuer = service.issuer.lock().await;
     if action == "identity" {
         let _: Empty = parse(body)?;
         clock(service.clock.as_ref())?;
-        let authority_epoch = issuer.instance().to_owned();
-        let authority = match issuer.installation_journal().role() {
-            briqyard_api::execution::admission::Role::Authority(id) => id.clone(),
-            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-        };
+        // The same ownership and poison check as every other read.
+        service
+            .reader
+            .view()
+            .owned()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let host: briqyard_api::execution::channel::Instance = service
             .host
             .call(crate::execution_host::Route::Instance, &())
@@ -433,12 +474,16 @@ async fn run(
         clock(service.clock.as_ref())?;
         // Identity discovery is not installation readiness or a source of trusted keys.
         return value(serde_json::json!({
-            "authority": authority,
-            "authority_epoch": authority_epoch,
+            "authority": service.authority,
+            "authority_epoch": service.authority_epoch,
             "host": service.host_id,
             "host_instance": host.host_instance,
         }));
     }
+    if let Some(reply) = read_only(service, action, body)? {
+        return Ok(reply);
+    }
+    let mut issuer = service.issuer.lock().await;
     let host_id = &service.host_id;
     let mut installer = Installer {
         journal: issuer.installation_journal(),
@@ -546,34 +591,7 @@ async fn run(
                 .map_err(install_error)?;
             installation_reply(installer.journal, "revoke", &dto.id, state)
         }
-        "installation_status" => {
-            let dto: InstallationStatus = parse(body)?;
-            clock(service.clock.as_ref())?;
-            installation_reply(installer.journal, &dto.kind, &dto.id, Outcome::Pending)
-        }
-        "projection_lookup" => {
-            let dto: ProjectionLookup = parse(body)?;
-            value(
-                installer
-                    .journal
-                    .lookup_projection(&dto.delegation, &dto.grant, clock(service.clock.as_ref())?)
-                    .map_err(|_| StatusCode::CONFLICT)?,
-            )
-        }
-        "projection" => {
-            let dto: ProjectionRead = parse(body)?;
-            value(
-                installer
-                    .journal
-                    .presented_projection(
-                        &dto.delegation_intent,
-                        &dto.grant,
-                        clock(service.clock.as_ref())?,
-                    )
-                    .map_err(|_| StatusCode::CONFLICT)?,
-            )
-        }
-        "operation_status" | "observe" => {
+        "observe" => {
             let dto: Id = parse(body)?;
             let mut coordinator = Coordinator {
                 issuer: &mut issuer,
@@ -581,24 +599,69 @@ async fn run(
                 host_id,
                 renewable: service.renewable,
             };
-            let status = if action == "observe" {
-                Some(
-                    coordinator
-                        .observe(&dto.id, clock(service.clock.as_ref())?)
-                        .await
-                        .map_err(operation_error)?,
-                )
-            } else {
-                coordinator.status(&dto.id).map_err(operation_error)?
-            };
-            value(Reply {
-                state: if status.is_some() { "known" } else { "unknown" },
-                evidence: status
-                    .map(|s| serde_json::json!({"phase":s.phase,"unconfirmed":s.unconfirmed})),
-            })
+            let status = coordinator
+                .observe(&dto.id, clock(service.clock.as_ref())?)
+                .await
+                .map_err(operation_error)?;
+            operation_reply(Some(status))
         }
         _ => Err(StatusCode::NOT_FOUND),
     }
+}
+
+fn operation_reply(
+    status: Option<crate::execution_operation::Status>,
+) -> Result<serde_json::Value, StatusCode> {
+    value(Reply {
+        state: if status.is_some() { "known" } else { "unknown" },
+        evidence: status.map(|s| serde_json::json!({"phase":s.phase,"unconfirmed":s.unconfirmed})),
+    })
+}
+
+/// Actions that only read the journal, from the latest committed state. They never
+/// wait for a write in flight: each is ordered before every action that has not
+/// released the issuer lock, and sees every action that has. `exec` releases it between
+/// its phases, so each phase is visible when it ends. `None` for any other action.
+fn read_only(
+    service: &Service,
+    action: &str,
+    body: &[u8],
+) -> Result<Option<serde_json::Value>, StatusCode> {
+    let view = service.reader.view();
+    let reply = match action {
+        "installation_status" => {
+            let dto: InstallationStatus = parse(body)?;
+            clock(service.clock.as_ref())?;
+            installation_reply(&view, &dto.kind, &dto.id, Outcome::Pending)?
+        }
+        "projection_lookup" => {
+            let dto: ProjectionLookup = parse(body)?;
+            value(
+                view.lookup_projection(&dto.delegation, &dto.grant, clock(service.clock.as_ref())?)
+                    .map_err(|_| StatusCode::CONFLICT)?,
+            )?
+        }
+        "projection" => {
+            let dto: ProjectionRead = parse(body)?;
+            value(
+                view.presented_projection(
+                    &dto.delegation_intent,
+                    &dto.grant,
+                    clock(service.clock.as_ref())?,
+                )
+                .map_err(|_| StatusCode::CONFLICT)?,
+            )?
+        }
+        "operation_status" => {
+            let dto: Id = parse(body)?;
+            operation_reply(
+                crate::execution_operation::operation_status(&view, &dto.id)
+                    .map_err(operation_error)?,
+            )?
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(reply))
 }
 
 async fn execute(service: &Service, dto: Execution) -> Result<serde_json::Value, StatusCode> {
@@ -705,7 +768,7 @@ struct ProjectionLookup {
 }
 
 fn installation_reply(
-    journal: &mut briqyard_api::execution::admission::Journal,
+    journal: &JournalView,
     kind: &str,
     id: &str,
     _outcome: Outcome,

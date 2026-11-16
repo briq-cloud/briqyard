@@ -59,7 +59,7 @@ impl Journal {
         }) {
             return Err(Error::AlreadyAdmitted);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.renewal_attempts.insert(attempt.id.clone(), attempt);
         next.clock_floor = clock.now;
         self.commit(next)?;
@@ -158,7 +158,7 @@ impl Journal {
                 Err(Error::Binding)
             };
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.renewal_attempts
             .get_mut(id)
             .ok_or(Error::Binding)?
