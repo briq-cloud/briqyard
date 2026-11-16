@@ -9,7 +9,9 @@ use crate::execution_host::{HostTransport, Route};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use briqyard_api::{
     execution::{
-        admission::{AuthorityPayload, OperationIntent, OperationPhase, PreparedAdmission},
+        admission::{
+            AuthorityPayload, JournalView, OperationIntent, OperationPhase, PreparedAdmission,
+        },
         channel::{AdmissionStatus, BundleRequest, Dispatch, Prepare, StatusRequest},
         exec_request_digest, token_digest, verify_delegation, AllocationRef, Clock,
         DelegationContext, DispatchContext, DurableIssuer, IssueCredentials, IssueError, Limits,
@@ -39,6 +41,19 @@ pub(super) struct Control {
 pub(super) struct Status {
     pub phase: OperationPhase,
     pub unconfirmed: bool,
+}
+
+/// The retained phase of an operation, read from one committed state.
+pub(super) fn operation_status(journal: &JournalView, id: &str) -> Result<Option<Status>, Error> {
+    let op = journal.operation_intent(id).map_err(|_| Error::Journal)?;
+    Ok(op.map(|op| Status {
+        phase: op.phase,
+        unconfirmed: op.unconfirmed
+            || matches!(
+                op.phase,
+                OperationPhase::Reserved | OperationPhase::Dispatched | OperationPhase::Consumed
+            ),
+    }))
 }
 
 pub(super) enum ExecOutcome {
@@ -75,21 +90,7 @@ pub(super) struct Coordinator<'a> {
 
 impl Coordinator<'_> {
     pub fn status(&mut self, id: &str) -> Result<Option<Status>, Error> {
-        let op = self
-            .issuer
-            .installation_journal()
-            .operation_intent(id)
-            .map_err(|_| Error::Journal)?;
-        Ok(op.map(|op| Status {
-            phase: op.phase,
-            unconfirmed: op.unconfirmed
-                || matches!(
-                    op.phase,
-                    OperationPhase::Reserved
-                        | OperationPhase::Dispatched
-                        | OperationPhase::Consumed
-                ),
-        }))
+        operation_status(self.issuer.installation_journal(), id)
     }
 
     /// Explicit recovery observation. Host absence or an uncertain reply never

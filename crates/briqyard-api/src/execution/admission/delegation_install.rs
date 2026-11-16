@@ -131,13 +131,136 @@ impl Journal {
                 return Err(Error::Binding);
             }
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.delegation_intents.insert(intent_id.into(), intended);
         next.clock_floor = clock.now;
         self.commit(next)?;
         Ok(true)
     }
 
+    pub fn acknowledge_delegation_intent(
+        &mut self,
+        id: &str,
+        ack: HostDelegation,
+        clock: Clock,
+    ) -> Result<(), Error> {
+        self.check(clock)?;
+        let intent = self
+            .state
+            .delegation_intents
+            .get(id)
+            .ok_or(Error::Binding)?;
+        if intent.authority_epoch != self.instance()
+            || intent.expected.expires_at <= clock.now.saturating_add(clock.uncertainty)
+            || self.delegation_revoked(&intent.request.id)?
+            || !self.delegation_dependencies_ready(
+                &intent.host,
+                &intent.registration,
+                &intent.ownership,
+                &intent.protection,
+                &intent.request,
+            )?
+            || ack != intent.expected
+        {
+            return Err(Error::Binding);
+        }
+        if intent.acknowledgement.as_ref() == Some(&ack) {
+            return Ok(());
+        }
+        if intent.acknowledgement.is_some() {
+            return Err(Error::Binding);
+        }
+        let mut next = State::clone(&self.state);
+        next.delegation_intents
+            .get_mut(id)
+            .ok_or(Error::Binding)?
+            .acknowledgement = Some(ack);
+        next.clock_floor = clock.now;
+        self.commit(next)
+    }
+
+    pub fn acknowledge_operation_policy(
+        &mut self,
+        id: &str,
+        ack: HostOperationPolicy,
+        clock: Clock,
+    ) -> Result<(), Error> {
+        self.check(clock)?;
+        let intent = self.delegation_intent(id)?.ok_or(Error::Binding)?;
+        if intent.operation_policy.as_ref() != Some(&ack)
+            || intent.acknowledgement.as_ref() != Some(&intent.expected)
+            || self.delegation_revoked(&intent.request.id)?
+            || intent.expected.expires_at <= clock.now.saturating_add(clock.uncertainty)
+        {
+            return Err(Error::Binding);
+        }
+        if intent.operation_policy_ack.as_ref() == Some(&ack) {
+            return Ok(());
+        }
+        let mut next = State::clone(&self.state);
+        next.delegation_intents
+            .get_mut(id)
+            .ok_or(Error::Binding)?
+            .operation_policy_ack = Some(ack);
+        next.clock_floor = clock.now;
+        self.commit(next)
+    }
+}
+
+impl Journal {
+    pub fn install_delegation(
+        &mut self,
+        record: HostDelegation,
+        clock: Clock,
+    ) -> Result<(), Error> {
+        self.check(clock)?;
+        let Some(owner) = self.state.ownership.get(&record.ownership) else {
+            return Err(Error::Binding);
+        };
+        if owner.generation != record.ownership_generation
+            || !valid_id(&record.id)
+            || record.version == 0
+            || record.expires_at <= clock.now.saturating_add(clock.uncertainty)
+            || self.state.delegation_tombstones.contains_key(&record.id)
+        {
+            return Err(Error::Binding);
+        }
+        if self.state.delegations.get(&record.id) == Some(&record) {
+            return Ok(());
+        }
+        let history = self.state.delegation_versions.get(&record.id);
+        for prior in history
+            .into_iter()
+            .flatten()
+            .chain(self.state.delegations.get(&record.id))
+        {
+            if record.version <= prior.version
+                || record.ownership != prior.ownership
+                || record.ownership_generation != prior.ownership_generation
+                || record.principal != prior.principal
+                || record.grant_digest == prior.grant_digest
+            {
+                return Err(Error::Binding);
+            }
+        }
+        let mut next = State::clone(&self.state);
+        let history = next
+            .delegation_versions
+            .entry(record.id.clone())
+            .or_default();
+        if let Some(prior) = self.state.delegations.get(&record.id) {
+            if !history.contains(prior) {
+                history.push(prior.clone());
+            }
+        }
+        history.push(record.clone());
+        next.delegations.insert(record.id.clone(), record);
+        next.clock_floor = clock.now;
+        self.commit(next)
+    }
+}
+
+impl JournalView {
     pub fn delegation_intent(&self, id: &str) -> Result<Option<&DelegationIntent>, Error> {
         self.ownership()?;
         Ok(self.state.delegation_intents.get(id))
@@ -194,74 +317,6 @@ impl Journal {
             && self.protection_intent_ready(protection)?)
     }
 
-    pub fn acknowledge_delegation_intent(
-        &mut self,
-        id: &str,
-        ack: HostDelegation,
-        clock: Clock,
-    ) -> Result<(), Error> {
-        self.check(clock)?;
-        let intent = self
-            .state
-            .delegation_intents
-            .get(id)
-            .ok_or(Error::Binding)?;
-        if intent.authority_epoch != self.instance()
-            || intent.expected.expires_at <= clock.now.saturating_add(clock.uncertainty)
-            || self.delegation_revoked(&intent.request.id)?
-            || !self.delegation_dependencies_ready(
-                &intent.host,
-                &intent.registration,
-                &intent.ownership,
-                &intent.protection,
-                &intent.request,
-            )?
-            || ack != intent.expected
-        {
-            return Err(Error::Binding);
-        }
-        if intent.acknowledgement.as_ref() == Some(&ack) {
-            return Ok(());
-        }
-        if intent.acknowledgement.is_some() {
-            return Err(Error::Binding);
-        }
-        let mut next = self.state.clone();
-        next.delegation_intents
-            .get_mut(id)
-            .ok_or(Error::Binding)?
-            .acknowledgement = Some(ack);
-        next.clock_floor = clock.now;
-        self.commit(next)
-    }
-
-    pub fn acknowledge_operation_policy(
-        &mut self,
-        id: &str,
-        ack: HostOperationPolicy,
-        clock: Clock,
-    ) -> Result<(), Error> {
-        self.check(clock)?;
-        let intent = self.delegation_intent(id)?.ok_or(Error::Binding)?;
-        if intent.operation_policy.as_ref() != Some(&ack)
-            || intent.acknowledgement.as_ref() != Some(&intent.expected)
-            || self.delegation_revoked(&intent.request.id)?
-            || intent.expected.expires_at <= clock.now.saturating_add(clock.uncertainty)
-        {
-            return Err(Error::Binding);
-        }
-        if intent.operation_policy_ack.as_ref() == Some(&ack) {
-            return Ok(());
-        }
-        let mut next = self.state.clone();
-        next.delegation_intents
-            .get_mut(id)
-            .ok_or(Error::Binding)?
-            .operation_policy_ack = Some(ack);
-        next.clock_floor = clock.now;
-        self.commit(next)
-    }
-
     pub fn delegation_intent_ready(&self, id: &str) -> Result<bool, Error> {
         if self.installation_uncertain("delegation", id) {
             return Ok(false);
@@ -287,58 +342,5 @@ impl Journal {
                 &intent.protection,
                 &intent.request,
             )?)
-    }
-}
-
-impl Journal {
-    pub fn install_delegation(
-        &mut self,
-        record: HostDelegation,
-        clock: Clock,
-    ) -> Result<(), Error> {
-        self.check(clock)?;
-        let Some(owner) = self.state.ownership.get(&record.ownership) else {
-            return Err(Error::Binding);
-        };
-        if owner.generation != record.ownership_generation
-            || !valid_id(&record.id)
-            || record.version == 0
-            || record.expires_at <= clock.now.saturating_add(clock.uncertainty)
-            || self.state.delegation_tombstones.contains_key(&record.id)
-        {
-            return Err(Error::Binding);
-        }
-        if self.state.delegations.get(&record.id) == Some(&record) {
-            return Ok(());
-        }
-        let history = self.state.delegation_versions.get(&record.id);
-        for prior in history
-            .into_iter()
-            .flatten()
-            .chain(self.state.delegations.get(&record.id))
-        {
-            if record.version <= prior.version
-                || record.ownership != prior.ownership
-                || record.ownership_generation != prior.ownership_generation
-                || record.principal != prior.principal
-                || record.grant_digest == prior.grant_digest
-            {
-                return Err(Error::Binding);
-            }
-        }
-        let mut next = self.state.clone();
-        let history = next
-            .delegation_versions
-            .entry(record.id.clone())
-            .or_default();
-        if let Some(prior) = self.state.delegations.get(&record.id) {
-            if !history.contains(prior) {
-                history.push(prior.clone());
-            }
-        }
-        history.push(record.clone());
-        next.delegations.insert(record.id.clone(), record);
-        next.clock_floor = clock.now;
-        self.commit(next)
     }
 }

@@ -52,7 +52,7 @@ impl Journal {
                 Err(Error::Binding)
             };
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.operation_policies
             .insert(record.grant_digest.clone(), record);
         next.clock_floor = clock.now;

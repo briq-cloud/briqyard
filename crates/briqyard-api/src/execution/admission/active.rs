@@ -108,7 +108,7 @@ impl Journal {
             return Err(Error::Binding);
         }
         self.active_fence(&binding)?;
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         next.active_operations.insert(
             p.admission.clone(),
             ActiveOperation {
@@ -143,7 +143,7 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         let saved = next
             .active_operations
             .get_mut(admission)
@@ -189,7 +189,7 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         let saved = next
             .active_operations
             .get_mut(&c.binding.admission)
@@ -213,7 +213,7 @@ impl Journal {
     /// No time authority is required to permanently end uncertain work.
     pub fn end_active_operation(&mut self, admission: &str) -> Result<(), Error> {
         self.ownership()?;
-        let mut next = self.state.clone();
+        let mut next = State::clone(&self.state);
         let saved = next
             .active_operations
             .get_mut(admission)

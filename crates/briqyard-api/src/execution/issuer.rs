@@ -48,6 +48,10 @@ impl DurableIssuer {
     pub fn instance(&self) -> &str {
         self.journal.instance()
     }
+    /// Reads committed state without taking whoever holds this issuer.
+    pub fn reader(&self) -> admission::JournalReader {
+        self.journal.reader()
+    }
     /// Trusted installation uses the same exclusive authority journal and epoch.
     /// Keep the issuer alive while borrowing it; this does not expose its key.
     pub fn installation_journal(&mut self) -> &mut admission::Journal {

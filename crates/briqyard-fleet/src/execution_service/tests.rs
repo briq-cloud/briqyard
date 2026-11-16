@@ -549,6 +549,197 @@ async fn registration_route_returns_exact_ack_and_duplicate_is_status_only() {
     task.abort();
 }
 
+/// A host whose install calls wait for a permit, so a test can hold a write open.
+struct GatedHost {
+    host: HostRec,
+    gate: Arc<tokio::sync::Semaphore>,
+    installs: Arc<std::sync::atomic::AtomicUsize>,
+    handle: axum_server::Handle,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+impl GatedHost {
+    fn start() -> Self {
+        use axum::response::IntoResponse;
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use sha2::{Digest, Sha256};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        type Shared = (Arc<tokio::sync::Semaphore>, Arc<AtomicUsize>);
+        async fn endpoint(
+            State((gate, installs)): State<Shared>,
+            uri: axum::http::Uri,
+            body: axum::body::Bytes,
+        ) -> Response {
+            if uri.path().ends_with("/instance") {
+                return Json(briqyard_api::execution::channel::Instance {
+                    host_instance: "instance".into(),
+                })
+                .into_response();
+            }
+            installs.fetch_add(1, Ordering::SeqCst);
+            gate.acquire().await.unwrap().forget();
+            let record: HostRegistration = serde_json::from_slice(&body).unwrap();
+            Json(briqyard_api::execution::channel::InstallationAck {
+                host_instance: record.host_instance,
+                generation: record.generation,
+                digest: URL_SAFE_NO_PAD.encode(Sha256::digest(body)),
+            })
+            .into_response()
+        }
+        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+        let config = briqyard_api::tls::server_config(
+            cert.cert.pem().as_bytes(),
+            cert.key_pair.serialize_pem().as_bytes(),
+        )
+        .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = HostRec {
+            id: "host".into(),
+            url: format!("https://{}", listener.local_addr().unwrap()),
+            token: "host-admin".into(),
+            tls_fingerprint: briqyard_api::tls::fingerprint(cert.cert.der()),
+            ..Default::default()
+        };
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let installs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handle = axum_server::Handle::new();
+        let running = handle.clone();
+        let app = axum::Router::new()
+            .fallback(endpoint)
+            .with_state((gate.clone(), installs.clone()));
+        let task = tokio::spawn(async move {
+            axum_server::from_tcp_rustls(
+                listener,
+                axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(config)),
+            )
+            .handle(running)
+            .serve(app.into_make_service())
+            .await
+        });
+        Self {
+            host,
+            gate,
+            installs,
+            handle,
+            task,
+        }
+    }
+    fn installs(&self) -> usize {
+        self.installs.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    async fn until_installs(&self, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while self.installs() < count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the host receives the install call");
+    }
+}
+impl Drop for GatedHost {
+    fn drop(&mut self) {
+        self.handle.shutdown();
+        self.task.abort();
+    }
+}
+
+async fn json_reply(response: Response) -> serde_json::Value {
+    serde_json::from_slice(&to_bytes(response.into_body(), 1 << 16).await.unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn reads_proceed_while_a_write_is_held_and_writes_stay_serialized() {
+    use std::time::Duration;
+    let host = GatedHost::start();
+    let (app, _dir, epoch) = fixture_with_host(
+        Arc::new(FixedClock(Some(Clock {
+            now: 1000,
+            uncertainty: 1,
+        }))),
+        host.host.clone(),
+    );
+    let register = |id: &str, generation: u64| {
+        let record = HostRegistration {
+            authority: "region".into(),
+            epoch: epoch.clone(),
+            key_id: "authority".into(),
+            public_key: Ed25519KeyPair::from_seed_unchecked(&[2; 32])
+                .unwrap()
+                .public_key()
+                .as_ref()
+                .try_into()
+                .unwrap(),
+            host_instance: "instance".into(),
+            generation,
+        };
+        let body = serde_json::to_vec(&serde_json::json!({"id":id, "record":record})).unwrap();
+        let app = app.clone();
+        tokio::spawn(async move { request(&app, "register", "central-installer", body).await })
+    };
+    // The first registration is durable and sent; the host holds its answer.
+    let first = register("registration", 1);
+    host.until_installs(1).await;
+    // A second write waits for the first: it has not reached the host.
+    let second = register("registration-2", 2);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(host.installs(), 1);
+    assert!(!second.is_finished());
+
+    // Reads of every kind answer meanwhile, from the committed state.
+    let read = |action: &'static str, body: &'static str| {
+        let app = app.clone();
+        let token = if action == "operation_status" {
+            "gateway-only"
+        } else {
+            "central-installer"
+        };
+        async move {
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                request(&app, action, token, body.as_bytes().to_vec()),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{action} waited for the write"))
+        }
+    };
+    let identity = read("identity", "{}").await;
+    assert_eq!(identity.status(), StatusCode::OK);
+    let identity = json_reply(identity).await;
+    assert_eq!(identity["authority_epoch"], epoch);
+    assert_eq!(identity["authority"], "region");
+    let status = read(
+        "installation_status",
+        r#"{"kind":"registration","id":"registration"}"#,
+    )
+    .await;
+    assert_eq!(status.status(), StatusCode::OK);
+    // The intent is committed; the acknowledgement is not.
+    let status = json_reply(status).await;
+    assert_eq!(status["state"], "pending");
+    let operation = read("operation_status", r#"{"id":"absent"}"#).await;
+    assert_eq!(json_reply(operation).await["state"], "unknown");
+    assert!(!first.is_finished() && !second.is_finished());
+
+    // Releasing the host finishes both writes, one after the other.
+    host.gate.add_permits(2);
+    for write in [first, second] {
+        let response = tokio::time::timeout(Duration::from_secs(5), write)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_reply(response).await["state"], "ready");
+    }
+    assert_eq!(host.installs(), 2);
+    // The later registration is the current one; a read now sees both commits.
+    let status = read(
+        "installation_status",
+        r#"{"kind":"registration","id":"registration-2"}"#,
+    )
+    .await;
+    assert_eq!(json_reply(status).await["state"], "ready");
+}
+
 #[test]
 fn credential_configuration_refuses_reuse_and_empty_values() {
     // Constructor validation is pure and occurs before a listener exists.
