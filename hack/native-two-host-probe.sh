@@ -72,6 +72,8 @@ sudo qemu-system-x86_64 -enable-kvm -cpu host -smp 2 -m 6144 -display none \
   -drive "file=$WORK/seed.img,if=virtio,format=raw,readonly=on" \
   -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.2:27420-:7420 -device virtio-net-pci,netdev=net0 &
 qemu_pid=$!
+# Bind parent cleanup to this process incarnation, including setup failures.
+awk '{print $22}' "/proc/$qemu_pid/stat" > "$WORK/pid-start"
 printf '%s\n' "$qemu_pid" > "$WORK/pid"
 ready=0
 for _ in $(seq 1 180); do

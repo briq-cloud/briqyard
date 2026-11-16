@@ -39,6 +39,35 @@ Only wget exit 1 with a timeout or recognized neighbor-resolution denial passes.
 requests, refused connections, other errors and failed route controls still fail. The
 foreign-namespace probe keeps its timeout-only predicate.
 
+### Two-host mixed-version routing
+
+The upgrade job also boots the existing nested-host fixture before starting any VMs.
+During the fleet-first window both daemons run the same published previous release;
+the fleet and CLI run the candidate artifacts. Two explicit regions place separate
+namespaces on each host, and a second create without a region in each namespace checks its host binding.
+Every machine must reach running and answer an exec. Fleet reads and namespace lists
+prove the expected registered host; candidate CLI reads prove the exact owned ID,
+namespace, name and running state. The typed CLI machine omits the fleet-only `host`
+response extension. Cleanup deletes only exact owned machines and
+leaves an unresolved create as an unconfirmed outcome, without replay.
+
+The receipt binds both installed and running daemon hashes to the previous release,
+and installed fleet/CLI and running fleet hashes to the candidate checksums. It checks
+those hashes and both configurations again after requests. The original one-host fleet
+configuration is restored before the existing daemon upgrade proceeds. Cleanup first
+observes the second host empty while static polling remains active. After removing
+its static entry and restarting the fleet, it retires that exact empty fixture host
+with one POST, then confirms the original one-host inventory. Removing a static
+entry alone does not forget its durable registry record. A setup failure before any
+contract request can use this same empty-host cleanup without a contract receipt.
+The shell marks contract execution started before invoking it; thereafter a missing
+or unconfirmed cleanup receipt prevents retirement. The fixture explicitly
+preserves `tls: off` as a string when rewriting YAML: PyYAML reads an unquoted `off`
+as a boolean, while the fleet correctly refuses `tls: false`. Missing nested
+KVM fails the environment gate; it is not passing qualification. This subset does not
+exercise regional authority, controlled physical pressure, supported warm/nested machine
+classes, or interrupted activation and rollback.
+
 ### Initial upgrade result
 
 First pair, v0.1.23 to this head (PR #152), identical on 24.04 and 26.04: 26 checks pass, 2 fail.

@@ -59,10 +59,34 @@ cleanup() {
   sudo sh -c "cd $PARENT 2>/dev/null && find . -mindepth 1 -maxdepth 1 -type d -name 'm-5ca1*' | xargs -r rmdir 2>/dev/null"
   sudo journalctl -u briqyardd -u briqyard-fleet --no-pager -n 80 > "$WORK/journal-tail.log" 2>&1
   if [ "$rc" != 0 ]; then echo '--- journal tail'; cat "$WORK/journal-tail.log"; fi
+  if [ -f "$RUNNER_TEMP/two-host-probe/pid" ] && [ -f "$RUNNER_TEMP/two-host-probe/pid-start" ]; then
+    sudo python3 - "$RUNNER_TEMP/two-host-probe" <<'PYQEMU' || rc=1
+import os,signal,sys,time
+from pathlib import Path
+root=Path(sys.argv[1]); pid=int((root/'pid').read_text())
+expected=(root/'pid-start').read_text().strip()
+def alive():
+    try:
+        fields=Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()
+        return fields[19] == expected and fields[0] != 'Z'
+    except FileNotFoundError: return False
+for sig,budget in ((signal.SIGTERM,10),(signal.SIGKILL,3)):
+    if not alive(): break
+    try: os.kill(pid,sig)
+    except ProcessLookupError: break
+    deadline=time.monotonic()+budget
+    while alive() and time.monotonic()<deadline: time.sleep(.1)
+if alive(): raise SystemExit(1)
+PYQEMU
+  fi
   suite_early_end "$rc"
+  exit "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
+
+# Enable nested KVM before starting any machine; the probe may reload its vendor module.
+KEEP_SECOND_HOST=1 bash "$HARNESS/native-two-host-probe.sh" || die "two-host environment gate"
 
 echo "== the previous release, $PREV, installed from its published artifacts"
 git -c advice.detachedHead=false clone -q --depth 1 --branch "$PREV" "$REPO" "$WORK/previous" || die "cannot clone $PREV"
@@ -223,6 +247,7 @@ sudo python3 "$HARNESS/native-mixed-contract.py" --capture > "$WORK/mixed-head.j
 python3 "$HARNESS/native-mixed-contract.py" "$NS" "$SEED" "$SNAP" \
   "$WORK/mixed-source.json" "$WORK/mixed-head.json" native-logs/mixed-contract.json \
   "$PREV" "$HEAD_DIR" "$WORK/prev.sums" "$GEN" || die "mixed fleet contract failed"
+bash "$HARNESS/native-mixed-two-host.sh" "$PREV" "$WORK/previous" "$HEAD_DIR" "$WORK/prev.sums" || die "two-host mixed fleet contract failed"
 R=/var/lib/briqyard-fleet/release
 sudo rm -rf $R && sudo mkdir -p $R && sudo cp "$HEAD_DIR"/* $R/
 HEAD_VER=$(briqyard --version | awk '{print $2}')

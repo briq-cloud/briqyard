@@ -34,6 +34,8 @@ jobs:
           python3 -m unittest discover -s hack -p "test_qualification_readiness.py"
           python3 -m unittest discover -s hack -p "test_native_clone_contract.py"
           python3 -m unittest discover -s hack -p "test_native_mixed_contract.py"
+          python3 -m unittest discover -s hack -p "test_native_mixed_two_host_contract.py"
+          bash -n hack/native-mixed-two-host.sh
           python3 hack/release.py check > /dev/null
           python3 hack/monitoring-alert-check.py --check-source
           bash -n hack/bootstrap-host.sh
