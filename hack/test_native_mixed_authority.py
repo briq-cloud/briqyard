@@ -11,6 +11,24 @@ SPEC.loader.exec_module(a)
 
 
 class AuthorityTests(unittest.TestCase):
+    def test_failure_receipt_contains_only_fixed_bounded_diagnostics(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'private-output'
+            path.write_text('private secret\nscoped native: failed phase=scoped_dispatch\n'
+                            'scoped installation refusal: host_verification Time\n'
+                            'scoped installation refusal: host_verification Time secret\n'
+                            'Error: authority exec returned 503 Service Unavailable\n'
+                            'scoped native: failed phase=private\n')
+            result = a.failure(path)
+            self.assertEqual(len(result['events']), 3)
+            self.assertNotIn('private', json.dumps(result))
+            self.assertNotIn('secret', json.dumps(result))
+            self.assertFalse(result['truncated'])
+            path.write_bytes(b'x' * (64 * 1024) + b'\nscoped native: failed phase=gateway\n')
+            self.assertEqual(a.failure(path)['events'], {})
+            self.assertTrue(a.failure(path)['truncated'])
+
     def test_running_authority_must_match_candidate_digest(self):
         before = {'candidateFleetSha256': 'candidate'}
         a.validate_authority(before, {'sha256': 'candidate'})

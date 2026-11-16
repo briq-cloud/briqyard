@@ -231,6 +231,7 @@ jobs:
           path: |
             native-logs/upgrade.log
             native-logs/mixed-authority-contract.json
+            native-logs/mixed-authority-failure.json
             native-logs/mixed-contract.json
             native-logs/mixed-two-host-contract.json
             native-logs/seals.log

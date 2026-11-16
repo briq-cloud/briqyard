@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bind the standalone scoped fixture to published mixed-version binaries."""
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -48,9 +49,41 @@ def validate_restored(before, after):
     require(after['configurationSha256'] == before['configurationSha256'])
 
 
+def failure(path):
+    spec = importlib.util.spec_from_file_location(
+        'diagnostics', Path(__file__).with_name('scoped-execution-diagnostics.py'))
+    diagnostics = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(diagnostics)
+    with Path(path).open('rb') as source:
+        data = source.read(diagnostics.MAX_BYTES + 1)
+    allowed = {'scoped native failure: ' + category for category in diagnostics.FIXTURE_FAILURES.values()}
+    allowed.update('scoped native failure: callback_' + category for category in diagnostics.CALLBACK_FAILURES)
+    for stage in diagnostics.STAGES:
+        allowed.add('scoped installation refusal: ' + stage)
+        allowed.update('scoped installation refusal: ' + stage + ' ' + category
+                       for category in diagnostics.CATEGORIES)
+    allowed.update('scoped native: failed phase=' + phase for phase in (
+        'save_config', 'provision_keys', 'certificate', 'configure', 'host_start',
+        'authority_start', 'host_ready', 'gateway', 'primary', 'sibling',
+        'scoped_dispatch', 'authority_binding'))
+    events = diagnostics.classify(data)
+    bounded = data[:diagnostics.MAX_BYTES]
+    if len(data) > diagnostics.MAX_BYTES and not bounded.endswith(b'\n'):
+        bounded = bounded.rsplit(b'\n', 1)[0] if b'\n' in bounded else b''
+    for line in bounded.splitlines()[:diagnostics.MAX_LINES]:
+        value = line.decode('ascii', errors='replace')
+        if value in allowed:
+            events.append(value)
+    return {'schema': 1, 'kind': 'mixed-authority-failure', 'passed': False,
+            'truncated': len(data) > diagnostics.MAX_BYTES or len(bounded.splitlines()) > diagnostics.MAX_LINES,
+            'events': {event: events.count(event) for event in sorted(set(events))}}
+
+
 def main(args):
     mode = args[0]
-    if mode == 'before':
+    if mode == 'failure':
+        record = failure(args[1])
+    elif mode == 'before':
         previous, candidate, driver, source = map(Path, args[1:])
         old = sums(previous)
         new = sums(candidate / 'SHA256SUMS-x86_64')

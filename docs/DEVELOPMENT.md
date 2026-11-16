@@ -538,7 +538,8 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   existing scoped driver. The safe receipt verifies running executable digests,
   driver/source binding and restored daemon configuration. This precedes protected
   machines and the preservation baseline. It excludes renewable callbacks and
-  higher-level gateway traffic. Five offline regressions:
+  higher-level gateway traffic. Failure artifacts retain only bounded fixed phases
+  and allowlisted refusal categories. Six offline regressions:
   `python3 -m unittest discover -s hack -p test_native_mixed_authority.py`.
 - `hack/native-mixed-contract.py`: before upgrading the daemon, the disposable upgrade
   runner sends real requests through the candidate fleet to the previous daemon.

@@ -178,6 +178,8 @@ install -m 0755 "$HEAD_DIR/briqyard-fleet-linux-x86_64" "$WORK/candidate-authori
 if ! CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}" bash "$HARNESS/scoped-execution-native.sh" standalone \
     "$WORK/candidate-authority" "$WORK/authority-before.json" "$WORK/authority-exercised.json" \
     > "$WORK/authority-output" 2>&1; then
+  python3 "$HARNESS/native-mixed-authority.py" failure "$WORK/authority-output" \
+    > native-logs/mixed-authority-failure.json || die "mixed authority diagnostics unavailable"
   die "mixed authority fixture failed (no mutation replay)"
 fi
 # shellcheck disable=SC2024

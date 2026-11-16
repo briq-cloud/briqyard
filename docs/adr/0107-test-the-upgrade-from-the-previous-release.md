@@ -110,7 +110,8 @@ the source daemon before the upgrade preservation baseline; those restarts are
 not upgrade continuity evidence. The full scoped suite retains renewable callback
 coverage. This standalone slice does not qualify callbacks, gateways above the
 runtime, or a multi-host authority. Offline checks qualify receipt predicates only;
-exact-artifact native runs remain necessary.
+exact-artifact native runs remain necessary. Failure receipts retain only bounded,
+allowlisted phases and refusal categories; raw fixture output is not uploaded.
 
 ### Initial upgrade result
 
