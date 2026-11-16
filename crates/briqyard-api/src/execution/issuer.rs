@@ -48,9 +48,14 @@ impl DurableIssuer {
     pub fn instance(&self) -> &str {
         self.journal.instance()
     }
-    /// Reads committed state without taking whoever holds this issuer.
+    /// Reads published state without taking whoever holds this issuer.
     pub fn reader(&self) -> admission::JournalReader {
         self.journal.reader()
+    }
+    /// Makes what this issuer committed visible to its readers. Call it as the action
+    /// ends, before the lock around the issuer is released.
+    pub fn publish(&self) {
+        self.journal.publish();
     }
     /// Trusted installation uses the same exclusive authority journal and epoch.
     /// Keep the issuer alive while borrowing it; this does not expose its key.

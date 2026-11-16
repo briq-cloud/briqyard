@@ -713,9 +713,22 @@ async fn reads_proceed_while_a_write_is_held_and_writes_stay_serialized() {
     )
     .await;
     assert_eq!(status.status(), StatusCode::OK);
-    // The intent is committed; the acknowledgement is not.
+    // The write has not returned: a read sees the state before it, not its intent.
     let status = json_reply(status).await;
-    assert_eq!(status["state"], "pending");
+    assert_eq!(status["state"], "unknown");
+    // Projection reads answer too (a refusal here is an answer; a wait is not).
+    let projection = read(
+        "projection",
+        r#"{"delegation_intent":"absent","grant":"absent"}"#,
+    )
+    .await;
+    assert_ne!(projection.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let lookup = read(
+        "projection_lookup",
+        r#"{"delegation":"absent","grant":"absent"}"#,
+    )
+    .await;
+    assert_ne!(lookup.status(), StatusCode::SERVICE_UNAVAILABLE);
     let operation = read("operation_status", r#"{"id":"absent"}"#).await;
     assert_eq!(json_reply(operation).await["state"], "unknown");
     assert!(!first.is_finished() && !second.is_finished());
@@ -738,6 +751,106 @@ async fn reads_proceed_while_a_write_is_held_and_writes_stay_serialized() {
     )
     .await;
     assert_eq!(json_reply(status).await["state"], "ready");
+}
+
+/// A clock that is qualified except at one call: the second after it is armed. For
+/// `register` that is the recheck after the host acknowledged, between the ack commit and
+/// the commit that refuses readiness. It holds that call open until released.
+struct WindowClock {
+    armed: std::sync::atomic::AtomicBool,
+    calls: std::sync::atomic::AtomicUsize,
+    in_window: std::sync::atomic::AtomicBool,
+    release: std::sync::atomic::AtomicBool,
+}
+impl ClockSource for WindowClock {
+    fn qualified(&self) -> Option<QualifiedClock> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let ok = Some(QualifiedClock {
+            interval: Clock {
+                now: 1000,
+                uncertainty: 1,
+            },
+            valid_until: Instant::now() + std::time::Duration::from_secs(5),
+        });
+        if !self.armed.load(SeqCst) {
+            return ok;
+        }
+        // 1st armed call: the clock given to the ack commit. 2nd: the outcome recheck.
+        if self.calls.fetch_add(1, SeqCst) + 1 != 2 {
+            return ok;
+        }
+        self.in_window.store(true, SeqCst);
+        while !self.release.load(SeqCst) {
+            std::thread::yield_now();
+        }
+        None
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_never_sees_ready_that_the_same_action_then_refuses() {
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::time::Duration;
+    let host = GatedHost::start();
+    let clock = Arc::new(WindowClock {
+        armed: false.into(),
+        calls: 0.into(),
+        in_window: false.into(),
+        release: false.into(),
+    });
+    let (app, _dir, epoch) = fixture_with_host(clock.clone(), host.host.clone());
+    let record = HostRegistration {
+        authority: "region".into(),
+        epoch: epoch.clone(),
+        key_id: "authority".into(),
+        public_key: Ed25519KeyPair::from_seed_unchecked(&[2; 32])
+            .unwrap()
+            .public_key()
+            .as_ref()
+            .try_into()
+            .unwrap(),
+        host_instance: "instance".into(),
+        generation: 1,
+    };
+    let body =
+        serde_json::to_vec(&serde_json::json!({"id":"registration","record":record})).unwrap();
+    let writer = app.clone();
+    let write =
+        tokio::spawn(async move { request(&writer, "register", "central-installer", body).await });
+    host.until_installs(1).await;
+    clock.armed.store(true, SeqCst);
+    host.gate.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !clock.in_window.load(SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // The ack is committed; the action has not returned and will refuse readiness.
+    assert!(!write.is_finished());
+    let status = br#"{"kind":"registration","id":"registration"}"#.to_vec();
+    let during = json_reply(
+        request(
+            &app,
+            "installation_status",
+            "central-installer",
+            status.clone(),
+        )
+        .await,
+    )
+    .await;
+    clock.release.store(true, SeqCst);
+    let response = tokio::time::timeout(Duration::from_secs(5), write)
+        .await
+        .unwrap()
+        .unwrap();
+    let after =
+        json_reply(request(&app, "installation_status", "central-installer", status).await).await;
+    // Before the action: nothing. After it: the permanent refusal. Never `ready`.
+    assert_eq!(during["state"], "unknown");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(after["state"], "pending");
 }
 
 #[test]

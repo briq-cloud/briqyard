@@ -208,6 +208,16 @@ pub enum Error {
 /// One exclusive writer for a bounded private journal. Keep this alive for the service
 /// lifetime. Never copy a live journal or restore it under an acknowledged old instance.
 /// An instance change must be fenced at every dispatch host before capacity is reused.
+///
+/// Every commit is durable at once but visible to a `JournalReader` only after
+/// `publish`, which the owner calls when it ends the action that made the commits
+/// (before it releases the writer lock). A reader therefore never sees an intermediate
+/// state of an action that has not returned.
+///
+/// The writer lock lives in the shared fence, so it is released when the `Journal` and
+/// every `JournalReader` and `JournalView` made from it are dropped, not when the
+/// `Journal` alone is. A retained reader makes a second `open` of the same directory in
+/// this process fail with `Ownership`, and keeps answering the last published state.
 pub struct Journal {
     view: JournalView,
     published: Arc<RwLock<JournalView>>,
@@ -230,9 +240,10 @@ pub struct JournalView {
     fence: Arc<Fence>,
 }
 
-/// Reads the latest committed state of a journal without its writer. A new state is
-/// published only after it is durable, so a reader never sees a write that can still
-/// fail. A read is ordered before any write that has not returned.
+/// Reads the latest published state of a journal without its writer. A state is
+/// published only after it is durable and its action has ended, so a reader never sees
+/// a write that can still fail, nor part of an action that has not returned. A read is
+/// ordered before any action that has not returned and sees every action that has.
 #[derive(Clone)]
 pub struct JournalReader(Arc<RwLock<JournalView>>);
 impl JournalReader {
@@ -251,9 +262,23 @@ impl std::ops::Deref for Journal {
     }
 }
 impl Journal {
-    /// A handle that reads committed states without waiting for a write.
+    /// A handle that reads published states without waiting for a write.
     pub fn reader(&self) -> JournalReader {
         JournalReader(self.published.clone())
+    }
+
+    /// Makes every commit so far visible to readers. Call it once per action, after its
+    /// last commit and before releasing the writer lock. Commits are durable before it
+    /// runs, and a commit that failed never reached the writer's state, so it publishes
+    /// only durable evidence; a poisoned journal still refuses every read.
+    pub fn publish(&self) {
+        let mut published = self
+            .published
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !Arc::ptr_eq(&published.state, &self.view.state) {
+            *published = self.view.clone();
+        }
     }
 
     /// Clock loss after a durable host ACK must never promote that uncertain
@@ -419,6 +444,7 @@ impl Journal {
             view,
         };
         journal.commit(State::clone(&journal.state))?;
+        journal.publish();
         Ok(journal)
     }
 
@@ -1021,11 +1047,8 @@ impl Journal {
             self.fence.poisoned.store(true, Ordering::SeqCst);
             return Err(Error::Persistence);
         }
+        // Visible to readers only at `publish`, once the whole action has returned.
         self.view.state = Arc::new(next);
-        *self
-            .published
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = self.view.clone();
         Ok(())
     }
 }
@@ -1092,6 +1115,11 @@ impl JournalView {
             return Err(Error::Binding);
         }
         Ok(())
+    }
+
+    /// Whether this process still owns the journal and no write has failed.
+    pub fn owned(&self) -> Result<(), Error> {
+        self.ownership()
     }
 
     fn ownership(&self) -> Result<(), Error> {

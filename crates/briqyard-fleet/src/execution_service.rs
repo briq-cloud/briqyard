@@ -19,7 +19,7 @@ use briqyard_api::execution::{
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{sync::Arc, time::Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
 pub(crate) mod renewal;
 
@@ -51,10 +51,37 @@ impl TrustConfig {
     }
 }
 
+/// The issuer behind the write lock. Releasing the guard publishes what the action
+/// committed, so a read sees the state before the action or after it, never between.
+struct Issuer(Mutex<briqyard_api::execution::DurableIssuer>);
+impl Issuer {
+    async fn lock(&self) -> Held<'_> {
+        Held(self.0.lock().await)
+    }
+}
+struct Held<'a>(MutexGuard<'a, briqyard_api::execution::DurableIssuer>);
+impl std::ops::Deref for Held<'_> {
+    type Target = briqyard_api::execution::DurableIssuer;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Held<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Drop for Held<'_> {
+    /// Runs before the inner guard releases the lock, on success, refusal and early return.
+    fn drop(&mut self) {
+        self.0.publish();
+    }
+}
+
 struct Service {
     /// Every durable write, one at a time. Reads that need no write go through
-    /// `reader` and the two identity fields, which never wait for this lock.
-    issuer: Mutex<briqyard_api::execution::DurableIssuer>,
+    /// `reader`, which never waits for this lock.
+    issuer: Issuer,
     reader: JournalReader,
     authority: String,
     authority_epoch: String,
@@ -165,7 +192,7 @@ pub(super) fn router_with_continuation(
         return Err("invalid authority configuration");
     }
     let state = Arc::new(Service {
-        issuer: Mutex::new(issuer),
+        issuer: Issuer(Mutex::new(issuer)),
         reader,
         authority,
         authority_epoch,
@@ -433,6 +460,12 @@ async fn run(
     if action == "identity" {
         let _: Empty = parse(body)?;
         clock(service.clock.as_ref())?;
+        // The same ownership and poison check as every other read.
+        service
+            .reader
+            .view()
+            .owned()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let host: briqyard_api::execution::channel::Instance = service
             .host
             .call(crate::execution_host::Route::Instance, &())
@@ -586,8 +619,9 @@ fn operation_reply(
 }
 
 /// Actions that only read the journal, from the latest committed state. They never
-/// wait for a write in flight: each is ordered before every write that has not
-/// returned, and sees every write that has. `None` for any other action.
+/// wait for a write in flight: each is ordered before every action that has not
+/// released the issuer lock, and sees every action that has. `exec` releases it between
+/// its phases, so each phase is visible when it ends. `None` for any other action.
 fn read_only(
     service: &Service,
     action: &str,
