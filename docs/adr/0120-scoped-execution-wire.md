@@ -33,9 +33,11 @@ Other integers use that same safe range. No optional claim has an implicit defau
 `iat <= nbf < exp`; a trusted clock with uncertainty `u` accepts only when
 `iat <= now-u`, `nbf <= now-u` and `now+u < exp`. Clock arithmetic failure refuses.
 A reading is whole seconds: `now` is the floored wall time and `u` is the error rounded up plus
-one second, a constant within the second. `now-u` is therefore monotonic: a permit issued from an
-earlier reading is never newer than the lower bound of a later reading by the same or another
-clock. A margin that grew with the fractional second let a later reading fall below a permit's
+one second, constant within the second for a given error. `now-u` then does not fall as the
+fractional second advances. It can still fall by one second when the rounded error itself steps up
+between two readings, or when the verifying clock reports a larger error than the issuing one, so
+a host with a larger error than the authority can still refuse a permit issued at the authority's
+bound. A margin that grew with the fractional second let a later reading fall below a permit's
 `nbf` and refused fresh grants about half the time.
 Grant expiry cannot exceed original credential or idle-protection expiry.
 The issuer sets its authorization-freshness maximum; this verifier does not impose a 60-second cap.
