@@ -79,11 +79,18 @@ trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
 # ---- recovery helpers ----
-wait_api() { local i; for i in $(seq 1 90); do briqyard status >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+RECOVERY_SINCE=$(date +%s)
+wait_api() {
+  if ! python3 "$HERE/qualification-readiness.py" "$LOGS" "$RECOVERY_SINCE"; then
+    bad "daemon recovery readiness: observation and protected machine list"
+    exit 1
+  fi
+}
 # SIGKILL to the daemon alone (a systemctl kill would take the machines with it), then a start
 # now rather than after RestartSec.
 crash_daemon() {
   local pid i; pid=$(daemon_pid)
+  RECOVERY_SINCE=$(date +%s)
   sudo kill -9 "$pid"
   for i in $(seq 1 50); do [ "$(daemon_pid)" != "$pid" ] && break; sleep 0.1; done
   # A `zfs send` paused by a check outlives the daemon; it must be gone before recovery runs.
@@ -568,6 +575,7 @@ check "fleet killed: and creates through it" 'F=$(fleet machine run --sleep neve
 
 echo "-- power cut: the daemon and every VMM at once"
 CUT=($(pgrep -x firecracker) "$(daemon_pid)")
+RECOVERY_SINCE=$(date +%s)
 sudo kill -9 "${CUT[@]}"
 for i in $(seq 1 50); do [ -z "$(pgrep -x firecracker || true)" ] && break; sleep 0.1; done
 sudo systemctl start briqyardd

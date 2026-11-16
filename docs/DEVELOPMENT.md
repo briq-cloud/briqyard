@@ -537,7 +537,16 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   while the fleet upgrades the VM's host and then restarts, each attempt counted `ok`, `refused`,
   `reset`, `timeout` or `failed` (`hack/upgrade-probe.py`; ADR 0051 keeps the numbers). A
   measure, not a suite: it prints counts and passes nothing.
-- `hack/qualify.sh`: includes real-helper SIGKILL recovery, timeout endpoint availability, automatic restart and a SIGUSR2 drain control with bounded create acceptance (ADR 0102), then chaos, isolation and OOM on a disposable host only (it kills every Firecracker and fills the pool); native CI job `qualification`. What it covers and what needs real hardware: ADR 0095.
+- `hack/qualify.sh`: includes real-helper SIGKILL recovery, timeout endpoint availability,
+  automatic restart and a SIGUSR2 drain control with bounded create acceptance (ADR 0102),
+  then chaos, isolation and OOM on a disposable host only (it kills every Firecracker and
+  fills the pool); native CI job `qualification`. Recovery readiness requires a non-null
+  current runtime observation and a successful protected machine list within 90 seconds;
+  unrelated host conditions do not delay it. Failure ends dependent checks before cleanup
+  and writes `recovery-readiness.json` under `QUAL_LOGS` for the native artifact upload.
+  The bounded post-crash journal summary contains only fixed predicate hints, trusted source
+  positions, errno enums, counts and explicit unknown/truncated fields. Hints do not prove
+  an initiating predicate. What it covers and what needs real hardware: ADR 0095.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N namespaces through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start and a
   snapshot's delete against a destroy, more starts at once than the host has memory for), host
