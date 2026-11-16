@@ -58,6 +58,29 @@ class FakeAPI:
 
 
 class NativeContract(unittest.TestCase):
+    def test_daemon_seed_is_discovered_before_the_fleet_profile_refusal(self):
+        class SeedAPI(FakeAPI):
+            discovered = False
+
+            def call(self, method, path, body=None):
+                if method == "GET" and path == "/machines?namespace=test":
+                    self.discovered = True
+                    return 200, [{"id": "m_sandbox", "namespace": "test", "host": "local"}], {}
+                if method == "GET" and path == "/machines/m_sandbox/snapshots":
+                    return 200, [{"id": "s_sandbox", "memory": True,
+                                  "clone_profile": "sandbox-ready-v1"}], {}
+                if body and body.get("fork", {}).get("machine_id") == "m_sandbox":
+                    if not self.discovered:
+                        return 404, {"code": "not_found"}, {}
+                return super().call(method, path, body)
+
+        runner = contract.Contract(SeedAPI(), "test")
+        profiles = []
+        runner.profile = profiles.append
+        runner.run("m_sandbox", "s_sandbox")
+        self.assertEqual(runner.checks, 6)
+        self.assertEqual(profiles, ["init-ready-v1", "service-ready-v1"])
+
     def test_native_gate_selects_python_caller_changes(self):
         workflow = Path(__file__).parents[1] / ".github/workflows/native-upgrade.yml"
         selector = re.search(r"grep -qxE '([^']+)'", workflow.read_text()).group(1)

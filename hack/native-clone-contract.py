@@ -145,6 +145,17 @@ class Contract:
                 body["size"] = size
             # An empty Size is a wire error; the others reach the resource predicate.
             self.refuse("cold-" + label, body, "missing field" if label == "empty" else "size.vcpus")
+        # The upgrade fixture made this source directly on the daemon. A fleet
+        # listing discovers its registered route before named-clone preflight.
+        self.phase = "sandbox-source"
+        status, machines, _ = self.api.call("GET", "/machines?namespace=" + self.namespace)
+        self.check(status == 200 and isinstance(machines, list) and any(
+            m.get("id") == sandbox_source and m.get("namespace") == self.namespace and
+            m.get("host") == "local" for m in machines))
+        status, snapshots, _ = self.api.call("GET", f"/machines/{sandbox_source}/snapshots")
+        self.check(status == 200 and isinstance(snapshots, list) and any(
+            s.get("id") == sandbox_snapshot and s.get("clone_profile") == "sandbox-ready-v1" and
+            s.get("memory") is True for s in snapshots))
         self.phase = "sandbox-named"
         self.refuse("sandbox-named", {"fork": {"machine_id": sandbox_source,
                                                 "snapshot": sandbox_snapshot}},
