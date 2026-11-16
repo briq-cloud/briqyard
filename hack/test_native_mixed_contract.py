@@ -36,10 +36,13 @@ class FakeAPI:
         self.bad_hold_overhead = False
         self.cancel_all_holds = False
         self.double_count_dispatch = False
+        self.stale_seed_reports = 0
 
     def call(self, method, path, body=None, headers=None):
         self.calls.append((method, path, copy.deepcopy(body)))
         if path == "/hosts":
+            stale_seed = 512 if self.stale_seed_reports else 0
+            self.stale_seed_reports = max(0, self.stale_seed_reports - 1)
             overhead = 0 if self.bad_hold_overhead else 256
             held = sum(r["size"]["memory_mb"] + overhead
                        for p, a in self.admissions.items() if "-account-" in p and not a.get("cancelled")
@@ -52,7 +55,7 @@ class FakeAPI:
                           "egress_siblings_v1": True, "warm_pool_profiles": [],
                           "memory_policy": {"version": 1, "vmm_overhead_mb": 256},
                           "last_seen": str(len(self.calls)),
-                          "capacity": {"memory_mb": 12288}, "used": {"memory_mb": 4096 + held + actual}}], {}
+                          "capacity": {"memory_mb": 12288}, "used": {"memory_mb": 4096 + stale_seed + held + actual}}], {}
         if method == "GET" and path.startswith("/machines?"):
             return 200, [v for v in self.machines.values() if v["namespace"] == path.split("=")[1]], {}
         if path == "/namespaces":
@@ -158,6 +161,32 @@ class FakeAPI:
 
 
 class MixedContractTests(unittest.TestCase):
+    def test_hold_baseline_waits_for_deleted_seed_charge_to_settle(self):
+        api = FakeAPI()
+        api.stale_seed_reports = 1
+        runner = mixed.Mixed(api, "fixture")
+        runner.hold_accounting()
+        observations = {r["case"]: r["observed"] for r in runner.receipts}
+        self.assertEqual(observations["holds-baseline-pending"]["memoryMb"], 4608)
+        self.assertEqual(observations["holds-baseline"], {"memoryMb": 4096, "freshHeartbeat": True})
+        self.assertEqual(observations["holds-final-release"]["memoryMb"], 4096)
+
+    def test_missing_running_hold_machine_does_not_count_as_tested_deletion(self):
+        class MissingMachineAPI(FakeAPI):
+            def call(self, method, path, body=None, headers=None):
+                machine = self.machines.get(path.rsplit("/", 1)[-1], {})
+                if method == "GET" and machine.get("name", "").endswith("-holds-dispatch"):
+                    self.calls.append((method, path, copy.deepcopy(body)))
+                    return 404, {"code": "not_found"}, {}
+                return super().call(method, path, body, headers)
+        api = MissingMachineAPI()
+        runner = mixed.Mixed(api, "fixture")
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.hold_accounting()
+        self.assertEqual(len(runner.created), 1)
+        self.assertFalse(any(m == "DELETE" and p.startswith("/machines/") for m, p, _ in api.calls))
+        self.assertFalse(any(r["case"] == "holds-final-release" for r in runner.receipts))
+
     def test_independent_hold_charges_release_and_dispatch_reflection(self):
         api = FakeAPI()
         runner = mixed.Mixed(api, "fixture")

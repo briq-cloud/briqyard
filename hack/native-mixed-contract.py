@@ -538,7 +538,10 @@ class Mixed(clone.Contract):
 
     def hold_accounting(self):
         self.phase = "hold-accounting"
-        baseline, _ = self.accounting_usage("holds-baseline")
+        # Earlier cases delete machines. Let a newer daemon report settle those
+        # charges before treating fleet usage as this experiment's baseline.
+        _, seen = self.accounting_usage("holds-baseline-pending")
+        baseline, _ = self.accounting_usage("holds-baseline", after=seen)
         first = f"/namespaces/{self.namespace}/admissions/{self.prefix}-account-pair"
         second = f"/namespaces/{self.namespace}/admissions/{self.prefix}-account-survivor"
         def requirement(role, memory):
@@ -564,7 +567,7 @@ class Mixed(clone.Contract):
         self.running(machine)
         _, seen = self.accounting_usage("holds-dispatched-charge", baseline + 512 + 256)
         self.accounting_usage("holds-reflected-once", baseline + 512 + 256, after=seen)
-        self.delete("holds-delete-dispatched", "/machines/" + machine, [200, 204, 404])
+        self.delete("holds-delete-dispatched", "/machines/" + machine, [200, 204])
         self.created.remove(machine)
         _, seen = self.accounting_usage("holds-deletion-pending")
         self.accounting_usage("holds-final-release", baseline, after=seen)
