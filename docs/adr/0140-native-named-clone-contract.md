@@ -28,3 +28,12 @@ suite. Existing sandbox sources and unrelated machines are preserved.
 Offline fixtures cover wire shapes, refusal predicates, uncertain responses,
 partial cleanup and configuration failure. Only the disposable native run
 qualifies the actual artifacts and guest execution.
+
+The same disposable phase qualifies the pinned-namespace drain contract. Require
+exactly one initially ready host and an existing namespace pinned to it. After
+one drain, a cold create in that namespace must run and execute through the fleet;
+a fresh namespace must receive a capacity refusal. Restore admission on every
+exit, discover lost create responses by the exact run marker, and delete only
+owned machines and the fresh test namespace. An uncertain drain is observed before
+restoration; an uncertain undrain is never resent. This fixture has one writer and
+does not establish an ownership fence for concurrent administrative drain actions.
