@@ -2,6 +2,7 @@
 """Readiness never confuses diagnostic status with recovered protected routes."""
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 import unittest
 import urllib.error
@@ -70,6 +71,24 @@ class ReadinessTests(unittest.TestCase):
         self.assertTrue(ready.classify(b"x" * (ready.MAX_BYTES + 1))["truncated"])
         self.assertTrue(ready.classify(b"{}\n" * (ready.MAX_LINES + 1))["truncated"])
         self.assertTrue(ready.classify(b"", True)["truncated"])
+
+    def test_mid_create_readiness_failure_exits_parent_before_dependencies(self):
+        shell = Path(__file__).with_name("qualify.sh").read_text()
+        wait = shell[shell.index("wait_api() {"):shell.index("# SIGKILL to the daemon alone")]
+        checks = shell[shell.index('check "a create was cut short'):shell.index('st=$(settled_state')]
+        script = """bad() { echo failed; }
+check() { if ( eval "$2" ); then :; else bad "$1"; fi; }
+python3() { return 1; }
+settle() { return 0; }
+caught=1
+trap 'echo cleanup' EXIT
+""" + wait + checks + '\necho dependent-operation\n'
+        result = subprocess.run(["bash", "-c", script], capture_output=True,
+                                text=True, timeout=5)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("failed", result.stdout)
+        self.assertIn("cleanup", result.stdout)
+        self.assertNotIn("dependent-operation", result.stdout)
 
     def test_shell_records_boundary_before_crashes_and_stops_before_dependencies(self):
         shell = Path(__file__).with_name("qualify.sh").read_text()

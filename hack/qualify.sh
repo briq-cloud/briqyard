@@ -428,7 +428,8 @@ for d in 1 2.5 0.5 4; do
   if kill_during "$d" briqyard machine run --sleep never --image $PYSLIM --name cr --namespace "$T-c" --memory 256 -- sleep 7200; then caught=1; break; fi
 done
 check "a create was cut short (client failed, delay $d s)" '[ "$caught" = 1 ]'
-check "the daemon is back and the host settles" 'wait_api && settle'
+wait_api
+check "the daemon is back and the host settles" 'settle'
 st=$(settled_state "$T-c" cr); echo "   the machine is: $st"
 check "mid-create: a machine settles running, or in error with its reason, or was never recorded" 'case "$st" in running|none) true;; error) errors_reported;; *) false;; esac'
 check "mid-create: invariants hold with what is left" 'invariants || [ "$st" = error ]'
