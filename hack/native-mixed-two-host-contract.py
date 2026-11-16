@@ -78,6 +78,26 @@ def captured_command(argv):
         process.stdout.close()
 
 
+def fixture_empty(api, wait=False):
+    deadline = time.monotonic() + 30
+    while True:
+        status, hosts, _ = api.call("GET", "/hosts")
+        clone.require(status == 200 and isinstance(hosts, list) and
+                      {host.get("id") for host in hosts} == {"local", "fc2"} and len(hosts) == 2)
+        second = next(host for host in hosts if host["id"] == "fc2")
+        if second.get("machines") == 0 and second.get("namespaces") == []:
+            return
+        clone.require(wait and time.monotonic() < deadline)
+        time.sleep(1)
+
+
+def retire_fixture_host(api):
+    # The caller has already removed fc2 from the static configuration and restarted.
+    fixture_empty(api)
+    status, value, _ = api.call("POST", "/hosts/fc2/retire")
+    clone.require(status == 200 and value.get("id") == "fc2" and value.get("state") == "retired")
+
+
 def remote_capture(helper):
     clone.require(Path(helper).resolve() == (Path(os.environ["RUNNER_TEMP"]) / "two-host-probe/second-host").resolve())
     return captured_command([helper, "python3", "/tmp/mixed-contract/native-mixed-two-host-contract.py", "--capture-daemon"])
@@ -118,16 +138,24 @@ class TwoHost(mixed.Mixed):
 
     def check_cli(self):
         self.phase = "candidate-cli-routing"
-        for machine, (namespace, _) in self.machine_owners.items():
+        for machine, (namespace, name) in self.machine_owners.items():
             host = "local" if namespace.endswith("-local") else "fc2"
+            status, routed, headers = self.api.call("GET", "/machines/" + machine)
+            self.check(status == 200 and routed.get("host") == host and
+                       {key.lower(): val for key, val in headers.items()}.get("x-briqyard-host") == host)
+            self.receipts.append({"case": "candidate-api-get", "request": {"method": "GET",
+                                  "path": "/v1/machines/" + machine},
+                                  "expected": {"host": host},
+                                  "observed": mixed.summary(status, routed, headers)})
             value = captured_command(["env", "BRIQYARD_URL=http://127.0.0.1:7430",
                                       "briqyard", "machine", "get", machine])
             self.check(value.get("id") == machine and value.get("namespace") == namespace and
-                       value.get("host") == host and value.get("state") == "running")
+                       value.get("name") == name and value.get("state") == "running")
             self.receipts.append({"case": "candidate-cli-get", "request": {"method": "GET",
                                   "path": "/v1/machines/" + machine},
-                                  "expected": {"host": host, "state": "running"},
-                                  "observed": {"outcome": "accepted", "host": host, "state": "running"}})
+                                  "expected": {"id": machine, "namespace": namespace, "name": name, "state": "running"},
+                                  "observed": {"outcome": "accepted", "id": value["id"], "namespace": value["namespace"],
+                                               "name": value["name"], "state": value["state"]}})
 
     def run_pair(self):
         status, hosts, _ = self.api.call("GET", "/hosts")
@@ -149,6 +177,19 @@ class TwoHost(mixed.Mixed):
 
 
 def main():
+    if sys.argv[1:] in (["--fixture-empty"], ["--retire-fixture-host"]):
+        clone.require(os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted")
+        raw = Path("native-logs/mixed-two-host-contract.json").read_bytes()
+        clone.require(len(raw) <= 131072)
+        receipt = json.loads(raw)
+        clone.require(receipt.get("cleanup") == "complete" and receipt.get("inputsUnchanged") is True)
+        api = clone.API("http://127.0.0.1:7430")
+        api.deadline = time.monotonic() + 30
+        if sys.argv[1] == "--fixture-empty":
+            fixture_empty(api, wait=True)
+        else:
+            retire_fixture_host(api)
+        return
     if sys.argv[1:] == ["--capture-daemon"]:
         print(json.dumps(capture_daemon(), sort_keys=True))
         return

@@ -23,12 +23,26 @@ cleanup() {
   restored=1
   if [ "$changed" = 1 ]; then
     restored=0
-    if sudo install -m 0644 "$WORK/fleet.yaml" /etc/briqyard/fleet.yaml && sudo systemctl restart briqyard-fleet; then
-      for _ in $(seq 1 60); do
+    # Static hosts survive config removal in the durable registry. Observe the owned
+    # second host empty while it is still polled, then remove its configuration.
+    empty=0
+    python3 "$HARNESS/native-mixed-two-host-contract.py" --fixture-empty && empty=1
+    if sudo install -m 0644 "$WORK/fleet.yaml" /etc/briqyard/fleet.yaml && sudo systemctl restart briqyard-fleet &&
+      [ "$empty" = 1 ]; then
+      # Wait only on reads before the one-shot retirement POST.
+      available=0
+      for _ in $(seq 1 30); do
         if curl -fsS -H "Authorization: Bearer $BRIQYARD_TOKEN" http://127.0.0.1:7430/v1/hosts |
-          jq -e 'length == 1 and .[0].id == "local" and .[0].state == "ready"' >/dev/null; then restored=1; break; fi
+          jq -e 'any(.id == "local" and .state == "ready")' >/dev/null; then available=1; break; fi
         sleep 1
       done
+      if [ "$available" = 1 ] && python3 "$HARNESS/native-mixed-two-host-contract.py" --retire-fixture-host; then
+        for _ in $(seq 1 60); do
+          if curl -fsS -H "Authorization: Bearer $BRIQYARD_TOKEN" http://127.0.0.1:7430/v1/hosts |
+            jq -e 'length == 1 and .[0].id == "local" and .[0].state == "ready"' >/dev/null; then restored=1; break; fi
+          sleep 1
+        done
+      fi
     fi
     if [ "$restored" = 1 ]; then
       sudo python3 "$HARNESS/native-mixed-contract.py" --capture > "$WORK/restored.json" || restored=0

@@ -43,13 +43,13 @@ class API:
         if path.startswith("/machines/"):
             machine = self.machines[path.split("/")[2]]
             if method == "GET":
-                return 200, copy.deepcopy(machine), {}
+                return 200, copy.deepcopy(machine), {"x-briqyard-host": machine["host"]}
             if path.endswith("/exec"):
                 return 200, {"exit_code": 0, "stdout": machine["name"] + "\n"}, {}
             if method == "DELETE":
                 del self.machines[machine["id"]]
                 return 204, None, {}
-            return 200, copy.deepcopy(machine), {}
+            return 200, copy.deepcopy(machine), {"x-briqyard-host": machine["host"]}
         if method == "DELETE" and path.startswith("/namespaces/"):
             return 204, None, {}
         raise AssertionError((method, path))
@@ -84,12 +84,14 @@ class PairTests(unittest.TestCase):
         self.assertEqual(4, sum(method == "POST" and path == "/machines"
                                 for method, path, _ in api.calls))
 
-    def test_candidate_cli_must_return_the_expected_host(self):
+    def test_candidate_cli_reads_typed_machine_after_exact_route_check(self):
         api = API()
         runner = two.TwoHost(api)
         runner.run_pair()
         def get(argv):
-            return copy.deepcopy(api.machines[argv[-1]])
+            value = copy.deepcopy(api.machines[argv[-1]])
+            value.pop("host")  # CLI serializes Machine, not the fleet response extension.
+            return value
         with patch.object(two, "captured_command", side_effect=get) as command:
             runner.check_cli()
             self.assertEqual(4, command.call_count)
@@ -97,6 +99,32 @@ class PairTests(unittest.TestCase):
             with self.assertRaises(two.clone.ContractFailure):
                 runner.check_cli()
         runner.cleanup()
+
+    def test_fixture_retirement_is_empty_only_and_never_replayed(self):
+        calls = []
+        class RetireAPI:
+            def call(self, method, path, body=None):
+                calls.append((method, path))
+                if method == "GET":
+                    return 200, [{"id": "local"}, {"id": "fc2", "machines": 0, "namespaces": []}], {}
+                return 200, {"id": "fc2", "state": "retired"}, {}
+        two.retire_fixture_host(RetireAPI())
+        self.assertEqual([("GET", "/hosts"), ("POST", "/hosts/fc2/retire")], calls)
+        with patch.object(RetireAPI, "call", return_value=(200, [
+                {"id": "local"}, {"id": "fc2", "machines": 1, "namespaces": []}], {})), \
+                patch.object(two.time, "monotonic", side_effect=[0, 31]):
+            with self.assertRaises(two.clone.ContractFailure):
+                two.retire_fixture_host(RetireAPI())
+        calls.clear()
+        def lost(method, path, body=None):
+            calls.append((method, path))
+            if method == "GET":
+                return 200, [{"id": "local"}, {"id": "fc2", "machines": 0, "namespaces": []}], {}
+            raise TimeoutError()
+        with patch.object(RetireAPI, "call", side_effect=lost):
+            with self.assertRaises(TimeoutError):
+                two.retire_fixture_host(RetireAPI())
+        self.assertEqual(1, sum(method == "POST" for method, _ in calls))
 
     def test_capture_rejects_excess_output_and_invalid_json(self):
         for script in ("print('x'*16385)", "print('not json')", "raise SystemExit(1)"):
