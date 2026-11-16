@@ -68,6 +68,30 @@ KVM fails the environment gate; it is not passing qualification. This subset doe
 exercise regional authority, controlled physical pressure, supported warm/nested machine
 classes, or interrupted activation and rollback.
 
+### Nested admission in the mixed window
+
+Exact-artifact runs enable the nested class before any preservation machine starts.
+The upgrade job waits for both binary and nested-kernel builds, downloads both artifacts
+from the same release run, and assembles the three class checksums exactly as release
+publication does. These are assembled checksums over that run's artifacts, not a claim
+that the binary artifact already carried the published combined manifest. Missing class
+files, checksum mismatches and missing host capability fail the run.
+
+The previous release's own bootstrap installs its published nested assets. While that
+daemon remains unchanged and the candidate fleet is running, one direct nested create
+and one consumer-only nested admission must start on the registered local host, report
+`runtime_class: nested`, and execute a check for `/dev/kvm`, CPU virtualization flags
+and the read-only kernel modules mount. The admitted create consumes its exact reserved
+identity. Each mutation is submitted once and exact owned machines are deleted; unknown
+creates retain unconfirmed cleanup. The existing binary/process/configuration binding
+and subsequent daemon upgrade, preservation and rollback checks remain mandatory.
+Rollback and return-to-candidate retain the class and use the corresponding class assets.
+
+PR-built native runs remain default-only: they do not rebuild the nested kernel and
+retain the explicit nested qualification gap. The second fixture host remains default-only;
+this is not multi-host nested or regional-authority qualification. Passing offline tests
+establish wire and failure handling only; native exact-artifact evidence is still required.
+
 ### Initial upgrade result
 
 First pair, v0.1.23 to this head (PR #152), identical on 24.04 and 26.04: 26 checks pass, 2 fail.

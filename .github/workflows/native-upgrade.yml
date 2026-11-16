@@ -134,6 +134,18 @@ jobs:
           repository: briq-cloud/briqyard
           run-id: ${{ inputs.candidate_run || github.run_id }}
           github-token: ${{ github.token }}
+      - name: Download the candidate's nested class
+        if: steps.gate.outputs.run == 'true' && (inputs.candidate || inputs.candidate_run != '')
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nested-kernel-x86_64
+          path: native-release
+          repository: briq-cloud/briqyard
+          run-id: ${{ inputs.candidate_run || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Assemble the release class checksums
+        if: steps.gate.outputs.run == 'true' && (inputs.candidate || inputs.candidate_run != '')
+        run: (cd native-release && sha256sum nested-vmlinux-x86_64 nested-modules-x86_64.ext4 nested-versions-x86_64.json >> SHA256SUMS-x86_64)
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         if: steps.gate.outputs.run == 'true' && !inputs.candidate && inputs.candidate_run == ''
         with:
@@ -162,6 +174,8 @@ jobs:
         run: sudo apt-get install -y jq openssl postgresql-client openssh-server python3-yaml bc
       - name: Upgrade ${{ steps.previous.outputs.prev }} to the head
         if: steps.gate.outputs.run == 'true'
+        env:
+          NATIVE_UPGRADE_NESTED: ${{ (inputs.candidate || inputs.candidate_run != '') && '1' || '0' }}
         run: |
           mkdir -p native-logs
           set -o pipefail
