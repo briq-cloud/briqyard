@@ -39,6 +39,9 @@ class FakeAPI:
         self.double_count_dispatch = False
         self.stale_seed_reports = 0
         self.seed_report_charges = []
+        self.ignore_physical_pressure = False
+        self.bad_physical_charge = False
+        self.bad_physical_reason = False
         self.nested = False
         self.wrong_class = False
         self.bad_nested_exec = False
@@ -56,12 +59,15 @@ class FakeAPI:
                        for r in a["body"]["requirements"])
             actual = sum(m["size"]["memory_mb"] + 256 for m in self.machines.values()
                          if m.get("name", "").endswith("-holds-dispatch"))
+            physical = sum(m["size"]["memory_mb"] + (0 if self.bad_physical_charge else 256)
+                           for m in self.machines.values() if m.get("name", "").endswith("-physical-fill"))
             return 200, [{"id": "local", "state": "ready", "runtime_classes": [{"name": "nested", "nested": True}] if self.nested else [],
                           "named_memory_profiles": ["init-ready-v1", "sandbox-ready-v1"] if self.profile else ["sandbox-ready-v1"],
                           "egress_siblings_v1": True, "warm_pool_profiles": [],
                           "memory_policy": {"version": 1, "vmm_overhead_mb": 256},
                           "last_seen": str(len(self.calls)),
-                          "capacity": {"memory_mb": 12288}, "used": {"memory_mb": 4096 + stale_seed + held + actual}}], {}
+                          "conditions": [{"type": "memory_pressure", "status": bool(physical) and not self.ignore_physical_pressure}],
+                          "capacity": {"memory_mb": 12288}, "used": {"memory_mb": 4096 + stale_seed + held + actual + physical}}], {}
         if method == "GET" and path.startswith("/machines?"):
             return 200, [v for v in self.machines.values() if v["namespace"] == path.split("=")[1]], {}
         if path == "/namespaces":
@@ -123,6 +129,8 @@ class FakeAPI:
                 kind = "sandbox-admissions" if "sandbox_seed" in body else "admissions"
                 self.admissions[f"/namespaces/fixture/{kind}/{identity}"]["dispatched"] = True
             size = body.get("size", {})
+            if any(m.get("name", "").endswith("-physical-fill") for m in self.machines.values()):
+                return 503, {"code": "capacity", "error": "disk_pressure" if self.bad_physical_reason else "memory_pressure"}, {}
             if body.get("fork", {}).get("machine_id") == "m_seed":
                 return 409, {"code": "capability_unsupported"}, {}
             named = "fork" in body
@@ -171,6 +179,44 @@ class FakeAPI:
 
 
 class MixedContractTests(unittest.TestCase):
+    def test_physical_pressure_refuses_and_recovers_without_touching_existing_machines(self):
+        api = FakeAPI()
+        runner = mixed.Mixed(api, "fixture")
+        original = copy.deepcopy(api.machines)
+        runner.physical_pressure()
+        self.assertEqual(api.machines, original)
+        self.assertEqual(runner.created, [])
+        records = {r["case"]: r for r in runner.receipts}
+        self.assertEqual(records["physical-pressure"]["observed"],
+                         {"memoryPressure": True, "memoryMb": 12288})
+        self.assertEqual(records["physical-recovered"]["observed"],
+                         {"memoryPressure": False, "memoryMb": 4096})
+        self.assertEqual(sum(m == "POST" and p == "/machines" for m, p, _ in api.calls), 3)
+
+    def test_physical_pressure_requires_condition_and_exact_overhead(self):
+        for attr in ("ignore_physical_pressure", "bad_physical_charge"):
+            with self.subTest(attr=attr):
+                api = FakeAPI()
+                setattr(api, attr, True)
+                runner = mixed.Mixed(api, "fixture")
+                with patch.object(mixed.time, "monotonic", side_effect=[0, 0, 100]):
+                    with self.assertRaises(mixed.clone.ContractFailure):
+                        runner.physical_pressure()
+                self.assertEqual(len(runner.created), 1)
+                self.assertEqual(sum(m == "POST" and p == "/machines" for m, p, _ in api.calls), 1)
+                runner.cleanup()
+                self.assertIn("m_seed", api.machines)
+                self.assertIn("m_other", api.machines)
+
+    def test_physical_refusal_must_name_memory_pressure(self):
+        api = FakeAPI()
+        api.bad_physical_reason = True
+        runner = mixed.Mixed(api, "fixture")
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.physical_pressure()
+        self.assertFalse(runner.receipts[-1]["observed"]["reasonMatches"])
+        runner.cleanup()
+
     def test_hold_baseline_waits_for_deleted_seed_charge_to_settle(self):
         api = FakeAPI()
         api.stale_seed_reports = 1

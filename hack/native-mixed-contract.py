@@ -154,12 +154,12 @@ class Mixed(clone.Contract):
                      "interrupted activation, fleet rollback and drain ABA",
                      "nested guest execution (fixture has only the default class)",
                      "boot-pressure spill: one host, no second region or controlled boot queue",
-                     "host memory/disk-pressure conditions: fixture retains running upgrade controls",
+                     "disk-pressure condition: fixture retains its protected volume",
                      "supported warm claim: native-ci-upgrade.sh leaves templates.warm_pools disabled"]
         if self.nested:
             self.gaps.remove("nested guest execution (fixture has only the default class)")
 
-    def case(self, label, fields, expected, lifecycle=False, keep=False, inherited=None, admission=None):
+    def case(self, label, fields, expected, lifecycle=False, keep=False, inherited=None, admission=None, refusal_fragment=None):
         self.phase = label
         receipt = {"case": label, "request": {"method": "POST", "path": "/v1/machines",
                    "json": {"tenant": self.namespace, "name": self.prefix + "-" + label,
@@ -185,6 +185,10 @@ class Mixed(clone.Contract):
             self.machine_owners[machine_id] = identity
         self.check([status, value.get("code")] in expected)
         if status != 201:
+            if refusal_fragment is not None:
+                matches = refusal_fragment in value.get("error", "")
+                receipt["observed"]["reasonMatches"] = matches
+                self.check(matches)
             receipt["observed"]["outcome"] = "refused"
             return
         self.check(headers.get("x-briqyard-host") == "local" and value.get("namespace") == receipt["request"]["json"]["tenant"])
@@ -403,6 +407,7 @@ class Mixed(clone.Contract):
         self.seed_admission(source, snapshot, generation)
         self.hold_accounting()
         self.reservation_pressure()
+        self.physical_pressure()
         self.warm_refusal(hosts[0], source, snapshot)
 
     def nested_guest(self, admitted=False):
@@ -656,6 +661,48 @@ class Mixed(clone.Contract):
         self.admission_call("reservation-released", paths[2], small, [[200, None]])
         status = self.delete("reservation-recovered-cancel", paths[2], [204])
         self.check(status == 204)
+
+    def physical_pressure(self):
+        # qualify.sh's physical admission control, limited to this run's own VM.
+        self.phase = "physical-preconditions"
+        status, hosts, _ = self.api.call("GET", "/hosts")
+        self.check(status == 200 and len(hosts) == 1 and hosts[0].get("id") == "local")
+        host = hosts[0]
+        self.check(host.get("memory_policy") == {"version": 1, "vmm_overhead_mb": 256})
+        capacity, baseline = host["capacity"]["memory_mb"], host["used"]["memory_mb"]
+        self.check(type(capacity) is int and type(baseline) is int and
+                   384 <= capacity - baseline <= 12288)
+        self.memory_condition("physical-baseline", False, baseline)
+        machine = self.case("physical-fill", {"image": clone.IMAGE,
+                            "size": {"vcpus": 1, "memory_mb": capacity - baseline - 256,
+                                     "cpu_millis": 250}, "sleep": "never",
+                            "cmd": ["/bin/sleep", "3600"]}, [[201, None]], keep=True)
+        self.running(machine)
+        self.memory_condition("physical-pressure", True, capacity)
+        self.case("physical-refused", {"image": clone.IMAGE,
+                  "size": {"vcpus": 1, "memory_mb": 128, "cpu_millis": 250}},
+                  [[503, "capacity"]], refusal_fragment="memory_pressure")
+        self.delete("physical-release", "/machines/" + machine, [200, 204])
+        self.created.remove(machine)
+        self.memory_condition("physical-recovered", False, baseline)
+        self.case("physical-admitted-again", {"image": clone.IMAGE,
+                  "size": {"vcpus": 1, "memory_mb": 128, "cpu_millis": 250}}, [[201, None]])
+
+    def memory_condition(self, label, pressure, used):
+        self.phase = label
+        deadline = time.monotonic() + 35
+        while True:
+            status, hosts, _ = self.api.call("GET", "/hosts")
+            self.check(status == 200 and len(hosts) == 1 and hosts[0].get("id") == "local")
+            host = hosts[0]
+            conditions = [c for c in host.get("conditions", []) if c.get("type") == "memory_pressure"]
+            self.check(len(conditions) == 1 and type(conditions[0].get("status")) is bool)
+            if conditions[0]["status"] is pressure and host["used"]["memory_mb"] == used:
+                self.receipts.append({"case": label, "request": {"method": "GET", "path": "/v1/hosts"},
+                                      "observed": {"memoryPressure": pressure, "memoryMb": used}})
+                return
+            self.check(time.monotonic() < deadline)
+            time.sleep(1)
 
     def warm_refusal(self, host, source, snapshot):
         # Native upgrade fixture has no warm-pool configuration or budget. Never fill it.

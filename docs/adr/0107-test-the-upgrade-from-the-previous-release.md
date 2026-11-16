@@ -117,3 +117,12 @@ successive new reports: the first can be a serial poll started before the preced
 deletion, while the second started after it. Each report observation has a 35-second bound and records expected
 and actual memory. They never retry a mutation. This supplements capacity exhaustion;
 it does not expose individual holds or qualify real physical-memory pressure.
+
+### Mixed-window physical admission
+
+Reuse the physical-admission check from `qualify.sh` without its destructive recovery
+scenarios. One owned VM fills only the remaining accounted capacity. Require the old
+daemon's `memory_pressure` report and the candidate fleet's matching refusal, then
+release that VM and require recovery. Do not touch existing upgrade controls. The
+35-second condition observations are bounded; no create is retried. This does not
+qualify disk pressure or boot-queue spill.
