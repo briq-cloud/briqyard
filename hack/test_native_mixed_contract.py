@@ -2,6 +2,9 @@
 import copy
 import importlib.util
 import json
+import io
+import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -26,14 +29,27 @@ class FakeAPI:
         self.gateway = False
         self.bad_dispatch = False
         self.bad_decision = False
+        self.bad_network = False
+        self.bad_route = False
+        self.ignore_reservations = False
+        self.allow_bad_admission = False
 
     def call(self, method, path, body=None, headers=None):
         self.calls.append((method, path, copy.deepcopy(body)))
         if path == "/hosts":
             return 200, [{"id": "local", "state": "ready", "runtime_classes": [],
-                          "named_memory_profiles": ["init-ready-v1", "sandbox-ready-v1"] if self.profile else ["sandbox-ready-v1"]}], {}
+                          "named_memory_profiles": ["init-ready-v1", "sandbox-ready-v1"] if self.profile else ["sandbox-ready-v1"],
+                          "egress_siblings_v1": True, "warm_pool_profiles": [],
+                          "memory_policy": {"version": 1, "vmm_overhead_mb": 256},
+                          "capacity": {"memory_mb": 12288}, "used": {"memory_mb": 4096}}], {}
         if method == "GET" and path.startswith("/machines?"):
-            return 200, list(self.machines.values()), {}
+            return 200, [v for v in self.machines.values() if v["namespace"] == path.split("=")[1]], {}
+        if path == "/namespaces":
+            return 200, [{"id": "fixture", "host": "local"}], {}
+        if method == "DELETE" and path.startswith("/namespaces/") and path.count("/") == 2:
+            return 204, None, {}
+        if "/warm-pools/" in path:
+            return 409, {"code": "capability_unsupported"}, {}
         if method == "GET" and path.endswith("/snapshots"):
             return 200, [{"id": "s_seed", "source_host": "h_intrinsic"}], {}
         if "/admissions/" in path or "/sandbox-admissions/" in path:
@@ -47,8 +63,20 @@ class FakeAPI:
                 return 409, {"code": "conflict"}, {}
             if "requirements" in body:
                 r = body["requirements"][-1]
+                size = r.get("size", {})
+                if not self.allow_bad_admission:
+                    if not all(k in size for k in ("vcpus", "memory_mb")):
+                        return 422, None, {}
+                    cpu, memory = size["vcpus"], size["memory_mb"]
+                    if not (1 <= cpu <= 32 and 128 <= memory <= 262144 and
+                            1 <= size.get("cpu_millis", cpu * 1000) <= cpu * 1000):
+                        return 400, {"code": "invalid"}, {}
+                    if sum(r["size"]["memory_mb"] + 256 for r in body["requirements"]) + 4096 > 12288:
+                        return 503, {"code": "capacity"}, {}
                 if r.get("runtime_class") == "nested" or (r.get("memory_profile") and
                         r["memory_profile"] not in (["init-ready-v1", "sandbox-ready-v1"] if self.profile else ["sandbox-ready-v1"])):
+                    return 503, {"code": "capacity"}, {}
+                if not self.ignore_reservations and any("pressure-0" in p and not a.get("cancelled") for p, a in self.admissions.items()):
                     return 503, {"code": "capacity"}, {}
                 value = {"host": "other" if self.bad_decision else "local", "region": "dev", "binding": "existing", "mode": "cold"}
             else:
@@ -75,6 +103,8 @@ class FakeAPI:
             if body.get("fork", {}).get("machine_id") == "m_seed":
                 return 409, {"code": "capability_unsupported"}, {}
             named = "fork" in body
+            if named and body["tenant"] != "fixture" and not self.allow_invalid:
+                return 400, {"code": "invalid"}, {}
             invalid = (not named and not size.get("vcpus")) or body.get("runtime_class") == "nested" or body.get("volume", {}).get("size_gb") == 0
             if named and size.get("memory_mb") == 512:
                 invalid = True
@@ -83,7 +113,7 @@ class FakeAPI:
             if size.get("memory_mb") == 16384:
                 return 503, {"code": "capacity"}, {}
             value = {**copy.deepcopy(body), "id": f"m_{len(self.calls)}", "namespace": body["tenant"],
-                     "state": "running", "host": "local", "size": copy.deepcopy(mixed.clone.SIZE if named else size)}
+                     "state": "running", "ready": True, "ip": f"10.64.0.{2 + len(self.calls) % 200}", "host": "local", "size": copy.deepcopy(mixed.clone.SIZE if named else size)}
             if "sandbox_seed" in body:
                 value["size"] = copy.deepcopy(size)
             if self.wrong_size:
@@ -95,6 +125,16 @@ class FakeAPI:
         if method == "POST" and path.endswith("/snapshots"):
             return 201, {"id": "s_named", "clone_profile": "init-ready-v1", "source_host": "h_intrinsic"}, {}
         machine = path.split("/")[2]
+        if method == "POST" and path.endswith("/exec"):
+            cmd = body["cmd"]
+            out = ""
+            if "wget" == cmd[0]:
+                out = "mixed-gateway" if "gateway.internal" in cmd[-1] else ("mixed-foreign" if "127.0.0.1" in cmd[-1] else "mixed-sibling")
+            elif len(cmd) > 2 and cmd[2] == mixed.ON_LINK_SCRIPT:
+                out = "wrong-route" if self.bad_route else "on-link"
+            else:
+                out = "wrong" if self.bad_network else "denied"
+            return 200, {"stdout": out, "exit_code": 0}, {}
         if method == "DELETE":
             if self.failed_delete:
                 raise TimeoutError()
@@ -104,6 +144,122 @@ class FakeAPI:
 
 
 class MixedContractTests(unittest.TestCase):
+    def test_strict_denial_accepts_neighbor_drop_but_not_other_failures(self):
+        cases = [("wget: download timed out", 1, "denied", 0),
+                 ("wget: Host is unreachable", 1, "denied", 0),
+                 ("wget: No route to host", 1, "denied", 0),
+                 ("wget: Connection refused", 1, "unexpected-refusal", 1),
+                 ("private-error-detail", 1, "unexpected-refusal", 1),
+                 ("mixed-sibling", 0, "unexpected-success", 1),
+                 ("wget: Host is unreachable", 2, "unexpected-exit", 1)]
+        with tempfile.TemporaryDirectory() as directory:
+            wget = Path(directory) / "wget"
+            wget.write_text('#!/bin/sh\nprintf "%s\\n" "$TEST_WGET_OUTPUT" >&2\nexit "$TEST_WGET_EXIT"\n')
+            wget.chmod(0o700)
+            for output, status, expected, exit_code in cases:
+                with self.subTest(output=output, status=status):
+                    result = subprocess.run(["/bin/sh", "-c", mixed.STRICT_DENIAL_SCRIPT, "sh", "http://10.64.0.4:8000/"],
+                                            env={**os.environ, "PATH": directory, "TEST_WGET_OUTPUT": output,
+                                                 "TEST_WGET_EXIT": str(status)}, capture_output=True, text=True, timeout=5)
+                    self.assertEqual((result.stdout.strip(), result.returncode), (expected, exit_code))
+                    self.assertEqual(result.stderr, "")
+
+    def test_on_link_control_refuses_wrong_route_source_and_interface(self):
+        cases = [("10.64.0.4 dev eth0 src 10.64.0.3 uid 0", True),
+                 ("10.64.0.4 via 10.64.0.1 dev eth0 src 10.64.0.3", False),
+                 ("10.64.0.5 dev eth0 src 10.64.0.3", False),
+                 ("10.64.0.4 dev eth1 src 10.64.0.3", False),
+                 ("10.64.0.4 dev eth0 src 10.64.0.9", False), ("", False)]
+        with tempfile.TemporaryDirectory() as directory:
+            ip = Path(directory) / "ip"
+            ip.write_text('#!/bin/sh\nprintf "%s\\n" "$TEST_ROUTE"\n')
+            ip.chmod(0o700)
+            for route, expected in cases:
+                result = subprocess.run(["/bin/sh", "-c", mixed.ON_LINK_SCRIPT, "sh", "10.64.0.4", "10.64.0.3"],
+                                        env={**os.environ, "PATH": directory, "TEST_ROUTE": route},
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode == 0 and result.stdout.strip() == "on-link", expected)
+
+    def test_strict_denial_requires_same_target_positive_and_route_first(self):
+        api = FakeAPI()
+        runner = mixed.Mixed(api, "fixture")
+        runner.placement(api.call("GET", "/hosts")[1][0])
+        labels = [case["case"] for case in runner.receipts]
+        self.assertLess(labels.index("sibling-allowed"), labels.index("strict-sibling-route"))
+        self.assertLess(labels.index("strict-sibling-route"), labels.index("strict-sibling-denied"))
+        runner.cleanup()
+        api = FakeAPI()
+        api.bad_route = True
+        runner = mixed.Mixed(api, "fixture")
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.placement(api.call("GET", "/hosts")[1][0])
+        self.assertNotIn("strict-sibling-denied", [case["case"] for case in runner.receipts])
+        runner.cleanup()
+
+    def test_denial_diagnostics_preserve_timeout_only_acceptance(self):
+        cases = [("wget: download timed out", 1, "denied", 0),
+                 ("wget: Host is unreachable", 1, "unreachable", 1),
+                 ("private-error-detail", 1, "unexpected-refusal", 1),
+                 ("mixed-sibling", 0, "unexpected-success", 1),
+                 ("private-error-detail", 2, "unexpected-exit", 1)]
+        with tempfile.TemporaryDirectory() as directory:
+            wget = Path(directory) / "wget"
+            wget.write_text('#!/bin/sh\nprintf "%s\\n" "$TEST_WGET_OUTPUT" >&2\nexit "$TEST_WGET_EXIT"\n')
+            wget.chmod(0o700)
+            for output, status, expected, exit_code in cases:
+                with self.subTest(expected=expected):
+                    result = subprocess.run(["/bin/sh", "-c", mixed.DENIAL_SCRIPT, "sh", "http://127.0.0.1:1/"],
+                                            env={**os.environ, "PATH": directory, "TEST_WGET_OUTPUT": output,
+                                                 "TEST_WGET_EXIT": str(status)}, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.stdout.strip(), expected)
+                    self.assertEqual(result.returncode, exit_code)
+                    self.assertEqual(result.stderr, "")
+                    self.assertNotIn("private-error-detail", result.stdout)
+
+    def test_denial_receipt_keeps_fixed_reason_and_still_fails(self):
+        class Unreachable(FakeAPI):
+            def call(self, method, path, body=None, headers=None):
+                if path.endswith("/exec"):
+                    return 200, {"exit_code": 1, "stdout": "unreachable"}, {}
+                return super().call(method, path, body, headers)
+
+        runner = mixed.Mixed(Unreachable(), "fixture")
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.exec_check("strict-sibling-denied", "m_seed", ["unused"], "denied")
+        self.assertEqual(runner.receipts[-1]["observed"],
+                         {"status": 200, "exitCode": 1, "outputMatches": False, "denialCode": "unreachable"})
+
+    def test_cleanup_refuses_changed_machine_identity(self):
+        for field, value in (("id", "m_other"), ("namespace", "foreign"),
+                             ("name", "unrelated"), ("metadata", {"qualification": "foreign"})):
+            with self.subTest(field=field):
+                api = FakeAPI()
+                runner = mixed.Mixed(api, "fixture")
+                machine = runner.case("owned", {"image": mixed.clone.IMAGE, "size": mixed.clone.SIZE},
+                                      [[201, None]], keep=True)
+                api.machines[machine][field] = value
+                with self.assertRaises(mixed.clone.ContractFailure):
+                    runner.cleanup()
+                self.assertIn(machine, api.machines)
+                self.assertFalse(any(m == "DELETE" and p == "/machines/" + machine for m, p, _ in api.calls))
+
+    def test_create_answer_cannot_authorize_unrelated_machine_deletion(self):
+        class WrongID(FakeAPI):
+            def call(self, method, path, body=None, headers=None):
+                status, value, result_headers = super().call(method, path, body, headers)
+                if method == "POST" and path == "/machines" and status == 201:
+                    value = {**value, "id": "m_other"}
+                return status, value, result_headers
+
+        api = WrongID()
+        runner = mixed.Mixed(api, "fixture")
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.case("wrong-id", {"image": mixed.clone.IMAGE, "size": mixed.clone.SIZE}, [[201, None]])
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.cleanup()
+        self.assertIn("m_other", api.machines)
+        self.assertFalse(any(m == "DELETE" and p == "/machines/m_other" for m, p, _ in api.calls))
+
     def test_matrix_wire_shapes_order_and_exact_cleanup(self):
         api = FakeAPI()
         runner = mixed.Mixed(api, "fixture")
@@ -126,7 +282,7 @@ class MixedContractTests(unittest.TestCase):
         self.assertNotIn("volume", direct[3])
         self.assertEqual([b["volume"] for b in requests if "volume" in b],
                          [{"size_gb": 0, "mount": "/data"}, {"size_gb": 2, "mount": "/data"}])
-        named = [b for b in requests if "fork" in b and b["fork"]["machine_id"] != "m_seed"]
+        named = [b for b in requests if "fork" in b and b["fork"]["machine_id"] != "m_seed" and b["tenant"] == "fixture"]
         self.assertNotIn("size", named[0])
         self.assertEqual(named[1]["size"], {"vcpus": 0, "memory_mb": 0})
         self.assertEqual(named[2]["size"], {"vcpus": 1, "memory_mb": 256})
@@ -141,6 +297,83 @@ class MixedContractTests(unittest.TestCase):
         workflow = Path(__file__).parents[1].joinpath(".github/workflows/native-upgrade.yml").read_text()
         self.assertIn("native-logs/mixed-contract.json", workflow)
 
+    def test_placement_resource_axes_and_exact_refusals(self):
+        api = FakeAPI()
+        runner = mixed.Mixed(api, "fixture")
+        runner.placement(api.call("GET", "/hosts")[1][0])
+        runner.cleanup()
+        receipts = {r["case"]: r for r in runner.receipts}
+        for index, size in enumerate(mixed.SIZES):
+            receipt = receipts["admit-size-" + str(index)]
+            gateway, consumer = receipt["request"]["json"]["requirements"]
+            self.assertEqual(gateway, {"role": "gateway", "size": mixed.WIRE_SIZE, "runtime_class": "default"})
+            if size is None:
+                self.assertNotIn("size", consumer)
+            else:
+                self.assertEqual(consumer["size"], size)
+            self.assertNotIn("volume_gb", consumer)
+            self.assertEqual(consumer["runtime_class"], "default")
+        self.assertEqual([receipts["admit-size-" + str(i)]["observed"]["status"] for i in range(3)], [422, 422, 400])
+        self.assertEqual(receipts["admit-size-10"]["observed"]["status"], 503)
+        for label, fields in (("volume-omitted", {}), ("volume-zero", {"volume_gb": 0}),
+                              ("volume-two", {"volume_gb": 2}), ("class-omitted", {}),
+                              ("class-default", {"runtime_class": "default"}),
+                              ("class-nested", {"runtime_class": "nested"})):
+            consumer = receipts["admit-" + label]["request"]["json"]["requirements"][1]
+            self.assertEqual(consumer["size"], mixed.WIRE_SIZE)
+            key = "volume_gb" if label.startswith("volume") else "runtime_class"
+            self.assertEqual({key: consumer[key]} if key in consumer else {}, fields)
+        self.assertEqual(set(api.machines), {"m_seed", "m_other"})
+
+    def test_bad_admission_size_acceptance_is_detected_and_cancelled(self):
+        for size, expected in ((None, [[422, None]]), ({}, [[422, None]]),
+                               ({"vcpus": 0, "memory_mb": 0}, [[400, "invalid"]]),
+                               (mixed.SIZES[-1], [[503, "capacity"]])):
+            with self.subTest(size=size):
+                api = FakeAPI()
+                api.allow_bad_admission = True
+                runner = mixed.Mixed(api, "fixture")
+                path = "/namespaces/fixture/admissions/" + runner.prefix + "-bad"
+                runner.admissions.append([path, False])
+                consumer = {"role": "consumer"}
+                if size is not None:
+                    consumer["size"] = size
+                with self.assertRaises(mixed.clone.ContractFailure):
+                    runner.admission_call("bad-size", path, {"regions": ["dev"], "requirements": [consumer]}, expected)
+                runner.cleanup()
+                self.assertTrue(api.admissions[path]["cancelled"])
+                self.assertEqual(sum(m == "PUT" and p == path for m, p, _ in api.calls), 1)
+
+    def test_admission_schema_and_semantic_refusals_are_not_interchangeable(self):
+        for status, value, expected in ((400, {"code": "invalid"}, [[422, None]]),
+                                        (422, None, [[400, "invalid"]]),
+                                        (422, {"code": "invalid"}, [[422, None]]),
+                                        (200, {}, [[422, None]])):
+            with self.subTest(status=status, value=value):
+                class Answer:
+                    def call(self, *args):
+                        return status, value, {}
+
+                runner = mixed.Mixed(Answer(), "fixture")
+                with self.assertRaises(mixed.clone.ContractFailure):
+                    runner.admission_call("schema", "/admissions/fixture", {}, expected)
+
+    def test_schema_transport_retains_status_without_error_text(self):
+        for status, raw in ((422, b"private extractor detail"), (422, b'{"code":"invalid"}'),
+                            (400, b"private extractor detail"), (200, b"private extractor detail")):
+            with self.subTest(status=status, raw=raw):
+                response = io.BytesIO(raw)
+                response.status, response.headers = status, {}
+                api = mixed.clone.API("http://fixture.invalid")
+                with patch.object(mixed.clone, "urlopen", return_value=response):
+                    if status != 422:
+                        with self.assertRaises(mixed.clone.ContractFailure):
+                            api.call("PUT", "/admissions/fixture", {})
+                    else:
+                        actual, value, _ = api.call("PUT", "/admissions/fixture", {})
+                        self.assertEqual(actual, 422)
+                        self.assertNotIn("private", str(mixed.summary(actual, value, {})))
+
     def test_lost_create_is_unknown_discovered_and_never_replayed(self):
         api = FakeAPI()
         api.lost = True
@@ -149,7 +382,9 @@ class MixedContractTests(unittest.TestCase):
             runner.case("lost", {"image": mixed.clone.IMAGE, "size": mixed.clone.SIZE}, [[201, None]])
         # Metadata alone is insufficient to claim an unrelated name.
         api.machines["m_other"]["metadata"] = {"qualification": runner.prefix}
-        runner.cleanup()
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.cleanup()
+        self.assertTrue(runner.cleanup_unconfirmed)
         self.assertEqual(set(api.machines), {"m_seed", "m_other"})
         self.assertEqual(sum(m == "POST" and p == "/machines" for m, p, _ in api.calls), 1)
         self.assertEqual(runner.receipts[0]["observed"], {"outcome": "unknown"})
@@ -198,6 +433,8 @@ class MixedContractTests(unittest.TestCase):
         with self.assertRaises(mixed.clone.ContractFailure):
             runner.cleanup()
         self.assertEqual(sum(m == "POST" and p == "/machines" for m, p, _ in api.calls), 1)
+        deletes = [p for m, p, _ in api.calls if m == "DELETE"]
+        self.assertEqual(len(deletes), len(set(deletes)))
 
     def test_missing_profile_is_explicitly_not_exercised(self):
         api = FakeAPI()
@@ -207,6 +444,62 @@ class MixedContractTests(unittest.TestCase):
         self.assertTrue(any("does not advertise" in gap for gap in runner.gaps))
         self.assertFalse(any(c[2] and "template_build" in c[2] for c in api.calls))
         runner.cleanup()
+
+    def test_foreign_namespace_exact_cleanup_preserves_unrelated_names(self):
+        api = FakeAPI()
+        runner = mixed.Mixed(api, "fixture")
+        foreign = runner.prefix + "-foreign"
+        api.machines["m_unrelated_foreign"] = {"id": "m_unrelated_foreign", "namespace": foreign,
+                "name": "unrelated", "metadata": {"qualification": runner.prefix}}
+        runner.named()
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.cleanup()
+        self.assertIn("m_unrelated_foreign", api.machines)
+        self.assertNotIn(("DELETE", "/namespaces/" + foreign, None), api.calls)
+        self.assertTrue(any(b and b.get("tenant") == foreign for m, p, b in api.calls if p == "/machines"))
+
+    def test_foreign_lost_answer_deletes_exact_id_but_remains_unconfirmed(self):
+        api = FakeAPI()
+        runner = mixed.Mixed(api, "fixture")
+        foreign = runner.prefix + "-foreign"
+        runner.owned_namespaces.add(foreign)
+        api.lost = True
+        with self.assertRaises(TimeoutError):
+            runner.case("foreign-lost", {"tenant": foreign, "image": mixed.clone.IMAGE,
+                        "size": mixed.clone.SIZE}, [[201, None]])
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.cleanup()
+        self.assertTrue(runner.cleanup_unconfirmed)
+        self.assertEqual(set(api.machines), {"m_seed", "m_other"})
+        self.assertFalse(any(m == "DELETE" and p == "/namespaces/" + foreign for m, p, _ in api.calls))
+        self.assertEqual(sum(m == "POST" and p == "/machines" for m, p, _ in api.calls), 1)
+
+    def test_mutation_intents_exist_before_each_single_submission(self):
+        class IntentAPI(FakeAPI):
+            runner = None
+
+            def call(self, method, path, body=None, headers=None):
+                if method in ("PUT", "DELETE") or (method == "POST" and not "/wait?" in path and not path.endswith(("/start", "/stop"))):
+                    self.runner.check(any(r["request"]["method"] == method and
+                        r["request"]["path"] == "/v1" + path and
+                        r["observed"].get("outcome") == "unknown" for r in self.runner.receipts))
+                return super().call(method, path, body, headers)
+
+        api = IntentAPI()
+        runner = mixed.Mixed(api, "fixture")
+        api.runner = runner
+        runner.run_mixed("m_seed", "s_seed")
+        runner.cleanup()
+
+    def test_reservations_must_refuse_and_network_refusal_must_have_control(self):
+        for attr in ("bad_network", "ignore_reservations"):
+            api = FakeAPI()
+            setattr(api, attr, True)
+            runner = mixed.Mixed(api, "fixture")
+            with self.assertRaises(mixed.clone.ContractFailure):
+                runner.run_mixed("m_seed", "s_seed")
+            runner.cleanup()
+            self.assertEqual(set(api.machines), {"m_seed", "m_other"})
 
     def test_response_receipt_drops_untrusted_text(self):
         result = mixed.summary(400, {"code": "token secret", "error": "secret", "env": {"KEY": "secret"},
@@ -235,7 +528,7 @@ class MixedContractTests(unittest.TestCase):
                     mixed.main()
             receipt = json.loads((root / "receipt").read_text())
             self.assertFalse(receipt["passed"])
-            self.assertEqual(receipt["cleanup"], "complete")
+            self.assertEqual(receipt["cleanup"], "unconfirmed")
             self.assertEqual(receipt["source"], identity)
             self.assertEqual(receipt["cases"][0]["observed"], {"outcome": "unknown"})
             self.assertTrue(receipt["notExercised"])

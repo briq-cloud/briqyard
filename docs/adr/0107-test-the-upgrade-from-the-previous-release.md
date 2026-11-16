@@ -28,6 +28,19 @@ v0.1.19 passed native CI and then failed closed on real hosts. CI's hosts are fr
 
 ## Results
 
+### Mixed-window sibling refusal control (2026-11-16)
+
+Strict `via:gateway` filters both peer IPv4 and ARP (ADR 0064). The native mixed-window
+probe returned an unreachable-host error during neighbor resolution, rather than a timeout.
+Either can be a policy denial. Before accepting either, the fixture requires a successful
+request to the exact server IP and port from an opted-in sibling, a working gateway request
+from the strict guest, and the strict guest's on-link route with its expected source address.
+Only wget exit 1 with a timeout or recognized neighbor-resolution denial passes. Successful
+requests, refused connections, other errors and failed route controls still fail. The
+foreign-namespace probe keeps its timeout-only predicate.
+
+### Initial upgrade result
+
 First pair, v0.1.23 to this head (PR #152), identical on 24.04 and 26.04: 26 checks pass, 2 fail.
 
 | Runner | Host upgrade | API silent | Endpoint gap | Adopted after | Orphan sweep |
