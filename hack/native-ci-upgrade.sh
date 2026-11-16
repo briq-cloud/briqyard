@@ -292,6 +292,44 @@ check "the idle cgroups were retired" '[ "$a" = 1 ]'
 echo "   cgroup leaves after: $(leaves)"
 check "a second backup works on the head" '[ -n "$(briqyard machine backup "$PG" | jq -r .id)" ]'
 
+echo "== named clone contracts through the target fleet and daemon"
+# This qualification has its own configuration and two explicit handovers. It is
+# outside the measured upgrade interval and restores the target configuration
+# before the existing rollback test. No runtime binary is rebuilt or replaced.
+native_clone_contract() (
+  set -e
+  sudo cp /etc/briqyard/config.yaml "$WORK/contract-config.yaml"
+  restore_contract_config() {
+    local rc=$?
+    trap - EXIT
+    sudo cp "$WORK/contract-config.yaml" /etc/briqyard/config.yaml || rc=1
+    sudo systemctl restart briqyardd || rc=1
+    exit "$rc"
+  }
+  trap restore_contract_config EXIT
+  trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
+  sudo python3 - "$NEW_INIT" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+p = Path('/etc/briqyard/config.yaml')
+c = yaml.safe_load(p.read_text())
+c['templates']['init_ready_init_sha256'] = sys.argv[1]
+c['templates']['service_ready'] = True
+p.write_text(yaml.safe_dump(c, sort_keys=False))
+PY
+  sudo systemctl restart briqyardd
+  timeout 90 bash -c 'until curl -fsS http://127.0.0.1:7430/v1/hosts | jq -e '\''length == 1 and all(.state == "ready" and ((.named_memory_profiles | index("init-ready-v1")) != null) and ((.named_memory_profiles | index("service-ready-v1")) != null))'\'' >/dev/null; do sleep 1; done'
+  python3 "$HARNESS/native-clone-contract.py" "$NS" "$SEED" "$SNAP"
+)
+native_clone_contract
+contract_rc=$?
+[ "$contract_rc" = 0 ] || die "target named clone contract failed"
+for id in $RUNNING; do
+  was=$(awk -v i="$id" '$1 == i {print $2}' "$WORK/before")
+  check "contract handovers preserve the VMM of $id" '[ "$(vmm "$id")" = "$was" ]'
+done
+
 echo "== rollback through the current bootstrap, with the retained set"
 [ "$urc" = 0 ] && [ "$fail" = 0 ] || die "forward qualification failed; no rollback attempted"
 sudo find /etc/briqyard -maxdepth 1 -type d -name 'rollback.*' | sort > "$WORK/rollback-after"
