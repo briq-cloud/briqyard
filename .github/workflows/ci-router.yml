@@ -1,0 +1,72 @@
+name: ci-router
+# A copy of ci.yml's `check` job on ci-router (https://stg.ci-router.com, staging), run beside
+# ci.yml to test the router on a real repository. Not a required check: ci.yml stays what gates main.
+#
+# Differences from ci.yml, on purpose:
+# - Job name `router-check`, so it never matches the `check` status.
+# - Same-repo pull requests and workflow_dispatch only (no push, no fork PRs).
+# - No native-cache job: it saves the release cache for native.yml on push to main.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-router-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  router-check:
+    # Same-repo PRs and manual runs only: a fork PR never queues a job on the router.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    # CPU-bound (clippy and the workspace tests compile the whole tree): pinned large.
+    runs-on: [ci-router, large]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-unknown-linux-musl
+      - name: Verify release packaging and standalone installer
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-yaml
+          python3 -m unittest discover -s hack/firecracker -p "test_*.py"
+          python3 -m unittest discover -s hack -p "test_bootstrap.py"
+          python3 -m unittest discover -s hack -p "test_native_seals.py"
+          python3 -m unittest discover -s hack -p "test_release.py"
+          python3 -m unittest discover -s hack -p "test_service_template.py"
+          python3 -m unittest discover -s hack -p "test_monitoring_auth.py"
+          python3 -m unittest discover -s hack -p "test_monitoring_alerts.py"
+          python3 -m unittest discover -s hack -p "test_stress_safety.py"
+          python3 -m unittest discover -s hack -p "test_stress_trend.py"
+          python3 -m unittest discover -s hack -p "test_native_suites.py"
+          python3 -m unittest discover -s hack -p "test_scoped_execution_diagnostics.py"
+          python3 -m unittest discover -s hack -p "test_qualification_readiness.py"
+          python3 -m unittest discover -s hack -p "test_native_clone_contract.py"
+          python3 hack/release.py check > /dev/null
+          python3 hack/monitoring-alert-check.py --check-source
+          bash -n hack/bootstrap-host.sh
+          bash -n hack/monitoring-auth.sh
+          bash -n hack/monitoring-check.sh
+          bash -n hack/native-ci-more.sh
+          bash -n hack/render-alerting.sh
+          bash -n hack/install-monitoring.sh
+          python3 -m py_compile hack/monitoring-webhook-check.py hack/monitoring-alerts-check.py
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --features briqyard-api/execution-admission,briqyard-testing/scoped-native -- -D warnings
+      - run: cargo test --workspace --features briqyard-api/execution-admission,briqyard-testing/scoped-native
+      # The init's SHA-256 binds seeds (ADR 0076): a release or a commit outside the init must not change it (ADR 0101).
+      - run: sudo apt-get install -y musl-tools && hack/init-digest-check.sh
+      # The init's test that changes users needs root: its test binary, as built above, as root.
+      - run: sudo "$(cargo test --workspace --no-run --message-format=json | jq -r 'select(.profile.test and .target.name == "briqyard-init") | .executable')" --ignored run_as
+      # The fuzz targets run by hand on nightly (ADR 0033); this checks they still build.
+      - run: cargo check --manifest-path fuzz/Cargo.toml --locked
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
