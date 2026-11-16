@@ -28,16 +28,16 @@ TOKEN=upgrade-ci-token
 REPO=https://github.com/briq-cloud/briqyard
 REL_URL=$REPO/releases/download/$PREV
 FLEET=http://127.0.0.1:7430
-export BRIQYARD_TOKEN=$TOKEN   # the daemon's; the fleet takes no token here (see `fleet`)
+export BRIQYARD_TOKEN=$TOKEN   # both fixture APIs require authentication
 pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 . "$HARNESS/suite-end.sh"
 die() { echo "SETUP FAILED: $*" >&2; exit 1; }
-fleet() { env -u BRIQYARD_TOKEN BRIQYARD_URL=$FLEET briqyard "$@"; }
+fleet() { env BRIQYARD_URL=$FLEET briqyard "$@"; }
 dapi() { curl -fsS -H "Authorization: Bearer $TOKEN" "$@"; }
-hostf() { curl -fsS "$FLEET/v1/hosts" | jq -r ".[] | select(.id == \"local\") | $1"; }
+hostf() { dapi "$FLEET/v1/hosts" | jq -r ".[] | select(.id == \"local\") | $1"; }
 leaves() { sudo find "$PARENT" -mindepth 1 -maxdepth 1 -type d -name 'm-*' | wc -l; }
 made() { sudo find "$PARENT" -mindepth 1 -maxdepth 1 -type d -name 'm-5ca1*' | wc -l; }
 cgdir() { echo "$PARENT/${1//_/-}"; }
@@ -102,6 +102,7 @@ PY
 sudo systemctl start ssh
 cat > "$WORK/fleet.yaml" <<YAML
 listen: 127.0.0.1:7430
+token: $TOKEN
 tls: off
 state_dir: /var/lib/briqyard-fleet
 hosts:
@@ -122,8 +123,8 @@ sudo bash "$HARNESS/install-mirror.sh" >/dev/null || die "registry mirror"
 sudo systemctl daemon-reload
 sudo systemctl enable briqyardd briqyard-fleet >/dev/null 2>&1
 sudo systemctl restart briqyardd briqyard-fleet
-for _ in $(seq 1 60); do briqyard status >/dev/null 2>&1 && curl -fsS $FLEET/v1/hosts | jq -e 'length == 1 and all(.state == "ready")' >/dev/null 2>&1 && break; sleep 1; done
-curl -fsS $FLEET/v1/hosts | jq -e 'all(.state == "ready")' >/dev/null || die "the previous fleet and host did not become ready"
+for _ in $(seq 1 60); do briqyard status >/dev/null 2>&1 && dapi "$FLEET/v1/hosts" | jq -e 'length == 1 and all(.state == "ready")' >/dev/null 2>&1 && break; sleep 1; done
+dapi "$FLEET/v1/hosts" | jq -e 'all(.state == "ready")' >/dev/null || die "the previous fleet and host did not become ready"
 echo "   fleet: $(briqyard-fleet --version)"
 for _ in $(seq 1 60); do [ -n "$(hostf .version)" ] && break; sleep 1; done
 echo "   host version: $(hostf .version), installed: $PREV_VER"
@@ -216,11 +217,12 @@ sudo python3 "$HARNESS/native-mixed-contract.py" --capture > "$WORK/mixed-source
 sudo install -m 0755 "$HEAD_DIR/briqyard-fleet-linux-x86_64" /usr/local/bin/briqyard-fleet
 sudo install -m 0755 "$HEAD_DIR/briqyard-linux-x86_64" /usr/local/bin/briqyard
 sudo systemctl restart briqyard-fleet
-for _ in $(seq 1 60); do curl -fsS $FLEET/v1/hosts 2>/dev/null | jq -e 'length == 1 and all(.state == "ready")' >/dev/null && break; sleep 1; done
-curl -fsS $FLEET/v1/hosts | jq -e 'all(.state == "ready")' >/dev/null || die "the head fleet did not see the host ready"
+for _ in $(seq 1 60); do dapi "$FLEET/v1/hosts" 2>/dev/null | jq -e 'length == 1 and all(.state == "ready")' >/dev/null && break; sleep 1; done
+dapi "$FLEET/v1/hosts" | jq -e 'all(.state == "ready")' >/dev/null || die "the head fleet did not see the host ready"
 sudo python3 "$HARNESS/native-mixed-contract.py" --capture > "$WORK/mixed-head.json" || die "mixed identity capture"
 python3 "$HARNESS/native-mixed-contract.py" "$NS" "$SEED" "$SNAP" \
-  "$WORK/mixed-source.json" "$WORK/mixed-head.json" native-logs/mixed-contract.json || die "mixed fleet contract failed"
+  "$WORK/mixed-source.json" "$WORK/mixed-head.json" native-logs/mixed-contract.json \
+  "$PREV" "$HEAD_DIR" "$WORK/prev.sums" "$GEN" || die "mixed fleet contract failed"
 R=/var/lib/briqyard-fleet/release
 sudo rm -rf $R && sudo mkdir -p $R && sudo cp "$HEAD_DIR"/* $R/
 HEAD_VER=$(briqyard --version | awk '{print $2}')
@@ -340,7 +342,7 @@ c['templates']['service_ready'] = True
 p.write_text(yaml.safe_dump(c, sort_keys=False))
 PY
   contract_handover
-  timeout 90 bash -c 'until curl -fsS http://127.0.0.1:7430/v1/hosts | jq -e '\''length == 1 and all(.state == "ready" and ((.named_memory_profiles | index("init-ready-v1")) != null) and ((.named_memory_profiles | index("service-ready-v1")) != null))'\'' >/dev/null; do sleep 1; done'
+  timeout 90 bash -c 'until curl -fsS -H "Authorization: Bearer $BRIQYARD_TOKEN" http://127.0.0.1:7430/v1/hosts | jq -e '\''length == 1 and all(.state == "ready" and ((.named_memory_profiles | index("init-ready-v1")) != null) and ((.named_memory_profiles | index("service-ready-v1")) != null))'\'' >/dev/null; do sleep 1; done'
   python3 "$HARNESS/native-clone-contract.py" "$NS" "$SEED" "$SNAP"
 )
 native_clone_contract

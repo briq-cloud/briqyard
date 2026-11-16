@@ -14,6 +14,8 @@ spec = importlib.util.spec_from_file_location("clone_contract", Path(__file__).w
 clone = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(clone)
 
+WIRE_SIZE = {**clone.SIZE, "cpu_millis": 1000}
+
 SIZES = [None, {}, {"vcpus": 0, "memory_mb": 0},
          {"vcpus": 1, "memory_mb": 2048},
          {"vcpus": 1, "memory_mb": 2048, "cpu_millis": 1000},
@@ -31,37 +33,108 @@ def capture():
         clone.require(re.fullmatch(r"[a-z-]+ [0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.+() _-]*", version))
         result["binaries"][name] = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                                     "version": version}
+    result["processSha256"] = {}
+    for name in ("briqyardd", "briqyard-fleet"):
+        pid = subprocess.check_output(["systemctl", "show", "-p", "MainPID", "--value", name],
+                                      timeout=10).decode().strip()
+        clone.require(re.fullmatch(r"[1-9][0-9]*", pid))
+        result["processSha256"][name] = hashlib.sha256(Path(f"/proc/{pid}/exe").read_bytes()).hexdigest()
     for name in ("config.yaml", "fleet.yaml"):
         result["configurationSha256"][name] = hashlib.sha256(
             (Path("/etc/briqyard") / name).read_bytes()).hexdigest()
     return result
 
 
+def checksums(path):
+    result = {}
+    for line in Path(path).read_text().splitlines():
+        fields = line.split()
+        clone.require(len(fields) == 2 and re.fullmatch(r"[a-f0-9]{64}", fields[0]))
+        clone.require(fields[1] not in result)
+        result[fields[1]] = fields[0]
+    return result
+
+
+def bind_inputs(source, mixed, previous, head_dir, previous_sums):
+    """Fail before opening an API transport when the mixed window is unbound."""
+    clone.require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?", previous))
+    old = checksums(previous_sums)
+    head = checksums(Path(head_dir) / "SHA256SUMS-x86_64")
+    for name in ("briqyardd", "briqyard-fleet", "briqyard"):
+        asset = name + "-linux-x86_64"
+        before, after = source["binaries"][name], mixed["binaries"][name]
+        clone.require(before["sha256"] == old[asset] and
+                      re.fullmatch(re.escape(name + " " + previous[1:]) + r"(?:\+[^\n]+)?", before["version"]))
+        expected = before if name == "briqyardd" else after
+        if name != "briqyardd":
+            clone.require(after["sha256"] == head[asset] ==
+                          hashlib.sha256((Path(head_dir) / asset).read_bytes()).hexdigest())
+        else:
+            clone.require(before == after)
+        if name != "briqyard":
+            clone.require(source["processSha256"][name] == before["sha256"] and
+                          mixed["processSha256"][name] == expected["sha256"])
+    clone.require(source["binaries"]["briqyard-fleet"]["sha256"] !=
+                  mixed["binaries"]["briqyard-fleet"]["sha256"] and
+                  source["configurationSha256"] == mixed["configurationSha256"])
+
+
+def audit_registry(prefix, namespace, path="/var/lib/briqyard-fleet/registry.json"):
+    """Inspect only the exact run's ownership; emit no registry contents."""
+    clone.require(re.fullmatch(r"contract-[a-f0-9]{12}", prefix))
+    with Path(path).open("rb") as stream:
+        raw = stream.read(16 * 1024 * 1024 + 1)
+    clone.require(len(raw) <= 16 * 1024 * 1024)
+    registry = json.loads(raw)
+    for admission in registry["sandbox_admissions"].values():
+        if admission["namespace"] != namespace or not admission["request_id"].startswith(prefix + "-"):
+            continue
+        placed = admission.get("placement")
+        complete = placed and all(r["role"] in placed["dispatched"] for r in placed["request"]["requirements"])
+        clone.require(admission["phase"] in ("cancelled", "expired") or
+                      (admission["phase"] == "dispatched" and (not placed or complete)))
+
+
 class Mixed(clone.Contract):
     def __init__(self, api, namespace):
         super().__init__(api, namespace)
         self.receipts = []
+        self.admissions = []
+        self.gateway_owned = False
+        self.audit = False
         self.gaps = ["multi-host placement and regional execution authority",
                      "gateway and consumer traffic; sibling packet allow/deny",
                      "interrupted activation, fleet rollback and drain ABA",
-                     "authenticated sandbox admission dispatch",
-                     "cross-namespace named-template owner rejection",
-                     "nested guest execution (fixture has only the default class)"]
+                     "nested guest execution (fixture has only the default class)",
+                     "new namespace placement and pressure/spill scheduling",
+                     "direct in-memory hold accounting (not exposed by the API or registry)",
+                     "cross-namespace named-template refusal (cleanup is scoped to the existing namespace)"]
 
-    def case(self, label, fields, expected, lifecycle=False, keep=False, inherited=None):
+    def case(self, label, fields, expected, lifecycle=False, keep=False, inherited=None, admission=None):
         self.phase = label
         receipt = {"case": label, "request": {"method": "POST", "path": "/v1/machines",
                    "json": {"tenant": self.namespace, "name": self.prefix + "-" + label,
                             "metadata": {"qualification": self.prefix}, "start": True, **fields}},
                    "expected": expected, "observed": {"outcome": "unknown"}}
         self.receipts.append(receipt)  # Intent exists before the one-shot create.
-        status, value, headers = self.create(label, fields)
+        if admission:
+            receipt["request"]["headers"] = {"x-briqyard-placement-request-id": admission}
+            status, value, headers = self.api.call("POST", "/machines", receipt["request"]["json"],
+                                                 receipt["request"]["headers"])
+            headers = {k.lower(): v for k, v in headers.items()}
+            if status == 201:
+                clone.require(re.fullmatch(r"m_[A-Za-z0-9_-]+", value.get("id", "")))
+                self.created.append(value["id"])
+        else:
+            status, value, headers = self.create(label, fields)
         receipt["observed"] = summary(status, value, headers)
         self.check([status, value.get("code")] in expected)
         if status != 201:
             receipt["observed"]["outcome"] = "refused"
             return
         self.check(headers.get("x-briqyard-host") == "local" and value.get("namespace") == self.namespace)
+        if admission:
+            self.check(value.get("host") == "local")
         size = inherited or fields["size"]
         observed = value["size"]
         self.check(observed["vcpus"] == size["vcpus"] and observed["memory_mb"] == size["memory_mb"] and
@@ -151,9 +224,28 @@ class Mixed(clone.Contract):
                 unresolved.discard(discovered.get(machine))
             except Exception:
                 failed = True
+        if self.gateway_owned:
+            try:
+                status, _, _ = self.api.call("DELETE", f"/namespaces/{self.namespace}/gateway")
+                clone.require(status in (200, 204))
+            except Exception:
+                failed = True
+        for path, dispatched in self.admissions:
+            try:
+                status, _, _ = self.api.call("DELETE", path)
+                clone.require(status == (409 if dispatched else 204))
+            except Exception:
+                failed = True
+        if self.audit:
+            try:
+                subprocess.run(["sudo", "python3", str(Path(__file__).resolve()), "--audit",
+                                self.prefix, self.namespace], check=True, timeout=10,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                failed = True
         clone.require(not failed and not unresolved)
 
-    def run_mixed(self, source, snapshot):
+    def run_mixed(self, source, snapshot, generation="g_seed"):
         status, hosts, _ = self.api.call("GET", "/hosts")
         self.check(status == 200 and len(hosts) == 1 and hosts[0].get("id") == "local" and
                    hosts[0].get("state") == "ready" and not hosts[0].get("runtime_classes"))
@@ -187,17 +279,78 @@ class Mixed(clone.Contract):
                    s.get("source_host") not in (None, "", "local") for s in snapshots))
         self.case("sandbox-named", {"fork": {"machine_id": source, "snapshot": snapshot}},
                   [[409, "capability_unsupported"]])
-        # The unauthenticated fixture must fail closed, before admission is persisted.
-        self.phase = "sandbox-admission"
-        body = {"region": "dev", "size": clone.SIZE,
-                "sandbox_seed": {"machine_id": source, "snapshot": snapshot, "generation": "g_probe"}}
-        receipt = {"case": self.phase, "request": {"method": "PUT", "path":
-                   f"/v1/namespaces/{self.namespace}/sandbox-admissions/{self.prefix}", "json": body},
-                   "expected": [[409, "capability_unsupported"]], "observed": {"outcome": "unknown"}}
+        self.placement(hosts[0])
+        self.seed_admission(source, snapshot, generation)
+
+    def admission_call(self, label, path, body, expected):
+        self.phase = label
+        receipt = {"case": label, "request": {"method": "PUT", "path": "/v1" + path, "json": body},
+                   "expected": expected, "observed": {"outcome": "unknown"}}
         self.receipts.append(receipt)
-        status, value, _ = self.api.call("PUT", receipt["request"]["path"][3:], body)
-        receipt["observed"] = summary(status, value, {})
-        self.check([status, value.get("code")] == [409, "capability_unsupported"])
+        status, value, headers = self.api.call("PUT", path, body)
+        receipt["observed"] = summary(status, value, headers)
+        self.check([status, value.get("code")] in expected)
+        return value
+
+    def placement(self, host):
+        base = {"role": "consumer", "size": WIRE_SIZE, "runtime_class": "default"}
+        gateway = {**base, "role": "gateway"}
+        # Each axis changes from a valid baseline, never a Cartesian product.
+        cases = [("baseline", {}, [[200, None]]),
+                 ("size", {"size": {**WIRE_SIZE, "memory_mb": 512}}, [[200, None]]),
+                 ("volume", {"volume_gb": 2}, [[200, None]]),
+                 ("nested", {"runtime_class": "nested"}, [[503, "capacity"]])]
+        for profile in ("init-ready-v1", "sandbox-ready-v1", "service-ready-v1"):
+            expected = [[200, None]] if profile in host.get("named_memory_profiles", []) else [[503, "capacity"]]
+            cases.append(("profile-" + profile, {"memory_profile": profile}, expected))
+        for label, extra, expected in cases:
+            path = f"/namespaces/{self.namespace}/admissions/{self.prefix}-{label}"
+            self.admissions.append([path, False])  # Own the identity before the one-shot PUT.
+            body = {"regions": ["dev"], "requirements": [gateway, {**base, **extra}]}
+            value = self.admission_call("admit-" + label, path, body, expected)
+            if expected != [[200, None]]:
+                continue
+            self.check(value.get("host") == "local" and value.get("region") == "dev" and
+                       value.get("binding") == "existing" and value.get("mode") == "cold")
+            if label == "baseline":
+                conflict = {**body, "regions": ["absent"]}
+                self.admission_call("admit-body-conflict", path, conflict, [[409, "conflict"]])
+                fields = {"image": clone.IMAGE, "size": WIRE_SIZE, "region": "absent"}
+                self.case("dispatch-conflict", fields, [[409, "conflict"]], admission=path.rsplit("/", 1)[1])
+                status, ns, _ = self.api.call("GET", f"/namespaces/{self.namespace}")
+                self.check(status == 200 and ns.get("host") == "local" and not ns.get("gateway"))
+                self.gateway_owned = True
+                self.admissions[-1][1] = True  # A lost gateway dispatch may already have committed.
+                gateway_path = f"/namespaces/{self.namespace}/gateway?region=dev&placement_request_id=" + path.rsplit("/", 1)[1]
+                gateway_body = {"image": clone.IMAGE, "size": WIRE_SIZE, "port": 8080}
+                receipt = {"case": "gateway-dispatch", "request": {"method": "PUT", "path": "/v1" + gateway_path,
+                           "json": gateway_body}, "expected": [[200, None]], "observed": {"outcome": "unknown"}}
+                self.receipts.append(receipt)
+                status, value, headers = self.api.call("PUT", gateway_path, gateway_body)
+                headers = {k.lower(): v for k, v in headers.items()}
+                receipt["observed"] = summary(status, value, headers)
+                self.check(status == 200 and headers.get("x-briqyard-host") == "local")
+                self.case("dispatch-matching", {"image": clone.IMAGE, "size": WIRE_SIZE,
+                          "region": "dev", "runtime_class": "default", "cmd": ["/bin/sleep", "3600"]},
+                          [[201, None]], admission=path.rsplit("/", 1)[1])
+            else:
+                status, _, _ = self.api.call("DELETE", path)
+                self.check(status == 204)
+                self.admission_call("cancelled-" + label, path, body, [[409, "conflict"]])
+
+    def seed_admission(self, source, snapshot, generation):
+        path = f"/namespaces/{self.namespace}/sandbox-admissions/{self.prefix}-seed"
+        selector = {"machine_id": source, "snapshot": snapshot, "generation": generation}
+        self.admissions.append([path, False])
+        value = self.admission_call("seed-admit", path, {"region": "dev", "size": WIRE_SIZE,
+                                   "sandbox_seed": selector}, [[200, None]])
+        self.check(value.get("mode") == "sandbox-seed")
+        # A timeout at dispatch cannot safely be cancelled or replayed.
+        self.admissions[-1][1] = True
+        self.case("seed-dispatch", {"image": clone.IMAGE, "size": WIRE_SIZE, "region": "dev",
+                  "sleep": "never", "cmd": ["/bin/sh", "-ec", "sleep infinity"],
+                  "sandbox_seed": {**selector, "request_id": self.prefix + "-seed"}},
+                  [[201, None]], lifecycle=True, admission=self.prefix + "-seed")
 
 
 def summary(status, value, headers):
@@ -206,7 +359,11 @@ def summary(status, value, headers):
     code = value.get("code")
     result = {"status": status, "code": code if code in
               (None, "invalid", "capacity", "capability_unsupported", "conflict", "not_found") else "unexpected",
-              "host": "local" if headers.get("x-briqyard-host") == "local" else None}
+              "host": "local" if headers.get("x-briqyard-host") == "local" or value.get("host") == "local" else None}
+    if value.get("binding") in ("new", "existing"):
+        result["binding"] = value["binding"]
+    if value.get("mode") in ("cold", "sandbox-seed"):
+        result["mode"] = value["mode"]
     if re.fullmatch(r"m_[A-Za-z0-9_-]+", str(value.get("id", ""))):
         result["id"] = value["id"]
     if value.get("state") in ("created", "creating", "starting", "running", "stopping", "stopped", "error"):
@@ -226,14 +383,18 @@ def main():
     if sys.argv[1:] == ["--capture"]:
         print(json.dumps(capture(), sort_keys=True))
         return
-    clone.require(os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and len(sys.argv) == 7)
-    namespace, source, snapshot, before, after, destination = sys.argv[1:]
+    if len(sys.argv) == 4 and sys.argv[1] == "--audit":
+        audit_registry(sys.argv[2], sys.argv[3])
+        return
+    clone.require(os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and len(sys.argv) == 11)
+    namespace, source, snapshot, before, after, destination, previous, head_dir, previous_sums, generation = sys.argv[1:]
     clone.require(all(re.fullmatch(r"[A-Za-z0-9_-]+", v) for v in (namespace, source, snapshot)))
     receipt = {"schema": 1, "scope": "single-host fleet-first mixed-version window",
                "source": json.loads(Path(before).read_text()), "mixed": json.loads(Path(after).read_text())}
-    clone.require(receipt["source"]["binaries"]["briqyardd"] == receipt["mixed"]["binaries"]["briqyardd"] and
-                  receipt["source"]["configurationSha256"] == receipt["mixed"]["configurationSha256"])
+    bind_inputs(receipt["source"], receipt["mixed"], previous, head_dir, previous_sums)
+    clone.require(os.environ.get("BRIQYARD_TOKEN") and re.fullmatch(r"[A-Za-z0-9_-]+", generation))
     runner = Mixed(clone.API("http://127.0.0.1:7430"), namespace)
+    runner.audit = True
     def interrupted(_sig, _frame):
         raise clone.ContractFailure()
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGALRM):
@@ -241,7 +402,7 @@ def main():
     signal.alarm(600)
     success = False
     try:
-        runner.run_mixed(source, snapshot)
+        runner.run_mixed(source, snapshot, generation)
         success = True
     finally:
         signal.alarm(60)

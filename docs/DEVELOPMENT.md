@@ -540,12 +540,27 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   inheritance when advertised, registered source discovery, and stop/start.
   The 16 GiB request must refuse for capacity; an 8 GiB request may be accepted or
   refuse for capacity on this small fixture. Acceptance does not qualify guest boot.
-  The unauthenticated fleet must refuse sandbox admission. Each create is sent once;
+  Before any contract request, source binaries must match the previous release and
+  candidate fleet/CLI binaries must match the candidate checksum manifest and files.
+  Running daemon/fleet executable hashes must match their installed binaries; the
+  fleet hash must change while daemon and configuration hashes stay fixed.
+  Both APIs authenticate before the source baseline is captured. Placement admission
+  checks gateway/consumer requirements on the existing namespace, matching gateway
+  and consumer dispatch, conflicting bodies/regions, cancellation, and individual
+  size, volume, class and advertised-profile changes. An unavailable class/profile
+  on this pinned namespace must refuse with capacity. An authenticated seed admission
+  dispatches the existing sealed seed with its actual generation and registered host.
+  Cleanup audits the bounded persisted ledger for exact run-owned pending admissions.
+  The ledger does not serialize live capacity holds, so this does not directly measure
+  in-memory hold release. Each create and dispatch is sent once;
   cleanup discovers only exact run-owned names and metadata, then deletes their IDs.
   `native-logs/mixed-contract.json` retains bounded requests, response fields, binary
   versions/hashes, configuration hashes and explicit gaps. It contains no configuration,
   credentials, error text or guest output. This single-host check does not qualify
   multi-host authority, gateway traffic, interruption, rollback or nested execution.
+  New namespace placement and pressure/spill remain separate cases. Cross-namespace
+  named-template refusal remains unexercised: cleanup owns only the existing namespace.
+  Offline transport, identity, ordering and uncertainty tests do not qualify a native host.
 - `hack/native-clone-contract.py`: the disposable native-upgrade runner checks named
   init/service clones through the installed fleet and daemon (ADR 0140). It covers
   omitted/default/matching size inheritance, mismatched and invalid resource refusals,
