@@ -538,9 +538,11 @@ class Mixed(clone.Contract):
 
     def hold_accounting(self):
         self.phase = "hold-accounting"
-        # Earlier cases delete machines. Let a newer daemon report settle those
-        # charges before treating fleet usage as this experiment's baseline.
+        # A poll started before the prior DELETE can publish stale usage after
+        # DELETE's refresh. Static polls run serially: discard that first newer
+        # report, then use the following poll, which started after deletion.
         _, seen = self.accounting_usage("holds-baseline-pending")
+        _, seen = self.accounting_usage("holds-baseline-drain", after=seen)
         baseline, _ = self.accounting_usage("holds-baseline", after=seen)
         first = f"/namespaces/{self.namespace}/admissions/{self.prefix}-account-pair"
         second = f"/namespaces/{self.namespace}/admissions/{self.prefix}-account-survivor"

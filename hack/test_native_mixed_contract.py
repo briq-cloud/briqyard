@@ -37,11 +37,13 @@ class FakeAPI:
         self.cancel_all_holds = False
         self.double_count_dispatch = False
         self.stale_seed_reports = 0
+        self.seed_report_charges = []
 
     def call(self, method, path, body=None, headers=None):
         self.calls.append((method, path, copy.deepcopy(body)))
         if path == "/hosts":
-            stale_seed = 512 if self.stale_seed_reports else 0
+            stale_seed = (self.seed_report_charges.pop(0) if self.seed_report_charges
+                          else 512 if self.stale_seed_reports else 0)
             self.stale_seed_reports = max(0, self.stale_seed_reports - 1)
             overhead = 0 if self.bad_hold_overhead else 256
             held = sum(r["size"]["memory_mb"] + overhead
@@ -168,6 +170,19 @@ class MixedContractTests(unittest.TestCase):
         runner.hold_accounting()
         observations = {r["case"]: r["observed"] for r in runner.receipts}
         self.assertEqual(observations["holds-baseline-pending"]["memoryMb"], 4608)
+        self.assertEqual(observations["holds-baseline"], {"memoryMb": 4096, "freshHeartbeat": True})
+        self.assertEqual(observations["holds-final-release"]["memoryMb"], 4096)
+
+    def test_hold_baseline_drains_poll_started_before_seed_deletion(self):
+        api = FakeAPI()
+        # DELETE refresh settled usage without moving last_seen. The first new
+        # heartbeat is an in-flight poll with a pre-DELETE status snapshot.
+        api.seed_report_charges = [0, 512, 0]
+        runner = mixed.Mixed(api, "fixture")
+        runner.hold_accounting()
+        observations = {r["case"]: r["observed"] for r in runner.receipts}
+        self.assertEqual(observations["holds-baseline-pending"]["memoryMb"], 4096)
+        self.assertEqual(observations["holds-baseline-drain"]["memoryMb"], 4608)
         self.assertEqual(observations["holds-baseline"], {"memoryMb": 4096, "freshHeartbeat": True})
         self.assertEqual(observations["holds-final-release"]["memoryMb"], 4096)
 
