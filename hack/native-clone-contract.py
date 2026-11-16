@@ -28,6 +28,8 @@ class API:
     def __init__(self, origin):
         self.origin = origin
         self.deadline = time.monotonic() + 600
+        self.last_status = None
+        self.last_code = None
 
     def call(self, method, path, body=None):
         request = Request(self.origin + "/v1" + path, method=method,
@@ -43,6 +45,8 @@ class API:
             raw = response.read(1024 * 1024 + 1)
             require(len(raw) <= 1024 * 1024)
             value = json.loads(raw) if raw else None
+            self.last_status = response.status
+            self.last_code = value.get("code") if isinstance(value, dict) else None
             return response.status, value, dict(response.headers)
 
 
@@ -53,6 +57,15 @@ class Contract:
         self.created = []
         self.prefix = "contract-" + uuid.uuid4().hex[:12]
         self.checks = 0
+        self.phase = "initial"
+
+    def failure_receipt(self):
+        status = getattr(self.api, "last_status", None)
+        code = getattr(self.api, "last_code", None)
+        return {"schema": 1, "phase": self.phase, "checksPassed": self.checks,
+                "httpStatus": status if isinstance(status, int) and 100 <= status <= 599 else None,
+                "errorCode": code if code in ("invalid", "conflict", "capability_unsupported",
+                                              "internal", "capacity", "not_found") else None}
 
     def check(self, condition):
         require(condition)
@@ -78,6 +91,7 @@ class Contract:
                    fragment in value.get("error", ""))
 
     def profile(self, profile):
+        self.phase = profile + ":builder"
         fields = {"image": IMAGE, "size": SIZE, "sleep": "never", "template_build": profile}
         if profile == "service-ready-v1":
             fields.update(cmd=["/bin/sleep", "3600"], clone_hooks={
@@ -85,43 +99,53 @@ class Contract:
                 "park_timeout_s": 5, "resume_timeout_s": 5})
         status, source, headers = self.create(profile, fields)
         self.check(status == 201)
+        self.phase = profile + ":builder-running"
         self.running(source["id"])
+        self.phase = profile + ":seal"
         status, snapshot, _ = self.api.call("POST", f"/machines/{source['id']}/snapshots",
                                            {"memory": True, "template": True})
         self.check(status in (200, 201) and snapshot.get("clone_profile") == profile)
+        self.phase = profile + ":provenance"
         # The inventory registers `local`; the source snapshot carries the intrinsic identity.
         self.check(headers.get("x-briqyard-host") == "local" and
                    snapshot.get("source_host") not in (None, "", "local"))
         fork = {"machine_id": source["id"], "snapshot": snapshot["id"]}
         for label, size in [("omitted", None), ("default", {"vcpus": 0, "memory_mb": 0}),
                             ("matching", SIZE)]:
+            self.phase = profile + ":clone-" + label
             body = {"fork": fork}
             if size is not None:
                 body["size"] = size
             status, clone, headers = self.create(profile + "-" + label, body)
             self.check(status == 201 and headers.get("x-briqyard-host") == "local")
+            self.phase = profile + ":running-" + label
             view = self.running(clone["id"])
             self.check(view["size"]["vcpus"] == 1 and view["size"]["memory_mb"] == 256 and
                        view.get("memory_origin", {}).get("stage") == "active" and
                        view.get("memory_origin", {}).get("source_machine") == source["id"])
+            self.phase = profile + ":exec-" + label
             status, result, _ = self.api.call("POST", f"/machines/{clone['id']}/exec",
                                              {"cmd": ["/bin/echo", "contract-ok"]})
             self.check(status == 200 and result.get("exit_code") == 0 and
                        result.get("stdout", "").strip() == "contract-ok")
+            self.phase = profile + ":delete-" + label
             status, _, _ = self.api.call("DELETE", f"/machines/{clone['id']}")
             self.check(status in (200, 204))
             self.created.remove(clone["id"])
+        self.phase = profile + ":mismatch"
         self.refuse(profile + "-mismatch", {"fork": fork, "size": {"vcpus": 1, "memory_mb": 512}},
                     "keeps its template size")
 
     def run(self, sandbox_source, sandbox_snapshot):
         for label, size in [("omitted", None), ("default", {"vcpus": 0, "memory_mb": 0}),
                             ("empty", {})]:
+            self.phase = "cold-" + label
             body = {"image": IMAGE}
             if size is not None:
                 body["size"] = size
             # An empty Size is a wire error; the others reach the resource predicate.
             self.refuse("cold-" + label, body, "missing field" if label == "empty" else "size.vcpus")
+        self.phase = "sandbox-named"
         self.refuse("sandbox-named", {"fork": {"machine_id": sandbox_source,
                                                 "snapshot": sandbox_snapshot}},
                     "snapshot is not a compatible source-host memory template", 409,
@@ -163,14 +187,26 @@ def main():
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGALRM):
         signal.signal(sig, interrupted)
     signal.alarm(600)
+    failure = None
+    cleanup_failed = False
     try:
         contract.run(source, snapshot)
+    except Exception:
+        failure = contract.failure_receipt()
     finally:
         signal.alarm(60)
         try:
             contract.cleanup()
+        except Exception:
+            cleanup_failed = True
+            if failure is None:
+                failure = {"schema": 1, "phase": "cleanup", "checksPassed": contract.checks}
         finally:
             signal.alarm(0)
+    if failure is not None:
+        print("native clone diagnostic: " + json.dumps({**failure, "cleanupFailed": cleanup_failed}),
+              file=sys.stderr)
+        raise ContractFailure()
     print(f"native clone contract: {contract.checks} checks passed")
 
 

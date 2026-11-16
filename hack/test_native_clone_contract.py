@@ -136,6 +136,18 @@ die() { echo stopped; exit 1; }
         with self.assertRaises(contract.ContractFailure):
             runner.refuse("wrong", {"image": "alpine"}, "unrelated predicate")
 
+    def test_failure_receipt_identifies_phase_without_remote_error_text(self):
+        api = FakeAPI()
+        api.profile = "sandbox-ready-v1"
+        api.last_status = 201
+        api.last_code = "SECRET"
+        runner = contract.Contract(api, "test")
+        with self.assertRaises(contract.ContractFailure):
+            runner.profile("init-ready-v1")
+        receipt = runner.failure_receipt()
+        self.assertEqual(receipt, {"schema": 1, "phase": "init-ready-v1:seal",
+                                  "checksPassed": 2, "httpStatus": 201, "errorCode": None})
+
 
 if __name__ == "__main__":
     unittest.main()
