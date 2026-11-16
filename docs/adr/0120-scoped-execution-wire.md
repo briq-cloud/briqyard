@@ -32,6 +32,11 @@ Numeric dates are integer Unix seconds from zero through 9007199254740991, inclu
 Other integers use that same safe range. No optional claim has an implicit default.
 `iat <= nbf < exp`; a trusted clock with uncertainty `u` accepts only when
 `iat <= now-u`, `nbf <= now-u` and `now+u < exp`. Clock arithmetic failure refuses.
+A reading is whole seconds: `now` is the floored wall time and `u` is the error rounded up plus
+one second, a constant within the second. `now-u` is therefore monotonic: a permit issued from an
+earlier reading is never newer than the lower bound of a later reading by the same or another
+clock. A margin that grew with the fractional second let a later reading fall below a permit's
+`nbf` and refused fresh grants about half the time.
 Grant expiry cannot exceed original credential or idle-protection expiry.
 The issuer sets its authorization-freshness maximum; this verifier does not impose a 60-second cap.
 Allocation expiry cannot exceed the fixed window end. Permit expiry cannot exceed grant or
