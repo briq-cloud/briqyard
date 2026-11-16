@@ -16,6 +16,10 @@ clone = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(clone)
 
 WIRE_SIZE = {**clone.SIZE, "cpu_millis": 1000}
+NESTED_ASSETS = ("nested-vmlinux-x86_64", "nested-modules-x86_64.ext4", "nested-versions-x86_64.json")
+NESTED_CHECK = ('test -c /dev/kvm && grep -Ewq "vmx|svm" /proc/cpuinfo && '
+                'test -d /lib/modules/$(uname -r) && '
+                'grep -q " /lib/modules/$(uname -r) .* ro," /proc/mounts && echo nested-ready')
 # Same immutable Python HTTP fixture used by qualify.sh.
 HTTP_IMAGE = "python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
 
@@ -75,6 +79,23 @@ def checksums(path):
     return result
 
 
+def nested_assets(directory):
+    """Pin the complete candidate class before installing the fixture."""
+    root = Path(directory)
+    sums = checksums(root / "SHA256SUMS-x86_64")
+    result = {}
+    for name in NESTED_ASSETS:
+        asset = root / name
+        clone.require(asset.stat().st_size > 0)
+        with asset.open("rb") as stream:
+            clone.require(hashlib.file_digest(stream, "sha256").hexdigest() == sums.get(name))
+        result[name] = sums[name]
+    versions = json.loads((root / NESTED_ASSETS[-1]).read_bytes())
+    clone.require(versions.get("arch") == "x86_64" and
+                  isinstance(versions.get("kernel_release"), str) and versions["kernel_release"])
+    return result
+
+
 def bind_inputs(source, mixed, previous, head_dir, previous_sums):
     """Fail before opening an API transport when the mixed window is unbound."""
     clone.require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?", previous))
@@ -116,8 +137,9 @@ def audit_registry(prefix, namespace, path="/var/lib/briqyard-fleet/registry.jso
 
 
 class Mixed(clone.Contract):
-    def __init__(self, api, namespace):
+    def __init__(self, api, namespace, nested=False):
         super().__init__(api, namespace)
+        self.nested = nested
         self.receipts = []
         self.admissions = []
         self.gateway_owned = False
@@ -134,6 +156,8 @@ class Mixed(clone.Contract):
                      "host memory/disk-pressure conditions: fixture retains running upgrade controls",
                      "supported warm claim: native-ci-upgrade.sh leaves templates.warm_pools disabled",
                      "per-hold memory accounting: API exposes aggregate usage; registry does not serialize live holds"]
+        if self.nested:
+            self.gaps.remove("nested guest execution (fixture has only the default class)")
 
     def case(self, label, fields, expected, lifecycle=False, keep=False, inherited=None, admission=None):
         self.phase = label
@@ -166,6 +190,8 @@ class Mixed(clone.Contract):
         self.check(headers.get("x-briqyard-host") == "local" and value.get("namespace") == receipt["request"]["json"]["tenant"])
         if admission:
             self.check(value.get("host") == "local")
+        if fields.get("runtime_class") == "nested":
+            self.check(value.get("runtime_class") == "nested")
         size = inherited or fields["size"]
         observed = value["size"]
         self.check(observed["vcpus"] == size["vcpus"] and observed["memory_mb"] == size["memory_mb"] and
@@ -333,7 +359,10 @@ class Mixed(clone.Contract):
     def run_mixed(self, source, snapshot, generation="g_seed"):
         status, hosts, _ = self.api.call("GET", "/hosts")
         self.check(status == 200 and len(hosts) == 1 and hosts[0].get("id") == "local" and
-                   hosts[0].get("state") == "ready" and not hosts[0].get("runtime_classes"))
+                   hosts[0].get("state") == "ready")
+        classes = hosts[0].get("runtime_classes", [])
+        self.check((len(classes) == 1 and classes[0].get("name") == "nested" and
+                    classes[0].get("nested") is True) if self.nested else not classes)
         if "init-ready-v1" in hosts[0].get("named_memory_profiles", []):
             self.named()
         else:
@@ -350,10 +379,14 @@ class Mixed(clone.Contract):
         for label, extra, expected in [
                 ("volume-zero", {"volume": {"size_gb": 0, "mount": "/data"}}, [[400, "invalid"]]),
                 ("volume-two", {"volume": {"size_gb": 2, "mount": "/data"}}, [[201, None]]),
-                ("class-default", {"runtime_class": "default"}, [[201, None]]),
-                ("class-nested", {"runtime_class": "nested"}, [[400, "invalid"]])]:
+                ("class-default", {"runtime_class": "default"}, [[201, None]])]:
             self.case(label, {"image": clone.IMAGE, "size": clone.SIZE,
                               "cmd": ["/bin/sleep", "3600"], **extra}, expected)
+        if self.nested:
+            self.nested_guest()
+        else:
+            self.case("class-nested", {"image": clone.IMAGE, "size": clone.SIZE,
+                      "runtime_class": "nested"}, [[400, "invalid"]])
         # Discover a daemon-created source under its registered fleet route first.
         self.phase = "source-discovery"
         status, machines, _ = self.api.call("GET", "/machines?namespace=" + self.namespace)
@@ -365,9 +398,32 @@ class Mixed(clone.Contract):
         self.case("sandbox-named", {"fork": {"machine_id": source, "snapshot": snapshot}},
                   [[409, "capability_unsupported"]])
         self.placement(hosts[0])
+        if self.nested:
+            self.nested_guest(admitted=True)
         self.seed_admission(source, snapshot, generation)
         self.reservation_pressure()
         self.warm_refusal(hosts[0], source, snapshot)
+
+    def nested_guest(self, admitted=False):
+        label = "nested-admitted" if admitted else "nested-direct"
+        identity = None
+        if admitted:
+            path = f"/namespaces/{self.namespace}/admissions/{self.prefix}-nested-consumer"
+            self.admissions.append([path, False])
+            body = {"regions": ["dev"], "requirements": [{"role": "consumer", "size": WIRE_SIZE,
+                                                         "runtime_class": "nested"}]}
+            value = self.admission_call(label + "-reserve", path, body, [[200, None]])
+            self.check(value.get("host") == "local" and value.get("region") == "dev" and
+                       value.get("binding") == "existing" and value.get("mode") == "cold")
+            identity = path.rsplit("/", 1)[1]
+            self.admissions[-1][1] = True  # A lost dispatch response remains unknown.
+        machine = self.case(label, {"image": clone.IMAGE, "size": WIRE_SIZE, "region": "dev",
+                           "runtime_class": "nested", "cmd": ["/bin/sleep", "3600"]},
+                            [[201, None]], keep=True, admission=identity)
+        self.transition(self.receipts[-1], machine, "wait?for=running&timeout=120")
+        self.exec_check(label + "-exec", machine, ["sh", "-ec", NESTED_CHECK], "nested-ready")
+        self.delete(label + "-delete", f"/machines/{machine}", [200, 204])
+        self.created.remove(machine)
 
     def admission_call(self, label, path, body, expected):
         self.phase = label
@@ -398,7 +454,8 @@ class Mixed(clone.Contract):
                       ("volume-two", {"volume_gb": 2}, [[200, None]]),
                       ("class-omitted", {"runtime_class": None}, [[200, None]]),
                       ("class-default", {"runtime_class": "default"}, [[200, None]]),
-                      ("class-nested", {"runtime_class": "nested"}, [[503, "capacity"]])])
+                      ("class-nested", {"runtime_class": "nested"},
+                       [[200, None]] if self.nested else [[503, "capacity"]])])
         for profile in ("init-ready-v1", "sandbox-ready-v1", "service-ready-v1"):
             expected = [[200, None]] if profile in host.get("named_memory_profiles", []) else [[503, "capacity"]]
             cases.append(("profile-" + profile, {"memory_profile": profile}, expected))
@@ -605,7 +662,10 @@ def main():
                "source": json.loads(Path(before).read_text()), "mixed": json.loads(Path(after).read_text())}
     bind_inputs(receipt["source"], receipt["mixed"], previous, head_dir, previous_sums)
     clone.require(os.environ.get("BRIQYARD_TOKEN") and re.fullmatch(r"[A-Za-z0-9_-]+", generation))
-    runner = Mixed(clone.API("http://127.0.0.1:7430"), namespace)
+    mode = os.environ.get("NATIVE_UPGRADE_NESTED", "0")
+    clone.require(mode in ("0", "1"))
+    receipt["nestedAssets"] = nested_assets(head_dir) if mode == "1" else None
+    runner = Mixed(clone.API("http://127.0.0.1:7430"), namespace, nested=mode == "1")
     runner.audit = True
     def interrupted(_sig, _frame):
         raise clone.ContractFailure()

@@ -22,6 +22,8 @@ WORK=$(mktemp -d)
 API_DOWN_MAX=${NATIVE_UPGRADE_API_DOWN_MAX:-30}
 GAP_MAX=${NATIVE_UPGRADE_ENDPOINT_GAP_MAX:-10}
 LEAVES=${NATIVE_UPGRADE_LEAVES:-6500}
+export NATIVE_UPGRADE_NESTED=${NATIVE_UPGRADE_NESTED:-0}
+case "$NATIVE_UPGRADE_NESTED" in 0) CLASSES= ;; 1) CLASSES=nested ;; *) exit 2 ;; esac
 NS=upgrade-ci
 PARENT=/sys/fs/cgroup/firecracker
 TOKEN=upgrade-ci-token
@@ -85,6 +87,16 @@ PYQEMU
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
+# Require the complete candidate class before fixture mutation in exact artifact mode.
+if [ "$NATIVE_UPGRADE_NESTED" = 1 ]; then
+  python3 - "$HARNESS" "$HEAD_DIR" <<'PY' || die "candidate nested assets"
+import importlib.util,sys
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('mixed',Path(sys.argv[1])/'native-mixed-contract.py')
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.nested_assets(sys.argv[2])
+PY
+fi
 # Enable nested KVM before starting any machine; the probe may reload its vendor module.
 KEEP_SECOND_HOST=1 bash "$HARNESS/native-two-host-probe.sh" || die "two-host environment gate"
 
@@ -98,7 +110,7 @@ echo "   init digest: previous ${OLD_INIT:0:12}, head ${NEW_INIT:0:12}"
 sudo iptables -P FORWARD ACCEPT 2>/dev/null; sudo systemctl stop docker.service docker.socket 2>/dev/null; sudo iptables -P FORWARD ACCEPT
 command -v conntrack >/dev/null || { sudo apt-get update -qq; sudo apt-get install -y -qq conntrack; }
 # Its own bootstrap, over HTTPS from the release, every binary checked against its SHA256SUMS.
-sudo env BRIQYARD_RELEASE="$REL_URL" BRIQYARD_POOL_FILE_GB=40 BRIQYARD_ARC_GB=1 LISTEN=127.0.0.1:7420 \
+sudo env BRIQYARD_RELEASE="$REL_URL" BRIQYARD_RUNTIME_CLASSES="$CLASSES" BRIQYARD_POOL_FILE_GB=40 BRIQYARD_ARC_GB=1 LISTEN=127.0.0.1:7420 \
   bash "$WORK/previous/hack/bootstrap-host.sh" || die "the previous release's bootstrap failed"
 PREV_VER=$(briqyardd --version | awk '{print $2}')
 echo "   installed: $(briqyardd --version)"
@@ -403,7 +415,14 @@ with Path(sys.argv[3]).open('w') as sums:
 shutil.copyfile(config['init'], Path(sys.argv[2]) / 'briqyard-init-linux-x86_64')
 PY
 curl -fsSL "$REL_URL/firecracker-checked-linux-x86_64.tar.gz" -o "$ROLLBACK_RELEASE/firecracker-checked-linux-x86_64.tar.gz" || die "previous checked bundle"
-for asset in briqyardd-linux-x86_64 briqyard-init-linux-x86_64 firecracker-checked-linux-x86_64.tar.gz; do
+ROLLBACK_ASSETS=(briqyardd-linux-x86_64 briqyard-init-linux-x86_64 firecracker-checked-linux-x86_64.tar.gz)
+if [ "$NATIVE_UPGRADE_NESTED" = 1 ]; then
+  for asset in nested-vmlinux-x86_64 nested-modules-x86_64.ext4 nested-versions-x86_64.json; do
+    curl -fsSL "$REL_URL/$asset" -o "$ROLLBACK_RELEASE/$asset" || die "previous nested asset: $asset"
+    ROLLBACK_ASSETS+=("$asset")
+  done
+fi
+for asset in "${ROLLBACK_ASSETS[@]}"; do
   sha=$(awk -v f="$asset" '$2 == f {print $1}' "$WORK/prev.sums")
   [[ "$sha" =~ ^[a-f0-9]{64}$ ]] && echo "$sha  $ROLLBACK_RELEASE/$asset" | sudo sha256sum -c --quiet - || die "rollback asset differs from previous release: $asset"
 done
@@ -420,7 +439,7 @@ sudo sha256sum /usr/local/bin/briqyard{,d,-fleet} > "$WORK/head-binaries.sums" |
 HEAD_PID=$(systemctl show -p MainPID --value briqyardd)
 probe rollback-endpoint "http://$WEBADDR/"
 probe rollback-api -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7420/v1/status
-timeout 900 sudo env BRIQYARD_RELEASE="file://$ROLLBACK_RELEASE" BRIQYARD_POOL_FILE_GB=40 BRIQYARD_ARC_GB=1 LISTEN=127.0.0.1:7420 \
+timeout 900 sudo env BRIQYARD_RELEASE="file://$ROLLBACK_RELEASE" BRIQYARD_RUNTIME_CLASSES="$CLASSES" BRIQYARD_POOL_FILE_GB=40 BRIQYARD_ARC_GB=1 LISTEN=127.0.0.1:7420 \
   KERNEL_URL="file://$PRIOR_KERNEL" KERNEL_SHA256="$PRIOR_KERNEL_SHA" \
   bash "$HARNESS/bootstrap-host.sh" > "$WORK/rollback.log" 2>&1
 rrc=$?
@@ -452,7 +471,7 @@ check "rollback preserves postgres rows and volume data" '[ "$(briqyard machine 
 check "rollback preserves the serving endpoint" '[ "$(curl -fsS -m 5 "http://$WEBADDR/")" = upgrade-ci-page ]'
 check "rollback preserves prior immutable runtime files" 'sudo sha256sum -c --quiet "$WORK/prior-runtime.sums"'
 if [ "$rrc" = 0 ]; then
-  timeout 900 sudo env BRIQYARD_RELEASE="file://$HEAD_DIR" BRIQYARD_POOL_FILE_GB=40 BRIQYARD_ARC_GB=1 LISTEN=127.0.0.1:7420 \
+  timeout 900 sudo env BRIQYARD_RELEASE="file://$HEAD_DIR" BRIQYARD_RUNTIME_CLASSES="$CLASSES" BRIQYARD_POOL_FILE_GB=40 BRIQYARD_ARC_GB=1 LISTEN=127.0.0.1:7420 \
     bash "$HARNESS/bootstrap-host.sh" > "$WORK/return-to-head.log" 2>&1 || die "return to head after supported rollback"
   for _ in $(seq 1 90); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
   check "the candidate serves again after rollback" '[ "$(daemon_version)" = "$HEAD_VER" ] && briqyard status >/dev/null && sudo cmp -s "$WORK/head-config.yaml" /etc/briqyard/config.yaml && sudo sha256sum -c --quiet "$WORK/head-binaries.sums"'

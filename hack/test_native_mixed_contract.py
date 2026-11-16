@@ -1,5 +1,6 @@
 """Offline wire, ordering and uncertainty checks; these do not qualify a native host."""
 import copy
+import hashlib
 import importlib.util
 import json
 import io
@@ -33,11 +34,14 @@ class FakeAPI:
         self.bad_route = False
         self.ignore_reservations = False
         self.allow_bad_admission = False
+        self.nested = False
+        self.wrong_class = False
+        self.bad_nested_exec = False
 
     def call(self, method, path, body=None, headers=None):
         self.calls.append((method, path, copy.deepcopy(body)))
         if path == "/hosts":
-            return 200, [{"id": "local", "state": "ready", "runtime_classes": [],
+            return 200, [{"id": "local", "state": "ready", "runtime_classes": [{"name": "nested", "nested": True}] if self.nested else [],
                           "named_memory_profiles": ["init-ready-v1", "sandbox-ready-v1"] if self.profile else ["sandbox-ready-v1"],
                           "egress_siblings_v1": True, "warm_pool_profiles": [],
                           "memory_policy": {"version": 1, "vmm_overhead_mb": 256},
@@ -73,7 +77,7 @@ class FakeAPI:
                         return 400, {"code": "invalid"}, {}
                     if sum(r["size"]["memory_mb"] + 256 for r in body["requirements"]) + 4096 > 12288:
                         return 503, {"code": "capacity"}, {}
-                if r.get("runtime_class") == "nested" or (r.get("memory_profile") and
+                if (r.get("runtime_class") == "nested" and not self.nested) or (r.get("memory_profile") and
                         r["memory_profile"] not in (["init-ready-v1", "sandbox-ready-v1"] if self.profile else ["sandbox-ready-v1"])):
                     return 503, {"code": "capacity"}, {}
                 if not self.ignore_reservations and any("pressure-0" in p and not a.get("cancelled") for p, a in self.admissions.items()):
@@ -105,7 +109,7 @@ class FakeAPI:
             named = "fork" in body
             if named and body["tenant"] != "fixture" and not self.allow_invalid:
                 return 400, {"code": "invalid"}, {}
-            invalid = (not named and not size.get("vcpus")) or body.get("runtime_class") == "nested" or body.get("volume", {}).get("size_gb") == 0
+            invalid = (not named and not size.get("vcpus")) or (body.get("runtime_class") == "nested" and not self.nested) or body.get("volume", {}).get("size_gb") == 0
             if named and size.get("memory_mb") == 512:
                 invalid = True
             if invalid and not self.allow_invalid:
@@ -118,6 +122,8 @@ class FakeAPI:
                 value["size"] = copy.deepcopy(size)
             if self.wrong_size:
                 value["size"]["cpu_millis"] = 999
+            if self.wrong_class:
+                value["runtime_class"] = "default"
             self.machines[value["id"]] = value
             if self.lost:
                 raise TimeoutError()
@@ -128,7 +134,9 @@ class FakeAPI:
         if method == "POST" and path.endswith("/exec"):
             cmd = body["cmd"]
             out = ""
-            if "wget" == cmd[0]:
+            if cmd == ["sh", "-ec", mixed.NESTED_CHECK]:
+                out = "wrong" if self.bad_nested_exec else "nested-ready"
+            elif "wget" == cmd[0]:
                 out = "mixed-gateway" if "gateway.internal" in cmd[-1] else ("mixed-foreign" if "127.0.0.1" in cmd[-1] else "mixed-sibling")
             elif len(cmd) > 2 and cmd[2] == mixed.ON_LINK_SCRIPT:
                 out = "wrong-route" if self.bad_route else "on-link"
@@ -144,6 +152,81 @@ class FakeAPI:
 
 
 class MixedContractTests(unittest.TestCase):
+    def test_nested_direct_and_admitted_guests_are_consumed_and_checked(self):
+        api = FakeAPI()
+        api.nested = True
+        runner = mixed.Mixed(api, "fixture", nested=True)
+        runner.nested_guest()
+        runner.nested_guest(admitted=True)
+        posts = [(p, b) for m, p, b in api.calls if m == "POST" and p == "/machines"]
+        self.assertEqual(len(posts), 2)
+        self.assertTrue(all(b["runtime_class"] == "nested" for _, b in posts))
+        admission = next(iter(api.admissions.values()))
+        self.assertTrue(admission["dispatched"])
+        self.assertEqual(admission["body"]["requirements"], [{"role": "consumer", "size": mixed.WIRE_SIZE,
+                                                              "runtime_class": "nested"}])
+        self.assertEqual(sum(m == "POST" and p.endswith("/exec") for m, p, _ in api.calls), 2)
+        self.assertEqual(runner.created, [])
+        runner.cleanup()
+
+    def test_nested_fixture_runs_the_full_existing_matrix(self):
+        api = FakeAPI()
+        api.nested = True
+        runner = mixed.Mixed(api, "fixture", nested=True)
+        runner.run_mixed("m_seed", "s_seed")
+        self.assertTrue(any(r["case"] == "nested-admitted-exec" for r in runner.receipts))
+        runner.cleanup()
+
+    def test_nested_capability_is_required_before_any_mutation(self):
+        api = FakeAPI()
+        runner = mixed.Mixed(api, "fixture", nested=True)
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.run_mixed("m_seed", "s_seed")
+        self.assertEqual([m for m, _, _ in api.calls], ["GET"])
+
+    def test_nested_misclassification_or_failed_execution_fails_and_cleans(self):
+        for fault in ("wrong_class", "bad_nested_exec", "bad_decision"):
+            with self.subTest(fault=fault):
+                api = FakeAPI()
+                api.nested = True
+                setattr(api, fault, True)
+                runner = mixed.Mixed(api, "fixture", nested=True)
+                with self.assertRaises(mixed.clone.ContractFailure):
+                    runner.nested_guest(admitted=True)
+                runner.cleanup()
+                self.assertEqual(set(api.machines), {"m_seed", "m_other"})
+
+    def test_nested_lost_create_is_not_replayed_and_cleanup_stays_unconfirmed(self):
+        api = FakeAPI()
+        api.nested = api.lost = True
+        runner = mixed.Mixed(api, "fixture", nested=True)
+        with self.assertRaises(TimeoutError):
+            runner.nested_guest(admitted=True)
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.cleanup()
+        self.assertTrue(runner.cleanup_unconfirmed)
+        self.assertEqual(sum(m == "POST" and p == "/machines" for m, p, _ in api.calls), 1)
+        self.assertEqual(set(api.machines), {"m_seed", "m_other"})
+
+    def test_nested_candidate_assets_require_complete_matching_checksums(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            values = {name: b"class-file" for name in mixed.NESTED_ASSETS}
+            values[mixed.NESTED_ASSETS[-1]] = b'{"arch":"x86_64","kernel_release":"test-kernel"}'
+            for name, value in values.items():
+                (root / name).write_bytes(value)
+            (root / "SHA256SUMS-x86_64").write_text("".join(
+                hashlib.sha256(value).hexdigest() + "  " + name + "\n" for name, value in values.items()))
+            self.assertEqual(set(mixed.nested_assets(root)), set(mixed.NESTED_ASSETS))
+            for name in mixed.NESTED_ASSETS:
+                (root / name).write_bytes(b"changed")
+                with self.assertRaises(mixed.clone.ContractFailure):
+                    mixed.nested_assets(root)
+                (root / name).write_bytes(values[name])
+            (root / mixed.NESTED_ASSETS[0]).unlink()
+            with self.assertRaises(FileNotFoundError):
+                mixed.nested_assets(root)
+
     def test_strict_denial_accepts_neighbor_drop_but_not_other_failures(self):
         cases = [("wget: download timed out", 1, "denied", 0),
                  ("wget: Host is unreachable", 1, "denied", 0),

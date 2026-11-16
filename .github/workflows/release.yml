@@ -59,7 +59,7 @@ jobs:
           for b in briqyardd briqyard briqyard-fleet; do cp target/release/$b dist/$b-linux-${{ matrix.arch }}; done
           cp target/${{ matrix.arch }}-unknown-linux-musl/release/briqyard-init dist/briqyard-init-linux-${{ matrix.arch }}
           python3 hack/firecracker/package.py .validation/firecracker "$RUNNER_TEMP/checked-firecracker" "$RUNNER_TEMP/checked-firecracker-cli" "dist/firecracker-checked-linux-${{ matrix.arch }}.tar.gz" --arch "${{ matrix.arch }}"
-          (cd dist && sha256sum * > SHA256SUMS-${{ matrix.arch }})
+          (cd dist && sha256sum -- * > SHA256SUMS-${{ matrix.arch }})
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.arch }}
@@ -71,7 +71,7 @@ jobs:
   # The upgrade from the previous release to these candidate artifacts, on a host with state and
   # history (ADR 0107). A draft release is not created without it.
   upgrade:
-    needs: build
+    needs: [build, nested-kernel]
     permissions:
       contents: read
       actions: read
