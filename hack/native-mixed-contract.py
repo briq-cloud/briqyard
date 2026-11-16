@@ -10,6 +10,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 
 spec = importlib.util.spec_from_file_location("clone_contract", Path(__file__).with_name("native-clone-contract.py"))
 clone = importlib.util.module_from_spec(spec)
@@ -154,8 +155,7 @@ class Mixed(clone.Contract):
                      "nested guest execution (fixture has only the default class)",
                      "boot-pressure spill: one host, no second region or controlled boot queue",
                      "host memory/disk-pressure conditions: fixture retains running upgrade controls",
-                     "supported warm claim: native-ci-upgrade.sh leaves templates.warm_pools disabled",
-                     "per-hold memory accounting: API exposes aggregate usage; registry does not serialize live holds"]
+                     "supported warm claim: native-ci-upgrade.sh leaves templates.warm_pools disabled"]
         if self.nested:
             self.gaps.remove("nested guest execution (fixture has only the default class)")
 
@@ -401,6 +401,7 @@ class Mixed(clone.Contract):
         if self.nested:
             self.nested_guest(admitted=True)
         self.seed_admission(source, snapshot, generation)
+        self.hold_accounting()
         self.reservation_pressure()
         self.warm_refusal(hosts[0], source, snapshot)
 
@@ -571,6 +572,66 @@ class Mixed(clone.Contract):
                         ["wget", "-qO-", "-T", "4", "http://127.0.0.1:8000/"], "mixed-foreign")
         self.exec_check("foreign-sibling-denied", sibling,
                         ["/bin/sh", "-c", DENIAL_SCRIPT, "sh", foreign_url], "denied")
+
+    def accounting_usage(self, label, expected=None, after=None):
+        # Observe real heartbeats, not a delay assumed to make accounting current.
+        deadline = time.monotonic() + 35
+        while True:
+            status, hosts, _ = self.api.call("GET", "/hosts")
+            self.check(status == 200 and len(hosts) == 1 and hosts[0].get("id") == "local")
+            host = hosts[0]
+            self.check(host.get("memory_policy") == {"version": 1, "vmm_overhead_mb": 256})
+            used = host["used"]["memory_mb"]
+            self.check(type(used) is int and used >= 0 and isinstance(host.get("last_seen"), str))
+            fresh = after is None or host["last_seen"] != after
+            if fresh:
+                self.receipts.append({"case": label, "request": {"method": "GET", "path": "/v1/hosts"},
+                                      "expected": {"memoryMb": expected, "freshHeartbeat": after is not None},
+                                      "observed": {"memoryMb": used, "freshHeartbeat": after is not None}})
+                self.check(expected is None or used == expected)
+                return used, host["last_seen"]
+            self.check(time.monotonic() < deadline)
+            time.sleep(1)
+
+    def hold_accounting(self):
+        self.phase = "hold-accounting"
+        # A poll started before the prior DELETE can publish stale usage after
+        # DELETE's refresh. Static polls run serially: discard that first newer
+        # report, then use the following poll, which started after deletion.
+        _, seen = self.accounting_usage("holds-baseline-pending")
+        _, seen = self.accounting_usage("holds-baseline-drain", after=seen)
+        baseline, _ = self.accounting_usage("holds-baseline", after=seen)
+        first = f"/namespaces/{self.namespace}/admissions/{self.prefix}-account-pair"
+        second = f"/namespaces/{self.namespace}/admissions/{self.prefix}-account-survivor"
+        def requirement(role, memory):
+            return {"role": role, "size": {"vcpus": 1, "memory_mb": memory, "cpu_millis": 250}}
+        pair = {"regions": ["dev"], "requirements": [requirement("gateway", 128), requirement("consumer", 256)]}
+        survivor = {"regions": ["dev"], "requirements": [requirement("consumer", 512)]}
+        # Per-machine policy overhead is charged once for each of the three unequal holds.
+        self.admissions.append([first, False])
+        self.admission_call("holds-pair", first, pair, [[200, None]])
+        self.accounting_usage("holds-pair-charge", baseline + 128 + 256 + 2 * 256)
+        self.admissions.append([second, False])
+        self.admission_call("holds-survivor", second, survivor, [[200, None]])
+        self.accounting_usage("holds-combined-charge", baseline + 128 + 256 + 512 + 3 * 256)
+        self.delete("holds-cancel-pair", first, [204])
+        _, seen = self.accounting_usage("holds-survivor-charge", baseline + 512 + 256)
+        self.accounting_usage("holds-survive-heartbeat", baseline + 512 + 256, after=seen)
+        # A dispatch is one-shot. Once attempted, cleanup must not cancel the reservation.
+        self.admissions[-1][1] = True
+        machine = self.case("holds-dispatch", {"image": clone.IMAGE,
+                            "size": survivor["requirements"][0]["size"], "region": "dev",
+                            "sleep": "never", "cmd": ["/bin/sleep", "3600"]},
+                            [[201, None]], keep=True, admission=self.prefix + "-account-survivor")
+        self.running(machine)
+        _, seen = self.accounting_usage("holds-dispatched-charge", baseline + 512 + 256)
+        self.accounting_usage("holds-reflected-once", baseline + 512 + 256, after=seen)
+        self.delete("holds-delete-dispatched", "/machines/" + machine, [200, 204])
+        self.created.remove(machine)
+        _, seen = self.accounting_usage("holds-deletion-pending")
+        # As at the initial baseline, drain the one possible pre-DELETE poll.
+        _, seen = self.accounting_usage("holds-deletion-drain", after=seen)
+        self.accounting_usage("holds-final-release", baseline, after=seen)
 
     def reservation_pressure(self):
         self.phase = "reservation-preconditions"

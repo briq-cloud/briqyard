@@ -104,3 +104,16 @@ First pair, v0.1.23 to this head (PR #152), identical on 24.04 and 26.04: 26 che
 **Defect found (not fixed here):** after SIGUSR2 the new daemon adopts the running machines within five seconds, then runs the start's orphan sweep over the idle cgroup leaves before it serves anything: `orphans swept at start` (6500) is logged 186 s later, and only then the API, the HTTP ingress and every TCP endpoint listen (`serving again`, `gap_ms 190513`, `adopted_ms 190379`). The machines never stopped (same VMM pids, no reboot, data intact), but nothing could reach them for three to four minutes, against ADR 0027's 2 s drain. Staging's 5000 to 6000 leaves meant the same. The check fails above 30 s (API) and 10 s (endpoint) and stays red until the sweep no longer holds the listeners; the bounds are not to be raised to pass it.
 
 The seed check ran its refusal branch: the previous init digest is `7f39e6645c96`, the head's `cee0c0323a8d` (CI builds the init with the `stable` toolchain, not the release pin), the templates turned off, and the clone was refused with HTTP 400 `operator sandbox seed profile unavailable`.
+
+### Mixed-version admission accounting
+
+The mixed fixture checks unequal concurrent admission charges through the public host
+usage. A gateway and consumer hold 128 and 256 MB; a second consumer holds 512 MB.
+Every machine adds the advertised 256 MB overhead once. Cancelling the first admission
+must leave only the second charge, including after a fresh heartbeat. Dispatch consumes
+that second hold without double charging it; after another heartbeat and deletion, usage
+must return to baseline. Both the initial baseline and final release observe two
+successive new reports: the first can be a serial poll started before the preceding
+deletion, while the second started after it. Each report observation has a 35-second bound and records expected
+and actual memory. They never retry a mutation. This supplements capacity exhaustion;
+it does not expose individual holds or qualify real physical-memory pressure.

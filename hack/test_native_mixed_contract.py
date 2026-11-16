@@ -34,6 +34,11 @@ class FakeAPI:
         self.bad_route = False
         self.ignore_reservations = False
         self.allow_bad_admission = False
+        self.bad_hold_overhead = False
+        self.cancel_all_holds = False
+        self.double_count_dispatch = False
+        self.stale_seed_reports = 0
+        self.seed_report_charges = []
         self.nested = False
         self.wrong_class = False
         self.bad_nested_exec = False
@@ -41,11 +46,22 @@ class FakeAPI:
     def call(self, method, path, body=None, headers=None):
         self.calls.append((method, path, copy.deepcopy(body)))
         if path == "/hosts":
+            stale_seed = (self.seed_report_charges.pop(0) if self.seed_report_charges
+                          else 512 if self.stale_seed_reports else 0)
+            self.stale_seed_reports = max(0, self.stale_seed_reports - 1)
+            overhead = 0 if self.bad_hold_overhead else 256
+            held = sum(r["size"]["memory_mb"] + overhead
+                       for p, a in self.admissions.items() if "-account-" in p and not a.get("cancelled")
+                       and (not a.get("dispatched") or self.double_count_dispatch)
+                       for r in a["body"]["requirements"])
+            actual = sum(m["size"]["memory_mb"] + 256 for m in self.machines.values()
+                         if m.get("name", "").endswith("-holds-dispatch"))
             return 200, [{"id": "local", "state": "ready", "runtime_classes": [{"name": "nested", "nested": True}] if self.nested else [],
                           "named_memory_profiles": ["init-ready-v1", "sandbox-ready-v1"] if self.profile else ["sandbox-ready-v1"],
                           "egress_siblings_v1": True, "warm_pool_profiles": [],
                           "memory_policy": {"version": 1, "vmm_overhead_mb": 256},
-                          "capacity": {"memory_mb": 12288}, "used": {"memory_mb": 4096}}], {}
+                          "last_seen": str(len(self.calls)),
+                          "capacity": {"memory_mb": 12288}, "used": {"memory_mb": 4096 + stale_seed + held + actual}}], {}
         if method == "GET" and path.startswith("/machines?"):
             return 200, [v for v in self.machines.values() if v["namespace"] == path.split("=")[1]], {}
         if path == "/namespaces":
@@ -60,6 +76,9 @@ class FakeAPI:
             if method == "DELETE":
                 if self.admissions.get(path, {}).get("dispatched"):
                     return 409, {"code": "conflict"}, {}
+                if self.cancel_all_holds and "-account-" in path:
+                    for item in self.admissions.values():
+                        item["cancelled"] = True
                 self.admissions[path] = {"cancelled": True}
                 return 204, None, {}
             old = self.admissions.get(path)
@@ -152,6 +171,80 @@ class FakeAPI:
 
 
 class MixedContractTests(unittest.TestCase):
+    def test_hold_baseline_waits_for_deleted_seed_charge_to_settle(self):
+        api = FakeAPI()
+        api.stale_seed_reports = 1
+        runner = mixed.Mixed(api, "fixture")
+        runner.hold_accounting()
+        observations = {r["case"]: r["observed"] for r in runner.receipts}
+        self.assertEqual(observations["holds-baseline-pending"]["memoryMb"], 4608)
+        self.assertEqual(observations["holds-baseline"], {"memoryMb": 4096, "freshHeartbeat": True})
+        self.assertEqual(observations["holds-final-release"]["memoryMb"], 4096)
+
+    def test_hold_baseline_drains_poll_started_before_seed_deletion(self):
+        api = FakeAPI()
+        # DELETE refresh settled usage without moving last_seen. The first new
+        # heartbeat is an in-flight poll with a pre-DELETE status snapshot.
+        api.seed_report_charges = [0, 512, 0]
+        runner = mixed.Mixed(api, "fixture")
+        runner.hold_accounting()
+        observations = {r["case"]: r["observed"] for r in runner.receipts}
+        self.assertEqual(observations["holds-baseline-pending"]["memoryMb"], 4096)
+        self.assertEqual(observations["holds-baseline-drain"]["memoryMb"], 4608)
+        self.assertEqual(observations["holds-baseline"], {"memoryMb": 4096, "freshHeartbeat": True})
+        self.assertEqual(observations["holds-final-release"]["memoryMb"], 4096)
+
+    def test_missing_running_hold_machine_does_not_count_as_tested_deletion(self):
+        class MissingMachineAPI(FakeAPI):
+            def call(self, method, path, body=None, headers=None):
+                machine = self.machines.get(path.rsplit("/", 1)[-1], {})
+                if method == "GET" and machine.get("name", "").endswith("-holds-dispatch"):
+                    self.calls.append((method, path, copy.deepcopy(body)))
+                    return 404, {"code": "not_found"}, {}
+                return super().call(method, path, body, headers)
+        api = MissingMachineAPI()
+        runner = mixed.Mixed(api, "fixture")
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.hold_accounting()
+        self.assertEqual(len(runner.created), 1)
+        self.assertFalse(any(m == "DELETE" and p.startswith("/machines/") for m, p, _ in api.calls))
+        self.assertFalse(any(r["case"] == "holds-final-release" for r in runner.receipts))
+
+    def test_final_release_drains_poll_started_before_machine_deletion(self):
+        class StaleDeletionAPI(FakeAPI):
+            def call(self, method, path, body=None, headers=None):
+                deleting = method == "DELETE" and path.startswith("/machines/")
+                result = super().call(method, path, body, headers)
+                if deleting:
+                    # DELETE refresh settles the dispatched machine's 512+256
+                    # charge; one already-running poll can publish it again.
+                    self.seed_report_charges = [0, 768, 0]
+                return result
+        runner = mixed.Mixed(StaleDeletionAPI(), "fixture")
+        runner.hold_accounting()
+        observations = {r["case"]: r["observed"] for r in runner.receipts}
+        self.assertEqual(observations["holds-deletion-pending"]["memoryMb"], 4096)
+        self.assertEqual(observations["holds-deletion-drain"]["memoryMb"], 4864)
+        self.assertEqual(observations["holds-final-release"]["memoryMb"], 4096)
+
+    def test_independent_hold_charges_release_and_dispatch_reflection(self):
+        api = FakeAPI()
+        runner = mixed.Mixed(api, "fixture")
+        runner.hold_accounting()
+        self.assertEqual(runner.receipts[-1]["observed"]["memoryMb"], 4096)
+        self.assertTrue(all(a.get("cancelled") or a.get("dispatched") for a in api.admissions.values()))
+        self.assertEqual(sum(m == "POST" and p == "/machines" for m, p, _ in api.calls), 1)
+        self.assertFalse(runner.created)
+
+    def test_hold_accounting_detects_wrong_overhead_cross_cancel_and_double_charge(self):
+        for fault in ("bad_hold_overhead", "cancel_all_holds", "double_count_dispatch"):
+            with self.subTest(fault=fault):
+                api = FakeAPI()
+                setattr(api, fault, True)
+                runner = mixed.Mixed(api, "fixture")
+                with self.assertRaises(mixed.clone.ContractFailure):
+                    runner.hold_accounting()
+                runner.cleanup()
     def test_nested_direct_and_admitted_guests_are_consumed_and_checked(self):
         api = FakeAPI()
         api.nested = True
