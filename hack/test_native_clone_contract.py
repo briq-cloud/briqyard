@@ -100,14 +100,65 @@ sudo() {
   case "$1" in
     cp) echo copy ;;
     python3) echo configure; return 7 ;;
-    systemctl) echo restart ;;
+    systemctl)
+      case "$2" in
+        show) echo 101 ;;
+        kill) echo handover; return 7 ;;
+        *) echo unexpected-restart; return 8 ;;
+      esac ;;
   esac
 }
 die() { echo stopped; exit 1; }
 ''' + shell[start:end] + '\necho dependent-operation\n'
         result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stdout.splitlines(), ["copy", "configure", "copy", "restart", "stopped"])
+        self.assertEqual(result.stdout.splitlines(), ["copy", "configure", "copy", "handover", "stopped"])
+
+    def test_configuration_handover_signals_and_observes_the_new_ready_process(self):
+        shell = Path(__file__).with_name("native-ci-upgrade.sh").read_text()
+        start = shell.index("  contract_handover() {")
+        end = shell.index('\n  sudo cp /etc/briqyard/config.yaml', start)
+        helper = shell[start:end]
+        script = '''
+NS=test; TOKEN=test; signaled=0
+sudo() { "$@"; }
+systemctl() {
+  case "$1" in
+    show) if [ "$signaled" = 1 ]; then echo 202; else echo 101; fi ;;
+    kill)
+      [ "$*" = 'kill --kill-whom=main --signal=SIGUSR2 briqyardd' ] || return 9
+      signaled=1; echo handover ;;
+    *) echo unexpected-restart; return 8 ;;
+  esac
+}
+curl() { echo readiness >&2; }
+sleep() { echo unexpected-sleep; return 9; }
+''' + helper + '\ncontract_handover\n'
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.splitlines(), ["handover"])
+        self.assertEqual(result.stderr.splitlines(), ["readiness"])
+
+    def test_refused_handover_does_not_fall_back_to_restart(self):
+        shell = Path(__file__).with_name("native-ci-upgrade.sh").read_text()
+        start = shell.index("  contract_handover() {")
+        end = shell.index('\n  sudo cp /etc/briqyard/config.yaml', start)
+        helper = shell[start:end]
+        script = '''
+NS=test; TOKEN=test
+sudo() { "$@"; }
+systemctl() {
+  case "$1" in
+    show) echo 101 ;;
+    kill) echo refused; return 7 ;;
+    *) echo unexpected-restart; return 8 ;;
+  esac
+}
+curl() { echo unexpected-readiness; return 9; }
+''' + helper + '\ncontract_handover\n'
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.splitlines(), ["refused"])
 
     def test_profile_sends_omitted_default_and_matching_sizes_without_recipe_overrides(self):
         api = FakeAPI()

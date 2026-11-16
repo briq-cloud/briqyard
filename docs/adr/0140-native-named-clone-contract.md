@@ -10,6 +10,9 @@ Use the installed target binaries without rebuilding them. Temporarily enable
 the two named profiles with the target init digest, then restore the configuration
 even when the phase fails. These two daemon handovers are outside the measured
 upgrade interval; original VMM identities must survive them.
+Use SIGUSR2 and observe a new ready daemon for both transitions. A systemd restart
+sends SIGTERM, which intentionally suspends ordinary guests rather than handing
+their running VMMs to the replacement (ADR 0027).
 
 For each profile, create and seal a builder through the fleet. Clone with omitted,
 zero/default and matching resources; require inherited resources, active memory

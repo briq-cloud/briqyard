@@ -298,12 +298,28 @@ echo "== named clone contracts through the target fleet and daemon"
 # before the existing rollback test. No runtime binary is rebuilt or replaced.
 native_clone_contract() (
   set -e
+  contract_handover() {
+    local prior current
+    prior=$(sudo systemctl show -p MainPID --value briqyardd) || return 1
+    [[ "$prior" =~ ^[1-9][0-9]*$ ]] || return 1
+    sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd || return 1
+    for _ in $(seq 1 120); do
+      current=$(sudo systemctl show -p MainPID --value briqyardd) || return 1
+      if [[ "$current" =~ ^[1-9][0-9]*$ ]] && [ "$current" != "$prior" ] &&
+         curl -fsS --max-time 2 -H "Authorization: Bearer $TOKEN" \
+           "http://127.0.0.1:7420/v1/machines?namespace=$NS" >/dev/null; then
+        return 0
+      fi
+      sleep 1
+    done
+    return 1
+  }
   sudo cp /etc/briqyard/config.yaml "$WORK/contract-config.yaml"
   restore_contract_config() {
     local rc=$?
     trap - EXIT
     sudo cp "$WORK/contract-config.yaml" /etc/briqyard/config.yaml || rc=1
-    sudo systemctl restart briqyardd || rc=1
+    contract_handover || rc=1
     exit "$rc"
   }
   trap restore_contract_config EXIT
@@ -318,7 +334,7 @@ c['templates']['init_ready_init_sha256'] = sys.argv[1]
 c['templates']['service_ready'] = True
 p.write_text(yaml.safe_dump(c, sort_keys=False))
 PY
-  sudo systemctl restart briqyardd
+  contract_handover
   timeout 90 bash -c 'until curl -fsS http://127.0.0.1:7430/v1/hosts | jq -e '\''length == 1 and all(.state == "ready" and ((.named_memory_profiles | index("init-ready-v1")) != null) and ((.named_memory_profiles | index("service-ready-v1")) != null))'\'' >/dev/null; do sleep 1; done'
   python3 "$HARNESS/native-clone-contract.py" "$NS" "$SEED" "$SNAP"
 )
