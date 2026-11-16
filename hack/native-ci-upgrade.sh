@@ -166,6 +166,24 @@ for _ in $(seq 1 60); do [ -n "$(hostf .version)" ] && break; sleep 1; done
 echo "   host version: $(hostf .version), installed: $PREV_VER"
 check "the host runs the previous release" '[ "$(hostf .version)" = "$PREV_VER" ] && [[ "$PREV_VER" == "${PREV#v}"* ]]'
 
+# This fixture temporarily provisions an execution channel and restarts the source daemon.
+# Run it before creating the protected upgrade state and taking preservation baselines.
+echo "== standalone candidate authority against the published source daemon"
+mkdir -p native-logs
+SCOPED_DRIVER=${CARGO_TARGET_DIR:-$PWD/target}/release/scoped-execution-native
+# Safe JSON projections are deliberately runner-owned.
+# shellcheck disable=SC2024
+sudo python3 "$HARNESS/native-mixed-authority.py" before "$WORK/prev.sums" "$HEAD_DIR" "$SCOPED_DRIVER" "$PWD" > "$WORK/authority-before.json" || die "mixed authority inputs"
+install -m 0755 "$HEAD_DIR/briqyard-fleet-linux-x86_64" "$WORK/candidate-authority" || die "mixed authority executable"
+if ! CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}" bash "$HARNESS/scoped-execution-native.sh" standalone \
+    "$WORK/candidate-authority" "$WORK/authority-before.json" "$WORK/authority-exercised.json" \
+    > "$WORK/authority-output" 2>&1; then
+  die "mixed authority fixture failed (no mutation replay)"
+fi
+# shellcheck disable=SC2024
+sudo python3 "$HARNESS/native-mixed-authority.py" after "$WORK/authority-before.json" "$WORK/authority-exercised.json" \
+  > native-logs/mixed-authority-contract.json || die "mixed authority restoration"
+
 echo "== state: machines of every kind"
 IMG=alpine:3.20
 # Volume, sleep never: the shapes a production host holds.

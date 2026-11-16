@@ -70,7 +70,7 @@ jobs:
             case "$HEAD_REF" in chore/v*) run=true ;; esac
             git fetch --no-tags --depth=1 origin "$BASE_SHA"
             changed=$(git diff --name-only "$BASE_SHA" HEAD)
-            echo "$changed" | grep -qxE '\.github/workflows/native-upgrade\.yml|hack/native-ci-upgrade\.sh|hack/native-(clone|mixed|mixed-two-host)-contract\.py|hack/native-mixed-two-host\.sh|hack/native-two-host-probe\.sh|hack/test_native_mixed(_two_host)?_contract\.py|docs/adr/0107-.*' && run=true
+            echo "$changed" | grep -qxE '\.github/workflows/native-upgrade\.yml|hack/native-ci-upgrade\.sh|hack/native-(clone|mixed|mixed-two-host)-contract\.py|hack/native-mixed-authority\.py|hack/scoped-execution-native\.sh|hack/test_native_mixed_authority\.py|hack/native-mixed-two-host\.sh|hack/native-two-host-probe\.sh|hack/test_native_mixed(_two_host)?_contract\.py|docs/adr/0107-.*' && run=true
             # The workspace version, as a version PR changes it.
             ver() { python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["workspace"]["package"]["version"])'; }
             [ "$(git show "$BASE_SHA:Cargo.toml" | ver)" != "$(ver < Cargo.toml)" ] && run=true
@@ -147,12 +147,12 @@ jobs:
         if: steps.gate.outputs.run == 'true' && (inputs.candidate || inputs.candidate_run != '')
         run: (cd native-release && sha256sum nested-vmlinux-x86_64 nested-modules-x86_64.ext4 nested-versions-x86_64.json >> SHA256SUMS-x86_64)
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        if: steps.gate.outputs.run == 'true' && !inputs.candidate && inputs.candidate_run == ''
+        if: steps.gate.outputs.run == 'true'
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        if: steps.gate.outputs.run == 'true' && !inputs.candidate && inputs.candidate_run == ''
+        if: steps.gate.outputs.run == 'true'
       - name: Build the head
         if: steps.gate.outputs.run == 'true' && !inputs.candidate && inputs.candidate_run == ''
         run: |
@@ -169,6 +169,14 @@ jobs:
           curl -fsSL "https://github.com/briq-cloud/briqyard/releases/download/v0.1.17/$B" -o "$R/$B"
           echo "$BSHA  $R/$B" | sha256sum -c -
           (cd "$R" && sha256sum -- briq*-linux-* firecracker-checked-linux-*.tar.gz > SHA256SUMS-x86_64)
+      - name: Build the matching-source scoped fixture driver
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y pkg-config libssl-dev
+          # The runtime binaries still come exclusively from the selected artifact.
+          cmp crates/briqyard-testing/src/scoped_execution_native.rs .native-harness/crates/briqyard-testing/src/scoped_execution_native.rs
+          cargo build --release --locked -p briqyard-testing --features scoped-native --bin scoped-execution-native
       - name: Install what the host needs
         if: steps.gate.outputs.run == 'true'
         run: sudo apt-get install -y jq openssl postgresql-client openssh-server python3-yaml bc
@@ -222,6 +230,7 @@ jobs:
           name: native-upgrade-log
           path: |
             native-logs/upgrade.log
+            native-logs/mixed-authority-contract.json
             native-logs/mixed-contract.json
             native-logs/mixed-two-host-contract.json
             native-logs/seals.log

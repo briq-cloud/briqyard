@@ -92,6 +92,26 @@ retain the explicit nested qualification gap. The second fixture host remains de
 this is not multi-host nested or regional-authority qualification. Passing offline tests
 establish wire and failure handling only; native exact-artifact evidence is still required.
 
+### Standalone authority against the published source daemon
+
+Before creating the upgrade's protected machines, the job reuses the standalone
+part of `scoped-execution-native.sh`. The candidate authority executable comes
+from the selected checksum-verified release assets; the running daemon remains
+the published previous release. The matching-source testing driver exercises
+registration, ownership, discovery, protection, delegation and direct scoped
+execution, including duplicate-operation refusal. Its source must match the
+harness checkout; building this helper never replaces a runtime asset.
+
+A separate receipt binds the actual authority process executable to the candidate
+checksum and the actual daemon executable to the previous checksum. It records
+the testing driver's hash and source commit, then requires the original daemon
+configuration and binary after fixture cleanup. This fixture temporarily restarts
+the source daemon before the upgrade preservation baseline; those restarts are
+not upgrade continuity evidence. The full scoped suite retains renewable callback
+coverage. This standalone slice does not qualify callbacks, gateways above the
+runtime, or a multi-host authority. Offline checks qualify receipt predicates only;
+exact-artifact native runs remain necessary.
+
 ### Initial upgrade result
 
 First pair, v0.1.23 to this head (PR #152), identical on 24.04 and 26.04: 26 checks pass, 2 fail.

@@ -533,6 +533,13 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   against a real fleet: it drains only the dev fleet's host `local`, so it leaves real hosts
   alone (21 checks then: `/metrics` refused without a token over `https://`;
   `BRIQYARD_METRICS_TOKEN` when the fleet has a `metrics_token`).
+- `hack/native-mixed-authority.py`: the upgrade runner first exercises the selected
+  candidate standalone authority against the published source daemon, using the
+  existing scoped driver. The safe receipt verifies running executable digests,
+  driver/source binding and restored daemon configuration. This precedes protected
+  machines and the preservation baseline. It excludes renewable callbacks and
+  higher-level gateway traffic. Five offline regressions:
+  `python3 -m unittest discover -s hack -p test_native_mixed_authority.py`.
 - `hack/native-mixed-contract.py`: before upgrading the daemon, the disposable upgrade
   runner sends real requests through the candidate fleet to the previous daemon.
   It checks raw/default and explicit sizes (128 MiB to 16 GiB, 250 to 8000 CPU millis),
