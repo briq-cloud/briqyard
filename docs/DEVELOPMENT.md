@@ -577,8 +577,18 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   A pending admission reserves the remaining physical memory without booting guests.
   Another admission must refuse for capacity; cancellation must allow a new small
   admission. The advertised versioned memory policy supplies the per-VMM allowance.
-  This proves admission refusal/recovery behavior, not per-hold accounting: the API
-  exposes aggregate usage and the persisted ledger does not serialize live holds.
+  Independent holds also check aggregate accounting: a gateway/consumer pair reserves
+  128/256 MB, and another consumer reserves 512 MB, plus 256 MB per machine. Cancelling
+  the pair must preserve the other consumer's charge through a fresh heartbeat.
+  Dispatching that survivor must replace its hold exactly once; another fresh heartbeat
+  and deletion must return usage to baseline. Each observation records expected/actual
+  memory and whether a new heartbeat was observed. This checks externally visible charges,
+  not serialization of individual ledger holds.
+  Physical admission then fills the remaining accounted memory with one owned sleeping
+  VM, including its 256 MB overhead. The host must report `memory_pressure`, and a
+  create in its bound namespace must refuse specifically for that condition. Deleting
+  only the owned fill VM must clear the condition and permit another small create.
+  Existing upgrade controls remain running; this measures committed memory, not RSS.
   An attempted zero-desired warm pool refuses with 409 `capability_unsupported` while
   the host advertises no warm profile. The fixture leaves `templates.warm_pools` off,
   so supported warm claims remain unqualified. Cleanup audits the bounded persisted
@@ -594,9 +604,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   the timeout-only isolation predicate. This single-host check does not qualify
   multi-host authority, interruption or rollback. Exact-artifact runs additionally require
   direct and admitted nested guests to execute with `/dev/kvm`, virtualization flags and
-  read-only modules; PR-built default-only runs retain the nested gap (ADR 0107). Host memory/disk
-  pressure remains unqualified because the fixture retains running upgrade controls;
-  pending reservations do not produce a daemon pressure condition. Boot-pressure
+  read-only modules; PR-built default-only runs retain the nested gap (ADR 0107). Disk pressure remains unqualified because the fixture retains its protected volume. Boot-pressure
   spill also remains unqualified: this fixture has one host and no controlled boot
   queue or second region. These gaps remain explicit in the receipt.
   Offline transport, identity, ordering and uncertainty tests do not qualify a native host.
