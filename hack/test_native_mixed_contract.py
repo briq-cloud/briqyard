@@ -127,6 +127,37 @@ class FakeAPI:
 
 
 class MixedContractTests(unittest.TestCase):
+    def test_cleanup_refuses_changed_machine_identity(self):
+        for field, value in (("id", "m_other"), ("namespace", "foreign"),
+                             ("name", "unrelated"), ("metadata", {"qualification": "foreign"})):
+            with self.subTest(field=field):
+                api = FakeAPI()
+                runner = mixed.Mixed(api, "fixture")
+                machine = runner.case("owned", {"image": mixed.clone.IMAGE, "size": mixed.clone.SIZE},
+                                      [[201, None]], keep=True)
+                api.machines[machine][field] = value
+                with self.assertRaises(mixed.clone.ContractFailure):
+                    runner.cleanup()
+                self.assertIn(machine, api.machines)
+                self.assertFalse(any(m == "DELETE" and p == "/machines/" + machine for m, p, _ in api.calls))
+
+    def test_create_answer_cannot_authorize_unrelated_machine_deletion(self):
+        class WrongID(FakeAPI):
+            def call(self, method, path, body=None, headers=None):
+                status, value, result_headers = super().call(method, path, body, headers)
+                if method == "POST" and path == "/machines" and status == 201:
+                    value = {**value, "id": "m_other"}
+                return status, value, result_headers
+
+        api = WrongID()
+        runner = mixed.Mixed(api, "fixture")
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.case("wrong-id", {"image": mixed.clone.IMAGE, "size": mixed.clone.SIZE}, [[201, None]])
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.cleanup()
+        self.assertIn("m_other", api.machines)
+        self.assertFalse(any(m == "DELETE" and p == "/machines/m_other" for m, p, _ in api.calls))
+
     def test_matrix_wire_shapes_order_and_exact_cleanup(self):
         api = FakeAPI()
         runner = mixed.Mixed(api, "fixture")

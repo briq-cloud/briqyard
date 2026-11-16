@@ -109,6 +109,7 @@ class Mixed(clone.Contract):
         self.warm_paths = []
         self.cleanup_unconfirmed = False
         self.deletions = {}
+        self.machine_owners = {}
         self.gaps = ["multi-host placement and regional execution authority",
                      "interrupted activation, fleet rollback and drain ABA",
                      "nested guest execution (fixture has only the default class)",
@@ -135,6 +136,12 @@ class Mixed(clone.Contract):
         else:
             status, value, headers = self.create(label, fields)
         receipt["observed"] = summary(status, value, headers)
+        if status == 201:
+            machine_id = value.get("id", "")
+            clone.require(re.fullmatch(r"m_[A-Za-z0-9_-]+", machine_id))
+            identity = (receipt["request"]["json"]["tenant"], receipt["request"]["json"]["name"])
+            clone.require(machine_id not in self.machine_owners or self.machine_owners[machine_id] == identity)
+            self.machine_owners[machine_id] = identity
         self.check([status, value.get("code")] in expected)
         if status != 201:
             receipt["observed"]["outcome"] = "refused"
@@ -168,6 +175,21 @@ class Mixed(clone.Contract):
                 raise clone.ContractFailure()
             self.check(self.deletions[path] in expected)
             return self.deletions[path]
+        if path.startswith("/machines/") and path.count("/") == 2:
+            machine_id = path.rsplit("/", 1)[1]
+            identity = self.machine_owners.get(machine_id)
+            clone.require(identity is not None)
+            status, machine, _ = self.api.call("GET", path)
+            matches = (status == 200 and isinstance(machine, dict) and machine.get("id") == machine_id and
+                       (machine.get("namespace"), machine.get("name")) == identity and
+                       isinstance(machine.get("metadata"), dict) and
+                       machine["metadata"].get("qualification") == self.prefix)
+            self.receipts.append({"case": "cleanup-ownership", "request": {"method": "GET", "path": "/v1" + path},
+                                  "observed": {"status": status, "ownershipMatches": matches}})
+            if status == 404 and 404 in expected:
+                self.deletions[path] = 404
+                return 404
+            clone.require(matches)
         receipt = {"case": label, "request": {"method": "DELETE", "path": "/v1" + path},
                    "expected": {"status": expected}, "observed": {"outcome": "unknown"}}
         self.receipts.append(receipt)
@@ -244,6 +266,8 @@ class Mixed(clone.Contract):
                             machine.get("metadata", {}).get("qualification") == self.prefix):
                         machine_id = machine.get("id", "")
                         clone.require(re.fullmatch(r"m_[A-Za-z0-9_-]+", machine_id))
+                        clone.require(machine_id not in self.machine_owners or self.machine_owners[machine_id] == identity)
+                        self.machine_owners[machine_id] = identity
                         if machine_id not in self.created:
                             self.created.append(machine_id)
             except Exception:
