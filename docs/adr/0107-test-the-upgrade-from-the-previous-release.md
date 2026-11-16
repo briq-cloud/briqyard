@@ -39,6 +39,24 @@ Only wget exit 1 with a timeout or recognized neighbor-resolution denial passes.
 requests, refused connections, other errors and failed route controls still fail. The
 foreign-namespace probe keeps its timeout-only predicate.
 
+### Two-host mixed-version routing
+
+The upgrade job also boots the existing nested-host fixture before starting any VMs.
+During the fleet-first window both daemons run the same published previous release;
+the fleet and CLI run the candidate artifacts. Two explicit regions place separate
+namespaces on each host, and a second create without a region in each namespace checks its host binding.
+Every machine must reach running and answer an exec; candidate CLI reads and namespace lists must show the
+exact owned IDs on the expected host. Cleanup deletes only exact owned machines and
+leaves an unresolved create as an unconfirmed outcome, without replay.
+
+The receipt binds both installed and running daemon hashes to the previous release,
+and installed fleet/CLI and running fleet hashes to the candidate checksums. It checks
+those hashes and both configurations again after requests. The original one-host fleet
+configuration is restored before the existing daemon upgrade proceeds. Missing nested
+KVM fails the environment gate; it is not passing qualification. This subset does not
+exercise regional authority, controlled physical pressure, supported warm/nested machine
+classes, or interrupted activation and rollback.
+
 ### Initial upgrade result
 
 First pair, v0.1.23 to this head (PR #152), identical on 24.04 and 26.04: 26 checks pass, 2 fail.
