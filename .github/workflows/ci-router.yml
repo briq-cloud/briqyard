@@ -26,6 +26,23 @@ jobs:
     runs-on: [ci-router, large]
     timeout-minutes: 45
     steps:
+      # Router diagnostic (temporary): kernel clock sync state and chrony's view of it.
+      - name: Clock sync state (router diagnostic)
+        continue-on-error: true
+        run: |
+          set +e
+          python3 -c 'import ctypes,ctypes.util
+          class T(ctypes.Structure): _fields_=[("modes",ctypes.c_uint),("offset",ctypes.c_long),("freq",ctypes.c_long),("maxerror",ctypes.c_long),("esterror",ctypes.c_long),("status",ctypes.c_int),("pad",ctypes.c_byte*200)]
+          t=T(); r=ctypes.CDLL(ctypes.util.find_library("c")).adjtimex(ctypes.byref(t)); print("adjtimex state",r,"status",hex(t.status),"maxerror_us",t.maxerror)'
+          echo "uid=$(id -u) procs: $(cat /proc/[0-9]*/comm 2>/dev/null | grep -xE 'chronyd|ntpd|systemd-timesyn' | paste -sd' ')"
+          ps -eo pid,user,args 2>/dev/null | grep -i [c]hrony
+          chronyc -n tracking 2>&1 | head -12
+          chronyc -n sources 2>&1 | head -12
+          grep -vE '^\s*(#|$)' /etc/chrony/chrony.conf 2>&1 | head -12
+          ls /etc/chrony/sources.d 2>&1
+          ls /dev/ptp* 2>&1
+          timeout 5 bash -c 'exec 3<>/dev/udp/162.159.200.1/123' && echo "udp socket ok (no proof of reply)"
+          true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
