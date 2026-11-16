@@ -533,6 +533,19 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   against a real fleet: it drains only the dev fleet's host `local`, so it leaves real hosts
   alone (21 checks then: `/metrics` refused without a token over `https://`;
   `BRIQYARD_METRICS_TOKEN` when the fleet has a `metrics_token`).
+- `hack/native-mixed-contract.py`: before upgrading the daemon, the disposable upgrade
+  runner sends real requests through the candidate fleet to the previous daemon.
+  It checks raw/default and explicit sizes (128 MiB to 16 GiB, 250 to 8000 CPU millis),
+  CPU defaults, omitted/zero/2 GiB volumes, default/nested class handling, named init
+  inheritance when advertised, registered source discovery, and stop/start.
+  The 16 GiB request must refuse for capacity; an 8 GiB request may be accepted or
+  refuse for capacity on this small fixture. Acceptance does not qualify guest boot.
+  The unauthenticated fleet must refuse sandbox admission. Each create is sent once;
+  cleanup discovers only exact run-owned names and metadata, then deletes their IDs.
+  `native-logs/mixed-contract.json` retains bounded requests, response fields, binary
+  versions/hashes, configuration hashes and explicit gaps. It contains no configuration,
+  credentials, error text or guest output. This single-host check does not qualify
+  multi-host authority, gateway traffic, interruption, rollback or nested execution.
 - `hack/native-clone-contract.py`: the disposable native-upgrade runner checks named
   init/service clones through the installed fleet and daemon (ADR 0140). It covers
   omitted/default/matching size inheritance, mismatched and invalid resource refusals,

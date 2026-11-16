@@ -211,11 +211,16 @@ sleep 5
 BEFORE_START=$(hostf .started.at)
 SINCE=$(date '+%Y-%m-%d %H:%M:%S')
 # The fleet first, then the host (docs/OPERATIONS.md#upgrade).
+mkdir -p native-logs
+sudo python3 "$HARNESS/native-mixed-contract.py" --capture > "$WORK/mixed-source.json" || die "source identity capture"
 sudo install -m 0755 "$HEAD_DIR/briqyard-fleet-linux-x86_64" /usr/local/bin/briqyard-fleet
 sudo install -m 0755 "$HEAD_DIR/briqyard-linux-x86_64" /usr/local/bin/briqyard
 sudo systemctl restart briqyard-fleet
 for _ in $(seq 1 60); do curl -fsS $FLEET/v1/hosts 2>/dev/null | jq -e 'length == 1 and all(.state == "ready")' >/dev/null && break; sleep 1; done
 curl -fsS $FLEET/v1/hosts | jq -e 'all(.state == "ready")' >/dev/null || die "the head fleet did not see the host ready"
+sudo python3 "$HARNESS/native-mixed-contract.py" --capture > "$WORK/mixed-head.json" || die "mixed identity capture"
+python3 "$HARNESS/native-mixed-contract.py" "$NS" "$SEED" "$SNAP" \
+  "$WORK/mixed-source.json" "$WORK/mixed-head.json" native-logs/mixed-contract.json || die "mixed fleet contract failed"
 R=/var/lib/briqyard-fleet/release
 sudo rm -rf $R && sudo mkdir -p $R && sudo cp "$HEAD_DIR"/* $R/
 HEAD_VER=$(briqyard --version | awk '{print $2}')
