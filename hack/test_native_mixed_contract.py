@@ -202,6 +202,23 @@ class MixedContractTests(unittest.TestCase):
         self.assertFalse(any(m == "DELETE" and p.startswith("/machines/") for m, p, _ in api.calls))
         self.assertFalse(any(r["case"] == "holds-final-release" for r in runner.receipts))
 
+    def test_final_release_drains_poll_started_before_machine_deletion(self):
+        class StaleDeletionAPI(FakeAPI):
+            def call(self, method, path, body=None, headers=None):
+                deleting = method == "DELETE" and path.startswith("/machines/")
+                result = super().call(method, path, body, headers)
+                if deleting:
+                    # DELETE refresh settles the dispatched machine's 512+256
+                    # charge; one already-running poll can publish it again.
+                    self.seed_report_charges = [0, 768, 0]
+                return result
+        runner = mixed.Mixed(StaleDeletionAPI(), "fixture")
+        runner.hold_accounting()
+        observations = {r["case"]: r["observed"] for r in runner.receipts}
+        self.assertEqual(observations["holds-deletion-pending"]["memoryMb"], 4096)
+        self.assertEqual(observations["holds-deletion-drain"]["memoryMb"], 4864)
+        self.assertEqual(observations["holds-final-release"]["memoryMb"], 4096)
+
     def test_independent_hold_charges_release_and_dispatch_reflection(self):
         api = FakeAPI()
         runner = mixed.Mixed(api, "fixture")

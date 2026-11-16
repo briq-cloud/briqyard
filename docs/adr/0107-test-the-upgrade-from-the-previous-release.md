@@ -88,8 +88,8 @@ usage. A gateway and consumer hold 128 and 256 MB; a second consumer holds 512 M
 Every machine adds the advertised 256 MB overhead once. Cancelling the first admission
 must leave only the second charge, including after a fresh heartbeat. Dispatch consumes
 that second hold without double charging it; after another heartbeat and deletion, usage
-must return to baseline. Before taking the baseline, observe two successive new reports:
-the first can be a serial poll started before the earlier seed deletion, while the second
-started after it. Each report observation has a 35-second bound and records expected
+must return to baseline. Both the initial baseline and final release observe two
+successive new reports: the first can be a serial poll started before the preceding
+deletion, while the second started after it. Each report observation has a 35-second bound and records expected
 and actual memory. They never retry a mutation. This supplements capacity exhaustion;
 it does not expose individual holds or qualify real physical-memory pressure.

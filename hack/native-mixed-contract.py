@@ -572,6 +572,8 @@ class Mixed(clone.Contract):
         self.delete("holds-delete-dispatched", "/machines/" + machine, [200, 204])
         self.created.remove(machine)
         _, seen = self.accounting_usage("holds-deletion-pending")
+        # As at the initial baseline, drain the one possible pre-DELETE poll.
+        _, seen = self.accounting_usage("holds-deletion-drain", after=seen)
         self.accounting_usage("holds-final-release", baseline, after=seen)
 
     def reservation_pressure(self):
