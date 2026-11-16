@@ -41,6 +41,9 @@ jobs:
           grep -vE '^\s*(#|$)' /etc/chrony/chrony.conf 2>&1 | head -12
           ls /etc/chrony/sources.d 2>&1
           ls /dev/ptp* 2>&1
+          echo "HOME=$HOME user=$(id -un)"; ls -la /nonexistent 2>&1 | head -8; stat -c '%U %w %y' /nonexistent 2>&1
+          sudo cat /proc/1/environ 2>/dev/null | tr '\0' '\n' | grep -E '^HOME=' ; grep -E '^(nobody|runner)' /etc/passwd
+          sudo tr '\0' '\n' < /proc/$(pgrep -o -f Runner.Listener)/environ 2>/dev/null | grep -E '^HOME='
           timeout 5 bash -c 'exec 3<>/dev/udp/162.159.200.1/123' && echo "udp socket ok (no proof of reply)"
           true
       - uses: actions/checkout@v4
