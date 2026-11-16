@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.12 — 2026-11-15
+
+### Upgrade notes
+
+- Upgrade the fleet and operator CLI before using `prepared_upgrade_v1`, `require_ready`, or `stay_draining`. Omitted flags preserve the previous upgrade behavior.
+- The embedded installer prepares verified artifacts before admission withdrawal. Package provisioning and activation still follow withdrawal; existing long-lived transports can still be cut during handover. Custom bootstrap scripts retain their previous behavior.
+- The guest-init implementation and toolchain are unchanged. Confirm the candidate init checksum against 0.2.11 before reusing existing seeds.
+
+### Features
+
+- prepare host artifacts before admission withdrawal (#248) ([4f73f4fb](https://github.com/briq-cloud/briqyard/commit/4f73f4fb14330d1a45e6aa432ad68b0c963aed8e))
+- hold admission for external verification (#249) ([0e8f64ed](https://github.com/briq-cloud/briqyard/commit/0e8f64ede36da1a1081832166d148eb9521d7391))
+- record durable upgrade phase timings (#250) ([ec5787d1](https://github.com/briq-cloud/briqyard/commit/ec5787d1b81a9b72df0baff64c1f05d3ec968c8a))
+- report loaded configuration and process identity (#251) ([004281a4](https://github.com/briq-cloud/briqyard/commit/004281a42785d7654ee686d8e8a0d5c047f785c1))
+
+### Fixes
+
+- inherit named clone resources and preserve source profiles (#252) ([cc6baa99](https://github.com/briq-cloud/briqyard/commit/cc6baa997d62c6b5fa53960fd560f5cf6c4cc86a))
+
+### Maintenance
+
+- split standalone installer sources and tests (#247) ([8f2a7ff6](https://github.com/briq-cloud/briqyard/commit/8f2a7ff6fed7f65031419c7662d181dc6d344a92))
+
 ## 0.2.11 — 2026-11-15
 
 ### Upgrade notes
