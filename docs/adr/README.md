@@ -144,3 +144,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 - [0138: Observe the central fleet's loaded configuration](0138-fleet-loaded-configuration-observation.md)
 
 - [0139: Omitted create size reaches source inheritance](0139-omitted-create-size-inheritance.md)
+
+- [0140: Qualify named clones through the native fleet](0140-native-named-clone-contract.md)
