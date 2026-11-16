@@ -26,6 +26,23 @@ jobs:
     runs-on: [ci-router, large]
     timeout-minutes: 45
     steps:
+      # Router diagnostic (temporary): the kernel clock's NTP sync state, which briqyardd's qualified
+      # execution clock requires (adjtimex TIME_OK, no STA_UNSYNC). GitHub-hosted runners run chrony.
+      - name: Clock sync state (router diagnostic)
+        run: |
+          python3 - <<'PY'
+          import ctypes, ctypes.util
+          class T(ctypes.Structure):
+              _fields_ = [("modes", ctypes.c_uint), ("offset", ctypes.c_long), ("freq", ctypes.c_long), ("maxerror", ctypes.c_long), ("esterror", ctypes.c_long), ("status", ctypes.c_int), ("pad", ctypes.c_byte * 200)]
+          t = T()
+          r = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True).adjtimex(ctypes.byref(t))
+          print(f"adjtimex state={r} (0=TIME_OK 5=TIME_ERROR) status=0x{t.status:x} unsync={bool(t.status & 0x40)} maxerror_us={t.maxerror} esterror_us={t.esterror}")
+          PY
+          timedatectl show 2>&1 | grep -E 'NTP|Timezone' || true
+          for d in chronyd systemd-timesyncd ntpd; do command -v $d || ls /usr/lib/systemd/$d /lib/systemd/$d 2>/dev/null; done
+          systemctl is-active chrony chronyd systemd-timesyncd ntp 2>&1 | paste -sd' ' || true
+          cat /sys/devices/system/clocksource/clocksource0/current_clocksource 2>/dev/null || true
+          ls /dev/ptp* 2>/dev/null || echo "no /dev/ptp"
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
