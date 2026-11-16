@@ -116,6 +116,30 @@ class MixedContractTests(unittest.TestCase):
         self.assertEqual(sum(m == "POST" and p == "/machines" for m, p, _ in api.calls), 1)
         self.assertEqual(runner.receipts[0]["observed"], {"outcome": "unknown"})
 
+    def test_lost_create_after_list_cannot_claim_complete_cleanup(self):
+        class DelayedCreate(FakeAPI):
+            pending = None
+
+            def call(self, method, path, body=None):
+                if method == "POST" and path == "/machines":
+                    self.calls.append((method, path, copy.deepcopy(body)))
+                    self.pending = {**body, "id": "m_late", "namespace": body["tenant"]}
+                    raise TimeoutError()
+                if method == "GET" and path.startswith("/machines?") and self.pending:
+                    result = super().call(method, path, body)
+                    self.machines["m_late"] = self.pending
+                    self.pending = None
+                    return result
+                return super().call(method, path, body)
+
+        api = DelayedCreate()
+        runner = mixed.Mixed(api, "fixture")
+        with self.assertRaises(TimeoutError):
+            runner.case("late", {"image": mixed.clone.IMAGE, "size": mixed.clone.SIZE}, [[201, None]])
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.cleanup()
+        self.assertEqual(sum(m == "POST" and p == "/machines" for m, p, _ in api.calls), 1)
+
     def test_wrong_cpu_and_unexpected_success_fail_and_are_cleaned(self):
         for attr in ("wrong_size", "allow_invalid"):
             api = FakeAPI()

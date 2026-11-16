@@ -125,6 +125,11 @@ class Mixed(clone.Contract):
         self.api.deadline = clone.time.monotonic() + 60
         names = {r["request"]["json"]["name"] for r in self.receipts
                  if r["request"]["path"] == "/v1/machines"}
+        # A list snapshot cannot prove a timed-out create did not commit later.
+        unresolved = {r["request"]["json"]["name"] for r in self.receipts
+                      if r["request"]["path"] == "/v1/machines" and
+                      r["observed"].get("outcome") == "unknown"}
+        discovered = {}
         failed = False
         try:
             status, machines, _ = self.api.call("GET", "/machines?namespace=" + self.namespace)
@@ -134,6 +139,7 @@ class Mixed(clone.Contract):
                         machine.get("metadata", {}).get("qualification") == self.prefix):
                     machine_id = machine.get("id", "")
                     clone.require(re.fullmatch(r"m_[A-Za-z0-9_-]+", machine_id))
+                    discovered[machine_id] = machine["name"]
                     if machine_id not in self.created:
                         self.created.append(machine_id)
         except Exception:
@@ -142,9 +148,10 @@ class Mixed(clone.Contract):
             try:
                 status, _, _ = self.api.call("DELETE", f"/machines/{machine}")
                 clone.require(status in (200, 204, 404))
+                unresolved.discard(discovered.get(machine))
             except Exception:
                 failed = True
-        clone.require(not failed)
+        clone.require(not failed and not unresolved)
 
     def run_mixed(self, source, snapshot):
         status, hosts, _ = self.api.call("GET", "/hosts")
