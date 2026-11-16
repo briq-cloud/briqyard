@@ -58,7 +58,10 @@ configuration is restored before the existing daemon upgrade proceeds. Cleanup f
 observes the second host empty while static polling remains active. After removing
 its static entry and restarting the fleet, it retires that exact empty fixture host
 with one POST, then confirms the original one-host inventory. Removing a static
-entry alone does not forget its durable registry record. The fixture explicitly
+entry alone does not forget its durable registry record. A setup failure before any
+contract request can use this same empty-host cleanup without a contract receipt.
+The shell marks contract execution started before invoking it; thereafter a missing
+or unconfirmed cleanup receipt prevents retirement. The fixture explicitly
 preserves `tls: off` as a string when rewriting YAML: PyYAML reads an unquoted `off`
 as a boolean, while the fleet correctly refuses `tls: false`. Missing nested
 KVM fails the environment gate; it is not passing qualification. This subset does not

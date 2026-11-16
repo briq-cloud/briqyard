@@ -78,22 +78,25 @@ def captured_command(argv):
         process.stdout.close()
 
 
-def fixture_empty(api, wait=False):
+def fixture_empty(api, wait=False, allow_absent=False):
     deadline = time.monotonic() + 30
     while True:
         status, hosts, _ = api.call("GET", "/hosts")
-        clone.require(status == 200 and isinstance(hosts, list) and
-                      {host.get("id") for host in hosts} == {"local", "fc2"} and len(hosts) == 2)
+        clone.require(status == 200 and isinstance(hosts, list))
+        if allow_absent and len(hosts) == 1 and hosts[0].get("id") == "local":
+            return False
+        clone.require({host.get("id") for host in hosts} == {"local", "fc2"} and len(hosts) == 2)
         second = next(host for host in hosts if host["id"] == "fc2")
         if second.get("machines") == 0 and second.get("namespaces") == []:
-            return
+            return True
         clone.require(wait and time.monotonic() < deadline)
         time.sleep(1)
 
 
-def retire_fixture_host(api):
+def retire_fixture_host(api, allow_absent=False):
     # The caller has already removed fc2 from the static configuration and restarted.
-    fixture_empty(api)
+    if not fixture_empty(api, allow_absent=allow_absent):
+        return
     status, value, _ = api.call("POST", "/hosts/fc2/retire")
     clone.require(status == 200 and value.get("id") == "fc2" and value.get("state") == "retired")
 
@@ -177,18 +180,22 @@ class TwoHost(mixed.Mixed):
 
 
 def main():
-    if sys.argv[1:] in (["--fixture-empty"], ["--retire-fixture-host"]):
+    arguments = sys.argv[1:]
+    before_contract = arguments[-1:] == ["--before-contract"]
+    cleanup_mode = arguments[:-1] if before_contract else arguments
+    if cleanup_mode in (["--fixture-empty"], ["--retire-fixture-host"]):
         clone.require(os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted")
-        raw = Path("native-logs/mixed-two-host-contract.json").read_bytes()
-        clone.require(len(raw) <= 131072)
-        receipt = json.loads(raw)
-        clone.require(receipt.get("cleanup") == "complete" and receipt.get("inputsUnchanged") is True)
+        if not before_contract:
+            raw = Path("native-logs/mixed-two-host-contract.json").read_bytes()
+            clone.require(len(raw) <= 131072)
+            receipt = json.loads(raw)
+            clone.require(receipt.get("cleanup") == "complete" and receipt.get("inputsUnchanged") is True)
         api = clone.API("http://127.0.0.1:7430")
         api.deadline = time.monotonic() + 30
         if sys.argv[1] == "--fixture-empty":
-            fixture_empty(api, wait=True)
+            fixture_empty(api, wait=True, allow_absent=before_contract)
         else:
-            retire_fixture_host(api)
+            retire_fixture_host(api, allow_absent=before_contract)
         return
     if sys.argv[1:] == ["--capture-daemon"]:
         print(json.dumps(capture_daemon(), sort_keys=True))

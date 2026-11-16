@@ -126,6 +126,26 @@ class PairTests(unittest.TestCase):
                 two.retire_fixture_host(RetireAPI())
         self.assertEqual(1, sum(method == "POST" for method, _ in calls))
 
+    def test_pre_contract_cleanup_needs_no_receipt_but_started_contract_does(self):
+        class EmptyAPI:
+            def __init__(self, origin):
+                self.posts = 0
+            def call(self, method, path, body=None):
+                if method == "GET":
+                    return 200, [{"id": "local"}], {}
+                self.posts += 1
+                raise AssertionError("Absent fixture host must not be mutated")
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(two.os, "environ", {"RUNNER_ENVIRONMENT": "github-hosted"}), \
+                patch.object(two.clone, "API", EmptyAPI), \
+                patch.object(two.Path, "read_bytes", side_effect=FileNotFoundError()):
+            for mode in ("--fixture-empty", "--retire-fixture-host"):
+                with patch.object(two.sys, "argv", ["contract", mode, "--before-contract"]):
+                    two.main()
+                with patch.object(two.sys, "argv", ["contract", mode]):
+                    with self.assertRaises(FileNotFoundError):
+                        two.main()
+
     def test_capture_rejects_excess_output_and_invalid_json(self):
         for script in ("print('x'*16385)", "print('not json')", "raise SystemExit(1)"):
             with self.subTest(script=script), self.assertRaises(Exception):
