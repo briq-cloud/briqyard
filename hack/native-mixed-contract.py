@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bounded fleet-first checks on the disposable native upgrade fixture."""
 import hashlib
+import ipaddress
 import importlib.util
 import json
 import os
@@ -15,6 +16,8 @@ clone = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(clone)
 
 WIRE_SIZE = {**clone.SIZE, "cpu_millis": 1000}
+# Same immutable Python HTTP fixture used by qualify.sh.
+HTTP_IMAGE = "python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
 
 SIZES = [None, {}, {"vcpus": 0, "memory_mb": 0},
          {"vcpus": 1, "memory_mb": 2048},
@@ -102,13 +105,17 @@ class Mixed(clone.Contract):
         self.admissions = []
         self.gateway_owned = False
         self.audit = False
+        self.owned_namespaces = set()
+        self.warm_paths = []
+        self.cleanup_unconfirmed = False
+        self.deletions = {}
         self.gaps = ["multi-host placement and regional execution authority",
-                     "gateway and consumer traffic; sibling packet allow/deny",
                      "interrupted activation, fleet rollback and drain ABA",
                      "nested guest execution (fixture has only the default class)",
-                     "new namespace placement and pressure/spill scheduling",
-                     "direct in-memory hold accounting (not exposed by the API or registry)",
-                     "cross-namespace named-template refusal (cleanup is scoped to the existing namespace)"]
+                     "boot-pressure spill: one host, no second region or controlled boot queue",
+                     "host memory/disk-pressure conditions: fixture retains running upgrade controls",
+                     "supported warm claim: native-ci-upgrade.sh leaves templates.warm_pools disabled",
+                     "per-hold memory accounting: API exposes aggregate usage; registry does not serialize live holds"]
 
     def case(self, label, fields, expected, lifecycle=False, keep=False, inherited=None, admission=None):
         self.phase = label
@@ -132,7 +139,7 @@ class Mixed(clone.Contract):
         if status != 201:
             receipt["observed"]["outcome"] = "refused"
             return
-        self.check(headers.get("x-briqyard-host") == "local" and value.get("namespace") == self.namespace)
+        self.check(headers.get("x-briqyard-host") == "local" and value.get("namespace") == receipt["request"]["json"]["tenant"])
         if admission:
             self.check(value.get("host") == "local")
         size = inherited or fields["size"]
@@ -148,10 +155,28 @@ class Mixed(clone.Contract):
                 self.transition(receipt, value["id"], operation)
         if keep:
             return value["id"]
-        status, _, _ = self.api.call("DELETE", f"/machines/{value['id']}")
+        status = self.delete("delete-machine", f"/machines/{value['id']}", [200, 204])
         self.check(status in (200, 204))
         self.created.remove(value["id"])
         receipt["cleanup"] = "deleted"
+
+    def delete(self, label, path, expected):
+        if path in self.deletions:
+            # Observation is not authority to replay an uncertain mutation.
+            if self.deletions[path] is None:
+                self.cleanup_unconfirmed = True
+                raise clone.ContractFailure()
+            self.check(self.deletions[path] in expected)
+            return self.deletions[path]
+        receipt = {"case": label, "request": {"method": "DELETE", "path": "/v1" + path},
+                   "expected": {"status": expected}, "observed": {"outcome": "unknown"}}
+        self.receipts.append(receipt)
+        self.deletions[path] = None
+        status, value, headers = self.api.call("DELETE", path)
+        self.deletions[path] = status
+        receipt["observed"] = summary(status, value, headers)
+        self.check(status in expected)
+        return status
 
     def transition(self, receipt, machine, operation):
         item = {"request": {"method": "POST", "path": f"/v1/machines/{machine}/{operation}"},
@@ -185,6 +210,12 @@ class Mixed(clone.Contract):
                    intrinsic not in (None, "", "local") and
                    re.fullmatch(r"s_[A-Za-z0-9_-]+", snapshot.get("id", "")))
         fork = {"machine_id": source, "snapshot": snapshot["id"]}
+        foreign = self.prefix + "-foreign"
+        status, namespaces, _ = self.api.call("GET", "/namespaces")
+        self.check(status == 200 and isinstance(namespaces, list) and
+                   not any(n.get("id") == foreign for n in namespaces))
+        self.owned_namespaces.add(foreign)  # Before submission, even a refusal may pin it.
+        self.case("named-foreign", {"tenant": foreign, "fork": fork}, [[400, "invalid"]])
         for label, size in [("omitted", None), ("zero", {"vcpus": 0, "memory_mb": 0}),
                             ("matching", clone.SIZE)]:
             fields = {"fork": fork}
@@ -196,44 +227,57 @@ class Mixed(clone.Contract):
 
     def cleanup(self):
         self.api.deadline = clone.time.monotonic() + 60
-        names = {r["request"]["json"]["name"] for r in self.receipts
-                 if r["request"]["path"] == "/v1/machines"}
+        creates = [r for r in self.receipts if r["request"]["path"] == "/v1/machines"]
+        names = {(r["request"]["json"]["tenant"], r["request"]["json"]["name"]) for r in creates}
         # A list snapshot cannot prove a timed-out create did not commit later.
-        unresolved = {r["request"]["json"]["name"] for r in self.receipts
-                      if r["request"]["path"] == "/v1/machines" and
-                      r["observed"].get("outcome") == "unknown"}
-        discovered = {}
+        unresolved = {(r["request"]["json"]["tenant"], r["request"]["json"]["name"]) for r in creates
+                      if r["observed"].get("outcome") == "unknown"}
+        self.cleanup_unconfirmed = self.cleanup_unconfirmed or bool(unresolved)
         failed = False
-        try:
-            status, machines, _ = self.api.call("GET", "/machines?namespace=" + self.namespace)
-            clone.require(status == 200 and isinstance(machines, list))
-            for machine in machines:
-                if (machine.get("namespace") == self.namespace and machine.get("name") in names and
-                        machine.get("metadata", {}).get("qualification") == self.prefix):
-                    machine_id = machine.get("id", "")
-                    clone.require(re.fullmatch(r"m_[A-Za-z0-9_-]+", machine_id))
-                    discovered[machine_id] = machine["name"]
-                    if machine_id not in self.created:
-                        self.created.append(machine_id)
-        except Exception:
-            failed = True
+        for namespace in sorted({self.namespace} | self.owned_namespaces):
+            try:
+                status, machines, _ = self.api.call("GET", "/machines?namespace=" + namespace)
+                clone.require(status == 200 and isinstance(machines, list))
+                for machine in machines:
+                    identity = (machine.get("namespace"), machine.get("name"))
+                    if (identity[0] == namespace and identity in names and
+                            machine.get("metadata", {}).get("qualification") == self.prefix):
+                        machine_id = machine.get("id", "")
+                        clone.require(re.fullmatch(r"m_[A-Za-z0-9_-]+", machine_id))
+                        if machine_id not in self.created:
+                            self.created.append(machine_id)
+            except Exception:
+                failed = True
         for machine in reversed(self.created):
             try:
-                status, _, _ = self.api.call("DELETE", f"/machines/{machine}")
+                status = self.delete("cleanup-machine", f"/machines/{machine}", [200, 204, 404])
                 clone.require(status in (200, 204, 404))
-                unresolved.discard(discovered.get(machine))
             except Exception:
                 failed = True
         if self.gateway_owned:
             try:
-                status, _, _ = self.api.call("DELETE", f"/namespaces/{self.namespace}/gateway")
+                status = self.delete("cleanup-gateway", f"/namespaces/{self.namespace}/gateway", [200, 204])
                 clone.require(status in (200, 204))
             except Exception:
                 failed = True
         for path, dispatched in self.admissions:
             try:
-                status, _, _ = self.api.call("DELETE", path)
-                clone.require(status == (409 if dispatched else 204))
+                status = self.delete("cleanup-admission", path, [409 if dispatched else 204])
+            except Exception:
+                failed = True
+        for path in self.warm_paths:
+            try:
+                status = self.delete("cleanup-warm-pool", path, [200, 204, 404])
+            except Exception:
+                failed = True
+        for namespace in sorted(self.owned_namespaces):
+            try:
+                # Never delete a namespace with an unresolved submission or any remaining machine.
+                clone.require(not failed and not any(n == namespace for n, _ in unresolved))
+                status, machines, _ = self.api.call("GET", "/machines?namespace=" + namespace)
+                clone.require(status == 200 and machines == [])
+                status = self.delete("cleanup-namespace", "/namespaces/" + namespace, [200, 204])
+                clone.require(status in (200, 204))
             except Exception:
                 failed = True
         if self.audit:
@@ -281,6 +325,8 @@ class Mixed(clone.Contract):
                   [[409, "capability_unsupported"]])
         self.placement(hosts[0])
         self.seed_admission(source, snapshot, generation)
+        self.reservation_pressure()
+        self.warm_refusal(hosts[0], source, snapshot)
 
     def admission_call(self, label, path, body, expected):
         self.phase = label
@@ -322,7 +368,9 @@ class Mixed(clone.Contract):
                 self.gateway_owned = True
                 self.admissions[-1][1] = True  # A lost gateway dispatch may already have committed.
                 gateway_path = f"/namespaces/{self.namespace}/gateway?region=dev&placement_request_id=" + path.rsplit("/", 1)[1]
-                gateway_body = {"image": clone.IMAGE, "size": WIRE_SIZE, "port": 8080}
+                gateway_body = {"image": HTTP_IMAGE, "size": WIRE_SIZE, "port": 8080,
+                                "cmd": ["/bin/sh", "-ec", "mkdir -p /www; echo mixed-gateway > /www/index.html; exec python3 -m http.server 8080 -d /www"],
+                                "probes": {"readiness": {"tcp": 8080}}}
                 receipt = {"case": "gateway-dispatch", "request": {"method": "PUT", "path": "/v1" + gateway_path,
                            "json": gateway_body}, "expected": [[200, None]], "observed": {"outcome": "unknown"}}
                 self.receipts.append(receipt)
@@ -330,13 +378,103 @@ class Mixed(clone.Contract):
                 headers = {k.lower(): v for k, v in headers.items()}
                 receipt["observed"] = summary(status, value, headers)
                 self.check(status == 200 and headers.get("x-briqyard-host") == "local")
-                self.case("dispatch-matching", {"image": clone.IMAGE, "size": WIRE_SIZE,
-                          "region": "dev", "runtime_class": "default", "cmd": ["/bin/sleep", "3600"]},
-                          [[201, None]], admission=path.rsplit("/", 1)[1])
+                consumer = self.case("dispatch-matching", {"image": clone.IMAGE, "size": WIRE_SIZE,
+                          "region": "dev", "runtime_class": "default", "cmd": ["/bin/sleep", "3600"],
+                          "egress": {"mode": "via", "via": "gateway"}},
+                          [[201, None]], keep=True, admission=path.rsplit("/", 1)[1])
+                self.traffic(consumer, host)
             else:
-                status, _, _ = self.api.call("DELETE", path)
-                self.check(status == 204)
+                status = self.delete("cancel-admission", path, [204])
                 self.admission_call("cancelled-" + label, path, body, [[409, "conflict"]])
+
+    def exec_check(self, label, machine, cmd, expected_stdout, expected_code=0):
+        self.phase = label
+        receipt = {"case": label, "request": {"method": "POST", "path": f"/v1/machines/{machine}/exec",
+                   "json": {"cmd": cmd}}, "expected": {"exitCode": expected_code, "outputMatches": True},
+                   "observed": {"outcome": "unknown"}}
+        self.receipts.append(receipt)
+        status, value, _ = self.api.call("POST", f"/machines/{machine}/exec", {"cmd": cmd})
+        matches = value.get("stdout", "").strip() == expected_stdout
+        receipt["observed"] = {"status": status, "exitCode": value.get("exit_code") if type(value.get("exit_code")) is int else None, "outputMatches": matches}
+        self.check(status == 200 and value.get("exit_code") == expected_code and matches)
+
+    def traffic(self, consumer, host):
+        # qualify.sh's bounded wget control beside a timeout refusal; e2e-siblings.sh's
+        # via:gateway strict default beside explicit sibling opt-in. No external target.
+        self.running(consumer)
+        self.exec_check("gateway-traffic", consumer,
+                        ["wget", "-qO-", "-T", "4", "http://gateway.internal:8080/"], "mixed-gateway")
+        server = self.case("traffic-server", {"image": HTTP_IMAGE, "size": clone.SIZE, "sleep": "never",
+                           "cmd": ["/bin/sh", "-ec", "mkdir -p /www; echo mixed-sibling > /www/index.html; exec python3 -m http.server 8000 -d /www"],
+                           "probes": {"readiness": {"tcp": 8000}}}, [[201, None]], keep=True)
+        status, value, _ = self.api.call("POST", f"/machines/{server}/wait?timeout=120")
+        self.check(status == 200 and value.get("ready") is True)
+        address = str(ipaddress.IPv4Address(value["ip"]))
+        url = "http://" + address + ":8000/"
+        # Exact exit and timeout text prove a packet refusal beside the healthy control.
+        self.exec_check("strict-sibling-denied", consumer,
+                        ["/bin/sh", "-c", 'out=$(wget -qO- -T 4 "$1" 2>&1); rc=$?; [ "$rc" = 1 ] && case "$out" in *"timed out"*) echo denied;; *) exit 1;; esac', "sh", url], "denied")
+        if not host.get("egress_siblings_v1"):
+            self.gaps.append("sibling opt-in traffic: previous daemon does not advertise egress_siblings_v1")
+            return
+        sibling = self.case("traffic-sibling", {"image": clone.IMAGE, "size": clone.SIZE,
+                            "sleep": "never", "cmd": ["/bin/sleep", "3600"],
+                            "egress": {"mode": "via", "via": "gateway", "siblings": True}},
+                            [[201, None]], keep=True)
+        self.running(sibling)
+        self.exec_check("sibling-allowed", sibling, ["wget", "-qO-", "-T", "4", url], "mixed-sibling")
+        self.exec_check("sibling-gateway-traffic", sibling,
+                        ["wget", "-qO-", "-T", "4", "http://gateway.internal:8080/"], "mixed-gateway")
+        foreign = self.prefix + "-traffic-foreign"
+        status, namespaces, _ = self.api.call("GET", "/namespaces")
+        self.check(status == 200 and isinstance(namespaces, list) and
+                   not any(n.get("id") == foreign for n in namespaces))
+        self.owned_namespaces.add(foreign)
+        outsider = self.case("traffic-foreign", {"tenant": foreign, "image": HTTP_IMAGE,
+                             "size": clone.SIZE, "sleep": "never",
+                             "cmd": ["/bin/sh", "-ec", "mkdir -p /www; echo mixed-foreign > /www/index.html; exec python3 -m http.server 8000 -d /www"],
+                             "probes": {"readiness": {"tcp": 8000}}}, [[201, None]], keep=True)
+        status, value, _ = self.api.call("POST", f"/machines/{outsider}/wait?timeout=120")
+        self.check(status == 200 and value.get("ready") is True)
+        foreign_url = "http://" + str(ipaddress.IPv4Address(value["ip"])) + ":8000/"
+        self.exec_check("foreign-server-control", outsider,
+                        ["wget", "-qO-", "-T", "4", "http://127.0.0.1:8000/"], "mixed-foreign")
+        self.exec_check("foreign-sibling-denied", sibling,
+                        ["/bin/sh", "-c", 'out=$(wget -qO- -T 4 "$1" 2>&1); rc=$?; [ "$rc" = 1 ] && case "$out" in *"timed out"*) echo denied;; *) exit 1;; esac', "sh", foreign_url], "denied")
+
+    def reservation_pressure(self):
+        self.phase = "reservation-preconditions"
+        status, hosts, _ = self.api.call("GET", "/hosts")
+        self.check(status == 200 and len(hosts) == 1 and hosts[0].get("id") == "local")
+        host = hosts[0]
+        # The fixture pins physical reservation policy; do not infer it from a version.
+        policy = host.get("memory_policy")
+        self.check(policy == {"version": 1, "vmm_overhead_mb": 256})
+        free = host["capacity"]["memory_mb"] - host["used"]["memory_mb"]
+        self.check(512 <= free <= 12288)
+        paths = [f"/namespaces/{self.namespace}/admissions/{self.prefix}-pressure-{i}" for i in range(3)]
+        small = {"regions": ["dev"], "requirements": [{"role": "consumer", "size": {**WIRE_SIZE, "cpu_millis": 250}}]}
+        large = {"regions": ["dev"], "requirements": [{"role": "consumer", "size": {"vcpus": 1, "memory_mb": free - 256, "cpu_millis": 250}}]}
+        self.admissions.append([paths[0], False])
+        self.admission_call("reservation-fill", paths[0], large, [[200, None]])
+        self.admissions.append([paths[1], False])
+        self.admission_call("reservation-refused", paths[1], small, [[503, "capacity"]])
+        status = self.delete("reservation-cancel", paths[0], [204])
+        self.check(status == 204)
+        self.admissions.append([paths[2], False])
+        self.admission_call("reservation-released", paths[2], small, [[200, None]])
+        status = self.delete("reservation-recovered-cancel", paths[2], [204])
+        self.check(status == 204)
+
+    def warm_refusal(self, host, source, snapshot):
+        # Native upgrade fixture has no warm-pool configuration or budget. Never fill it.
+        self.check(not host.get("warm_pool_profiles"))
+        path = f"/namespaces/{self.namespace}/warm-pools/{self.prefix}-unsupported"
+        self.warm_paths.append(path)
+        self.admission_call("warm-profile-unsupported", path,
+                            {"source_machine": source, "snapshot": snapshot, "desired": 0},
+                            [[409, "capability_unsupported"]])
+        self.warm_paths.remove(path)
 
     def seed_admission(self, source, snapshot, generation):
         path = f"/namespaces/{self.namespace}/sandbox-admissions/{self.prefix}-seed"
@@ -355,7 +493,8 @@ class Mixed(clone.Contract):
 
 def summary(status, value, headers):
     """Only fixed response fields; never retain errors, guest output or configuration."""
-    clone.require(isinstance(value, dict))
+    clone.require(value is None or isinstance(value, dict))
+    value = value or {}
     code = value.get("code")
     result = {"status": status, "code": code if code in
               (None, "invalid", "capacity", "capability_unsupported", "conflict", "not_found") else "unexpected",
@@ -411,7 +550,7 @@ def main():
             receipt["cleanup"] = "complete"
         except Exception:
             success = False
-            receipt["cleanup"] = "failed"
+            receipt["cleanup"] = "unconfirmed" if runner.cleanup_unconfirmed else "failed"
         finally:
             signal.alarm(0)
             receipt.update(cases=runner.receipts, notExercised=runner.gaps, passed=success,

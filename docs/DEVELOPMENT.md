@@ -550,16 +550,35 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   size, volume, class and advertised-profile changes. An unavailable class/profile
   on this pinned namespace must refuse with capacity. An authenticated seed admission
   dispatches the existing sealed seed with its actual generation and registered host.
-  Cleanup audits the bounded persisted ledger for exact run-owned pending admissions.
-  The ledger does not serialize live capacity holds, so this does not directly measure
-  in-memory hold release. Each create and dispatch is sent once;
-  cleanup discovers only exact run-owned names and metadata, then deletes their IDs.
+  A sealed init template refuses a foreign namespace with 400 `invalid`. Cleanup owns
+  that unique namespace only after checking its absence, and deletes machines only by
+  exact namespace, name, qualification metadata and recorded ID. Gateway/consumer
+  dispatch then serves real local HTTP traffic: strict consumers reach their gateway
+  and time out on a healthy sibling; explicit sibling opt-in reaches that server and
+  the gateway, while a healthy foreign namespace server remains unreachable. Servers
+  use the immutable Python image from `qualify.sh` and readiness probes; wget uses
+  that suite's four-second timeout with a healthy control, with no external target.
+  A pending admission reserves the remaining physical memory without booting guests.
+  Another admission must refuse for capacity; cancellation must allow a new small
+  admission. The advertised versioned memory policy supplies the per-VMM allowance.
+  This proves admission refusal/recovery behavior, not per-hold accounting: the API
+  exposes aggregate usage and the persisted ledger does not serialize live holds.
+  An attempted zero-desired warm pool refuses with 409 `capability_unsupported` while
+  the host advertises no warm profile. The fixture leaves `templates.warm_pools` off,
+  so supported warm claims remain unqualified. Cleanup audits the bounded persisted
+  ledger for exact run-owned pending admissions. Every mutation records its intent
+  before its single submission; creates and dispatches are never replayed. A lost
+  create answer leaves cleanup `unconfirmed`, even if a discovered owned ID is deleted.
+  A new namespace is deleted only after its owned machines are gone, its list is empty,
+  and no submission in it remains uncertain.
   `native-logs/mixed-contract.json` retains bounded requests, response fields, binary
   versions/hashes, configuration hashes and explicit gaps. It contains no configuration,
   credentials, error text or guest output. This single-host check does not qualify
-  multi-host authority, gateway traffic, interruption, rollback or nested execution.
-  New namespace placement and pressure/spill remain separate cases. Cross-namespace
-  named-template refusal remains unexercised: cleanup owns only the existing namespace.
+  multi-host authority, interruption, rollback or nested execution. Host memory/disk
+  pressure remains unqualified because the fixture retains running upgrade controls;
+  pending reservations do not produce a daemon pressure condition. Boot-pressure
+  spill also remains unqualified: this fixture has one host and no controlled boot
+  queue or second region. These gaps remain explicit in the receipt.
   Offline transport, identity, ordering and uncertainty tests do not qualify a native host.
 - `hack/native-clone-contract.py`: the disposable native-upgrade runner checks named
   init/service clones through the installed fleet and daemon (ADR 0140). It covers

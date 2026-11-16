@@ -26,14 +26,25 @@ class FakeAPI:
         self.gateway = False
         self.bad_dispatch = False
         self.bad_decision = False
+        self.bad_network = False
+        self.ignore_reservations = False
 
     def call(self, method, path, body=None, headers=None):
         self.calls.append((method, path, copy.deepcopy(body)))
         if path == "/hosts":
             return 200, [{"id": "local", "state": "ready", "runtime_classes": [],
-                          "named_memory_profiles": ["init-ready-v1", "sandbox-ready-v1"] if self.profile else ["sandbox-ready-v1"]}], {}
+                          "named_memory_profiles": ["init-ready-v1", "sandbox-ready-v1"] if self.profile else ["sandbox-ready-v1"],
+                          "egress_siblings_v1": True, "warm_pool_profiles": [],
+                          "memory_policy": {"version": 1, "vmm_overhead_mb": 256},
+                          "capacity": {"memory_mb": 12288}, "used": {"memory_mb": 4096}}], {}
         if method == "GET" and path.startswith("/machines?"):
-            return 200, list(self.machines.values()), {}
+            return 200, [v for v in self.machines.values() if v["namespace"] == path.split("=")[1]], {}
+        if path == "/namespaces":
+            return 200, [{"id": "fixture", "host": "local"}], {}
+        if method == "DELETE" and path.startswith("/namespaces/") and path.count("/") == 2:
+            return 204, None, {}
+        if "/warm-pools/" in path:
+            return 409, {"code": "capability_unsupported"}, {}
         if method == "GET" and path.endswith("/snapshots"):
             return 200, [{"id": "s_seed", "source_host": "h_intrinsic"}], {}
         if "/admissions/" in path or "/sandbox-admissions/" in path:
@@ -49,6 +60,8 @@ class FakeAPI:
                 r = body["requirements"][-1]
                 if r.get("runtime_class") == "nested" or (r.get("memory_profile") and
                         r["memory_profile"] not in (["init-ready-v1", "sandbox-ready-v1"] if self.profile else ["sandbox-ready-v1"])):
+                    return 503, {"code": "capacity"}, {}
+                if not self.ignore_reservations and any("pressure-0" in p and not a.get("cancelled") for p, a in self.admissions.items()):
                     return 503, {"code": "capacity"}, {}
                 value = {"host": "other" if self.bad_decision else "local", "region": "dev", "binding": "existing", "mode": "cold"}
             else:
@@ -75,6 +88,8 @@ class FakeAPI:
             if body.get("fork", {}).get("machine_id") == "m_seed":
                 return 409, {"code": "capability_unsupported"}, {}
             named = "fork" in body
+            if named and body["tenant"] != "fixture" and not self.allow_invalid:
+                return 400, {"code": "invalid"}, {}
             invalid = (not named and not size.get("vcpus")) or body.get("runtime_class") == "nested" or body.get("volume", {}).get("size_gb") == 0
             if named and size.get("memory_mb") == 512:
                 invalid = True
@@ -83,7 +98,7 @@ class FakeAPI:
             if size.get("memory_mb") == 16384:
                 return 503, {"code": "capacity"}, {}
             value = {**copy.deepcopy(body), "id": f"m_{len(self.calls)}", "namespace": body["tenant"],
-                     "state": "running", "host": "local", "size": copy.deepcopy(mixed.clone.SIZE if named else size)}
+                     "state": "running", "ready": True, "ip": "10.64.0.2", "host": "local", "size": copy.deepcopy(mixed.clone.SIZE if named else size)}
             if "sandbox_seed" in body:
                 value["size"] = copy.deepcopy(size)
             if self.wrong_size:
@@ -95,6 +110,14 @@ class FakeAPI:
         if method == "POST" and path.endswith("/snapshots"):
             return 201, {"id": "s_named", "clone_profile": "init-ready-v1", "source_host": "h_intrinsic"}, {}
         machine = path.split("/")[2]
+        if method == "POST" and path.endswith("/exec"):
+            cmd = body["cmd"]
+            out = ""
+            if "wget" == cmd[0]:
+                out = "mixed-gateway" if "gateway.internal" in cmd[-1] else ("mixed-foreign" if "127.0.0.1" in cmd[-1] else "mixed-sibling")
+            else:
+                out = "wrong" if self.bad_network else "denied"
+            return 200, {"stdout": out, "exit_code": 0}, {}
         if method == "DELETE":
             if self.failed_delete:
                 raise TimeoutError()
@@ -126,7 +149,7 @@ class MixedContractTests(unittest.TestCase):
         self.assertNotIn("volume", direct[3])
         self.assertEqual([b["volume"] for b in requests if "volume" in b],
                          [{"size_gb": 0, "mount": "/data"}, {"size_gb": 2, "mount": "/data"}])
-        named = [b for b in requests if "fork" in b and b["fork"]["machine_id"] != "m_seed"]
+        named = [b for b in requests if "fork" in b and b["fork"]["machine_id"] != "m_seed" and b["tenant"] == "fixture"]
         self.assertNotIn("size", named[0])
         self.assertEqual(named[1]["size"], {"vcpus": 0, "memory_mb": 0})
         self.assertEqual(named[2]["size"], {"vcpus": 1, "memory_mb": 256})
@@ -149,7 +172,9 @@ class MixedContractTests(unittest.TestCase):
             runner.case("lost", {"image": mixed.clone.IMAGE, "size": mixed.clone.SIZE}, [[201, None]])
         # Metadata alone is insufficient to claim an unrelated name.
         api.machines["m_other"]["metadata"] = {"qualification": runner.prefix}
-        runner.cleanup()
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.cleanup()
+        self.assertTrue(runner.cleanup_unconfirmed)
         self.assertEqual(set(api.machines), {"m_seed", "m_other"})
         self.assertEqual(sum(m == "POST" and p == "/machines" for m, p, _ in api.calls), 1)
         self.assertEqual(runner.receipts[0]["observed"], {"outcome": "unknown"})
@@ -198,6 +223,8 @@ class MixedContractTests(unittest.TestCase):
         with self.assertRaises(mixed.clone.ContractFailure):
             runner.cleanup()
         self.assertEqual(sum(m == "POST" and p == "/machines" for m, p, _ in api.calls), 1)
+        deletes = [p for m, p, _ in api.calls if m == "DELETE"]
+        self.assertEqual(len(deletes), len(set(deletes)))
 
     def test_missing_profile_is_explicitly_not_exercised(self):
         api = FakeAPI()
@@ -207,6 +234,62 @@ class MixedContractTests(unittest.TestCase):
         self.assertTrue(any("does not advertise" in gap for gap in runner.gaps))
         self.assertFalse(any(c[2] and "template_build" in c[2] for c in api.calls))
         runner.cleanup()
+
+    def test_foreign_namespace_exact_cleanup_preserves_unrelated_names(self):
+        api = FakeAPI()
+        runner = mixed.Mixed(api, "fixture")
+        foreign = runner.prefix + "-foreign"
+        api.machines["m_unrelated_foreign"] = {"id": "m_unrelated_foreign", "namespace": foreign,
+                "name": "unrelated", "metadata": {"qualification": runner.prefix}}
+        runner.named()
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.cleanup()
+        self.assertIn("m_unrelated_foreign", api.machines)
+        self.assertNotIn(("DELETE", "/namespaces/" + foreign, None), api.calls)
+        self.assertTrue(any(b and b.get("tenant") == foreign for m, p, b in api.calls if p == "/machines"))
+
+    def test_foreign_lost_answer_deletes_exact_id_but_remains_unconfirmed(self):
+        api = FakeAPI()
+        runner = mixed.Mixed(api, "fixture")
+        foreign = runner.prefix + "-foreign"
+        runner.owned_namespaces.add(foreign)
+        api.lost = True
+        with self.assertRaises(TimeoutError):
+            runner.case("foreign-lost", {"tenant": foreign, "image": mixed.clone.IMAGE,
+                        "size": mixed.clone.SIZE}, [[201, None]])
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.cleanup()
+        self.assertTrue(runner.cleanup_unconfirmed)
+        self.assertEqual(set(api.machines), {"m_seed", "m_other"})
+        self.assertFalse(any(m == "DELETE" and p == "/namespaces/" + foreign for m, p, _ in api.calls))
+        self.assertEqual(sum(m == "POST" and p == "/machines" for m, p, _ in api.calls), 1)
+
+    def test_mutation_intents_exist_before_each_single_submission(self):
+        class IntentAPI(FakeAPI):
+            runner = None
+
+            def call(self, method, path, body=None, headers=None):
+                if method in ("PUT", "DELETE") or (method == "POST" and not "/wait?" in path and not path.endswith(("/start", "/stop"))):
+                    self.runner.check(any(r["request"]["method"] == method and
+                        r["request"]["path"] == "/v1" + path and
+                        r["observed"].get("outcome") == "unknown" for r in self.runner.receipts))
+                return super().call(method, path, body, headers)
+
+        api = IntentAPI()
+        runner = mixed.Mixed(api, "fixture")
+        api.runner = runner
+        runner.run_mixed("m_seed", "s_seed")
+        runner.cleanup()
+
+    def test_reservations_must_refuse_and_network_refusal_must_have_control(self):
+        for attr in ("bad_network", "ignore_reservations"):
+            api = FakeAPI()
+            setattr(api, attr, True)
+            runner = mixed.Mixed(api, "fixture")
+            with self.assertRaises(mixed.clone.ContractFailure):
+                runner.run_mixed("m_seed", "s_seed")
+            runner.cleanup()
+            self.assertEqual(set(api.machines), {"m_seed", "m_other"})
 
     def test_response_receipt_drops_untrusted_text(self):
         result = mixed.summary(400, {"code": "token secret", "error": "secret", "env": {"KEY": "secret"},
@@ -235,7 +318,7 @@ class MixedContractTests(unittest.TestCase):
                     mixed.main()
             receipt = json.loads((root / "receipt").read_text())
             self.assertFalse(receipt["passed"])
-            self.assertEqual(receipt["cleanup"], "complete")
+            self.assertEqual(receipt["cleanup"], "unconfirmed")
             self.assertEqual(receipt["source"], identity)
             self.assertEqual(receipt["cases"][0]["observed"], {"outcome": "unknown"})
             self.assertTrue(receipt["notExercised"])
