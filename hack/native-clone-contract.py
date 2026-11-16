@@ -31,10 +31,12 @@ class API:
         self.last_status = None
         self.last_code = None
 
-    def call(self, method, path, body=None):
+    def call(self, method, path, body=None, headers=None):
         request = Request(self.origin + "/v1" + path, method=method,
                           data=None if body is None else json.dumps(body).encode(),
-                          headers={"Content-Type": "application/json"})
+                          headers={"Content-Type": "application/json",
+                                   **({"Authorization": "Bearer " + os.environ["BRIQYARD_TOKEN"]}
+                                      if os.environ.get("BRIQYARD_TOKEN") else {}), **(headers or {})})
         remaining = self.deadline - time.monotonic()
         require(remaining > 0)
         try:
