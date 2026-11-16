@@ -46,7 +46,13 @@ class API:
         with response:
             raw = response.read(1024 * 1024 + 1)
             require(len(raw) <= 1024 * 1024)
-            value = json.loads(raw) if raw else None
+            try:
+                value = json.loads(raw) if raw else None
+            except (ValueError, UnicodeDecodeError):
+                # Axum Json extraction rejects malformed schemas as plain-text 422.
+                # Keep only status; never retain the body or relax other responses.
+                require(response.status == 422)
+                value = None
             self.last_status = response.status
             self.last_code = value.get("code") if isinstance(value, dict) else None
             return response.status, value, dict(response.headers)

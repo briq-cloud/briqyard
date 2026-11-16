@@ -368,26 +368,42 @@ class Mixed(clone.Contract):
         self.receipts.append(receipt)
         status, value, headers = self.api.call("PUT", path, body)
         receipt["observed"] = summary(status, value, headers)
-        self.check([status, value.get("code")] in expected)
+        self.check([status, value.get("code") if isinstance(value, dict) else None] in expected)
         return value
 
     def placement(self, host):
         base = {"role": "consumer", "size": WIRE_SIZE, "runtime_class": "default"}
         gateway = {**base, "role": "gateway"}
         # Each axis changes from a valid baseline, never a Cartesian product.
-        cases = [("baseline", {}, [[200, None]]),
-                 ("size", {"size": {**WIRE_SIZE, "memory_mb": 512}}, [[200, None]]),
-                 ("volume", {"volume_gb": 2}, [[200, None]]),
-                 ("nested", {"runtime_class": "nested"}, [[503, "capacity"]])]
+        cases = [("baseline", {}, [[200, None]])]
+        # Requirement.size is required (Json extraction: 422), unlike create's default.
+        # Size.check rejects zero values after extraction (400 invalid).
+        for index, size in enumerate(SIZES):
+            expected = [[422, None]] if index < 2 else [[400, "invalid"]] if index == 2 else [[200, None]]
+            if size and size.get("memory_mb", 0) >= 8192:
+                # Two requirements plus the running controls share the 12 GiB fixture.
+                expected = [[503, "capacity"]] if size["memory_mb"] == 16384 else [[200, None], [503, "capacity"]]
+            cases.append(("size-" + str(index), {"size": size}, expected))
+        # Zero is a valid admission disk estimate; daemon create separately refuses it.
+        cases.extend([("volume-omitted", {}, [[200, None]]),
+                      ("volume-zero", {"volume_gb": 0}, [[200, None]]),
+                      ("volume-two", {"volume_gb": 2}, [[200, None]]),
+                      ("class-omitted", {"runtime_class": None}, [[200, None]]),
+                      ("class-default", {"runtime_class": "default"}, [[200, None]]),
+                      ("class-nested", {"runtime_class": "nested"}, [[503, "capacity"]])])
         for profile in ("init-ready-v1", "sandbox-ready-v1", "service-ready-v1"):
             expected = [[200, None]] if profile in host.get("named_memory_profiles", []) else [[503, "capacity"]]
             cases.append(("profile-" + profile, {"memory_profile": profile}, expected))
         for label, extra, expected in cases:
             path = f"/namespaces/{self.namespace}/admissions/{self.prefix}-{label}"
             self.admissions.append([path, False])  # Own the identity before the one-shot PUT.
-            body = {"regions": ["dev"], "requirements": [gateway, {**base, **extra}]}
+            consumer = {**base, **extra}
+            for key in ("size", "runtime_class"):
+                if consumer.get(key) is None:
+                    consumer.pop(key)
+            body = {"regions": ["dev"], "requirements": [gateway, consumer]}
             value = self.admission_call("admit-" + label, path, body, expected)
-            if expected != [[200, None]]:
+            if self.receipts[-1]["observed"]["status"] != 200:
                 continue
             self.check(value.get("host") == "local" and value.get("region") == "dev" and
                        value.get("binding") == "existing" and value.get("mode") == "cold")

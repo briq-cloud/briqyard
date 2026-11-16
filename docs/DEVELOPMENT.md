@@ -547,7 +547,13 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   Both APIs authenticate before the source baseline is captured. Placement admission
   checks gateway/consumer requirements on the existing namespace, matching gateway
   and consumer dispatch, conflicting bodies/regions, cancellation, and individual
-  size, volume, class and advertised-profile changes. An unavailable class/profile
+  every size above, omitted/zero/2 GiB volume, omitted/default/nested class and
+  advertised-profile changes, each from a valid baseline. Admission requires a size:
+  omitted/empty sizes return 422 (including plain-text extractor responses); zero
+  sizes return 400 `invalid`. Its zero-volume estimate is accepted; direct create
+  still refuses a zero-volume disk. Paired admission includes the gateway's memory
+  and per-VMM overhead; 16 GiB must refuse, while 8 GiB may refuse for capacity.
+  An unavailable class/profile
   on this pinned namespace must refuse with capacity. An authenticated seed admission
   dispatches the existing sealed seed with its actual generation and registered host.
   A sealed init template refuses a foreign namespace with 400 `invalid`. Cleanup owns

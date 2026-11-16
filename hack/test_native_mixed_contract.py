@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 import json
+import io
 import os
 import subprocess
 from pathlib import Path
@@ -30,6 +31,7 @@ class FakeAPI:
         self.bad_decision = False
         self.bad_network = False
         self.ignore_reservations = False
+        self.allow_bad_admission = False
 
     def call(self, method, path, body=None, headers=None):
         self.calls.append((method, path, copy.deepcopy(body)))
@@ -60,6 +62,16 @@ class FakeAPI:
                 return 409, {"code": "conflict"}, {}
             if "requirements" in body:
                 r = body["requirements"][-1]
+                size = r.get("size", {})
+                if not self.allow_bad_admission:
+                    if not all(k in size for k in ("vcpus", "memory_mb")):
+                        return 422, None, {}
+                    cpu, memory = size["vcpus"], size["memory_mb"]
+                    if not (1 <= cpu <= 32 and 128 <= memory <= 262144 and
+                            1 <= size.get("cpu_millis", cpu * 1000) <= cpu * 1000):
+                        return 400, {"code": "invalid"}, {}
+                    if sum(r["size"]["memory_mb"] + 256 for r in body["requirements"]) + 4096 > 12288:
+                        return 503, {"code": "capacity"}, {}
                 if r.get("runtime_class") == "nested" or (r.get("memory_profile") and
                         r["memory_profile"] not in (["init-ready-v1", "sandbox-ready-v1"] if self.profile else ["sandbox-ready-v1"])):
                     return 503, {"code": "capacity"}, {}
@@ -229,6 +241,83 @@ class MixedContractTests(unittest.TestCase):
         self.assertLess(shell.index('native-mixed-contract.py" "$NS"'), shell.index('out=$(fleet host upgrade'))
         workflow = Path(__file__).parents[1].joinpath(".github/workflows/native-upgrade.yml").read_text()
         self.assertIn("native-logs/mixed-contract.json", workflow)
+
+    def test_placement_resource_axes_and_exact_refusals(self):
+        api = FakeAPI()
+        runner = mixed.Mixed(api, "fixture")
+        runner.placement(api.call("GET", "/hosts")[1][0])
+        runner.cleanup()
+        receipts = {r["case"]: r for r in runner.receipts}
+        for index, size in enumerate(mixed.SIZES):
+            receipt = receipts["admit-size-" + str(index)]
+            gateway, consumer = receipt["request"]["json"]["requirements"]
+            self.assertEqual(gateway, {"role": "gateway", "size": mixed.WIRE_SIZE, "runtime_class": "default"})
+            if size is None:
+                self.assertNotIn("size", consumer)
+            else:
+                self.assertEqual(consumer["size"], size)
+            self.assertNotIn("volume_gb", consumer)
+            self.assertEqual(consumer["runtime_class"], "default")
+        self.assertEqual([receipts["admit-size-" + str(i)]["observed"]["status"] for i in range(3)], [422, 422, 400])
+        self.assertEqual(receipts["admit-size-10"]["observed"]["status"], 503)
+        for label, fields in (("volume-omitted", {}), ("volume-zero", {"volume_gb": 0}),
+                              ("volume-two", {"volume_gb": 2}), ("class-omitted", {}),
+                              ("class-default", {"runtime_class": "default"}),
+                              ("class-nested", {"runtime_class": "nested"})):
+            consumer = receipts["admit-" + label]["request"]["json"]["requirements"][1]
+            self.assertEqual(consumer["size"], mixed.WIRE_SIZE)
+            key = "volume_gb" if label.startswith("volume") else "runtime_class"
+            self.assertEqual({key: consumer[key]} if key in consumer else {}, fields)
+        self.assertEqual(set(api.machines), {"m_seed", "m_other"})
+
+    def test_bad_admission_size_acceptance_is_detected_and_cancelled(self):
+        for size, expected in ((None, [[422, None]]), ({}, [[422, None]]),
+                               ({"vcpus": 0, "memory_mb": 0}, [[400, "invalid"]]),
+                               (mixed.SIZES[-1], [[503, "capacity"]])):
+            with self.subTest(size=size):
+                api = FakeAPI()
+                api.allow_bad_admission = True
+                runner = mixed.Mixed(api, "fixture")
+                path = "/namespaces/fixture/admissions/" + runner.prefix + "-bad"
+                runner.admissions.append([path, False])
+                consumer = {"role": "consumer"}
+                if size is not None:
+                    consumer["size"] = size
+                with self.assertRaises(mixed.clone.ContractFailure):
+                    runner.admission_call("bad-size", path, {"regions": ["dev"], "requirements": [consumer]}, expected)
+                runner.cleanup()
+                self.assertTrue(api.admissions[path]["cancelled"])
+                self.assertEqual(sum(m == "PUT" and p == path for m, p, _ in api.calls), 1)
+
+    def test_admission_schema_and_semantic_refusals_are_not_interchangeable(self):
+        for status, value, expected in ((400, {"code": "invalid"}, [[422, None]]),
+                                        (422, None, [[400, "invalid"]]),
+                                        (422, {"code": "invalid"}, [[422, None]]),
+                                        (200, {}, [[422, None]])):
+            with self.subTest(status=status, value=value):
+                class Answer:
+                    def call(self, *args):
+                        return status, value, {}
+
+                runner = mixed.Mixed(Answer(), "fixture")
+                with self.assertRaises(mixed.clone.ContractFailure):
+                    runner.admission_call("schema", "/admissions/fixture", {}, expected)
+
+    def test_schema_transport_retains_status_without_error_text(self):
+        for status, raw in ((422, b"private extractor detail"), (422, b'{"code":"invalid"}'),
+                            (400, b"private extractor detail"), (200, b"private extractor detail")):
+            with self.subTest(status=status, raw=raw):
+                response = io.BytesIO(raw)
+                response.status, response.headers = status, {}
+                api = mixed.clone.API("http://fixture.invalid")
+                with patch.object(mixed.clone, "urlopen", return_value=response):
+                    if status != 422:
+                        with self.assertRaises(mixed.clone.ContractFailure):
+                            api.call("PUT", "/admissions/fixture", {})
+                    else:
+                        actual, value, _ = api.call("PUT", "/admissions/fixture", {})
+                        self.assertEqual(actual, 422)
+                        self.assertNotIn("private", str(mixed.summary(actual, value, {})))
 
     def test_lost_create_is_unknown_discovered_and_never_replayed(self):
         api = FakeAPI()
