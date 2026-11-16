@@ -33,15 +33,26 @@ class FakeAPI:
         self.bad_route = False
         self.ignore_reservations = False
         self.allow_bad_admission = False
+        self.bad_hold_overhead = False
+        self.cancel_all_holds = False
+        self.double_count_dispatch = False
 
     def call(self, method, path, body=None, headers=None):
         self.calls.append((method, path, copy.deepcopy(body)))
         if path == "/hosts":
+            overhead = 0 if self.bad_hold_overhead else 256
+            held = sum(r["size"]["memory_mb"] + overhead
+                       for p, a in self.admissions.items() if "-account-" in p and not a.get("cancelled")
+                       and (not a.get("dispatched") or self.double_count_dispatch)
+                       for r in a["body"]["requirements"])
+            actual = sum(m["size"]["memory_mb"] + 256 for m in self.machines.values()
+                         if m.get("name", "").endswith("-holds-dispatch"))
             return 200, [{"id": "local", "state": "ready", "runtime_classes": [],
                           "named_memory_profiles": ["init-ready-v1", "sandbox-ready-v1"] if self.profile else ["sandbox-ready-v1"],
                           "egress_siblings_v1": True, "warm_pool_profiles": [],
                           "memory_policy": {"version": 1, "vmm_overhead_mb": 256},
-                          "capacity": {"memory_mb": 12288}, "used": {"memory_mb": 4096}}], {}
+                          "last_seen": str(len(self.calls)),
+                          "capacity": {"memory_mb": 12288}, "used": {"memory_mb": 4096 + held + actual}}], {}
         if method == "GET" and path.startswith("/machines?"):
             return 200, [v for v in self.machines.values() if v["namespace"] == path.split("=")[1]], {}
         if path == "/namespaces":
@@ -56,6 +67,9 @@ class FakeAPI:
             if method == "DELETE":
                 if self.admissions.get(path, {}).get("dispatched"):
                     return 409, {"code": "conflict"}, {}
+                if self.cancel_all_holds and "-account-" in path:
+                    for item in self.admissions.values():
+                        item["cancelled"] = True
                 self.admissions[path] = {"cancelled": True}
                 return 204, None, {}
             old = self.admissions.get(path)
@@ -144,6 +158,25 @@ class FakeAPI:
 
 
 class MixedContractTests(unittest.TestCase):
+    def test_independent_hold_charges_release_and_dispatch_reflection(self):
+        api = FakeAPI()
+        runner = mixed.Mixed(api, "fixture")
+        runner.hold_accounting()
+        self.assertEqual(runner.receipts[-1]["observed"]["memoryMb"], 4096)
+        self.assertTrue(all(a.get("cancelled") or a.get("dispatched") for a in api.admissions.values()))
+        self.assertEqual(sum(m == "POST" and p == "/machines" for m, p, _ in api.calls), 1)
+        self.assertFalse(runner.created)
+
+    def test_hold_accounting_detects_wrong_overhead_cross_cancel_and_double_charge(self):
+        for fault in ("bad_hold_overhead", "cancel_all_holds", "double_count_dispatch"):
+            with self.subTest(fault=fault):
+                api = FakeAPI()
+                setattr(api, fault, True)
+                runner = mixed.Mixed(api, "fixture")
+                with self.assertRaises(mixed.clone.ContractFailure):
+                    runner.hold_accounting()
+                runner.cleanup()
+
     def test_strict_denial_accepts_neighbor_drop_but_not_other_failures(self):
         cases = [("wget: download timed out", 1, "denied", 0),
                  ("wget: Host is unreachable", 1, "denied", 0),

@@ -567,8 +567,13 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   A pending admission reserves the remaining physical memory without booting guests.
   Another admission must refuse for capacity; cancellation must allow a new small
   admission. The advertised versioned memory policy supplies the per-VMM allowance.
-  This proves admission refusal/recovery behavior, not per-hold accounting: the API
-  exposes aggregate usage and the persisted ledger does not serialize live holds.
+  Independent holds also check aggregate accounting: a gateway/consumer pair reserves
+  128/256 MB, and another consumer reserves 512 MB, plus 256 MB per machine. Cancelling
+  the pair must preserve the other consumer's charge through a fresh heartbeat.
+  Dispatching that survivor must replace its hold exactly once; another fresh heartbeat
+  and deletion must return usage to baseline. Each observation records expected/actual
+  memory and whether a new heartbeat was observed. This checks externally visible charges,
+  not serialization of individual ledger holds.
   An attempted zero-desired warm pool refuses with 409 `capability_unsupported` while
   the host advertises no warm profile. The fixture leaves `templates.warm_pools` off,
   so supported warm claims remain unqualified. Cleanup audits the bounded persisted
