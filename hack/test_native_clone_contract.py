@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 from pathlib import Path
+import re
 import subprocess
 import unittest
 
@@ -57,6 +58,15 @@ class FakeAPI:
 
 
 class NativeContract(unittest.TestCase):
+    def test_native_gate_selects_python_caller_changes(self):
+        workflow = Path(__file__).parents[1] / ".github/workflows/native-upgrade.yml"
+        selector = re.search(r"grep -qxE '([^']+)'", workflow.read_text()).group(1)
+        for path, selected in [("hack/native-clone-contract.py", True),
+                               ("hack/native-ci-upgrade.sh", True),
+                               ("hack/native-clone-contract.py.bak", False)]:
+            result = subprocess.run(["grep", "-qxE", selector], input=path + "\n", text=True)
+            self.assertEqual(result.returncode == 0, selected)
+
     def test_configuration_failure_restores_and_stops_before_activation(self):
         shell = Path(__file__).with_name("native-ci-upgrade.sh").read_text()
         start = shell.index("native_clone_contract() (")
