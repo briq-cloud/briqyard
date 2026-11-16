@@ -146,3 +146,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 - [0139: Omitted create size reaches source inheritance](0139-omitted-create-size-inheritance.md)
 
 - [0140: Qualify named clones through the native fleet](0140-native-named-clone-contract.md)
+
+- [0141: Serve installer reads from committed snapshots](0141-installer-reads-from-committed-snapshots.md)
