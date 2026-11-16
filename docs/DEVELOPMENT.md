@@ -573,7 +573,9 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   and no submission in it remains uncertain.
   `native-logs/mixed-contract.json` retains bounded requests, response fields, binary
   versions/hashes, configuration hashes and explicit gaps. It contains no configuration,
-  credentials, error text or guest output. This single-host check does not qualify
+  credentials, error text or guest output. Denial probes retain only a fixed refusal
+  classification; unexpected success, unreachable targets and other errors still fail
+  the timeout-only isolation predicate. This single-host check does not qualify
   multi-host authority, interruption, rollback or nested execution. Host memory/disk
   pressure remains unqualified because the fixture retains running upgrade controls;
   pending reservations do not produce a daemon pressure condition. Boot-pressure

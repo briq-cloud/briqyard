@@ -19,6 +19,15 @@ WIRE_SIZE = {**clone.SIZE, "cpu_millis": 1000}
 # Same immutable Python HTTP fixture used by qualify.sh.
 HTTP_IMAGE = "python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
 
+# Emit fixed diagnostics only; non-timeout failures still fail isolation acceptance.
+DENIAL_SCRIPT = ('out=$(wget -qO- -T 4 "$1" 2>&1); rc=$?; '
+                 'if [ "$rc" = 0 ]; then echo unexpected-success; exit 1; fi; '
+                 'if [ "$rc" != 1 ]; then echo unexpected-exit; exit 1; fi; '
+                 'case "$out" in *"timed out"*) echo denied;; '
+                 '*"Host is unreachable"*|*"No route to host"*) echo unreachable; exit 1;; '
+                 '*) echo unexpected-refusal; exit 1;; esac')
+DENIAL_CODES = {"denied", "unexpected-success", "unexpected-exit", "unreachable", "unexpected-refusal"}
+
 SIZES = [None, {}, {"vcpus": 0, "memory_mb": 0},
          {"vcpus": 1, "memory_mb": 2048},
          {"vcpus": 1, "memory_mb": 2048, "cpu_millis": 1000},
@@ -420,6 +429,9 @@ class Mixed(clone.Contract):
         status, value, _ = self.api.call("POST", f"/machines/{machine}/exec", {"cmd": cmd})
         matches = value.get("stdout", "").strip() == expected_stdout
         receipt["observed"] = {"status": status, "exitCode": value.get("exit_code") if type(value.get("exit_code")) is int else None, "outputMatches": matches}
+        if label.endswith("-denied"):
+            code = value.get("stdout", "").strip()
+            receipt["observed"]["denialCode"] = code if code in DENIAL_CODES else "unclassified"
         self.check(status == 200 and value.get("exit_code") == expected_code and matches)
 
     def traffic(self, consumer, host):
@@ -437,7 +449,7 @@ class Mixed(clone.Contract):
         url = "http://" + address + ":8000/"
         # Exact exit and timeout text prove a packet refusal beside the healthy control.
         self.exec_check("strict-sibling-denied", consumer,
-                        ["/bin/sh", "-c", 'out=$(wget -qO- -T 4 "$1" 2>&1); rc=$?; [ "$rc" = 1 ] && case "$out" in *"timed out"*) echo denied;; *) exit 1;; esac', "sh", url], "denied")
+                        ["/bin/sh", "-c", DENIAL_SCRIPT, "sh", url], "denied")
         if not host.get("egress_siblings_v1"):
             self.gaps.append("sibling opt-in traffic: previous daemon does not advertise egress_siblings_v1")
             return
@@ -464,7 +476,7 @@ class Mixed(clone.Contract):
         self.exec_check("foreign-server-control", outsider,
                         ["wget", "-qO-", "-T", "4", "http://127.0.0.1:8000/"], "mixed-foreign")
         self.exec_check("foreign-sibling-denied", sibling,
-                        ["/bin/sh", "-c", 'out=$(wget -qO- -T 4 "$1" 2>&1); rc=$?; [ "$rc" = 1 ] && case "$out" in *"timed out"*) echo denied;; *) exit 1;; esac', "sh", foreign_url], "denied")
+                        ["/bin/sh", "-c", DENIAL_SCRIPT, "sh", foreign_url], "denied")
 
     def reservation_pressure(self):
         self.phase = "reservation-preconditions"

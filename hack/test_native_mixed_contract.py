@@ -2,6 +2,8 @@
 import copy
 import importlib.util
 import json
+import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -127,6 +129,39 @@ class FakeAPI:
 
 
 class MixedContractTests(unittest.TestCase):
+    def test_denial_diagnostics_preserve_timeout_only_acceptance(self):
+        cases = [("wget: download timed out", 1, "denied", 0),
+                 ("wget: Host is unreachable", 1, "unreachable", 1),
+                 ("private-error-detail", 1, "unexpected-refusal", 1),
+                 ("mixed-sibling", 0, "unexpected-success", 1),
+                 ("private-error-detail", 2, "unexpected-exit", 1)]
+        with tempfile.TemporaryDirectory() as directory:
+            wget = Path(directory) / "wget"
+            wget.write_text('#!/bin/sh\nprintf "%s\\n" "$TEST_WGET_OUTPUT" >&2\nexit "$TEST_WGET_EXIT"\n')
+            wget.chmod(0o700)
+            for output, status, expected, exit_code in cases:
+                with self.subTest(expected=expected):
+                    result = subprocess.run(["/bin/sh", "-c", mixed.DENIAL_SCRIPT, "sh", "http://127.0.0.1:1/"],
+                                            env={**os.environ, "PATH": directory, "TEST_WGET_OUTPUT": output,
+                                                 "TEST_WGET_EXIT": str(status)}, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.stdout.strip(), expected)
+                    self.assertEqual(result.returncode, exit_code)
+                    self.assertEqual(result.stderr, "")
+                    self.assertNotIn("private-error-detail", result.stdout)
+
+    def test_denial_receipt_keeps_fixed_reason_and_still_fails(self):
+        class Unreachable(FakeAPI):
+            def call(self, method, path, body=None, headers=None):
+                if path.endswith("/exec"):
+                    return 200, {"exit_code": 1, "stdout": "unreachable"}, {}
+                return super().call(method, path, body, headers)
+
+        runner = mixed.Mixed(Unreachable(), "fixture")
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.exec_check("strict-sibling-denied", "m_seed", ["unused"], "denied")
+        self.assertEqual(runner.receipts[-1]["observed"],
+                         {"status": 200, "exitCode": 1, "outputMatches": False, "denialCode": "unreachable"})
+
     def test_cleanup_refuses_changed_machine_identity(self):
         for field, value in (("id", "m_other"), ("namespace", "foreign"),
                              ("name", "unrelated"), ("metadata", {"qualification": "foreign"})):
