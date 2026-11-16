@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.15 — 2026-11-16
+
+### Upgrade notes
+
+- Runtime behavior is unchanged from 0.2.14; this maintenance release adds native qualification of pinned cold creates and execution while a host drains.
+- Guest-init source, dependencies and toolchain are unchanged. Confirm the candidate init checksum against 0.2.14 before reusing existing seeds.
+
+### Maintenance
+
+- qualify pinned creates while a host drains (#260) ([453b0ba9](https://github.com/briq-cloud/briqyard/commit/453b0ba96c95ac4b3e8cc4a68b617a855bca75f8))
+
 ## 0.2.14 — 2026-11-16
 
 ### Upgrade notes
