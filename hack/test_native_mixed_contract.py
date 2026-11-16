@@ -30,6 +30,7 @@ class FakeAPI:
         self.bad_dispatch = False
         self.bad_decision = False
         self.bad_network = False
+        self.bad_route = False
         self.ignore_reservations = False
         self.allow_bad_admission = False
 
@@ -112,7 +113,7 @@ class FakeAPI:
             if size.get("memory_mb") == 16384:
                 return 503, {"code": "capacity"}, {}
             value = {**copy.deepcopy(body), "id": f"m_{len(self.calls)}", "namespace": body["tenant"],
-                     "state": "running", "ready": True, "ip": "10.64.0.2", "host": "local", "size": copy.deepcopy(mixed.clone.SIZE if named else size)}
+                     "state": "running", "ready": True, "ip": f"10.64.0.{2 + len(self.calls) % 200}", "host": "local", "size": copy.deepcopy(mixed.clone.SIZE if named else size)}
             if "sandbox_seed" in body:
                 value["size"] = copy.deepcopy(size)
             if self.wrong_size:
@@ -129,6 +130,8 @@ class FakeAPI:
             out = ""
             if "wget" == cmd[0]:
                 out = "mixed-gateway" if "gateway.internal" in cmd[-1] else ("mixed-foreign" if "127.0.0.1" in cmd[-1] else "mixed-sibling")
+            elif len(cmd) > 2 and cmd[2] == mixed.ON_LINK_SCRIPT:
+                out = "wrong-route" if self.bad_route else "on-link"
             else:
                 out = "wrong" if self.bad_network else "denied"
             return 200, {"stdout": out, "exit_code": 0}, {}
@@ -141,6 +144,58 @@ class FakeAPI:
 
 
 class MixedContractTests(unittest.TestCase):
+    def test_strict_denial_accepts_neighbor_drop_but_not_other_failures(self):
+        cases = [("wget: download timed out", 1, "denied", 0),
+                 ("wget: Host is unreachable", 1, "denied", 0),
+                 ("wget: No route to host", 1, "denied", 0),
+                 ("wget: Connection refused", 1, "unexpected-refusal", 1),
+                 ("private-error-detail", 1, "unexpected-refusal", 1),
+                 ("mixed-sibling", 0, "unexpected-success", 1),
+                 ("wget: Host is unreachable", 2, "unexpected-exit", 1)]
+        with tempfile.TemporaryDirectory() as directory:
+            wget = Path(directory) / "wget"
+            wget.write_text('#!/bin/sh\nprintf "%s\\n" "$TEST_WGET_OUTPUT" >&2\nexit "$TEST_WGET_EXIT"\n')
+            wget.chmod(0o700)
+            for output, status, expected, exit_code in cases:
+                with self.subTest(output=output, status=status):
+                    result = subprocess.run(["/bin/sh", "-c", mixed.STRICT_DENIAL_SCRIPT, "sh", "http://10.64.0.4:8000/"],
+                                            env={**os.environ, "PATH": directory, "TEST_WGET_OUTPUT": output,
+                                                 "TEST_WGET_EXIT": str(status)}, capture_output=True, text=True, timeout=5)
+                    self.assertEqual((result.stdout.strip(), result.returncode), (expected, exit_code))
+                    self.assertEqual(result.stderr, "")
+
+    def test_on_link_control_refuses_wrong_route_source_and_interface(self):
+        cases = [("10.64.0.4 dev eth0 src 10.64.0.3 uid 0", True),
+                 ("10.64.0.4 via 10.64.0.1 dev eth0 src 10.64.0.3", False),
+                 ("10.64.0.5 dev eth0 src 10.64.0.3", False),
+                 ("10.64.0.4 dev eth1 src 10.64.0.3", False),
+                 ("10.64.0.4 dev eth0 src 10.64.0.9", False), ("", False)]
+        with tempfile.TemporaryDirectory() as directory:
+            ip = Path(directory) / "ip"
+            ip.write_text('#!/bin/sh\nprintf "%s\\n" "$TEST_ROUTE"\n')
+            ip.chmod(0o700)
+            for route, expected in cases:
+                result = subprocess.run(["/bin/sh", "-c", mixed.ON_LINK_SCRIPT, "sh", "10.64.0.4", "10.64.0.3"],
+                                        env={**os.environ, "PATH": directory, "TEST_ROUTE": route},
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode == 0 and result.stdout.strip() == "on-link", expected)
+
+    def test_strict_denial_requires_same_target_positive_and_route_first(self):
+        api = FakeAPI()
+        runner = mixed.Mixed(api, "fixture")
+        runner.placement(api.call("GET", "/hosts")[1][0])
+        labels = [case["case"] for case in runner.receipts]
+        self.assertLess(labels.index("sibling-allowed"), labels.index("strict-sibling-route"))
+        self.assertLess(labels.index("strict-sibling-route"), labels.index("strict-sibling-denied"))
+        runner.cleanup()
+        api = FakeAPI()
+        api.bad_route = True
+        runner = mixed.Mixed(api, "fixture")
+        with self.assertRaises(mixed.clone.ContractFailure):
+            runner.placement(api.call("GET", "/hosts")[1][0])
+        self.assertNotIn("strict-sibling-denied", [case["case"] for case in runner.receipts])
+        runner.cleanup()
+
     def test_denial_diagnostics_preserve_timeout_only_acceptance(self):
         cases = [("wget: download timed out", 1, "denied", 0),
                  ("wget: Host is unreachable", 1, "unreachable", 1),

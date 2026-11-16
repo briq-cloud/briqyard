@@ -27,6 +27,14 @@ DENIAL_SCRIPT = ('out=$(wget -qO- -T 4 "$1" 2>&1); rc=$?; '
                  '*"Host is unreachable"*|*"No route to host"*) echo unreachable; exit 1;; '
                  '*) echo unexpected-refusal; exit 1;; esac')
 DENIAL_CODES = {"denied", "unexpected-success", "unexpected-exit", "unreachable", "unexpected-refusal"}
+STRICT_DENIAL_SCRIPT = ('out=$(wget -qO- -T 4 "$1" 2>&1); rc=$?; '
+                        'if [ "$rc" = 0 ]; then echo unexpected-success; exit 1; fi; '
+                        'if [ "$rc" != 1 ]; then echo unexpected-exit; exit 1; fi; '
+                        'case "$out" in *"timed out"*|*"Host is unreachable"*|*"No route to host"*) echo denied;; '
+                        '*) echo unexpected-refusal; exit 1;; esac')
+ON_LINK_SCRIPT = ('target=$1; source=$2; out=$(ip -4 route get "$target") || exit 1; '
+                  'set -- $out; [ "$1" = "$target" ] && [ "$2" = dev ] && '
+                  '[ "$3" = eth0 ] && [ "$4" = src ] && [ "$5" = "$source" ] && echo on-link')
 
 SIZES = [None, {}, {"vcpus": 0, "memory_mb": 0},
          {"vcpus": 1, "memory_mb": 2048},
@@ -463,11 +471,11 @@ class Mixed(clone.Contract):
         self.check(status == 200 and value.get("ready") is True)
         address = str(ipaddress.IPv4Address(value["ip"]))
         url = "http://" + address + ":8000/"
-        # Exact exit and timeout text prove a packet refusal beside the healthy control.
-        self.exec_check("strict-sibling-denied", consumer,
-                        ["/bin/sh", "-c", DENIAL_SCRIPT, "sh", url], "denied")
         if not host.get("egress_siblings_v1"):
             self.gaps.append("sibling opt-in traffic: previous daemon does not advertise egress_siblings_v1")
+            # Without the same-target positive, retain the stricter timeout-only predicate.
+            self.exec_check("strict-sibling-denied", consumer,
+                            ["/bin/sh", "-c", DENIAL_SCRIPT, "sh", url], "denied")
             return
         sibling = self.case("traffic-sibling", {"image": clone.IMAGE, "size": clone.SIZE,
                             "sleep": "never", "cmd": ["/bin/sleep", "3600"],
@@ -475,6 +483,19 @@ class Mixed(clone.Contract):
                             [[201, None]], keep=True)
         self.running(sibling)
         self.exec_check("sibling-allowed", sibling, ["wget", "-qO-", "-T", "4", url], "mixed-sibling")
+        status, strict, _ = self.api.call("GET", f"/machines/{consumer}")
+        self.check(status == 200 and strict.get("host") == "local" and
+                   strict.get("namespace") == self.namespace and
+                   strict.get("egress") == {"mode": "via", "via": "gateway"})
+        source = str(ipaddress.IPv4Address(strict["ip"]))
+        self.check(source != address and ipaddress.IPv4Network(source + "/24", strict=False) ==
+                   ipaddress.IPv4Network(address + "/24", strict=False))
+        self.exec_check("strict-sibling-route", consumer,
+                        ["/bin/sh", "-c", ON_LINK_SCRIPT, "sh", address, source], "on-link")
+        # ARP is filtered too: a healthy on-link route can report neighbor-resolution denial.
+        # Require the same-target positive above; other wget errors remain failures.
+        self.exec_check("strict-sibling-denied", consumer,
+                        ["/bin/sh", "-c", STRICT_DENIAL_SCRIPT, "sh", url], "denied")
         self.exec_check("sibling-gateway-traffic", sibling,
                         ["wget", "-qO-", "-T", "4", "http://gateway.internal:8080/"], "mixed-gateway")
         foreign = self.prefix + "-traffic-foreign"
