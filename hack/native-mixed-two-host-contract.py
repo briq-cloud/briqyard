@@ -149,7 +149,7 @@ class TwoHost(mixed.Mixed):
             self.receipts.append({"case": "candidate-api-get", "request": {"method": "GET",
                                   "path": "/v1/machines/" + machine},
                                   "expected": {"host": host},
-                                  "observed": mixed.summary(status, routed, headers)})
+                                  "observed": {**mixed.summary(status, routed, headers), "host": routed["host"]}})
             value = captured_command(["env", "BRIQYARD_URL=http://127.0.0.1:7430",
                                       "briqyard", "machine", "get", machine])
             self.check(value.get("id") == machine and value.get("namespace") == namespace and

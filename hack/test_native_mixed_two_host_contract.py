@@ -95,6 +95,10 @@ class PairTests(unittest.TestCase):
         with patch.object(two, "captured_command", side_effect=get) as command:
             runner.check_cli()
             self.assertEqual(4, command.call_count)
+            routed = [r for r in runner.receipts if r["case"] == "candidate-api-get"]
+            self.assertEqual(4, len(routed))
+            for receipt in routed:
+                self.assertEqual(receipt["expected"]["host"], receipt["observed"]["host"])
         with patch.object(two, "captured_command", return_value={"host": "other"}):
             with self.assertRaises(two.clone.ContractFailure):
                 runner.check_cli()
