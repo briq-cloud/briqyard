@@ -177,7 +177,8 @@ class Contract:
                    hosts[0].get("state") == "draining")
         self.phase = "draining-bound-create"
         status, machine, headers = self.create("draining-bound", {
-            "image": IMAGE, "size": SIZE, "sleep": "never"})
+            "image": IMAGE, "size": SIZE, "sleep": "never",
+            "cmd": ["/bin/sleep", "3600"]})
         self.check(status == 201 and headers.get("x-briqyard-host") == "local" and
                    machine.get("namespace") == self.namespace)
         self.running(machine["id"])

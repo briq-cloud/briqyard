@@ -99,6 +99,9 @@ class NativeContract(unittest.TestCase):
         runner = contract.Contract(api, "test")
         runner.draining_namespace()
         self.assertEqual(runner.checks, 8)
+        bound = next(body for method, path, body in api.calls
+                     if method == "POST" and path == "/machines")
+        self.assertEqual(bound["cmd"], ["/bin/sleep", "3600"])
         self.assertEqual(api.state, "ready")
         runner.cleanup()
         self.assertEqual(list(api.machines), ["m_unrelated"])
