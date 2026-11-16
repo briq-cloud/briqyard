@@ -29,6 +29,27 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(a.failure(path)['events'], {})
             self.assertTrue(a.failure(path)['truncated'])
 
+    def test_authority_state_cannot_contaminate_upgrade_timing_and_source_is_required(self):
+        text = Path(__file__).with_name('native-ci-upgrade.sh').read_text()
+        fixture = text.index('echo "== standalone candidate authority')
+        for marker in ('probe rollback-api', 'rollback API silence stays within',
+                       'rollback endpoint silence stays within', 'briqyard namespace rm $NS'):
+            self.assertLess(text.index(marker), fixture)
+        block = text[fixture:].split('mkdir -p native-logs', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = ('SECONDS=0; CLASSES=; ROLLBACK_RELEASE=source; PRIOR_KERNEL=kernel; '
+                      'PRIOR_KERNEL_SHA=digest; HARNESS=harness; PREV_VER=source; '
+                      'WORK="$1"\n'
+                      'die() { exit 42; }\n'
+                      'timeout() { return "$2"; }\n')
+            # A source activation failure or a wrong installed version must stop
+            # before the authority driver; no candidate-as-source fallback.
+            for rc, version in ((1, 'source'), (0, 'candidate')):
+                script = prefix.replace('return "$2"', 'return ' + str(rc))
+                script += 'daemon_version() { echo ' + version + '; }\n' + block
+                result = subprocess.run(['bash', '-c', script, 'sh', directory], capture_output=True)
+                self.assertEqual(result.returncode, 42)
+
     def test_running_authority_must_match_candidate_digest(self):
         before = {'candidateFleetSha256': 'candidate'}
         a.validate_authority(before, {'sha256': 'candidate'})

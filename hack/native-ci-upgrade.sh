@@ -166,26 +166,6 @@ for _ in $(seq 1 60); do [ -n "$(hostf .version)" ] && break; sleep 1; done
 echo "   host version: $(hostf .version), installed: $PREV_VER"
 check "the host runs the previous release" '[ "$(hostf .version)" = "$PREV_VER" ] && [[ "$PREV_VER" == "${PREV#v}"* ]]'
 
-# This fixture temporarily provisions an execution channel and restarts the source daemon.
-# Run it before creating the protected upgrade state and taking preservation baselines.
-echo "== standalone candidate authority against the published source daemon"
-mkdir -p native-logs
-SCOPED_DRIVER=${CARGO_TARGET_DIR:-$PWD/target}/release/scoped-execution-native
-# Safe JSON projections are deliberately runner-owned.
-# shellcheck disable=SC2024
-sudo python3 "$HARNESS/native-mixed-authority.py" before "$WORK/prev.sums" "$HEAD_DIR" "$SCOPED_DRIVER" "$PWD" > "$WORK/authority-before.json" || die "mixed authority inputs"
-install -m 0755 "$HEAD_DIR/briqyard-fleet-linux-x86_64" "$WORK/candidate-authority" || die "mixed authority executable"
-if ! CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}" bash "$HARNESS/scoped-execution-native.sh" standalone \
-    "$WORK/candidate-authority" "$WORK/authority-before.json" "$WORK/authority-exercised.json" \
-    > "$WORK/authority-output" 2>&1; then
-  python3 "$HARNESS/native-mixed-authority.py" failure "$WORK/authority-output" \
-    > native-logs/mixed-authority-failure.json || die "mixed authority diagnostics unavailable"
-  die "mixed authority fixture failed (no mutation replay)"
-fi
-# shellcheck disable=SC2024
-sudo python3 "$HARNESS/native-mixed-authority.py" after "$WORK/authority-before.json" "$WORK/authority-exercised.json" \
-  > native-logs/mixed-authority-contract.json || die "mixed authority restoration"
-
 echo "== state: machines of every kind"
 IMG=alpine:3.20
 # Volume, sleep never: the shapes a production host holds.
@@ -506,7 +486,51 @@ for p in "${PROBES[@]}"; do kill "$p" 2>/dev/null; done; PROBES=()
 check "rollback API silence stays within the upgrade bound" 'awk -v g="$(gap rollback-api)" -v m="$API_DOWN_MAX" "BEGIN{exit !(g <= m)}"'
 check "rollback endpoint silence stays within the upgrade bound" 'awk -v g="$(gap rollback-endpoint)" -v m="$GAP_MAX" "BEGIN{exit !(g <= m)}"'
 
-for id in $(briqyard machine ls --namespace $NS 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1; done
-briqyard namespace rm $NS >/dev/null 2>&1
+[ "$fail" = 0 ] || die "continuity qualification failed; authority fixture not started"
+for id in $(briqyard machine ls --namespace $NS | awk 'NR>1{print $1}'); do
+  briqyard machine rm "$id" >/dev/null || die "upgrade workload cleanup"
+done
+briqyard namespace rm $NS >/dev/null || die "upgrade namespace cleanup"
+
+# This fixture retains execution-protection receipts. Every later daemon start must
+# drain their command lifetime, even after the fixture deadlines expire. Run it only
+# after all clean-upgrade continuity checks and workload cleanup. Never erase its state.
+echo "== standalone candidate authority against the published source daemon"
+# Reactivate verified source assets after measurements; a refusal is missing coverage,
+# never permission to use the candidate daemon or skip the authority contract.
+source_start=$SECONDS
+timeout 900 sudo env BRIQYARD_RELEASE="file://$ROLLBACK_RELEASE" BRIQYARD_RUNTIME_CLASSES="$CLASSES" BRIQYARD_POOL_FILE_GB=40 BRIQYARD_ARC_GB=1 LISTEN=127.0.0.1:7420 \
+  KERNEL_URL="file://$PRIOR_KERNEL" KERNEL_SHA256="$PRIOR_KERNEL_SHA" \
+  bash "$HARNESS/bootstrap-host.sh" > "$WORK/authority-source.log" 2>&1 || die "mixed authority source reactivation"
+[ "$(daemon_version)" = "$PREV_VER" ] || die "mixed authority source version"
+source_seconds=$((SECONDS-source_start))
+authority_start=$SECONDS
+mkdir -p native-logs
+SCOPED_DRIVER=${CARGO_TARGET_DIR:-$PWD/target}/release/scoped-execution-native
+# Safe JSON projections are deliberately runner-owned.
+# shellcheck disable=SC2024
+sudo python3 "$HARNESS/native-mixed-authority.py" before "$WORK/prev.sums" "$HEAD_DIR" "$SCOPED_DRIVER" "$PWD" > "$WORK/authority-before.json" || die "mixed authority inputs"
+install -m 0755 "$HEAD_DIR/briqyard-fleet-linux-x86_64" "$WORK/candidate-authority" || die "mixed authority executable"
+if ! CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}" bash "$HARNESS/scoped-execution-native.sh" standalone \
+    "$WORK/candidate-authority" "$WORK/authority-before.json" "$WORK/authority-exercised.json" \
+    > "$WORK/authority-output" 2>&1; then
+  python3 "$HARNESS/native-mixed-authority.py" failure "$WORK/authority-output" \
+    > native-logs/mixed-authority-failure.json || die "mixed authority diagnostics unavailable"
+  die "mixed authority fixture failed (no mutation replay)"
+fi
+# shellcheck disable=SC2024
+sudo python3 "$HARNESS/native-mixed-authority.py" after "$WORK/authority-before.json" "$WORK/authority-exercised.json" \
+  > native-logs/mixed-authority-contract.json || die "mixed authority restoration"
+
+python3 - "$source_seconds" "$((SECONDS-authority_start))" <<'PYTIMING' > native-logs/mixed-authority-timings.json || die "mixed authority timings"
+import json,sys
+values=[int(v) for v in sys.argv[1:]]
+if any(v < 0 or v > 3600 for v in values): raise SystemExit(1)
+print(json.dumps({'schema':1,'sourceReactivationSeconds':values[0],
+                  'authorityFixtureSeconds':values[1],
+                  'timingScope':'separate-from-clean-upgrade',
+                  'retainedProtectionPreserved':True,'finalDaemon':'published-source'}))
+PYTIMING
+
 echo "result: ${PREV} -> ${HEAD_VER}: API down ${API_GAP} s, endpoint gap ${EP_GAP} s, host upgrade ${UPGRADE_SECONDS} s"
 suite_summary

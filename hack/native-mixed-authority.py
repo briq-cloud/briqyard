@@ -117,7 +117,7 @@ def main(args):
         record = {'schema': 1, 'kind': 'mixed-authority-contract', 'passed': True,
                   'source': before, 'exercised': exercised, 'restored': restored,
                   'scope': 'standalone-authority; no renewable callback or private gateway qualification',
-                  'preservationBasis': 'fixture runs before upgrade preservation baseline'}
+                  'preservationBasis': 'fixture runs after upgrade continuity checks and workload cleanup'}
     else:
         raise ValueError('invalid mode')
     print(json.dumps(record, sort_keys=True))
