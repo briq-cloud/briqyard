@@ -31,7 +31,7 @@ class API:
         self.last_status = None
         self.last_code = None
 
-    def call(self, method, path, body=None, headers=None):
+    def call(self, method, path, body=None, headers=None, *, timeout=None):
         request = Request(self.origin + "/v1" + path, method=method,
                           data=None if body is None else json.dumps(body).encode(),
                           headers={"Content-Type": "application/json",
@@ -39,6 +39,9 @@ class API:
                                       if os.environ.get("BRIQYARD_TOKEN") else {}), **(headers or {})})
         remaining = self.deadline - time.monotonic()
         require(remaining > 0)
+        if timeout is not None:
+            require(timeout > 0)
+            remaining = min(remaining, timeout)
         try:
             response = urlopen(request, timeout=min(10 if method == "DELETE" else 125, remaining))
         except HTTPError as error:

@@ -692,7 +692,10 @@ class Mixed(clone.Contract):
         self.phase = label
         deadline = time.monotonic() + 35
         while True:
-            status, hosts, _ = self.api.call("GET", "/hosts")
+            remaining = deadline - time.monotonic()
+            self.check(remaining > 0)
+            status, hosts, _ = self.api.call("GET", "/hosts", timeout=remaining)
+            self.check(time.monotonic() <= deadline)
             self.check(status == 200 and len(hosts) == 1 and hosts[0].get("id") == "local")
             host = hosts[0]
             conditions = [c for c in host.get("conditions", []) if c.get("type") == "memory_pressure"]
@@ -701,8 +704,9 @@ class Mixed(clone.Contract):
                 self.receipts.append({"case": label, "request": {"method": "GET", "path": "/v1/hosts"},
                                       "observed": {"memoryPressure": pressure, "memoryMb": used}})
                 return
-            self.check(time.monotonic() < deadline)
-            time.sleep(1)
+            remaining = deadline - time.monotonic()
+            self.check(remaining > 0)
+            time.sleep(min(1, remaining))
 
     def warm_refusal(self, host, source, snapshot):
         # Native upgrade fixture has no warm-pool configuration or budget. Never fill it.

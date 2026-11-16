@@ -46,7 +46,7 @@ class FakeAPI:
         self.wrong_class = False
         self.bad_nested_exec = False
 
-    def call(self, method, path, body=None, headers=None):
+    def call(self, method, path, body=None, headers=None, *, timeout=None):
         self.calls.append((method, path, copy.deepcopy(body)))
         if path == "/hosts":
             stale_seed = (self.seed_report_charges.pop(0) if self.seed_report_charges
@@ -199,7 +199,9 @@ class MixedContractTests(unittest.TestCase):
                 api = FakeAPI()
                 setattr(api, attr, True)
                 runner = mixed.Mixed(api, "fixture")
-                with patch.object(mixed.time, "monotonic", side_effect=[0, 0, 100]):
+                clock = [0]
+                with patch.object(mixed.time, "monotonic", side_effect=lambda: clock[0]), \
+                     patch.object(mixed.time, "sleep", side_effect=lambda _: clock.__setitem__(0, clock[0] + 40)):
                     with self.assertRaises(mixed.clone.ContractFailure):
                         runner.physical_pressure()
                 self.assertEqual(len(runner.created), 1)
@@ -207,6 +209,32 @@ class MixedContractTests(unittest.TestCase):
                 runner.cleanup()
                 self.assertIn("m_seed", api.machines)
                 self.assertIn("m_other", api.machines)
+
+    def test_memory_condition_rejects_matching_response_after_deadline(self):
+        clock = [0]
+        class SlowAPI(FakeAPI):
+            def call(self, method, path, body=None, headers=None, *, timeout=None):
+                self.timeout = timeout
+                result = super().call(method, path, body, headers)
+                clock[0] = 100
+                return result
+        api = SlowAPI()
+        runner = mixed.Mixed(api, "fixture")
+        with patch.object(mixed.time, "monotonic", side_effect=lambda: clock[0]):
+            with self.assertRaises(mixed.clone.ContractFailure):
+                runner.memory_condition("slow-observation", False, 4096)
+        self.assertEqual(api.timeout, 35)
+        self.assertEqual(runner.receipts, [])
+
+    def test_transport_receives_observation_budget(self):
+        from urllib.error import HTTPError
+        api = mixed.clone.API("http://fixture")
+        api.deadline = 1000
+        response = HTTPError("http://fixture", 422, "fixed", {}, io.BytesIO(b"invalid"))
+        with patch.object(mixed.clone.time, "monotonic", return_value=0), \
+             patch.object(mixed.clone, "urlopen", return_value=response) as opening:
+            self.assertEqual(api.call("GET", "/hosts", timeout=7)[0], 422)
+        self.assertEqual(opening.call_args.kwargs["timeout"], 7)
 
     def test_physical_refusal_must_name_memory_pressure(self):
         api = FakeAPI()
@@ -242,7 +270,7 @@ class MixedContractTests(unittest.TestCase):
 
     def test_missing_running_hold_machine_does_not_count_as_tested_deletion(self):
         class MissingMachineAPI(FakeAPI):
-            def call(self, method, path, body=None, headers=None):
+            def call(self, method, path, body=None, headers=None, *, timeout=None):
                 machine = self.machines.get(path.rsplit("/", 1)[-1], {})
                 if method == "GET" and machine.get("name", "").endswith("-holds-dispatch"):
                     self.calls.append((method, path, copy.deepcopy(body)))
@@ -258,7 +286,7 @@ class MixedContractTests(unittest.TestCase):
 
     def test_final_release_drains_poll_started_before_machine_deletion(self):
         class StaleDeletionAPI(FakeAPI):
-            def call(self, method, path, body=None, headers=None):
+            def call(self, method, path, body=None, headers=None, *, timeout=None):
                 deleting = method == "DELETE" and path.startswith("/machines/")
                 result = super().call(method, path, body, headers)
                 if deleting:
@@ -440,7 +468,7 @@ class MixedContractTests(unittest.TestCase):
 
     def test_denial_receipt_keeps_fixed_reason_and_still_fails(self):
         class Unreachable(FakeAPI):
-            def call(self, method, path, body=None, headers=None):
+            def call(self, method, path, body=None, headers=None, *, timeout=None):
                 if path.endswith("/exec"):
                     return 200, {"exit_code": 1, "stdout": "unreachable"}, {}
                 return super().call(method, path, body, headers)
@@ -467,7 +495,7 @@ class MixedContractTests(unittest.TestCase):
 
     def test_create_answer_cannot_authorize_unrelated_machine_deletion(self):
         class WrongID(FakeAPI):
-            def call(self, method, path, body=None, headers=None):
+            def call(self, method, path, body=None, headers=None, *, timeout=None):
                 status, value, result_headers = super().call(method, path, body, headers)
                 if method == "POST" and path == "/machines" and status == 201:
                     value = {**value, "id": "m_other"}
@@ -615,7 +643,7 @@ class MixedContractTests(unittest.TestCase):
         class DelayedCreate(FakeAPI):
             pending = None
 
-            def call(self, method, path, body=None, headers=None):
+            def call(self, method, path, body=None, headers=None, *, timeout=None):
                 if method == "POST" and path == "/machines":
                     self.calls.append((method, path, copy.deepcopy(body)))
                     self.pending = {**body, "id": "m_late", "namespace": body["tenant"]}
@@ -700,7 +728,7 @@ class MixedContractTests(unittest.TestCase):
         class IntentAPI(FakeAPI):
             runner = None
 
-            def call(self, method, path, body=None, headers=None):
+            def call(self, method, path, body=None, headers=None, *, timeout=None):
                 if method in ("PUT", "DELETE") or (method == "POST" and not "/wait?" in path and not path.endswith(("/start", "/stop"))):
                     self.runner.check(any(r["request"]["method"] == method and
                         r["request"]["path"] == "/v1" + path and
@@ -853,7 +881,7 @@ class MixedContractTests(unittest.TestCase):
 
     def test_lost_admission_is_cancelled_without_put_replay(self):
         class Lost(FakeAPI):
-            def call(self, method, path, body=None, headers=None):
+            def call(self, method, path, body=None, headers=None, *, timeout=None):
                 result = super().call(method, path, body, headers)
                 if method == "PUT" and "/admissions/" in path:
                     raise TimeoutError()
