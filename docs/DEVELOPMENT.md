@@ -587,7 +587,9 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   credentials, error text or guest output. Denial probes retain only a fixed refusal
   classification; unexpected success, unreachable targets and other errors still fail
   the timeout-only isolation predicate. This single-host check does not qualify
-  multi-host authority, interruption, rollback or nested execution. Host memory/disk
+  multi-host authority, interruption or rollback. Exact-artifact runs additionally require
+  direct and admitted nested guests to execute with `/dev/kvm`, virtualization flags and
+  read-only modules; PR-built default-only runs retain the nested gap (ADR 0107). Host memory/disk
   pressure remains unqualified because the fixture retains running upgrade controls;
   pending reservations do not produce a daemon pressure condition. Boot-pressure
   spill also remains unqualified: this fixture has one host and no controlled boot
