@@ -5,7 +5,7 @@
 ### Upgrade notes
 
 - Guest-init source, dependencies and toolchain are unchanged. Confirm the candidate init checksum against 0.2.13 before reusing existing seeds.
-- No wire or storage format change. Roll the fleet and every host in the usual order: the clock fix (#256) takes effect on each host as it upgrades, the installer-read change (#257) once the fleet runs 0.2.14.
+- No wire or storage format change. Roll the fleet and every host in the usual order: the clock fix (#256) takes effect on each host as it upgrades, the installer-read change (#257) once the fleet runs 0.2.14. While a mutating installer action is in flight, `installation_status` now answers the state before it (`unknown` for a record being created) instead of waiting (ADR 0141).
 
 ### Fixes
 
