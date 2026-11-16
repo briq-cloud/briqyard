@@ -5,7 +5,7 @@
 ### Upgrade notes
 
 - Guest-init source, dependencies and toolchain are unchanged. Confirm the candidate init checksum against 0.2.13 before reusing existing seeds.
-- Changes are in the execution clock and the fleet's installer reads; upgrade the fleet and API together.
+- No wire or storage format change. Roll the fleet and every host in the usual order: the clock fix (#256) takes effect on each host as it upgrades, the installer-read change (#257) once the fleet runs 0.2.14.
 
 ### Fixes
 
