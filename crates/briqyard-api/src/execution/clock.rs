@@ -66,13 +66,16 @@ impl ClockEvidence {
 }
 impl ClockSample {
     pub fn interval(&self) -> Option<Clock> {
-        // Flooring wall time introduces up to one second of additional error.
-        let uncertainty = self
+        // Whole seconds: `now` is the floored wall time, so the true time is
+        // within one second above it. The margin is the error rounded up plus
+        // that second, a constant: the lower bound `now - uncertainty` then
+        // never falls as the fractional second advances, so a later reading
+        // never sees a bound below the one an earlier reading issued from.
+        let seconds = self
             .uncertainty
-            .checked_add(Duration::from_nanos(self.wall.subsec_nanos().into()))?;
-        let seconds = uncertainty
             .as_secs()
-            .checked_add(u64::from(uncertainty.subsec_nanos() > 0))?;
+            .checked_add(u64::from(self.uncertainty.subsec_nanos() > 0))?
+            .checked_add(1)?;
         (seconds <= 5).then_some(Clock {
             now: self.wall.as_secs(),
             uncertainty: seconds,
@@ -273,6 +276,34 @@ mod tests {
         assert_eq!(sample.upper_ms(), Some(11_101));
         sample.uncertainty = Duration::from_secs(5);
         assert!(sample.interval().is_none());
+    }
+    /// A permit is issued at the lower bound of one reading and verified against a
+    /// later reading. The lower bound must never fall as wall time advances, or a
+    /// permit issued in one part of a second is "not yet valid" in a later part of
+    /// the same second (about 150 ms of staging host error made 1 admission in 4 fail).
+    #[test]
+    fn lower_bound_never_falls_and_always_contains_the_wall_error() {
+        for error_ms in [1, 155, 700, 1_000, 1_999, 3_000] {
+            let uncertainty = Duration::from_millis(1_000 + error_ms);
+            let mut previous = 0;
+            for ms in (100_000..104_000).step_by(5) {
+                let sample = ClockSample {
+                    wall: Duration::from_millis(ms),
+                    monotonic: Instant::now(),
+                    uncertainty,
+                };
+                let Some(clock) = sample.interval() else {
+                    continue;
+                };
+                let earliest = clock.now - clock.uncertainty;
+                assert!(earliest >= previous, "{error_ms} ms error, wall {ms} ms");
+                previous = earliest;
+                assert!(earliest * 1000 <= sample.lower_ms().unwrap());
+                // upper_ms rounds one millisecond outward on top of the error.
+                assert!((clock.now + clock.uncertainty) * 1000 + 1 >= sample.upper_ms().unwrap());
+            }
+            assert!(previous > 0, "{error_ms} ms error left no interval");
+        }
     }
     #[test]
     fn units_negatives_overflow_and_error_ceiling_fail_closed() {
