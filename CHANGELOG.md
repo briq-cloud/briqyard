@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.13 — 2026-11-16
+
+### Upgrade notes
+
+- Runtime behavior is unchanged from 0.2.12; this maintenance release adds native named-clone contract qualification.
+- Guest-init source, dependencies and toolchain are unchanged. Confirm the candidate init checksum against 0.2.12 before reusing existing seeds.
+
+### Maintenance
+
+- qualify native named clone resource contracts (#254) ([1e5b7319](https://github.com/briq-cloud/briqyard/commit/1e5b7319f4c32bbd64654f72d6e87ca9f4de1330))
+
 ## 0.2.12 — 2026-11-15
 
 ### Upgrade notes
