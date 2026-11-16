@@ -58,6 +58,10 @@ class Contract:
         self.prefix = "contract-" + uuid.uuid4().hex[:12]
         self.checks = 0
         self.phase = "initial"
+        self.drain_attempted = False
+        self.undrain_attempted = False
+        self.unbound_namespace = self.prefix + "-unbound"
+        self.unbound_attempted = False
 
     def failure_receipt(self):
         status = getattr(self.api, "last_status", None)
@@ -136,6 +140,60 @@ class Contract:
         self.refuse(profile + "-mismatch", {"fork": fork, "size": {"vcpus": 1, "memory_mb": 512}},
                     "keeps its template size")
 
+    def restore_admission(self):
+        if not self.drain_attempted:
+            return
+        # Only the disposable, initially-ready fixture host is ours to restore.
+        status, hosts, _ = self.api.call("GET", "/hosts")
+        require(status == 200 and len(hosts) == 1 and hosts[0].get("id") == "local")
+        state = hosts[0].get("state")
+        require(state in ("ready", "draining"))
+        if state == "draining":
+            require(not self.undrain_attempted)
+            self.undrain_attempted = True
+            status, _, _ = self.api.call("POST", "/hosts/local/undrain")
+            require(status == 204)
+        status, hosts, _ = self.api.call("GET", "/hosts")
+        require(status == 200 and len(hosts) == 1 and hosts[0].get("id") == "local" and
+                hosts[0].get("state") == "ready")
+        self.drain_attempted = False
+
+    def draining_namespace(self):
+        self.phase = "draining-preconditions"
+        status, hosts, _ = self.api.call("GET", "/hosts")
+        self.check(status == 200 and isinstance(hosts, list) and len(hosts) == 1 and
+                   hosts[0].get("id") == "local" and hosts[0].get("state") == "ready")
+        status, namespaces, _ = self.api.call("GET", "/namespaces")
+        self.check(status == 200 and isinstance(namespaces, list) and any(
+            n.get("id") == self.namespace and n.get("host") == "local" for n in namespaces) and
+            not any(n.get("id") == self.unbound_namespace for n in namespaces))
+        self.phase = "draining-host"
+        # Record intent before the one-shot call: a lost answer needs observation, not replay.
+        self.drain_attempted = True
+        status, _, _ = self.api.call("POST", "/hosts/local/drain")
+        self.check(status == 204)
+        status, hosts, _ = self.api.call("GET", "/hosts")
+        self.check(status == 200 and len(hosts) == 1 and hosts[0].get("id") == "local" and
+                   hosts[0].get("state") == "draining")
+        self.phase = "draining-bound-create"
+        status, machine, headers = self.create("draining-bound", {
+            "image": IMAGE, "size": SIZE, "sleep": "never",
+            "cmd": ["/bin/sleep", "3600"]})
+        self.check(status == 201 and headers.get("x-briqyard-host") == "local" and
+                   machine.get("namespace") == self.namespace)
+        self.running(machine["id"])
+        status, result, _ = self.api.call("POST", f"/machines/{machine['id']}/exec",
+                                         {"cmd": ["/bin/echo", "contract-ok"]})
+        self.check(status == 200 and result.get("exit_code") == 0 and
+                   result.get("stdout", "").strip() == "contract-ok")
+        self.phase = "draining-unbound-create"
+        self.unbound_attempted = True
+        status, result, _ = self.create("draining-unbound", {
+            "tenant": self.unbound_namespace, "image": IMAGE, "size": SIZE})
+        self.check(status == 503 and result.get("code") == "capacity")
+        self.phase = "draining-restore"
+        self.restore_admission()
+
     def run(self, sandbox_source, sandbox_snapshot):
         for label, size in [("omitted", None), ("default", {"vcpus": 0, "memory_mb": 0}),
                             ("empty", {})]:
@@ -163,21 +221,30 @@ class Contract:
                     "capability_unsupported")
         for profile in ("init-ready-v1", "service-ready-v1"):
             self.profile(profile)
+        self.draining_namespace()
 
     def cleanup(self):
         self.api.deadline = time.monotonic() + 60
         failed = False
-        # Include a create whose response was lost, without dispatching another create.
         try:
-            status, machines, _ = self.api.call("GET", "/machines?namespace=" + self.namespace)
-            require(status == 200 and isinstance(machines, list))
-            for machine in machines:
-                if (machine.get("namespace") == self.namespace and
-                        machine.get("metadata", {}).get("qualification") == self.prefix):
-                    if machine["id"] not in self.created:
-                        self.created.append(machine["id"])
+            self.restore_admission()
         except Exception:
             failed = True
+        # Discover only exact run-owned machines, including a lost create answer.
+        namespaces = [self.namespace]
+        if self.unbound_attempted:
+            namespaces.append(self.unbound_namespace)
+        for namespace in namespaces:
+            try:
+                status, machines, _ = self.api.call("GET", "/machines?namespace=" + namespace)
+                require(status == 200 and isinstance(machines, list))
+                for machine in machines:
+                    if (machine.get("namespace") == namespace and
+                            machine.get("metadata", {}).get("qualification") == self.prefix):
+                        if machine["id"] not in self.created:
+                            self.created.append(machine["id"])
+            except Exception:
+                failed = True
         for machine in reversed(self.created):
             try:
                 status, _, _ = self.api.call("DELETE", f"/machines/{machine}")
@@ -185,6 +252,12 @@ class Contract:
             except Exception:
                 failed = True
         self.created.clear()
+        if self.unbound_attempted:
+            try:
+                status, _, _ = self.api.call("DELETE", "/namespaces/" + self.unbound_namespace)
+                require(status in (200, 204, 404))
+            except Exception:
+                failed = True
         require(not failed)
 
 

@@ -57,7 +57,110 @@ class FakeAPI:
         return 200, self.machines[machine], {}
 
 
+class DrainingAPI(FakeAPI):
+    def __init__(self):
+        super().__init__()
+        self.state = "ready"
+        self.fail_undrain = False
+        self.lose_drain = False
+        self.allow_unbound = False
+
+    def call(self, method, path, body=None):
+        if path == "/hosts":
+            return 200, [{"id": "local", "state": self.state}], {}
+        if path == "/namespaces" and method == "GET":
+            return 200, [{"id": "test", "host": "local"}], {}
+        if path.startswith("/hosts/local/"):
+            self.calls.append((method, path, body))
+            if path.endswith("/drain"):
+                self.state = "draining"
+                if self.lose_drain:
+                    raise TimeoutError()
+            else:
+                if self.fail_undrain:
+                    raise TimeoutError()
+                self.state = "ready"
+            return 204, None, {}
+        if path.startswith("/namespaces/") and method == "DELETE":
+            self.calls.append((method, path, body))
+            return 204, None, {}
+        if path == "/machines" and method == "POST" and body.get("size") == contract.SIZE:
+            if body["tenant"] != "test" and self.state == "draining" and not self.allow_unbound:
+                self.calls.append((method, path, body))
+                return 503, {"code": "capacity"}, {}
+            # FakeAPI's cold-create rejection is unrelated to this admission test.
+            body = {**body, "template_build": "init-ready-v1"}
+        return super().call(method, path, body)
+
+
 class NativeContract(unittest.TestCase):
+    def test_draining_bound_create_and_unbound_refusal_restore_admission(self):
+        api = DrainingAPI()
+        runner = contract.Contract(api, "test")
+        runner.draining_namespace()
+        self.assertEqual(runner.checks, 8)
+        bound = next(body for method, path, body in api.calls
+                     if method == "POST" and path == "/machines")
+        self.assertEqual(bound["cmd"], ["/bin/sleep", "3600"])
+        self.assertEqual(api.state, "ready")
+        runner.cleanup()
+        self.assertEqual(list(api.machines), ["m_unrelated"])
+        self.assertEqual(sum(p == "/hosts/local/drain" for _, p, _ in api.calls), 1)
+        self.assertEqual(sum(p == "/hosts/local/undrain" for _, p, _ in api.calls), 1)
+
+    def test_unexpected_unbound_success_fails_and_cleans_both_namespaces(self):
+        api = DrainingAPI()
+        api.allow_unbound = True
+        runner = contract.Contract(api, "test")
+        with self.assertRaises(contract.ContractFailure):
+            runner.draining_namespace()
+        runner.cleanup()
+        self.assertEqual(api.state, "ready")
+        self.assertEqual(list(api.machines), ["m_unrelated"])
+        self.assertIn(("DELETE", "/namespaces/" + runner.unbound_namespace, None), api.calls)
+
+    def test_initially_draining_host_is_never_mutated(self):
+        api = DrainingAPI()
+        api.state = "draining"
+        runner = contract.Contract(api, "test")
+        with self.assertRaises(contract.ContractFailure):
+            runner.draining_namespace()
+        runner.cleanup()
+        self.assertEqual(api.state, "draining")
+        self.assertFalse(any(p.startswith("/hosts/local/") for _, p, _ in api.calls))
+
+    def test_lost_bound_create_answer_restores_and_discovers_without_replay(self):
+        api = DrainingAPI()
+        api.lose_create = True
+        runner = contract.Contract(api, "test")
+        with self.assertRaises(TimeoutError):
+            runner.draining_namespace()
+        runner.cleanup()
+        self.assertEqual(api.state, "ready")
+        self.assertEqual(list(api.machines), ["m_unrelated"])
+        self.assertEqual(sum(p == "/machines" and m == "POST" for m, p, _ in api.calls), 1)
+
+    def test_lost_drain_answer_is_observed_then_restored_without_replay(self):
+        api = DrainingAPI()
+        api.lose_drain = True
+        runner = contract.Contract(api, "test")
+        with self.assertRaises(TimeoutError):
+            runner.draining_namespace()
+        runner.cleanup()
+        self.assertEqual(api.state, "ready")
+        self.assertEqual(sum(p == "/hosts/local/drain" for _, p, _ in api.calls), 1)
+
+    def test_uncertain_undrain_is_not_replayed_and_cleanup_fails(self):
+        api = DrainingAPI()
+        api.fail_undrain = True
+        runner = contract.Contract(api, "test")
+        with self.assertRaises(TimeoutError):
+            runner.draining_namespace()
+        with self.assertRaises(contract.ContractFailure):
+            runner.cleanup()
+        self.assertEqual(sum(p == "/hosts/local/undrain" for _, p, _ in api.calls), 1)
+        self.assertEqual(list(api.machines), ["m_unrelated"])
+
     def test_daemon_seed_is_discovered_before_the_fleet_profile_refusal(self):
         class SeedAPI(FakeAPI):
             discovered = False
@@ -77,6 +180,7 @@ class NativeContract(unittest.TestCase):
         runner = contract.Contract(SeedAPI(), "test")
         profiles = []
         runner.profile = profiles.append
+        runner.draining_namespace = lambda: None
         runner.run("m_sandbox", "s_sandbox")
         self.assertEqual(runner.checks, 6)
         self.assertEqual(profiles, ["init-ready-v1", "service-ready-v1"])

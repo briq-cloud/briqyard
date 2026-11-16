@@ -537,7 +537,10 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   init/service clones through the installed fleet and daemon (ADR 0140). It covers
   omitted/default/matching size inheritance, mismatched and invalid resource refusals,
   registered versus intrinsic host IDs, active memory origin and guest execution.
-  Eleven offline tests cover caller, CI selection and cleanup failure semantics; they do not qualify
+  It also drains the disposable fleet's only host: a cold create in an existing pinned
+  namespace must execute, while a fresh namespace must be refused for capacity. Admission
+  is restored on exit; an uncertain restoration is observed without resending it.
+  Seventeen offline tests cover caller, CI selection and cleanup failure semantics; they do not qualify
   native behavior. The contract phase restores temporary configuration before rollback.
 - `hack/upgrade-probe.sh`: traffic through a machine's TCP and HTTP endpoints and against both APIs
   while the fleet upgrades the VM's host and then restarts, each attempt counted `ok`, `refused`,
