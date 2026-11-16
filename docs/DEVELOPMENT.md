@@ -601,7 +601,8 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   candidate fleet and CLI binaries to two daemons from the same previous published release.
   It checks region selection, existing namespace placement, running machines and exec, then
   checks unchanged daemon/process/configuration hashes and restores the one-host fixture.
-  Six offline tests cover routing, lost replies, CLI checks, capture bounds and artifact binding;
+  Seven offline tests cover routing, lost replies, CLI checks, capture bounds, artifact binding
+  and preservation of the explicit plain-HTTP setting;
   they do not qualify native behavior. ADR 0107 records the remaining matrix gaps.
 - `hack/upgrade-probe.sh`: traffic through a machine's TCP and HTTP endpoints and against both APIs
   while the fleet upgrades the VM's host and then restarts, each attempt counted `ok`, `refused`,

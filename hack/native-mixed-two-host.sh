@@ -64,7 +64,7 @@ from pathlib import Path
 import yaml
 p=Path('/etc/briqyard/fleet.yaml'); c=yaml.safe_load(p.read_text())
 if len(c['hosts']) != 1 or c['hosts'][0]['id'] != 'local': raise SystemExit(1)
-c['listen']='0.0.0.0:7430'
+c['listen']='0.0.0.0:7430'; c['tls']='off'
 c['hosts'].append({'id':'fc2','url':'http://127.0.0.2:27420','token':'mixed-fc2-token','region':'mixed-second'})
 p.write_text(yaml.safe_dump(c,sort_keys=False))
 PY

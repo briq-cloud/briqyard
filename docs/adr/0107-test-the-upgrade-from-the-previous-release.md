@@ -52,7 +52,9 @@ leaves an unresolved create as an unconfirmed outcome, without replay.
 The receipt binds both installed and running daemon hashes to the previous release,
 and installed fleet/CLI and running fleet hashes to the candidate checksums. It checks
 those hashes and both configurations again after requests. The original one-host fleet
-configuration is restored before the existing daemon upgrade proceeds. Missing nested
+configuration is restored before the existing daemon upgrade proceeds. The fixture explicitly
+preserves `tls: off` as a string when rewriting YAML: PyYAML reads an unquoted `off`
+as a boolean, while the fleet correctly refuses `tls: false`. Missing nested
 KVM fails the environment gate; it is not passing qualification. This subset does not
 exercise regional authority, controlled physical pressure, supported warm/nested machine
 classes, or interrupted activation and rollback.

@@ -56,6 +56,22 @@ class API:
 
 
 class PairTests(unittest.TestCase):
+    def test_fleet_rewrite_preserves_the_explicit_plain_http_setting(self):
+        import yaml
+        script = Path(__file__).with_name("native-mixed-two-host.sh").read_text()
+        block = script.split("sudo python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "fleet.yaml"
+            config.write_text("listen: 127.0.0.1:7430\ntls: off\n"
+                              "hosts:\n  - id: local\n    region: dev\n")
+            code = block.replace("Path('/etc/briqyard/fleet.yaml')", "Path(config_path)")
+            exec(compile(code, "native-mixed-two-host.sh:config", "exec"),
+                 {"config_path": str(config)})
+            rewritten = yaml.safe_load(config.read_text())
+            self.assertEqual("off", rewritten["tls"])
+            self.assertEqual("0.0.0.0:7430", rewritten["listen"])
+            self.assertEqual(["local", "fc2"], [host["id"] for host in rewritten["hosts"]])
+
     def test_two_regions_and_existing_namespaces_reach_both_hosts(self):
         api = API()
         runner = two.TwoHost(api)
