@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.14 — 2026-11-16
+
+### Upgrade notes
+
+- Guest-init source, dependencies and toolchain are unchanged. Confirm the candidate init checksum against 0.2.13 before reusing existing seeds.
+- No wire or storage format change. Roll the fleet and every host in the usual order: the clock fix (#256) takes effect on each host as it upgrades, the installer-read change (#257) once the fleet runs 0.2.14. While a mutating installer action is in flight, `installation_status` now answers the state before it (`unknown` for a record being created) instead of waiting (ADR 0141).
+
+### Fixes
+
+- keep the clock lower bound monotonic within a second (#256) ([9b2271c8](https://github.com/briq-cloud/briqyard/commit/9b2271c8bae72d3bdc8e18ce3df7cb9f74e9d834))
+
+
+### Performance
+
+- serve installer reads without the issuer lock (#257) ([29469dd8](https://github.com/briq-cloud/briqyard/commit/29469dd80fdbdf9aa220fbb70a5db2bff5fa9b9d))
+
 ## 0.2.13 — 2026-11-16
 
 ### Upgrade notes
