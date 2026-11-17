@@ -317,10 +317,19 @@ DNS_PROBE
 )
   dns_probe() {
     local remaining=$((deadline - SECONDS))
-    ((remaining > 0)) || return 1
+    if ((remaining <= 0)); then
+      printf 'DNS probe budget exhausted: machine=%s gateway=%s name=%s expected=%s\n' "$1" "$2" "$3" "$4" >&2
+      return 1
+    fi
     ((remaining <= 8)) || remaining=8
-    timeout --kill-after=2s "${remaining}s" briqyard machine exec --timeout 5s "$1" -- \
-      python3 -I -c "$client" "$2" "$3" "$4" >/dev/null
+    if timeout --kill-after=2s "${remaining}s" briqyard machine exec --timeout 5s "$1" -- \
+      python3 -I -c "$client" "$2" "$3" "$4" >/dev/null; then
+      return 0
+    else
+      local status=$?
+      printf 'DNS probe failed: machine=%s gateway=%s name=%s expected=%s rc=%s\n' "$1" "$2" "$3" "$4" "$status" >&2
+      return "$status"
+    fi
   }
   dns_probe "$O" "$gw2" iso-o.internal "$oip" &&
     dns_probe "$A2" "$gw1" iso-a.internal "$aip" &&

@@ -139,11 +139,34 @@ class DnsProbeTests(unittest.TestCase):
         result = self.run_boundary("echo attempt >&2; return 77")
         self.assertEqual(result.returncode, 77)
         self.assertEqual(result.stderr.count("attempt"), 1)
+        self.assertIn(
+            "DNS probe failed: machine=other gateway=10.64.2.1 "
+            "name=iso-o.internal expected=10.64.2.2 rc=77", result.stderr)
+
+    def test_every_probe_pins_its_source_destination_and_expectation(self):
+        result = self.run_boundary(
+            'printf "%s %s %s %s\\n" "${8}" "${14}" "${15}" "${16}" >&2; return 0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.splitlines(), [
+            "other 10.64.2.1 iso-o.internal 10.64.2.2",
+            "open 10.64.1.1 iso-a.internal 10.64.1.2",
+            "none 10.64.1.1 iso-a.internal 10.64.1.2",
+            "none 10.64.1.1 boundary.invalid nxdomain",
+            "none 10.64.2.1 iso-o.internal silence",
+            "open 10.64.2.1 iso-o.internal silence",
+            "other 10.64.1.1 iso-a.internal silence",
+            "none 10.64.2.1 boundary.invalid silence",
+            "open 10.64.2.1 boundary.invalid silence",
+            "other 10.64.2.1 iso-o.internal 10.64.2.2",
+            "open 10.64.1.1 iso-a.internal 10.64.1.2",
+            "none 10.64.1.1 iso-a.internal 10.64.1.2",
+        ])
 
     def test_expired_budget_does_not_launch_another_exec(self):
         result = self.run_boundary("echo attempt >&2; SECONDS=1000; return 0")
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr.count("attempt"), 1)
+        self.assertIn("DNS probe budget exhausted", result.stderr)
 
 
 if __name__ == "__main__":
