@@ -537,11 +537,12 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   candidate standalone authority against the published source daemon, using the
   existing scoped driver. The safe receipt verifies running executable digests,
   driver/source binding and restored daemon configuration. The runner reactivates checksum-verified source assets and finishes on that source
-  daemon. Source refusal fails qualification. Retained protection is never deleted;
+  daemon. Exact-artifact sealed-sibling checks run before source reactivation and retain
+  their candidate binary and configuration checks. Source refusal fails qualification. Retained protection is never deleted;
   its legacy restart drain is at least 60 seconds. Source reactivation and total
   fixture durations are reported separately from clean-upgrade outage bounds. It excludes renewable callbacks and
   higher-level gateway traffic. Failure artifacts retain only bounded fixed phases
-  and allowlisted refusal categories. Seven offline regressions:
+  and allowlisted refusal categories. Nine offline regressions:
   `python3 -m unittest discover -s hack -p test_native_mixed_authority.py`.
 - `hack/native-mixed-contract.py`: before upgrading the daemon, the disposable upgrade
   runner sends real requests through the candidate fleet to the previous daemon.

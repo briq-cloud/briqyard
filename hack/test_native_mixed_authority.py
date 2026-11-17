@@ -50,6 +50,34 @@ class AuthorityTests(unittest.TestCase):
                 result = subprocess.run(['bash', '-c', script, 'sh', directory], capture_output=True)
                 self.assertEqual(result.returncode, 42)
 
+    def test_candidate_seals_precede_source_reactivation(self):
+        text = Path(__file__).with_name('native-ci-upgrade.sh').read_text()
+        seals = text.index('echo "== sealed siblings on unchanged candidate artifacts"')
+        self.assertLess(text.index('briqyard namespace rm $NS'), seals)
+        self.assertLess(seals, text.index('echo "== standalone candidate authority'))
+        workflow = Path(__file__).parents[1].joinpath('.github/workflows/native-upgrade.yml').read_text()
+        self.assertIn("NATIVE_UPGRADE_SEALED_SIBLINGS: ${{ inputs.candidate_run != '' && '1' || '0' }}", workflow)
+        self.assertNotIn('- name: Qualify sealed siblings', workflow)
+
+    def test_seals_failure_stops_before_source_reactivation(self):
+        text = Path(__file__).with_name('native-ci-upgrade.sh').read_text()
+        block = text.split('if [ "$SEALED_SIBLINGS" = 1 ]; then\n', 1)[1].split('\nfi\n', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'native-logs').mkdir()
+            prefix = ('HEAD_DIR=candidate; HARNESS=harness; RUNNER_TEMP="$PWD"\n'
+                      'die() { exit 42; }\n'
+                      'sudo() { cat >/dev/null; return "$BIND_RC"; }\n'
+                      'bash() { return "$SEALS_RC"; }\n'
+                      'briqyard() { return 0; }\n')
+            for binding, seals, expected in ((1, 0, 42), (0, 1, 42), (0, 0, 0)):
+                with self.subTest(binding=binding, seals=seals):
+                    script = f'BIND_RC={binding}; SEALS_RC={seals}\n' + prefix + block + '\necho source-reactivation\n'
+                    result = subprocess.run(['bash', '-o', 'pipefail', '-c', script], cwd=root,
+                                            capture_output=True, text=True, input='')
+                    self.assertEqual(result.returncode, expected)
+                    self.assertEqual('source-reactivation' in result.stdout, expected == 0)
+
     def test_running_authority_must_match_candidate_digest(self):
         before = {'candidateFleetSha256': 'candidate'}
         a.validate_authority(before, {'sha256': 'candidate'})

@@ -183,38 +183,12 @@ jobs:
       - name: Upgrade ${{ steps.previous.outputs.prev }} to the head
         if: steps.gate.outputs.run == 'true'
         env:
+          NATIVE_UPGRADE_SEALED_SIBLINGS: ${{ inputs.candidate_run != '' && '1' || '0' }}
           NATIVE_UPGRADE_NESTED: ${{ (inputs.candidate || inputs.candidate_run != '') && '1' || '0' }}
         run: |
           mkdir -p native-logs
           set -o pipefail
           bash .native-harness/hack/native-ci-upgrade.sh "${{ steps.previous.outputs.prev }}" native-release 2>&1 | tee native-logs/upgrade.log
-      - name: Qualify sealed siblings on the unchanged candidate artifacts
-        if: steps.gate.outputs.run == 'true' && inputs.candidate_run != ''
-        run: |
-          # Check the actual installed init path too: bootstrap keeps runtime inputs immutable.
-          # Only the input reads need root; the checksum receipt is runner-owned.
-          # shellcheck disable=SC2024
-          sudo python3 - <<'PY' > "$RUNNER_TEMP/seal-candidate.sums"
-          import hashlib
-          from pathlib import Path
-          import yaml
-          sums = dict(line.split()[::-1] for line in Path('native-release/SHA256SUMS-x86_64').read_text().splitlines())
-          config = yaml.safe_load(Path('/etc/briqyard/config.yaml').read_text())
-          paths = {name: Path('/usr/local/bin') / name for name in ('briqyardd', 'briqyard', 'briqyard-fleet')}
-          paths['briqyard-init'] = Path(config['init'])
-          for name, path in paths.items():
-              digest = sums[name + '-linux-x86_64']
-              assert hashlib.sha256(path.read_bytes()).hexdigest() == digest, name
-              print(digest + '  ' + str(path))
-          PY
-          sudo cp /etc/briqyard/config.yaml "$RUNNER_TEMP/seals-config.before"
-          set -o pipefail
-          seals_rc=0
-          BRIQYARD_TOKEN=upgrade-ci-token BRIQYARD_TEST_SEALS_ONLY=1 bash .native-harness/hack/e2e.sh 2>&1 | tee native-logs/seals.log || seals_rc=$?
-          sudo cmp -s "$RUNNER_TEMP/seals-config.before" /etc/briqyard/config.yaml
-          sudo sha256sum -c --quiet "$RUNNER_TEMP/seal-candidate.sums"
-          BRIQYARD_TOKEN=upgrade-ci-token briqyard status >/dev/null
-          exit "$seals_rc"
       - name: Result
         if: always() && steps.gate.outputs.run == 'true'
         run: |
