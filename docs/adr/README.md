@@ -8,6 +8,7 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 
 | ADR | Decision |
 |---|---|
+| [0142](0142-dns-query-namespace-admission.md) | DNS gateways reject foreign-subnet and non-machine source addresses before lookup or forwarding; host pins authenticate guest addresses |
 | [0065](0065-oom-protection-and-physical-memory.md) | Fixed OOM preferences, per-VMM containment and physical memory admission |
 | [0068](0068-cgroup-retirement.md) | Positive process settlement and checked nonrecursive cgroup retirement under lifecycle ownership |
 | [0074](0074-warm-catalog-admission.md) | Operator catalog ceilings, full warm resource charges, admission headroom and pressure-aware refill/draining |
