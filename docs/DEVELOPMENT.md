@@ -567,6 +567,12 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   An unavailable class/profile
   on this pinned namespace must refuse with capacity. An authenticated seed admission
   dispatches the existing sealed seed with its actual generation and registered host.
+  Separate consumer-only admissions dispatch 250 CPU millis, a 2 GiB volume with
+  500 CPU millis, and a nested guest with a 2 GiB volume when enabled. Each first
+  refuses changed CPU, memory, volume and class with 409, then dispatches once with
+  matching resources and waits for running; the nested case checks guest KVM.
+  Four offline regressions in `test_native_mixed_dispatch.py` check these bindings,
+  unexpected mismatch acceptance, lost replies without replay and disabled nested coverage.
   A sealed init template refuses a foreign namespace with 400 `invalid`. Cleanup owns
   that unique namespace only after checking its absence, and deletes machines only by
   exact namespace, name, qualification metadata and recorded ID. Gateway/consumer

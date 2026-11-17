@@ -402,6 +402,7 @@ class Mixed(clone.Contract):
         self.case("sandbox-named", {"fork": {"machine_id": source, "snapshot": snapshot}},
                   [[409, "capability_unsupported"]])
         self.placement(hosts[0])
+        self.dispatch_resources()
         if self.nested:
             self.nested_guest(admitted=True)
         self.seed_admission(source, snapshot, generation)
@@ -506,6 +507,43 @@ class Mixed(clone.Contract):
             else:
                 status = self.delete("cancel-admission", path, [204])
                 self.admission_call("cancelled-" + label, path, body, [[409, "conflict"]])
+
+    def dispatch_resources(self):
+        """Admission acceptance alone does not prove the daemon dispatch binding."""
+        cases = [("cpu", {"vcpus": 1, "memory_mb": 128, "cpu_millis": 250}, None, "default"),
+                 ("volume", {"vcpus": 1, "memory_mb": 256, "cpu_millis": 500}, 2, "default")]
+        if self.nested:
+            cases.append(("nested-volume", WIRE_SIZE, 2, "nested"))
+        for label, size, volume, runtime_class in cases:
+            label = "resource-" + label
+            path = f"/namespaces/{self.namespace}/admissions/{self.prefix}-{label}"
+            self.admissions.append([path, False])
+            requirement = {"role": "consumer", "size": size, "runtime_class": runtime_class}
+            fields = {"image": clone.IMAGE, "size": size, "region": "dev",
+                      "runtime_class": runtime_class, "cmd": ["/bin/sleep", "3600"]}
+            if volume is not None:
+                requirement["volume_gb"] = volume
+                fields["volume"] = {"size_gb": volume, "mount": "/data"}
+            value = self.admission_call(label + "-reserve", path,
+                                        {"regions": ["dev"], "requirements": [requirement]}, [[200, None]])
+            self.check(value.get("host") == "local" and value.get("region") == "dev" and
+                       value.get("binding") == "existing" and value.get("mode") == "cold")
+            identity = path.rsplit("/", 1)[1]
+            mismatches = [("cpu", {"size": {**size, "cpu_millis": 500 if size["cpu_millis"] == 250 else 250}}),
+                          ("memory", {"size": {**size, "memory_mb": size["memory_mb"] + 128}}),
+                          ("volume", {"volume": {"size_gb": 1, "mount": "/data"}}),
+                          ("class", {"runtime_class": "nested" if runtime_class == "default" else "default"})]
+            for axis, mismatch in mismatches:
+                self.case(label + "-mismatch-" + axis, {**fields, **mismatch},
+                          [[409, "conflict"]], admission=identity)
+            # Record possible consumption before POST: a lost answer is never replayed.
+            self.admissions[-1][1] = True
+            machine = self.case(label + "-matching", fields, [[201, None]], keep=True, admission=identity)
+            self.transition(self.receipts[-1], machine, "wait?for=running&timeout=120")
+            if runtime_class == "nested":
+                self.exec_check(label + "-exec", machine, ["sh", "-ec", NESTED_CHECK], "nested-ready")
+            self.delete(label + "-delete", f"/machines/{machine}", [200, 204])
+            self.created.remove(machine)
 
     def exec_check(self, label, machine, cmd, expected_stdout, expected_code=0):
         self.phase = label

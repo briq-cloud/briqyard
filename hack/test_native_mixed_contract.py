@@ -124,10 +124,19 @@ class FakeAPI:
         if method == "POST" and path == "/machines":
             if headers and headers.get("x-briqyard-placement-request-id"):
                 identity = headers["x-briqyard-placement-request-id"]
-                if body.get("region") != "dev" and not self.bad_dispatch:
-                    return 409, {"code": "conflict"}, {}
                 kind = "sandbox-admissions" if "sandbox_seed" in body else "admissions"
-                self.admissions[f"/namespaces/fixture/{kind}/{identity}"]["dispatched"] = True
+                admission = self.admissions[f"/namespaces/fixture/{kind}/{identity}"]
+                requirement = next((r for r in admission["body"].get("requirements", [])
+                                    if r["role"] == "consumer"), None)
+                mismatch = body.get("region") != "dev"
+                if requirement:
+                    effective_size = lambda s: {**s, "cpu_millis": s.get("cpu_millis", s["vcpus"] * 1000)}
+                    mismatch |= (effective_size(body["size"]) != effective_size(requirement["size"]) or
+                                 body.get("volume", {}).get("size_gb") != requirement.get("volume_gb") or
+                                 body.get("runtime_class", "default") != requirement.get("runtime_class", "default"))
+                if mismatch and not self.bad_dispatch:
+                    return 409, {"code": "conflict"}, {}
+                admission["dispatched"] = True
             size = body.get("size", {})
             if any(m.get("name", "").endswith("-physical-fill") for m in self.machines.values()):
                 return 503, {"code": "capacity", "error": "disk_pressure" if self.bad_physical_reason else "memory_pressure"}, {}
@@ -530,7 +539,7 @@ class MixedContractTests(unittest.TestCase):
             {"vcpus": 4, "memory_mb": 8192, "cpu_millis": 4000},
             {"vcpus": 8, "memory_mb": 16384, "cpu_millis": 8000}])
         self.assertNotIn("volume", direct[3])
-        self.assertEqual([b["volume"] for b in requests if "volume" in b],
+        self.assertEqual([b["volume"] for b in requests if "volume" in b and "-resource-" not in b["name"]],
                          [{"size_gb": 0, "mount": "/data"}, {"size_gb": 2, "mount": "/data"}])
         named = [b for b in requests if "fork" in b and b["fork"]["machine_id"] != "m_seed" and b["tenant"] == "fixture"]
         self.assertNotIn("size", named[0])
