@@ -24,6 +24,8 @@ GAP_MAX=${NATIVE_UPGRADE_ENDPOINT_GAP_MAX:-10}
 LEAVES=${NATIVE_UPGRADE_LEAVES:-6500}
 export NATIVE_UPGRADE_NESTED=${NATIVE_UPGRADE_NESTED:-0}
 case "$NATIVE_UPGRADE_NESTED" in 0) CLASSES= ;; 1) CLASSES=nested ;; *) exit 2 ;; esac
+SEALED_SIBLINGS=${NATIVE_UPGRADE_SEALED_SIBLINGS:-0}
+case "$SEALED_SIBLINGS" in 0|1) ;; *) exit 2 ;; esac
 NS=upgrade-ci
 PARENT=/sys/fs/cgroup/firecracker
 TOKEN=upgrade-ci-token
@@ -491,6 +493,35 @@ for id in $(briqyard machine ls --namespace $NS | awk 'NR>1{print $1}'); do
   briqyard machine rm "$id" >/dev/null || die "upgrade workload cleanup"
 done
 briqyard namespace rm $NS >/dev/null || die "upgrade namespace cleanup"
+
+# Exact candidate seals must run before the authority fixture restores source assets.
+if [ "$SEALED_SIBLINGS" = 1 ]; then
+  echo "== sealed siblings on unchanged candidate artifacts"
+  # Check the actual installed init path too: bootstrap keeps runtime inputs immutable.
+  # Only the input reads need root; the checksum receipt is runner-owned.
+  # shellcheck disable=SC2024
+  sudo python3 - "$HEAD_DIR" <<'PY' > "$RUNNER_TEMP/seal-candidate.sums" || die "sealed siblings candidate bindings"
+import hashlib, sys
+from pathlib import Path
+import yaml
+sums = dict(line.split()[::-1] for line in (Path(sys.argv[1]) / 'SHA256SUMS-x86_64').read_text().splitlines())
+config = yaml.safe_load(Path('/etc/briqyard/config.yaml').read_text())
+paths = {name: Path('/usr/local/bin') / name for name in ('briqyardd', 'briqyard', 'briqyard-fleet')}
+paths['briqyard-init'] = Path(config['init'])
+for name, path in paths.items():
+    digest = sums[name + '-linux-x86_64']
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == digest, name
+    print(digest + '  ' + str(path))
+PY
+  sudo cp /etc/briqyard/config.yaml "$RUNNER_TEMP/seals-config.before" || die "sealed siblings configuration capture"
+  set -o pipefail
+  seals_rc=0
+  BRIQYARD_TOKEN=upgrade-ci-token BRIQYARD_TEST_SEALS_ONLY=1 bash "$HARNESS/e2e.sh" 2>&1 | tee native-logs/seals.log || seals_rc=$?
+  sudo cmp -s "$RUNNER_TEMP/seals-config.before" /etc/briqyard/config.yaml || die "sealed siblings configuration changed"
+  sudo sha256sum -c --quiet "$RUNNER_TEMP/seal-candidate.sums" || die "sealed siblings candidate changed"
+  BRIQYARD_TOKEN=upgrade-ci-token briqyard status >/dev/null || die "sealed siblings daemon unavailable"
+  [ "$seals_rc" = 0 ] || die "sealed siblings qualification"
+fi
 
 # This fixture retains execution-protection receipts. Every later daemon start must
 # drain their command lifetime, even after the fixture deadlines expire. Run it only
