@@ -135,6 +135,10 @@ impl Resolver {
     }
 
     async fn answer(&self, gateway: Ipv4Addr, source: Ipv4Addr, q: &[u8]) -> Option<Vec<u8>> {
+        let octets = source.octets();
+        if octets[..3] != gateway.octets()[..3] || !(2..=254).contains(&octets[3]) {
+            return None;
+        }
         let query = parse_query(q)?;
         let name = query_name(&query);
         // A source kept inside gets NXDOMAIN for every name the namespace does not have, never
@@ -397,6 +401,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_gateway_rejects_foreign_and_non_machine_sources() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let up = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let r = Resolver::new(&[up.local_addr().unwrap().to_string()]);
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async move {
+            let mut buf = [0u8; 512];
+            while let Ok((n, from)) = up.recv_from(&mut buf).await {
+                observed.fetch_add(1, Ordering::Relaxed);
+                let mut response = buf[..n].to_vec();
+                response[2] |= 0x80;
+                response.extend_from_slice(b"upstream");
+                up.send_to(&response, from).await.unwrap();
+            }
+        });
+        let first = Ipv4Addr::new(10, 64, 1, 1);
+        let second = Ipv4Addr::new(10, 64, 2, 1);
+        for gateway in [first, second] {
+            let mut ip = gateway.octets();
+            ip[3] = 2;
+            r.set(
+                gateway,
+                HashMap::from([("db.internal".to_string(), Ipv4Addr::from(ip))]),
+            );
+            ip[3] = 3;
+            r.internal_only(gateway, Ipv4Addr::from(ip), true);
+        }
+        let outside = query("example.com", 1);
+        let inside = query("db.internal", 1);
+        for (gateway, source) in [
+            (first, Ipv4Addr::new(10, 64, 2, 3)),
+            (first, Ipv4Addr::new(10, 64, 2, 4)),
+            (second, Ipv4Addr::new(10, 64, 1, 3)),
+            (second, Ipv4Addr::new(10, 64, 1, 4)),
+            (first, Ipv4Addr::new(10, 64, 1, 0)),
+            (first, Ipv4Addr::new(10, 64, 1, 1)),
+            (first, Ipv4Addr::new(10, 64, 1, 255)),
+            (first, Ipv4Addr::UNSPECIFIED),
+            (first, Ipv4Addr::LOCALHOST),
+        ] {
+            for question in [&outside, &inside] {
+                assert!(
+                    r.answer(gateway, source, question).await.is_none(),
+                    "gateway {gateway} answered source {source}"
+                );
+            }
+        }
+        assert_eq!(requests.load(Ordering::Relaxed), 0);
+        for gateway in [first, second] {
+            let mut ip = gateway.octets();
+            for host in [2, 4, 254] {
+                ip[3] = host;
+                assert!(r
+                    .answer(gateway, Ipv4Addr::from(ip), &outside)
+                    .await
+                    .unwrap()
+                    .ends_with(b"upstream"));
+            }
+            ip[3] = 3;
+            let refused = r
+                .answer(gateway, Ipv4Addr::from(ip), &outside)
+                .await
+                .unwrap();
+            assert_eq!(refused[3] & 0x0F, 3);
+            let internal = r
+                .answer(gateway, Ipv4Addr::from(ip), &inside)
+                .await
+                .unwrap();
+            ip[3] = 2;
+            assert_eq!(&internal[internal.len() - 4..], &ip);
+        }
+        assert_eq!(requests.load(Ordering::Relaxed), 6);
+    }
+
+    #[tokio::test]
     async fn a_source_kept_inside_gets_internal_answers_only() {
         // The upstream is a socket that answers every query with the same reply, so a
         // forward is seen for what it is.
@@ -427,13 +509,8 @@ mod tests {
         assert!(!from_kept.ends_with(b"upstream"));
         let inside = r.answer(gw, kept, &query("db.internal", 1)).await.unwrap();
         assert_eq!(&inside[inside.len() - 4..], &db.octets());
-        // Only on its own gateway, and until it is lifted.
         let other_gw = Ipv4Addr::new(10, 64, 2, 1);
-        assert!(r
-            .answer(other_gw, kept, &outside)
-            .await
-            .unwrap()
-            .ends_with(b"upstream"));
+        assert!(r.answer(other_gw, kept, &outside).await.is_none());
         r.internal_only(gw, kept, false);
         assert!(r
             .answer(gw, kept, &outside)

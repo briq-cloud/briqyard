@@ -15,7 +15,7 @@ set -euo pipefail
 export BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7420}
 FLEET_URL=${FLEET_URL:-http://127.0.0.1:7430}
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-for c in briqyard curl jq sudo python3 journalctl pgrep; do command -v "$c" >/dev/null || { echo "qualify needs $c"; exit 2; }; done
+for c in briqyard curl jq sudo python3 journalctl pgrep timeout; do command -v "$c" >/dev/null || { echo "qualify needs $c"; exit 2; }; done
 sudo -n true || { echo 'qualify needs sudo without a password'; exit 2; }
 systemctl is-active briqyardd >/dev/null || { echo 'qualify needs the briqyardd unit running'; exit 2; }
 T=qual-$$
@@ -276,6 +276,75 @@ check "egress none: an address on the internet times out" 'grep -qF "timed out" 
 out=$(on "$NN" "nslookup example.com 2>&1; echo rc=\$?" || true)
 check "egress none: names outside the namespace do not resolve (NXDOMAIN)" 'grep -qiE "NXDOMAIN|can.t find|not found" <<<"$out"'
 check "egress none: control, its namespace and internal names answer" 'on "$NN" "ping -c1 -W2 $aip" >/dev/null && on "$NN" "nslookup iso-a.internal 2>&1" | grep -qF "$aip"'
+dns_boundary() {
+  local deadline=$((SECONDS + 90)) client
+  client=$(cat <<'DNS_PROBE'
+import secrets
+import socket
+import struct
+import sys
+
+def probe(gateway, name, expected):
+    ident = secrets.randbits(16)
+    question = b"".join(bytes([len(label)]) + label.encode("ascii") for label in name.split(".")) + b"\0\0\1\0\1"
+    query = struct.pack("!6H", ident, 0x0100, 1, 0, 0, 0) + question
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(2)
+        sock.connect((gateway, 53))
+        sock.send(query)
+        try:
+            reply = sock.recv(4096)
+        except TimeoutError:
+            assert expected == "silence", "own-gateway DNS control did not answer"
+            return "silence"
+    assert expected != "silence", "foreign gateway returned a DNS response"
+    seen, flags, questions, answers, authorities, additional = struct.unpack("!6H", reply[:12])
+    assert seen == ident and flags & 0x8000 and not flags & 0x7A00
+    assert questions == 1 and authorities == additional == 0
+    assert reply[12:len(query)] == question
+    if expected == "nxdomain":
+        assert flags & 15 == 3 and answers == 0 and len(reply) == len(query)
+        return "nxdomain"
+    assert flags & 15 == 0 and answers == 1
+    suffix = struct.pack("!HHIH", 1, 1, 5, 4) + socket.inet_aton(expected)
+    record = reply[len(query):]
+    assert record in [b"\xc0\x0c" + suffix, question[:-4] + suffix]
+    return "answer"
+
+if __name__ == "__main__":
+    print(probe(*sys.argv[1:]))
+DNS_PROBE
+)
+  dns_probe() {
+    local remaining=$((deadline - SECONDS))
+    if ((remaining <= 0)); then
+      printf 'DNS probe budget exhausted: machine=%s gateway=%s name=%s expected=%s\n' "$1" "$2" "$3" "$4" >&2
+      return 1
+    fi
+    ((remaining <= 8)) || remaining=8
+    if timeout --kill-after=2s "${remaining}s" briqyard machine exec --timeout 5s "$1" -- \
+      python3 -I -c "$client" "$2" "$3" "$4" >/dev/null; then
+      return 0
+    else
+      local status=$?
+      printf 'DNS probe failed: machine=%s gateway=%s name=%s expected=%s rc=%s\n' "$1" "$2" "$3" "$4" "$status" >&2
+      return "$status"
+    fi
+  }
+  dns_probe "$O" "$gw2" iso-o.internal "$oip" &&
+    dns_probe "$A2" "$gw1" iso-a.internal "$aip" &&
+    dns_probe "$NN" "$gw1" iso-a.internal "$aip" &&
+    dns_probe "$NN" "$gw1" boundary.invalid nxdomain &&
+    dns_probe "$NN" "$gw2" iso-o.internal silence &&
+    dns_probe "$A2" "$gw2" iso-o.internal silence &&
+    dns_probe "$O" "$gw1" iso-a.internal silence &&
+    dns_probe "$NN" "$gw2" boundary.invalid silence &&
+    dns_probe "$A2" "$gw2" boundary.invalid silence &&
+    dns_probe "$O" "$gw2" iso-o.internal "$oip" &&
+    dns_probe "$A2" "$gw1" iso-a.internal "$aip" &&
+    dns_probe "$NN" "$gw1" iso-a.internal "$aip"
+}
+check "DNS: foreign gateways refuse open and none sources beside own-gateway controls" 'dns_boundary'
 # Disks, files and the guest's view of its devices.
 seen=$(blocks "$A")
 check "a guest sees its own three disks only: root, config drive, volume (sees: $seen)" '[ "$seen" = "vda vdb vdc " ]'
