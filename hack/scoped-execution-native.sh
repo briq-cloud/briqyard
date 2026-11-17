@@ -3,6 +3,10 @@
 # cargo build --release -p briqyard-testing --features scoped-native --bin scoped-execution-native
 # Reuses native-ci.sh's checked bootstrap and install-dev.sh; never a shared dev host.
 set -euo pipefail
+MODE=${1:-full}
+AUTHORITY_BINARY=${2:-/usr/local/bin/briqyard-fleet}
+case "$MODE" in full|standalone) ;; *) echo 'invalid scoped fixture mode' >&2; exit 2 ;; esac
+[ -x "$AUTHORITY_BINARY" ] || { echo 'authority binary unavailable' >&2; exit 2; }
 [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || { echo 'requires a disposable GitHub-hosted runner' >&2; exit 2; }
 [ "$(uname -s)" = Linux ] && [ -c /dev/kvm ] || { echo 'requires Linux KVM' >&2; exit 2; }
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -10,9 +14,11 @@ cd "$ROOT"
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
 DRIVER=$TARGET/release/scoped-execution-native
 FLEET_TEST_PATH=$TARGET/scoped-native-fleet-test
-[ -f "$FLEET_TEST_PATH" ] || { echo 'build the native fleet test receipt first' >&2; exit 2; }
-FLEET_TEST=$(cat "$FLEET_TEST_PATH")
-[ -x "$FLEET_TEST" ] || { echo 'native fleet test binary unavailable' >&2; exit 2; }
+if [ "$MODE" = full ]; then
+  [ -f "$FLEET_TEST_PATH" ] || { echo 'build the native fleet test receipt first' >&2; exit 2; }
+  FLEET_TEST=$(cat "$FLEET_TEST_PATH")
+  [ -x "$FLEET_TEST" ] || { echo 'native fleet test binary unavailable' >&2; exit 2; }
+fi
 [ -x "$DRIVER" ] || { echo 'build scoped-execution-native first' >&2; exit 2; }
 export BRIQYARD_URL=http://127.0.0.1:7420
 # No arbitrary endpoint overrides: this fixture owns the disposable local host.
@@ -51,10 +57,11 @@ cleanup() {
   done
   timeout 90 briqyard namespace gateway rm "$T" >/dev/null 2>&1 || true
   briqyard namespace rm "$T" >/dev/null 2>&1 || { echo "scoped native: cleanup namespace failed" >&2; rc=1; }
-  if briqyard namespace ls | jq -e --arg ns "$T" 'any(.[]; .id == $ns)' >/dev/null; then rc=1; fi
+  namespaces=$(briqyard namespace ls) || rc=1
+  if ! printf '%s' "$namespaces" | jq -e --arg ns "$T" 'all(.[]; .id != $ns)' >/dev/null; then rc=1; fi
   # The retained compatibility floor belongs to this disposable fixture and is never removed.
   if [ "$CONFIG_SAVED" = 1 ]; then
-    sudo cp "$D/host-original.yaml" /etc/briqyard/config.yaml
+    sudo cp "$D/host-original.yaml" /etc/briqyard/config.yaml || rc=1
     sudo systemctl restart briqyardd || rc=1
   fi
   sudo rm -rf "$D"
@@ -103,7 +110,7 @@ BRIQYARD_TOKEN=$(sudo cat "$D/host-admin")
 export BRIQYARD_TOKEN
 sudo systemctl restart briqyardd
 PHASE=authority_start
-sudo env BRIQYARD_LOG=off,execution_installation=warn bash -c 'umask 077; echo "$$" > "$1/authority.pid"; exec /usr/local/bin/briqyard-fleet --config "$1/authority.yaml" authority > "$1/authority-diagnostics.jsonl" 2>&1' _ "$D" &
+sudo env BRIQYARD_LOG=off,execution_installation=warn bash -c 'umask 077; echo "$$" > "$1/authority.pid"; exec "$2" --config "$1/authority.yaml" authority > "$1/authority-diagnostics.jsonl" 2>&1' _ "$D" "$AUTHORITY_BINARY" &
 AUTHORITY_PID=$!
 # A single bounded startup observation; no exec request is retried.
 PHASE=host_ready
@@ -117,6 +124,14 @@ PHASE=sibling
 S=$(briqyard machine run --namespace "$T" --name sibling --image alpine:3.20 --memory 128 -l briq_id=native-sibling -l "team=$T" -- sleep 3600 | jq -er .id)
 PHASE=scoped_dispatch
 sudo "$DRIVER" run "$D" "$T" "$M" "$S"
+if [ "$MODE" = standalone ]; then
+  PHASE=authority_binding
+  # The safe projection is intentionally written by the runner, not by sudo.
+  # shellcheck disable=SC2024
+  sudo python3 hack/native-mixed-authority.py authority "${3:?binding input}" "$D" "$DRIVER" > "${4:?binding output}"
+  printf 'scoped native: standalone authority contract passed; callback service not exercised\n'
+  exit 0
+fi
 
 # The fixture uses the production Service constructor with its explicitly configured
 # callback. The preceding standalone authority has no callback and remains legacy.

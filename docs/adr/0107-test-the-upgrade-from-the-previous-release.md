@@ -92,6 +92,27 @@ retain the explicit nested qualification gap. The second fixture host remains de
 this is not multi-host nested or regional-authority qualification. Passing offline tests
 establish wire and failure handling only; native exact-artifact evidence is still required.
 
+### Standalone authority against the published source daemon
+
+Before creating the upgrade's protected machines, the job reuses the standalone
+part of `scoped-execution-native.sh`. The candidate authority executable comes
+from the selected checksum-verified release assets; the running daemon remains
+the published previous release. The matching-source testing driver exercises
+registration, ownership, discovery, protection, delegation and direct scoped
+execution, including duplicate-operation refusal. Its source must match the
+harness checkout; building this helper never replaces a runtime asset.
+
+A separate receipt binds the actual authority process executable to the candidate
+checksum and the actual daemon executable to the previous checksum. It records
+the testing driver's hash and source commit, then requires the original daemon
+configuration and binary after fixture cleanup. This fixture temporarily restarts
+the source daemon before the upgrade preservation baseline; those restarts are
+not upgrade continuity evidence. The full scoped suite retains renewable callback
+coverage. This standalone slice does not qualify callbacks, gateways above the
+runtime, or a multi-host authority. Offline checks qualify receipt predicates only;
+exact-artifact native runs remain necessary. Failure receipts retain only bounded,
+allowlisted phases and refusal categories; raw fixture output is not uploaded.
+
 ### Initial upgrade result
 
 First pair, v0.1.23 to this head (PR #152), identical on 24.04 and 26.04: 26 checks pass, 2 fail.
@@ -104,6 +125,23 @@ First pair, v0.1.23 to this head (PR #152), identical on 24.04 and 26.04: 26 che
 **Defect found (not fixed here):** after SIGUSR2 the new daemon adopts the running machines within five seconds, then runs the start's orphan sweep over the idle cgroup leaves before it serves anything: `orphans swept at start` (6500) is logged 186 s later, and only then the API, the HTTP ingress and every TCP endpoint listen (`serving again`, `gap_ms 190513`, `adopted_ms 190379`). The machines never stopped (same VMM pids, no reboot, data intact), but nothing could reach them for three to four minutes, against ADR 0027's 2 s drain. Staging's 5000 to 6000 leaves meant the same. The check fails above 30 s (API) and 10 s (endpoint) and stays red until the sweep no longer holds the listeners; the bounds are not to be raised to pass it.
 
 The seed check ran its refusal branch: the previous init digest is `7f39e6645c96`, the head's `cee0c0323a8d` (CI builds the init with the `stable` toolchain, not the release pin), the templates turned off, and the clone was refused with HTTP 400 `operator sandbox seed profile unavailable`.
+
+### Scoped authority qualification and retained protection
+
+The standalone authority fixture runs after forward, rollback and return continuity
+checks, with the upgrade workload removed. The runner reactivates checksum-verified
+published source assets and verifies the running source daemon before exercising the
+candidate authority. Failure to reactivate source fails qualification; it is never
+silently skipped. The disposable runner finishes on the published source daemon.
+
+The fixture retains execution-protection receipts and the compatibility floor.
+Expired legacy receipts still impose a 60-second startup drain. Running this fixture
+before upgrade measurements changed their initial state: one native trial measured
+65.52 seconds of API silence and 65.72 seconds of endpoint silence, although adoption
+was below 80 ms. Those are real protected-restart outages, not clean-upgrade timings.
+The existing 30-second API and 10-second endpoint bounds remain unchanged. Separate
+receipts report source-reactivation and total authority-fixture durations; neither is
+a claim to measure only the restart. No retained protection is erased to pass a test.
 
 ### Mixed-version admission accounting
 
