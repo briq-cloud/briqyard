@@ -94,11 +94,30 @@ then the namespace's turn, then the sandbox lock and the entry. Namespace admiss
 write-preferring lock that a namespace deletion takes exclusively, so no holder of a
 namespace turn may wait for it: gateway PUT and DELETE, a cold-born `via` create and a scoped
 egress PATCH hold namespace admission while they wait for the turn, and a queued deletion
-waits for them. An assigned start through a gateway therefore takes warm admission
-exclusively and namespace admission before its gateway turn and keeps all three through its
-reservation, instead of taking them inside the reservation under the turn. This changes the
-baseline assigned start: a gateway boot it waits for now holds warm admission, delaying seed
-creates and warm claims on the host until the gateway serves or fails.
+waits for them. The sandbox lock is taken under warm admission (a seed create, an
+assignment's staging and commit, an assigned reservation) or just before a request's own
+sandbox turn (a sandbox lookup), and none of its holders waits for a namespace turn. A create
+holds it only for a seed and releases it with the record, before the create's start waits
+for the gateway. An assigned reservation may therefore take it under the namespace turn.
+
+An assigned start through a gateway first makes the gateway serve under the namespace turn
+alone, as an ordinary start does, and releases the turn. It then takes warm admission
+exclusively, namespace admission and the turn again, checks the gateway once more and keeps
+all three through its reservation, instead of taking warm and namespace admission inside the
+reservation under the turn. The first gateway boot or serve wait therefore holds neither warm
+nor namespace admission, so seed creates, warm claims, maintenance and namespace admission go
+on beside it. The second `ensure_gateway` still runs with warm admission held exclusively and
+namespace admission held, and it waits for the namespace turn there: a concurrent gateway PUT
+that changes the spec, stopping and restarting the gateway, stalls warm admission for as long
+as it holds the turn. The check is normally a port check (an assigned record is refused in a
+policy namespace before this point, so there is no readback), but it performs a full boot,
+boot-queue wait included, whenever the gateway is not serving at that moment: the sleeper,
+which takes the namespace turn only by `try_lock`, stopped it between the two turns, a
+change between the turns left it unstarted, or its process exited. A boot under warm
+admission therefore remains possible. Looping back to the first phase instead of booting
+under warm admission is a possible follow-up, not implemented. `reserve_assigned_run_version` keeps the older order, warm then
+namespace admission inside the reservation with no namespace turn, and is reached only from
+the first-continuation launch path, which is dead code outside tests.
 
 **Unverified-gateway bridge gate.** A bound gateway's address is in the bridge table's
 `gateway_gate` set; `prerouting` drops ARP and IP between that address and any member of its

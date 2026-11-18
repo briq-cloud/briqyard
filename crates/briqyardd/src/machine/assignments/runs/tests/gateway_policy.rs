@@ -228,6 +228,15 @@ async fn an_assigned_start_and_a_namespace_waiter_finish_beside_a_deletion(
         }
     })
     .await;
+    let turn = bounded(
+        "the destination's turn while the start waits for warm",
+        h.m.namespace_of("destination")
+            .unwrap()
+            .lock
+            .clone()
+            .lock_owned(),
+    )
+    .await;
     let m = h.m.clone();
     let waiting = tokio::spawn(async move {
         match (waiter, ordinary) {
@@ -250,7 +259,8 @@ async fn an_assigned_start_and_a_namespace_waiter_finish_beside_a_deletion(
         }
     });
     bounded("the waiter's admission", async {
-        while h.m.inner.namespace_lifecycle.try_write().is_ok() && !waiting.is_finished() {
+        while h.m.inner.namespace_lifecycle.try_write().is_ok() {
+            assert!(!waiting.is_finished(), "the waiter waits for the turn");
             tokio::task::yield_now().await;
         }
     })
@@ -258,12 +268,19 @@ async fn an_assigned_start_and_a_namespace_waiter_finish_beside_a_deletion(
     let m = h.m.clone();
     let deleting = tokio::spawn(async move { m.delete_namespace("spare").await });
     bounded("the deletion's request", async {
-        while h.m.inner.namespace_lifecycle.try_read().is_ok() && !deleting.is_finished() {
+        while h.m.inner.namespace_lifecycle.try_read().is_ok() {
+            assert!(!deleting.is_finished(), "the deletion waits for the waiter");
             tokio::task::yield_now().await;
         }
     })
     .await;
     drop(warm);
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!waiting.is_finished() && !deleting.is_finished() && !starting.is_finished());
+    assert!(h.m.inner.namespace_lifecycle.try_read().is_err());
+    drop(turn);
     bounded("the namespace deletion", deleting)
         .await
         .unwrap()
@@ -296,4 +313,144 @@ async fn an_assigned_start_and_an_egress_patch_finish_beside_a_namespace_deletio
 async fn an_assigned_start_and_a_via_create_finish_beside_a_namespace_deletion() {
     an_assigned_start_and_a_namespace_waiter_finish_beside_a_deletion(NamespaceWaiter::ViaCreate)
         .await;
+}
+
+#[tokio::test]
+async fn an_assigned_start_waits_for_its_gateway_turn_without_warm_or_admission() {
+    let (h, entry) = stopped_through_the_gateway().await;
+    h.namespace("spare");
+    let lock = h.m.namespace_of("destination").unwrap().lock.clone();
+    let turn = lock.clone().lock_owned().await;
+    let idle = Arc::strong_count(&lock);
+    let m = h.m.clone();
+    let id = entry.snapshot().id;
+    let starting = tokio::spawn(async move { m.start(&id, None).await.map(|_| ()) });
+    bounded("the start's wait for the turn", async {
+        while Arc::strong_count(&lock) == idle {
+            assert!(!starting.is_finished(), "the start waits for the turn");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let parked = Arc::strong_count(&lock);
+    assert!(
+        h.m.inner.warm_lock.try_write().is_ok(),
+        "no warm admission held"
+    );
+    assert!(
+        h.m.inner.namespace_lifecycle.try_write().is_ok(),
+        "no namespace admission held"
+    );
+    let m = h.m.clone();
+    let deleting = tokio::spawn(async move { m.delete_namespace("spare").await });
+    let m = h.m.clone();
+    let gateway = legacy_spec(&h);
+    let putting =
+        tokio::spawn(async move { m.set_gateway("destination", gateway).await.map(|_| ()) });
+    bounded("the gateway put's wait for the turn", async {
+        while Arc::strong_count(&lock) == parked {
+            assert!(!putting.is_finished(), "the gateway put waits for the turn");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    drop(turn);
+    bounded("the namespace deletion", deleting)
+        .await
+        .unwrap()
+        .unwrap();
+    bounded("the gateway put", putting).await.unwrap().unwrap();
+    bounded("the assigned start", starting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.snapshot().state, state::RUNNING);
+    assert!(h.m.namespace_of("spare").is_none());
+}
+
+#[tokio::test]
+async fn warm_admission_is_not_held_while_an_assigned_start_boots_its_gateway() {
+    let (h, entry) = stopped_through_the_gateway().await;
+    h.namespace("spare");
+    let gw = h.m.gateway_of("destination").unwrap();
+    h.m.stop_entry(&gw, stop::IDLE, Duration::from_secs(1), false, None)
+        .await
+        .unwrap();
+    assert_ne!(gw.snapshot().state, state::RUNNING);
+    let size = h.m.boots_at_once();
+    h.m.inner
+        .boot_gate
+        .acquire_many(size)
+        .await
+        .unwrap()
+        .forget();
+    let m = h.m.clone();
+    let id = entry.snapshot().id;
+    let starting = tokio::spawn(async move { m.start(&id, None).await.map(|_| ()) });
+    bounded("the gateway's boot at the gate", async {
+        while h.m.boot_queue() == 0 {
+            assert!(!starting.is_finished(), "the start waits for its gateway");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_ne!(gw.snapshot().state, state::RUNNING);
+    let claimed = bounded(
+        "a warm claim",
+        h.m.claim_warm_pool(
+            "spare",
+            "pool",
+            api::ClaimWarmPoolRequest {
+                name: "claimed".into(),
+                request_id: "r_claim".into(),
+                fail_fast: false,
+            },
+        ),
+    )
+    .await;
+    let refused = claimed.unwrap_err();
+    assert!(matches!(refused, MError::NotFound), "{refused}");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    drop(
+        h.m.warm_maintenance_admission_until(deadline)
+            .await
+            .unwrap(),
+    );
+    assert!(!starting.is_finished());
+    h.m.inner.boot_gate.add_permits(size as usize);
+    bounded("the assigned start", starting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.snapshot().state, state::RUNNING);
+    assert_eq!(gw.snapshot().state, state::RUNNING);
+}
+
+#[tokio::test]
+async fn an_assigned_start_boots_a_gateway_stopped_between_its_turns() {
+    let (h, entry) = stopped_through_the_gateway().await;
+    let gw = h.m.gateway_of("destination").unwrap();
+    let warm = h.m.inner.warm_lock.read().await;
+    let m = h.m.clone();
+    let id = entry.snapshot().id;
+    let starting = tokio::spawn(async move { m.start(&id, None).await.map(|_| ()) });
+    bounded("the start's warm request", async {
+        while h.m.inner.warm_lock.try_read().is_ok() {
+            assert!(!starting.is_finished(), "the start waits for warm");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(gw.snapshot().state, state::RUNNING);
+    h.m.stop_entry(&gw, stop::IDLE, Duration::from_secs(1), false, None)
+        .await
+        .unwrap();
+    assert_ne!(gw.snapshot().state, state::RUNNING);
+    drop(warm);
+    bounded("the assigned start", starting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(gw.snapshot().state, state::RUNNING);
+    assert_eq!(entry.snapshot().state, state::RUNNING);
 }

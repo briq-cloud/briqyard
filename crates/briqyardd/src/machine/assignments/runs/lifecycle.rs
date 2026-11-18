@@ -115,6 +115,9 @@ impl Manager {
                 self.ensure_entry_assigned_update_backing(entry)
                     .await
                     .map_err(public_error)?;
+                if record.egress.via_gateway() {
+                    drop(self.ensure_gateway(&record.namespace, None).await?);
+                }
                 let warm = self.inner.warm_lock.write().await;
                 let admission = self.inner.namespace_lifecycle.read().await;
                 let gateway = if record.egress.via_gateway() {
