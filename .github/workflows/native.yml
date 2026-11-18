@@ -15,6 +15,15 @@ on:
         required: false
         default: false
         type: boolean
+      suites_only:
+        description: >-
+          Run only these suites of more-suites, comma separated (stress, monitoring, alerts,
+          qualification, restore, scale); the e2e, fleet-smoke and two-host jobs are skipped.
+          Empty runs everything. An unknown or repeated name fails the run. Not with
+          measure_freeze or two_hosts_only.
+        required: false
+        default: ''
+        type: string
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
@@ -33,7 +42,7 @@ jobs:
   # Which suites of `more-suites` run (ADR 0110). Not an optimisation that may fail quietly:
   # if this job fails the run is red and `more-suites` does not start.
   changes:
-    if: ${{ github.event.pull_request.draft != true && !inputs.two_hosts_only && !inputs.measure_freeze }}
+    if: ${{ github.event.pull_request.draft != true && ((!inputs.two_hosts_only && !inputs.measure_freeze) || inputs.suites_only != '') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -48,25 +57,42 @@ jobs:
         id: select
         env:
           EVENT: ${{ github.event_name }}
+          ONLY: ${{ inputs.suites_only }}
+          EXCLUSIVE: ${{ inputs.two_hosts_only || inputs.measure_freeze }}
         run: |
-          set -o pipefail
+          set -eo pipefail
           all=$(python3 hack/native-suites.py --all)
           if [ "$EVENT" = pull_request ]; then
             suites=$(git -c core.quotePath=off diff --name-only HEAD^1 HEAD | python3 hack/native-suites.py)
+          elif [ -n "$ONLY" ]; then
+            if [ "$EXCLUSIVE" = true ]; then
+              echo 'The suites_only input cannot be combined with measure_freeze or two_hosts_only' >&2
+              exit 1
+            fi
+            suites=$(python3 hack/native-suites.py --only "$ONLY")
           else
             suites=$all
+          fi
+          if ! jq -e 'type == "array" and length > 0' <<<"$suites" > /dev/null; then
+            echo "No suite selected: $suites" >&2
+            exit 1
           fi
           echo "suites=$suites" >> "$GITHUB_OUTPUT"
           left_out=$(jq -rn --argjson all "$all" --argjson run "$suites" '$all - $run | join(", ")')
           {
             echo "### Suites of more-suites"
             echo "Run: $(jq -r 'join(", ")' <<<"$suites")"
-            if [ -n "$left_out" ]; then
+            if [ -n "$ONLY" ]; then
+              echo "Selected by the dispatch input suites_only (\`$ONLY\`). The \`suites\` job (e2e, fleet-smoke, scoped execution) and the \`two-hosts\` job were skipped."
+              if [ -n "$left_out" ]; then
+                echo "Not selected: $left_out."
+              fi
+            elif [ -n "$left_out" ]; then
               echo "Left out: $left_out. Nothing they read changed; a release PR (it changes Cargo.toml) runs them."
             fi
           } | tee -a "$GITHUB_STEP_SUMMARY"
   suites:
-    if: ${{ github.event.pull_request.draft != true && !inputs.two_hosts_only && !inputs.measure_freeze }}
+    if: ${{ github.event.pull_request.draft != true && !inputs.two_hosts_only && !inputs.measure_freeze && inputs.suites_only == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -214,8 +240,12 @@ jobs:
           path: .native-harness
           persist-credentials: false
       - name: Record tested identity and host
+        env:
+          HARNESS_SHA: ${{ github.sha }}
+          REQUESTED_REF: ${{ inputs.ref }}
         run: |
           git -C "$GITHUB_WORKSPACE" rev-parse HEAD | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Harness: $HARNESS_SHA; requested ref: ${REQUESTED_REF:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
           uname -a | tee -a "$GITHUB_STEP_SUMMARY"
           ls -l /dev/kvm
           free -m
@@ -280,11 +310,13 @@ jobs:
           path: |
             native-logs/${{ matrix.suite }}.log
             native-logs/recovery-helper.log
+            native-logs/qualification/gateway-policy-receipt.json
+            native-logs/qualification/gateway-policy-observations.jsonl
             native-logs/${{ matrix.suite }}/
           if-no-files-found: ignore
 
   two-hosts:
-    if: ${{ github.event.pull_request.draft != true && !inputs.measure_freeze }}
+    if: ${{ github.event.pull_request.draft != true && !inputs.measure_freeze && inputs.suites_only == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -345,7 +377,7 @@ jobs:
           if-no-files-found: ignore
 
   measure:
-    if: ${{ github.event.pull_request.draft != true && inputs.measure_freeze }}
+    if: ${{ github.event.pull_request.draft != true && inputs.measure_freeze && inputs.suites_only == '' }}
     strategy:
       fail-fast: false
       matrix:
