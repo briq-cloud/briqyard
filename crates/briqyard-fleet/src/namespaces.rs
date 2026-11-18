@@ -306,6 +306,21 @@ pub(super) async fn set_gateway(
     put_on_namespace(&st, &id, "gateway", &q, Some(&spec), need, &headers, body).await
 }
 
+/// The loaded-policy readback of a namespace's gateway, asked of the namespace's pinned host
+/// only (ADR 0143); `forward` refuses it unless that host says it supports it.
+pub(super) async fn gateway_policy_status(
+    State(st): S,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, Refusal> {
+    let host = st.reg.lock().unwrap().host_of_namespace(&id).cloned();
+    let host =
+        host.ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "namespace not found"))?;
+    let path = format!("/v1/namespaces/{id}/gateway/policy-status");
+    Ok(forward(&st, &host, Method::POST, &path, &headers, body).await)
+}
+
 /// Puts a namespace's quota on the namespace's host (ADR 0025); a namespace with none yet is placed,
 /// with no need: the quota is what its machines will be held to there.
 pub(super) async fn set_quota(

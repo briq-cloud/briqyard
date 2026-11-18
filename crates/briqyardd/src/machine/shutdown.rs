@@ -38,6 +38,15 @@ impl Manager {
             self.settle_current_run_exit(e, pid).await;
             return;
         }
+        self.settle_exact_exit(e, pid, None).await;
+    }
+
+    pub(super) async fn settle_exact_exit(
+        &self,
+        e: &Arc<Entry>,
+        pid: u32,
+        expected: Option<&fc::Vm>,
+    ) {
         let machine = e.rec.lock().unwrap().id.clone();
         let started = Instant::now();
         stage("settle", "exit_observed", &machine, pid, started, true);
@@ -47,7 +56,14 @@ impl Manager {
         let (mut exit, vmm_oom) = {
             let live = e.live.lock().unwrap();
             match live.as_ref() {
-                Some(l) if l.pid == pid => (l.exit.clone(), l.vmm_oom.clone()),
+                Some(l)
+                    if l.pid == pid
+                        && expected.is_none_or(|vm| {
+                            *vm.exited.borrow() && gateway_policy::same_gateway_process(l, vm)
+                        }) =>
+                {
+                    (l.exit.clone(), l.vmm_oom.clone())
+                }
                 _ => return,
             }
         };
@@ -81,8 +97,19 @@ impl Manager {
         let started = Instant::now();
         let revoked = self.unplug(&rec.id, &rec.ip).await;
         stage("settle", "network", &machine, pid, started, revoked.is_ok());
+        let isolating = e.gateway_isolating.load(Relaxed);
+        if isolating && revoked.is_err() {
+            return;
+        }
         *e.live.lock().unwrap() = None;
         e.identity_trusted.store(false, Relaxed);
+        if isolating {
+            *e.stop_req.lock().unwrap() = None;
+            e.rec.lock().unwrap().error.clear();
+            self.settle_stopped(e, stop::HOST);
+            e.gateway_isolating.store(false, Relaxed);
+            return;
+        }
         // The init's report, or none: the process is gone, so the wait ends either way. A
         // process that ended without the init's word (killed, a kernel panic) reads as 255;
         // nothing the guest prints on its console can set its exit.
@@ -264,6 +291,10 @@ impl Manager {
                 }
                 return;
             }
+            if e.snapshot().gateway_policy.is_some() {
+                m.restart_bound_gateway(&e).await;
+                return;
+            }
             let _turns = e.lock_for_start().await;
             let r = e.snapshot();
             if r.state != state::STOPPED || r.stopped_reason != stop::EXIT {
@@ -309,16 +340,12 @@ impl Manager {
 
     // --- stop ---
 
-    /// Ends the process of a machine whose entry lock is held: asks the guest to stop and
-    /// kills after `grace` (at once when zero), waits for Firecracker to be gone, then clears
-    /// the entry itself, since the watcher cannot take the lock to settle it, and wakes whoever
-    /// waited for that.
-    pub(super) async fn end_process(
+    pub(super) async fn confirm_process_exit(
         &self,
         e: &Arc<Entry>,
         live: &fc::Vm,
         grace: Duration,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut exited = live.exited.clone();
         let mut forced = false;
         if !*exited.borrow() {
@@ -345,13 +372,27 @@ impl Manager {
                 // settlement ended without confirming the death: the machine, its backing and
                 // its charge stay, and the next attempt (the reconciler's) settles it.
                 anyhow::ensure!(
-                    confirmed.is_ok(),
+                    confirmed.is_ok_and(|gone| *gone),
                     "VMM exit unconfirmed: its settlement ended without proof; machine retained"
                 );
             }
         }
+        Ok(forced)
+    }
+
+    /// Ends the process of a machine whose entry lock is held: asks the guest to stop and
+    /// kills after `grace` (at once when zero), waits for Firecracker to be gone, then clears
+    /// the entry itself, since the watcher cannot take the lock to settle it, and wakes whoever
+    /// waited for that.
+    pub(super) async fn end_process(
+        &self,
+        e: &Arc<Entry>,
+        live: &fc::Vm,
+        grace: Duration,
+    ) -> Result<()> {
+        let forced = self.confirm_process_exit(e, live, grace).await?;
         if e.snapshot().clone_origin.is_some() {
-            if !*exited.borrow() {
+            if !*live.exited.borrow() {
                 tracing::error!(
                     machine = e.snapshot().id,
                     "clone exit unconfirmed; backing and reservation retained"
@@ -436,6 +477,7 @@ impl Manager {
             let pid = e.rec.lock().unwrap().pid;
             stage(operation, "lock", &machine, pid, started, true);
             self.check_version(e, at)?;
+            self.check_gateway_isolation(e)?;
             // InUse::drop touches the record before decrementing in_flight.
             let in_flight = e.in_flight.load(Relaxed);
             let r = e.snapshot();
@@ -664,6 +706,7 @@ impl Manager {
     ) -> Result<Vec<String>, MError> {
         let e = e.clone();
         self.check_version(&e, at)?;
+        self.check_gateway_isolation(&e)?;
         if e.snapshot().launch_identity.is_some() && self.destination_assignment_pending(id)? {
             return Err(MError::Conflict(
                 "destination assignment must settle before destruction".into(),

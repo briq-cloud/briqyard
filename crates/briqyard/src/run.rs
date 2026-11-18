@@ -100,6 +100,7 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                         }
                     }),
                     sandbox_seed: None,
+                    gateway_policy: None,
                 };
                 let m: api::Machine = c.call(POST, "/v1/machines", Some(&req)).await?;
                 let m = match a.detach || a.no_start {
@@ -551,10 +552,22 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     image,
                     port,
                     readiness,
+                    policy_digest,
                     envs,
                     files,
                     cmd,
                 } = *a;
+                let policy = policy_digest
+                    .map(|policy_digest| {
+                        let binding = api::GatewayPolicyBinding {
+                            policy_format: api::GATEWAY_POLICY_FORMAT,
+                            policy_digest,
+                            enforcement_version: api::GATEWAY_POLICY_ENFORCEMENT,
+                        };
+                        binding.check().map(|()| binding)
+                    })
+                    .transpose()
+                    .map_err(|why| anyhow::anyhow!("--policy-digest: {why}"))?;
                 let spec = api::GatewaySpec {
                     size: if vcpus.is_some() || memory.is_some() || cpu_millis.is_some() {
                         Some(api::Size {
@@ -575,6 +588,7 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                         ..Default::default()
                     },
                     start,
+                    policy,
                     ..Default::default()
                 };
                 print_json(
@@ -582,6 +596,21 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                         PUT,
                         &namespace_put_path(&namespace, "gateway", region.as_deref()),
                         Some(&spec),
+                    )
+                    .await?,
+                )
+            }
+            NamespaceCmd::Gateway(GatewayCmd::PolicyStatus {
+                namespace,
+                challenge,
+            }) => {
+                let request = api::GatewayPolicyStatusRequest { challenge };
+                request.check().map_err(|why| anyhow::anyhow!("{why}"))?;
+                print_json(
+                    &c.call::<api::GatewayPolicyStatus>(
+                        POST,
+                        &format!("/v1/namespaces/{namespace}/gateway/policy-status"),
+                        Some(&request),
                     )
                     .await?,
                 )

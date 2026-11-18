@@ -148,3 +148,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 - [0140: Qualify named clones through the native fleet](0140-native-named-clone-contract.md)
 
 - [0141: Serve installer reads from committed snapshots](0141-installer-reads-from-committed-snapshots.md)
+
+- [0143: Read a gateway's loaded policy back before bound machines reach it](0143-gateway-loaded-policy-readback.md)

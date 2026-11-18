@@ -42,6 +42,7 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
         MError::NamespaceInUse => (StatusCode::CONFLICT, "namespace_in_use"),
         MError::NamespaceProtected(_) => (StatusCode::CONFLICT, "namespace_protected"),
         MError::GatewayInUse => (StatusCode::CONFLICT, "gateway_in_use"),
+        MError::GatewayPolicy(_) => (StatusCode::CONFLICT, "gateway_policy_unverified"),
         MError::Gateway(_) => (StatusCode::CONFLICT, "gateway"),
         MError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
     }

@@ -48,6 +48,29 @@ pub(super) struct Proc {
 
 type Attachment = (String, String, Option<nft::Policy>);
 
+/// What the mock gateway's helper does with one challenge: its output, how it exits, and the
+/// signals a test uses to hold the answer while the world changes under it.
+#[derive(Clone, Default)]
+pub(super) struct PolicyReply {
+    pub(super) stdout: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
+    pub(super) code: i32,
+    pub(super) timed_out: bool,
+    /// Notified when the command is received.
+    pub(super) arrived: Option<Arc<tokio::sync::Notify>>,
+    /// The answer waits for this before it is sent.
+    pub(super) wait: Option<Arc<tokio::sync::Notify>>,
+}
+
+pub(super) type PolicyHook = Arc<dyn Fn(&str, u32) -> PolicyReply + Send + Sync>;
+
+#[derive(Clone, Copy)]
+pub(super) enum CheckedKill {
+    Exit,
+    Refuse,
+    CloseWithoutExit,
+}
+
 /// The host behind the manager, running nothing: a boot makes a `Proc` under a fresh
 /// pid, the guest answers as `boots` says, TAPs are a set of names, and every call is
 /// recorded, one line each, the way the fake `zfs` records its own. Cgroups and the
@@ -99,6 +122,15 @@ pub(super) struct Mock {
     pub(super) exec_takes: Mutex<Duration>,
     pub(super) execs_now: Arc<std::sync::atomic::AtomicUsize>,
     pub(super) execs_most: std::sync::atomic::AtomicUsize,
+    /// What a gateway's loaded-policy helper answers a challenge (ADR 0143); none: the image has
+    /// no such helper and the command fails as a missing program does.
+    pub(super) policy_reply: Mutex<Option<PolicyHook>>,
+    /// The gateway addresses whose bridge gate is closed.
+    pub(super) gates: Mutex<std::collections::BTreeSet<String>>,
+    pub(super) refuse_gate: AtomicBool,
+    pub(super) refuse_open_gate: AtomicBool,
+    pub(super) refuse_close_gate: AtomicBool,
+    pub(super) checked_kill: Mutex<CheckedKill>,
     /// The ports of an address a TCP probe finds closed; every other one accepts.
     pub(super) closed: Mutex<std::collections::HashSet<(Ipv4Addr, u16)>>,
     /// When each TCP probe and exec began, on the runtime's clock.
@@ -201,6 +233,12 @@ impl Mock {
             exec_takes: Mutex::new(Duration::ZERO),
             execs_now: Default::default(),
             execs_most: Default::default(),
+            policy_reply: Mutex::new(None),
+            gates: Mutex::new(Default::default()),
+            refuse_gate: AtomicBool::new(false),
+            refuse_open_gate: AtomicBool::new(false),
+            refuse_close_gate: AtomicBool::new(false),
+            checked_kill: Mutex::new(CheckedKill::Exit),
             closed: Mutex::new(Default::default()),
             probed: Mutex::new(Vec::new()),
             http_codes: Mutex::new(HashMap::new()),
@@ -847,8 +885,23 @@ impl fc::Vmm for Mock {
     }
 
     fn kill_checked(&self, vm: &fc::Vm) -> Result<()> {
-        // The synthetic factory's unreused PID is its explicit incarnation handle.
-        self.kill(vm.pid);
+        let mode = *self.checked_kill.lock().unwrap();
+        let mut procs = self.procs.lock().unwrap();
+        let process = procs
+            .iter_mut()
+            .find(|p| p.pid == vm.pid && Some(&p.incarnation) == vm.incarnation.as_ref())
+            .context("mock exact VMM ownership not found")?;
+        match mode {
+            CheckedKill::Exit => {
+                self.record(format!("kill {}", vm.pid));
+                process.exit = None;
+                process.exited.send_replace(true);
+            }
+            CheckedKill::Refuse => anyhow::bail!("mock exact kill refused"),
+            CheckedKill::CloseWithoutExit => {
+                process.exited = tokio::sync::watch::channel(false).0;
+            }
+        }
         Ok(())
     }
 
@@ -1028,6 +1081,33 @@ impl host::Net for Mock {
         self.attachments.lock().unwrap().remove(machine);
         Ok(())
     }
+    async fn gateway_gate(&self, ip: &str, closed: bool) -> Result<()> {
+        self.record(format!(
+            "gateway_gate {ip} {}",
+            if closed { "closed" } else { "open" }
+        ));
+        let (before, after) = if closed {
+            ("gate_close_before", "gate_close_after")
+        } else {
+            ("gate_open_before", "gate_open_after")
+        };
+        self.wait_network(before, ip).await;
+        if self.refuse_gate.load(Relaxed)
+            || (closed && self.refuse_close_gate.load(Relaxed))
+            || (!closed && self.refuse_open_gate.load(Relaxed))
+        {
+            anyhow::bail!("gateway gate refused");
+        }
+        {
+            let mut gates = self.gates.lock().unwrap();
+            match closed {
+                true => gates.insert(ip.into()),
+                false => gates.remove(ip),
+            };
+        }
+        self.wait_network(after, ip).await;
+        Ok(())
+    }
     async fn clear_connections(&self, ip: &str) -> Result<()> {
         self.wait_network("clear", ip).await;
         if self.refuse_clear.load(Relaxed)
@@ -1049,6 +1129,7 @@ impl host::Net for Mock {
     }
 
     async fn set_policy(&self, p: &nft::Policy) -> Result<()> {
+        self.wait_network("set_policy", p.ip()).await;
         self.policy_call(format!("set_policy {}", policy_line(p)))
     }
 
@@ -1057,6 +1138,7 @@ impl host::Net for Mock {
     }
 
     async fn swap_policy(&self, old: &nft::Policy, new: &nft::Policy) -> Result<()> {
+        self.wait_network("swap_policy", new.ip()).await;
         let (old, new) = (policy_line(old), policy_line(new));
         self.policy_call(format!("swap_policy {old} -> {new}"))
     }
@@ -1083,6 +1165,7 @@ impl host::Net for Mock {
     }
 
     async fn counters(&self) -> Result<HashMap<String, nft::Counters>> {
+        self.wait_network("counters", "*").await;
         Ok(self.counted.lock().unwrap().clone().into_iter().collect())
     }
 

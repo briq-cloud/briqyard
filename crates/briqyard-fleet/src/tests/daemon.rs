@@ -40,6 +40,7 @@ pub(super) struct Daemon {
     pub(super) on_create: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     pub(super) creates: Mutex<Vec<api::CreateMachineRequest>>,
     pub(super) egress_siblings: std::sync::atomic::AtomicBool,
+    pub(super) gateway_policy: std::sync::atomic::AtomicBool,
     pub(super) sandbox_lookup: Mutex<Option<(StatusCode, serde_json::Value)>>,
     pub(super) sandbox_lookups: Mutex<Vec<api::SandboxRequestLookup>>,
     pub(super) snapshots: Mutex<Vec<api::Snapshot>>,
@@ -180,6 +181,7 @@ pub(super) async fn start_daemon_on(
         on_create: Mutex::new(None),
         creates: Mutex::new(vec![]),
         egress_siblings: std::sync::atomic::AtomicBool::new(true),
+        gateway_policy: std::sync::atomic::AtomicBool::new(true),
         sandbox_lookup: Mutex::new(None),
         sandbox_lookups: Mutex::new(vec![]),
         snapshots: Mutex::new(vec![]),
@@ -207,6 +209,7 @@ pub(super) async fn start_daemon_on(
             observation: None,
             memory_policy: None,
             egress_siblings_v1: d.egress_siblings.load(Ordering::SeqCst),
+            gateway_policy_v1: d.gateway_policy.load(Ordering::SeqCst),
             named_memory_fork_v1: false,
             named_memory_profiles: Vec::new(),
             warm_pool_profiles: Vec::new(),
@@ -266,6 +269,7 @@ pub(super) async fn start_daemon_on(
                 port: 3128,
                 machine_id: format!("m_{}_gw", d.id),
                 error: String::new(),
+                policy: None,
             }),
         })
     }

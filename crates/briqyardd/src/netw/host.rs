@@ -45,6 +45,11 @@ pub trait Net: Send + Sync {
         policy: Option<&nft::Policy>,
     ) -> Result<()>;
     async fn clear_connections(&self, ip: &str) -> Result<()>;
+    /// Closes the bridge gate on a gateway's address: no ARP or IP passes between it and the
+    /// namespace's machines until `closed` is false (ADR 0143). The gateway's own route to the
+    /// host stays. Required, so a host that cannot do it fails the caller instead of defaulting
+    /// to open.
+    async fn gateway_gate(&self, ip: &str, closed: bool) -> Result<()>;
     async fn delete_link(&self, name: &str) -> Result<()>;
     async fn list_taps(&self) -> Result<Vec<String>>;
     async fn set_policy(&self, p: &nft::Policy) -> Result<()>;
@@ -220,6 +225,13 @@ impl Net for HostNet {
     async fn clear_connections(&self, ip: &str) -> Result<()> {
         let _turn = self.update.lock().await;
         super::conntrack::clear(ip).await
+    }
+    async fn gateway_gate(&self, ip: &str, closed: bool) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + nft::GATE_TIMEOUT;
+        let _turn = tokio::time::timeout_at(deadline, self.update.lock())
+            .await
+            .context("gateway gate network turn deadline")?;
+        nft::gateway_gate(ip, closed, deadline).await
     }
     async fn delete_link(&self, name: &str) -> Result<()> {
         delete_link(name).await

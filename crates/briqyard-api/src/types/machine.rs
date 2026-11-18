@@ -85,6 +85,10 @@ pub struct CreateMachineRequest {
     /// Operator-produced pristine sandbox seed; never a configured warm slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_seed: Option<SandboxSeed>,
+    /// Daemon-internal, never on the wire: the loaded policy a namespace's gateway is made
+    /// with (ADR 0143), set by `PUT /v1/namespaces/{id}/gateway` alone.
+    #[serde(skip)]
+    pub gateway_policy: Option<GatewayPolicyBinding>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -683,6 +683,12 @@ enum GatewayCmd {
     Set(Box<GatewaySetArgs>),
     /// Stop and remove it, once no machine runs through it
     Rm { namespace: String },
+    /// Read back the loaded policy of its running gateway for a fresh challenge (64 lowercase hex digits)
+    PolicyStatus {
+        namespace: String,
+        #[arg(long)]
+        challenge: String,
+    },
 }
 
 /// What `namespace gateway set` puts.
@@ -709,6 +715,9 @@ struct GatewaySetArgs {
     /// A start that needs it waits for this probe instead of its port: http:PORT[/PATH], tcp:PORT, exec:CMD ARGS
     #[arg(long, value_parser = probe_arg)]
     readiness: Option<api::Probe>,
+    /// The loaded policy it enforces, as sha256:HEX; fixed for the gateway's life
+    #[arg(long)]
+    policy_digest: Option<String>,
     /// K=V, repeatable
     #[arg(long = "env", short = 'e')]
     envs: Vec<String>,

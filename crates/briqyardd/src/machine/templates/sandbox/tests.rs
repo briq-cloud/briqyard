@@ -2,6 +2,7 @@ use super::*;
 use crate::machine::tests::{harness_config, Harness};
 
 mod concurrent;
+mod gateway_policy;
 mod recipe_evidence;
 mod unbound;
 

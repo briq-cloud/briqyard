@@ -175,6 +175,7 @@ fn an_egress_policy_is_read_as_the_daemon_checks_it() {
         mode: mode.into(),
         via: via.map(String::from),
         siblings: false,
+        gateway_policy: None,
     };
     for (arg, want) in [
         ("open", egress("open", None)),

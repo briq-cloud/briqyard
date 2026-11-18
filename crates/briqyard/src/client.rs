@@ -165,13 +165,21 @@ impl Client {
         body: Option<&impl serde::Serialize>,
         timeout: Option<Duration>,
     ) -> Result<reqwest::Response> {
-        if (method == reqwest::Method::POST && path == "/v1/machines")
-            || (method == reqwest::Method::PATCH && path.starts_with("/v1/machines/"))
-        {
+        let machine_mutation = (method == reqwest::Method::POST && path == "/v1/machines")
+            || (method == reqwest::Method::PATCH && path.starts_with("/v1/machines/"));
+        let gateway_update = method == reqwest::Method::PUT
+            && path.starts_with("/v1/namespaces/")
+            && path.ends_with("/gateway");
+        if machine_mutation || gateway_update {
             if let Some(body) = body {
                 let document = serde_json::to_value(body)?;
                 let inherited = !document["restore"].is_null() && document["egress"].is_null();
-                if document["egress"]["siblings"] == true || inherited {
+                let gateway_policy = (gateway_update && !document["policy"].is_null())
+                    || (machine_mutation && document["egress"]["gateway_policy"].is_object())
+                    || inherited;
+                let siblings =
+                    machine_mutation && (document["egress"]["siblings"] == true || inherited);
+                if gateway_policy || siblings {
                     let mut check = self
                         .http
                         .get(format!("{}/v1/status", self.base))
@@ -184,10 +192,13 @@ impl Client {
                         return Err(refusal(response).await);
                     }
                     let status: serde_json::Value = response.json().await?;
-                    if status["egress_siblings_v1"] != true {
-                        if inherited {
-                            bail!("server cannot safely inherit restore egress; provide an explicit egress policy");
-                        }
+                    if inherited && status["egress_siblings_v1"] != true {
+                        bail!("server cannot safely inherit restore egress; provide an explicit egress policy");
+                    }
+                    if gateway_policy && status["gateway_policy_v1"] != true {
+                        bail!("server does not support gateway policies");
+                    }
+                    if siblings && status["egress_siblings_v1"] != true {
                         bail!("server does not support egress.siblings");
                     }
                 }

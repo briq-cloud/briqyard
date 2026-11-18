@@ -176,3 +176,77 @@ fn image_ref_field() {
     }))
     .is_err());
 }
+
+#[test]
+fn a_gateway_policy_binding_is_strict_and_absent_is_the_legacy_route() {
+    let digest = format!("sha256:{}", "ab".repeat(32));
+    let good = json!({"policy_format": 1, "policy_digest": digest, "enforcement_version": 1});
+    let b: GatewayPolicyBinding = serde_json::from_value(good.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&b).unwrap(), good);
+    for bad in [
+        json!({"policy_format": 2, "policy_digest": digest, "enforcement_version": 1}),
+        json!({"policy_format": 1, "policy_digest": digest, "enforcement_version": 2}),
+        json!({"policy_format": 1, "policy_digest": "sha256:AB", "enforcement_version": 1}),
+        json!({"policy_format": 1, "policy_digest": format!("sha256:{}", "AB".repeat(32)), "enforcement_version": 1}),
+        json!({"policy_format": 1, "policy_digest": "ab".repeat(32), "enforcement_version": 1}),
+        json!({"policy_format": 1, "policy_digest": digest}),
+        json!({"policy_format": 1, "policy_digest": digest, "enforcement_version": 1, "extra": 1}),
+    ] {
+        assert!(
+            serde_json::from_value::<GatewayPolicyBinding>(bad.clone()).is_err(),
+            "{bad}"
+        );
+    }
+    // A record or request from before has none, and writes none back.
+    let spec: GatewaySpec = serde_json::from_value(json!({"image": "i", "port": 1})).unwrap();
+    assert!(spec.policy.is_none());
+    assert!(serde_json::to_value(&spec).unwrap().get("policy").is_none());
+    let old: Egress = serde_json::from_value(json!({"mode": "via", "via": "gateway"})).unwrap();
+    assert_eq!(old.gateway_policy, None);
+    assert_eq!(old.label(), "via:gateway");
+    assert!(serde_json::to_value(&old)
+        .unwrap()
+        .get("gateway_policy")
+        .is_none());
+}
+
+#[test]
+fn a_bound_egress_needs_the_gateway_route_and_no_siblings() {
+    let binding = Some(GatewayPolicyBinding {
+        policy_format: 1,
+        policy_digest: format!("sha256:{}", "ab".repeat(32)),
+        enforcement_version: 1,
+    });
+    let via = |via: &str, siblings| Egress {
+        mode: egress::VIA.into(),
+        via: Some(via.into()),
+        siblings,
+        gateway_policy: binding.clone(),
+    };
+    assert!(via("gateway", false).check().is_ok());
+    assert!(via("gateway", false).label() == "via:gateway");
+    assert!(via("gateway", true).check().is_err());
+    assert!(via("m_0123456789ab", false).check().is_err());
+    let open = Egress {
+        gateway_policy: binding,
+        ..Default::default()
+    };
+    assert!(open.check().is_err());
+}
+
+#[test]
+fn the_status_request_takes_only_a_lowercase_hex_challenge() {
+    let ok = |c: &str| {
+        GatewayPolicyStatusRequest {
+            challenge: c.into(),
+        }
+        .check()
+        .is_ok()
+    };
+    assert!(ok(&"0f".repeat(32)));
+    assert!(!ok(&"0F".repeat(32)) && !ok(&"0f".repeat(31)) && !ok(""));
+    assert!(serde_json::from_value::<GatewayPolicyStatusRequest>(
+        json!({"challenge": "0f".repeat(32), "wait": true})
+    )
+    .is_err());
+}

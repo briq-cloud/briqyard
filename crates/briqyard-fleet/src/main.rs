@@ -635,6 +635,10 @@ fn namespace_routes(prefix: &str) -> Router<Arc<AppState>> {
             put(set_gateway).delete(delete_gateway),
         )
         .route(
+            &format!("{prefix}/:id/gateway/policy-status"),
+            post(gateway_policy_status),
+        )
+        .route(
             &format!("{prefix}/:id/quota"),
             get(get_quota).put(set_quota),
         )

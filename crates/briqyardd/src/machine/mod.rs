@@ -40,6 +40,7 @@ pub(crate) use execution_fence::NamespaceProtected;
 mod execution_mutations;
 mod execution_resources;
 mod gateway;
+mod gateway_policy;
 mod idle_protection;
 mod launch_identity;
 mod leaves;
@@ -136,6 +137,10 @@ pub enum MError {
     NamespaceInUse,
     #[error("a machine of the namespace runs through its gateway")]
     GatewayInUse,
+    /// The gateway's loaded policy was not proven for its current process (ADR 0143): the
+    /// message names the reason and never carries what the guest said.
+    #[error("{0}")]
+    GatewayPolicy(String),
     /// A call that would change or run something in a namespace's gateway through the machine
     /// routes: the namespace's route owns it.
     #[error("the namespace's gateway: use /v1/namespaces/{0}/gateway")]
@@ -259,6 +264,9 @@ pub struct Record {
     /// Where its traffic may go (ADR 0015); a record from before has none: open.
     #[serde(default)]
     pub egress: api::Egress,
+    /// A gateway's loaded policy (ADR 0143), fixed for its life; absent: a legacy gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_policy: Option<api::GatewayPolicyBinding>,
     /// Its own limits on its internet traffic, over the host's (ADR 0018).
     #[serde(default)]
     pub limits: api::EgressLimits,
@@ -569,6 +577,8 @@ struct Namespace {
     lock: Arc<tokio::sync::Mutex<()>>,
 }
 
+type GatewayTurn = Arc<tokio::sync::OwnedMutexGuard<()>>;
+
 impl Namespace {
     fn new(rec: NamespaceRec, subnet: Subnet) -> Self {
         Self {
@@ -652,6 +662,10 @@ struct Entry {
     /// Out of the manager: its record deleted by its destroy, or never written (a create that
     /// failed). Every write of the record checks it under this lock, which the deletion holds.
     removed: Mutex<bool>,
+    /// A gateway's loaded policy as read back from its current process (ADR 0143); cleared
+    /// whenever a new process is booted for it.
+    gateway_proof: Mutex<Option<gateway_policy::GatewayProof>>,
+    gateway_isolating: AtomicBool,
 }
 
 impl Entry {
@@ -683,6 +697,8 @@ impl Entry {
             probe: Mutex::default(),
             prober: Mutex::new(None),
             removed: Mutex::new(false),
+            gateway_proof: Mutex::new(None),
+            gateway_isolating: AtomicBool::new(false),
         })
     }
 

@@ -341,6 +341,129 @@ async fn an_inherited_restore_policy_is_never_sent_to_a_legacy_server() {
 }
 
 #[tokio::test]
+async fn gateway_policy_mutations_require_the_live_server_capability() {
+    let mutations = [
+        (
+            reqwest::Method::PUT,
+            "/v1/namespaces/ns/gateway",
+            serde_json::json!({"policy":{"policy_format":1,"policy_digest":"sha256:".to_owned()+&"a".repeat(64),"enforcement_version":1}}),
+        ),
+        (
+            reqwest::Method::POST,
+            "/v1/machines",
+            serde_json::json!({"egress":{"mode":"via","via":"gateway","gateway_policy":{"policy_format":1,"policy_digest":"sha256:".to_owned()+&"a".repeat(64),"enforcement_version":1}}}),
+        ),
+        (
+            reqwest::Method::PATCH,
+            "/v1/machines/m1",
+            serde_json::json!({"egress":{"mode":"via","via":"gateway","gateway_policy":{"policy_format":1,"policy_digest":"sha256:".to_owned()+&"a".repeat(64),"enforcement_version":1}}}),
+        ),
+        (
+            reqwest::Method::POST,
+            "/v1/machines",
+            serde_json::json!({"restore":{"machine_id":"m_source","backup":"latest"}}),
+        ),
+    ];
+    for capability in [r#"{}"#, r#"{"gateway_policy_v1":false}"#] {
+        for (method, path, body) in &mutations {
+            let capability = if !body["restore"].is_null() {
+                if capability == r#"{}"# {
+                    r#"{"egress_siblings_v1":true}"#
+                } else {
+                    r#"{"egress_siblings_v1":true,"gateway_policy_v1":false}"#
+                }
+            } else {
+                capability
+            };
+            let (url, stub) = stub(vec![
+                (StatusCode::OK, JSON.to_vec(), capability),
+                (
+                    StatusCode::OK,
+                    JSON.to_vec(),
+                    r#"{"ignored_by_legacy_server":true}"#,
+                ),
+            ])
+            .await;
+            let error = client(&url, None)
+                .call::<serde_json::Value>(method.clone(), path, Some(body))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "server does not support gateway policies"
+            );
+            let calls = stub.seen.lock().unwrap();
+            assert_eq!(
+                calls.len(),
+                1,
+                "unsupported mutation {method} {path} was sent"
+            );
+            assert_eq!(calls[0].path, "/v1/status");
+        }
+    }
+
+    for (method, path, body) in &mutations {
+        let (url, stub) = stub(vec![
+            (
+                StatusCode::OK,
+                JSON.to_vec(),
+                r#"{"gateway_policy_v1":true,"egress_siblings_v1":true}"#,
+            ),
+            (StatusCode::OK, JSON.to_vec(), r#"{"accepted":true}"#),
+        ])
+        .await;
+        client(&url, None)
+            .call::<serde_json::Value>(method.clone(), path, Some(body))
+            .await
+            .unwrap();
+        let calls = stub.seen.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].path, "/v1/status");
+        assert_eq!(calls[1].path, *path);
+    }
+
+    let (url, stub) = stub(vec![(
+        StatusCode::OK,
+        JSON.to_vec(),
+        r#"{"accepted":true}"#,
+    )])
+    .await;
+    client(&url, None)
+        .call::<serde_json::Value>(
+            reqwest::Method::POST,
+            "/v1/machines",
+            Some(&serde_json::json!({"image":"alpine:latest"})),
+        )
+        .await
+        .unwrap();
+    let calls = stub.seen.lock().unwrap();
+    assert_eq!(calls.len(), 1, "legacy unbound create keeps its old path");
+    assert_eq!(calls[0].path, "/v1/machines");
+}
+
+#[tokio::test]
+async fn unreadable_gateway_capability_status_never_sends_the_mutation() {
+    for (status, response) in [
+        (StatusCode::OK, "not-json"),
+        (StatusCode::SERVICE_UNAVAILABLE, "status unavailable"),
+    ] {
+        let (url, stub) = stub(vec![(status, vec![], response)]).await;
+        let body = serde_json::json!({"policy":{"policy_format":1,"policy_digest":"sha256:".to_owned()+&"a".repeat(64),"enforcement_version":1}});
+        assert!(client(&url, None)
+            .call::<serde_json::Value>(
+                reqwest::Method::PUT,
+                "/v1/namespaces/ns/gateway",
+                Some(&body),
+            )
+            .await
+            .is_err());
+        let calls = stub.seen.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path, "/v1/status");
+    }
+}
+
+#[tokio::test]
 async fn stay_draining_requires_exact_fleet_capability_before_dispatch() {
     for value in [
         serde_json::json!({}),

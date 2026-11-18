@@ -562,14 +562,28 @@ paths:
             schema: { $ref: "#/components/schemas/GatewaySpec" }
       responses:
         "200": { description: the namespace, content: { application/json: { schema: { $ref: "#/components/schemas/Namespace" } } } }
-        "400": { description: "`invalid`: no image, no port, a bad size, bad `probes`, or a change of `volume_gb`" }
+        "400": { description: "`invalid`: no image, no port, a bad size, bad `probes`, or a change of `volume_gb` or of `policy`" }
         "403": { description: "`quota`: the gateway counts as one of the namespace's machines" }
-        "409": { description: "`conflict`: a machine named `gateway` exists in the namespace; `boot_failed`: the gateway did not come up (asked with `start`, or replaced while running), the body's `machine` is it, in `error` with its console's last lines" }
+        "409": { description: "`conflict`: a machine named `gateway` exists in the namespace, or a machine bound to the gateway's loaded policy exists (any state) and the spec would change (ADR 0143); `boot_failed`: the gateway did not come up (asked with `start`, or replaced while running), the body's `machine` is it, in `error` with its console's last lines" }
     delete:
       summary: Stop and destroy the namespace's gateway; none is success
       responses:
         "204": { description: removed }
-        "409": { description: "`gateway_in_use`: a machine of the namespace with `via: gateway` is running or starting" }
+        "409": { description: "`gateway_in_use`: a machine of the namespace with `via: gateway` is running or starting; `conflict`: a machine bound to the gateway's loaded policy exists, in any state (ADR 0143)" }
+  /v1/namespaces/{id}/gateway/policy-status:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: "Read back the loaded policy of the namespace's running gateway (ADR 0143). The daemon picks the gateway and asks its current process through one fixed helper command, bounded to 3 s and 4096 bytes; it never starts, wakes or creates anything. The outer namespace, machine and process incarnation are the daemon's, never the guest's. Requires the `gateway_policy_v1` capability; through the fleet, to the namespace's host only, and refused with 409 `capability_unsupported` when that host does not report it"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GatewayPolicyStatusRequest" }
+      responses:
+        "200": { description: the report, content: { application/json: { schema: { $ref: "#/components/schemas/GatewayPolicyStatus" } } } }
+        "400": { description: "`invalid`: `challenge` is not 64 lowercase hex digits, or the body has another field, or the namespace has no gateway" }
+        "404": { description: "`not_found`: no such namespace" }
+        "409": { description: "`gateway_policy_unverified`: the gateway is not running, has no binding, or its report is missing, malformed, oversized, late, for another challenge or policy, or its process changed during the readback; the reason never carries the guest's output" }
   /v1/namespaces/{id}/warm-pools:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:

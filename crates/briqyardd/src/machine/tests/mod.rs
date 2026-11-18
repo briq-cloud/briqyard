@@ -10,6 +10,7 @@ mod boot_queue;
 mod classes;
 mod event_log;
 mod gateway;
+mod gateway_policy;
 mod leaves;
 mod lifecycle;
 mod memory;
@@ -128,6 +129,7 @@ pub(in crate::machine) fn record() -> Record {
         warm_slot: None,
         launch_identity: None,
         assigned_run: None,
+        gateway_policy: None,
         stopped_updates: BTreeMap::new(),
         rest: Default::default(),
         snapshots: Vec::new(),
@@ -145,6 +147,28 @@ pub(super) struct Harness {
 }
 
 impl Harness {
+    pub(in crate::machine) fn gateway_policy_answers(
+        &self,
+        binding: api::GatewayPolicyBinding,
+        valid: bool,
+    ) {
+        *self.host.policy_reply.lock().unwrap() = Some(Arc::new(move |challenge, _| PolicyReply {
+            stdout: if valid {
+                serde_json::to_vec(&json!({
+                    "challenge": challenge,
+                    "policy_format": binding.policy_format,
+                    "policy_digest": binding.policy_digest,
+                    "enforcement_version": binding.enforcement_version,
+                    "ready": true,
+                }))
+                .unwrap()
+            } else {
+                b"malformed".to_vec()
+            },
+            ..Default::default()
+        }));
+    }
+
     pub(in crate::machine) fn fs_freeze_fault(&self, fault: u32) {
         self.host.fs_freeze_fault.store(fault, Relaxed);
     }

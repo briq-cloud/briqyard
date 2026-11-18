@@ -74,6 +74,7 @@ pub(super) fn egress(mode: &str, via: Option<&str>) -> api::Egress {
         mode: mode.into(),
         via: via.map(String::from),
         siblings: false,
+        gateway_policy: None,
     }
 }
 

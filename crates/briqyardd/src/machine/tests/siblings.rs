@@ -6,6 +6,7 @@ fn opted(mut request: api::CreateMachineRequest, gateway: &str) -> api::CreateMa
         mode: api::egress::VIA.into(),
         via: Some(gateway.into()),
         siblings: true,
+        gateway_policy: None,
     });
     request
 }

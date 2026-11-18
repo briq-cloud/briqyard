@@ -106,9 +106,14 @@ impl Manager {
             Some(Phase::Settled) | None => {
                 // Resolve dependencies before reserving a process attempt. No pending
                 // specification is applied or dropped by this dispatcher.
+                self.check_policy_ownership(
+                    record.is_cold_born(),
+                    &record.egress,
+                    &record.namespace,
+                )?;
                 self.policy_for(&record)?;
                 let gateway = if record.egress.via_gateway() {
-                    Some(self.ensure_gateway(&record.namespace).await?)
+                    Some(self.ensure_gateway(&record.namespace, None).await?)
                 } else {
                     None
                 };

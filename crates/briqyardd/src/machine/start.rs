@@ -109,6 +109,7 @@ impl Manager {
     /// `asked`: a caller asked for this run (a create, a start, a wake), not the restart
     /// policy; its startup probe failing is a failed boot (ADR 0022).
     pub(super) async fn start_entry(&self, e: &Arc<Entry>, asked: bool) -> Result<(), MError> {
+        self.check_gateway_isolation(e)?;
         // In the host's boot queue from here to the gate, a create's place included.
         let _queued = self.boot_queued(e);
         self.settle_stopped_update(e)?;
@@ -175,12 +176,18 @@ impl Manager {
         )?;
         // Through the namespace's gateway: it runs first, and the namespace's lock is kept until
         // this machine is `starting`, which is what the sleeper looks for.
-        let gateway_turn = match rec.egress.via_gateway() {
-            true => Some(
-                self.ensure_gateway(&rec.namespace)
+        let gateway_turn = match self.uses_gateway(&rec.namespace, &rec.egress) {
+            true => {
+                let required = rec.egress.gateway_policy.as_ref();
+                let turn = self
+                    .ensure_gateway(&rec.namespace, required)
                     .await
-                    .map_err(|err| self.gateway_failed(e, err))?,
-            ),
+                    .map_err(|err| self.gateway_failed(e, err))?;
+                // The proof must still be of the process that runs now, as the machine is reserved.
+                self.gateway_still_verified(&rec.namespace, required)
+                    .map_err(|err| self.gateway_failed(e, err))?;
+                Some(turn)
+            }
             false => None,
         };
         self.reserve(e, image)?;
@@ -240,6 +247,9 @@ impl Manager {
         self.validate_launch_record(&rec).map_err(fail)?;
         let quarantined = rec.template_birth.as_ref().is_some_and(|b| !b.is_service())
             || self.initial_memory_clone(&rec);
+        // A bound gateway is closed to the namespace's machines before its TAP exists and stays
+        // so until a readback of the process this boot makes (ADR 0143).
+        self.close_gateway_gate(e).await.map_err(fail)?;
         let tap = if quarantined {
             self.inner.net.quarantine(&rec.id).await
         } else {

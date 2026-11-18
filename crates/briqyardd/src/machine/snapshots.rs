@@ -502,6 +502,11 @@ impl Manager {
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
         self.ordinary_operation(&e.snapshot())?;
+        if e.snapshot().egress.gateway_policy.is_some() {
+            return Err(MError::Conflict(
+                "a machine bound to a gateway loaded policy is not restored from a snapshot".into(),
+            ));
+        }
         let turns = e.lock_once_stopped(true).await;
         self.check_version(&e, at)?;
         let r = e.snapshot();
