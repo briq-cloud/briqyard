@@ -70,8 +70,9 @@ reaches an error or a log.
 **Admission.** `ensure_gateway` performs a fresh readback on every call for a bound gateway,
 under the namespace's turn that the caller keeps through the machine's reservation. This
 also applies if an ordinary consumer names the policy gateway by its machine ID without a
-binding; a literal ID of an ordinary peer is unchanged. An egress PATCH of a derived or bound
-record, or one whose old or new egress uses a policy gateway or the `gateway` alias, takes the
+binding; a literal ID of an ordinary peer is unchanged. An egress PATCH of a bound record or
+one naming a binding, of a derived record whose current or requested mode is `via`, or one
+whose old or new egress uses a policy gateway or the `gateway` alias, takes the
 namespace turn before the consumer entry, refuses a busy transition or changed namespace
 before effects, and keeps the turn through the network change and record save; any other
 egress PATCH waits for the entry as before. The caller checks
@@ -83,10 +84,21 @@ rename. A derived move keeps both through the record save or rollback and releas
 before restarting; a derived egress PATCH takes its source name before the boot or entry
 turn. This also orders a rename into an absent namespace without creating it first. A
 configured gateway's insertion checks live records and retained assignment targets under
-the machine map's lock, matching either the alias or its exact machine ID. Nothing that holds
-warm admission waits for a namespace turn, which an assigned start keeps while it waits for
-warm: a derived create, an assignment's staging and its commit check policy ownership under
-the machine map's lock in the same step that inserts the record or reserves the target.
+the machine map's lock, matching either the alias or its exact machine ID. A derived create,
+an assignment's staging and its commit check policy ownership under the machine map's lock in
+the same step that inserts the record or reserves the target, never awaiting a namespace turn
+under warm admission.
+
+**Lock order.** Warm admission, then namespace admission, then the per-name admission turn,
+then the namespace's turn, then the sandbox lock and the entry. Namespace admission is a
+write-preferring lock that a namespace deletion takes exclusively, so no holder of a
+namespace turn may wait for it: gateway PUT and DELETE, a cold-born `via` create and a scoped
+egress PATCH hold namespace admission while they wait for the turn, and a queued deletion
+waits for them. An assigned start through a gateway therefore takes warm admission
+exclusively and namespace admission before its gateway turn and keeps all three through its
+reservation, instead of taking them inside the reservation under the turn. This changes the
+baseline assigned start: a gateway boot it waits for now holds warm admission, delaying seed
+creates and warm claims on the host until the gateway serves or fails.
 
 **Unverified-gateway bridge gate.** A bound gateway's address is in the bridge table's
 `gateway_gate` set; `prerouting` drops ARP and IP between that address and any member of its

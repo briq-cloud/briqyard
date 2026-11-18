@@ -395,6 +395,45 @@ async fn an_unbound_egress_patch_waits_for_the_entry_and_takes_no_namespace_turn
 }
 
 #[tokio::test]
+async fn a_derived_egress_patch_between_other_modes_waits_for_the_entry_and_takes_no_namespace_turn(
+) {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    let e = derived(&h, "fork", state::STOPPED, api::Egress::default());
+    let id = e.snapshot().id;
+    assert!(!e.snapshot().is_cold_born());
+    let patch = |mode: &str| api::UpdateMachineRequest {
+        egress: Some(api::Egress {
+            mode: mode.into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let namespace = h.m.namespace_of("t1").unwrap();
+    let occupied = namespace.lock.lock().await;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        h.m.update(&id, patch(api::egress::NONE), None),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    drop(occupied);
+    let held = e.lock.lock().await;
+    let mut waiting = Box::pin(h.m.update(&id, patch(api::egress::OPEN), None));
+    for _ in 0..8 {
+        assert!(futures::poll!(&mut waiting).is_pending());
+        tokio::task::yield_now().await;
+    }
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(30), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(e.snapshot().egress.mode, api::egress::OPEN);
+}
+
+#[tokio::test]
 async fn cold_born_consumer_keeps_its_binding_through_suspend_start_wake_and_resize() {
     let h = harness("10.64.0.0/22", 4096).await;
     let b = binding("ab");

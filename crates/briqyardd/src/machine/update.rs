@@ -64,7 +64,7 @@ impl Manager {
         let egress_source = req.egress.as_ref().and_then(|egress| {
             let r = e.snapshot();
             let derived = !r.is_cold_born();
-            (derived
+            ((derived && (r.egress.mode == api::egress::VIA || egress.mode == api::egress::VIA))
                 || r.egress.gateway_policy.is_some()
                 || egress.gateway_policy.is_some()
                 || self.uses_gateway(&r.namespace, &r.egress)

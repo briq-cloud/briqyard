@@ -33,7 +33,7 @@ impl Manager {
         asked: bool,
     ) -> Result<(), MError> {
         // Reuse the existing disk/lifecycle turn: coalesce requests without holding the
-        // entry lock while reserve takes warm -> namespace -> sandbox -> entry.
+        // entry lock while reserve takes warm -> namespace -> gateway turn -> sandbox -> entry.
         let _turn = entry.backup_turn.clone().lock_owned().await;
         {
             let _entry = entry.assigned_stopped_lock().await;
@@ -112,6 +112,11 @@ impl Manager {
                     &record.namespace,
                 )?;
                 self.policy_for(&record)?;
+                self.ensure_entry_assigned_update_backing(entry)
+                    .await
+                    .map_err(public_error)?;
+                let warm = self.inner.warm_lock.write().await;
+                let admission = self.inner.namespace_lifecycle.read().await;
                 let gateway = if record.egress.via_gateway() {
                     Some(self.ensure_gateway(&record.namespace, None).await?)
                 } else {
@@ -119,9 +124,11 @@ impl Manager {
                 };
                 let checkpoint =
                     record.pending.is_none() && record.suspended && self.resume_compatible(&record);
-                self.reserve_assigned_run_version(entry, checkpoint, at)
+                self.reserve_assigned_run_admitted(entry, checkpoint, at)
                     .await
                     .map_err(public_error)?;
+                drop(admission);
+                drop(warm);
                 if let Some(current) = self
                     .inner
                     .store
