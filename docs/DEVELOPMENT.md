@@ -22,7 +22,8 @@ Both restore runs use three independent Postgres rounds. Their final gates requi
 interruption and off-host results respectively; a skipped required check fails.
 `native-two-host-logs` retains both suites, host journals and boot measurements. Manual
 dispatch can select `two_hosts_only` for targeted validation
-([ADR 0089](adr/0089-native-suites-in-ci.md)).
+([ADR 0089](adr/0089-native-suites-in-ci.md)), or `suites_only` (for example `qualification`) to run only the named suites of the matrix and skip the other jobs
+([ADR 0110](adr/0110-select-monitoring-suites-by-diff.md)).
 
 The `scale` job of the `more-suites` matrix runs `hack/native-ci-scale.sh` on its own runner (9 checks, [ADR 0099](adr/0099-leaf-goes-with-its-vmm.md), [ADR 0109](adr/0109-scale-on-its-own-runner.md)): 6500 idle machine cgroups with no record and 60 of stopped machines, a daemon restart; the daemon must open its barrier, report memory protection healthy, accept a create and retire the leaves in background after serving within 480 s. It runs from the workflow revision, so a manual dispatch with an older `ref` runs it against that source.
 

@@ -4,6 +4,10 @@
 Changed paths on stdin, one per line; prints the JSON list of suites. `--all` prints every
 suite, for a run with no diff to read. `monitoring` and `alerts` run only when a path they
 read changed, or when nothing says what changed. Every other suite always runs.
+
+`--only a,b` is the selection of a dispatch (ADR 0110): the named suites, each one known, none
+repeated and none empty. It prints them in matrix order and exits non-zero on anything else, so
+a typo stops the run instead of running every suite or none.
 """
 
 import argparse
@@ -47,11 +51,31 @@ def select(paths: list[str]) -> list[str]:
     return [s for s in SUITES if s not in SELECTED]
 
 
+def parse_only(value: str) -> list[str]:
+    names = [name.strip() for name in value.split(",")]
+    if "" in names:
+        raise ValueError(f"empty suite name in {value!r}; expected {', '.join(SUITES)}")
+    unknown = [name for name in names if name not in SUITES]
+    if unknown:
+        raise ValueError(f"unknown suite {', '.join(unknown)}; expected {', '.join(SUITES)}")
+    if len(set(names)) != len(names):
+        raise ValueError(f"suite named twice in {value!r}")
+    return [suite for suite in SUITES if suite in names]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--all", action="store_true", help="print every suite; read no input")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--all", action="store_true", help="print every suite; read no input")
+    group.add_argument("--only", metavar="SUITES", help="print the named suites, comma separated; read no input")
     args = parser.parse_args()
-    if args.all:
+    if args.only is not None:
+        try:
+            suites = parse_only(args.only)
+        except ValueError as error:
+            print(f"native-suites: {error}", file=sys.stderr)
+            return 2
+    elif args.all:
         suites = SUITES
     else:
         suites = select([line.strip() for line in sys.stdin if line.strip()])

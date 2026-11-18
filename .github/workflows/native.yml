@@ -15,6 +15,15 @@ on:
         required: false
         default: false
         type: boolean
+      suites_only:
+        description: >-
+          Run only these suites of more-suites, comma separated (stress, monitoring, alerts,
+          qualification, restore, scale); the e2e, fleet-smoke and two-host jobs are skipped.
+          Empty runs everything. An unknown or repeated name fails the run. Not with
+          measure_freeze or two_hosts_only.
+        required: false
+        default: ''
+        type: string
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
@@ -33,7 +42,7 @@ jobs:
   # Which suites of `more-suites` run (ADR 0110). Not an optimisation that may fail quietly:
   # if this job fails the run is red and `more-suites` does not start.
   changes:
-    if: ${{ github.event.pull_request.draft != true && !inputs.two_hosts_only && !inputs.measure_freeze }}
+    if: ${{ github.event.pull_request.draft != true && ((!inputs.two_hosts_only && !inputs.measure_freeze) || inputs.suites_only != '') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -48,11 +57,19 @@ jobs:
         id: select
         env:
           EVENT: ${{ github.event_name }}
+          ONLY: ${{ inputs.suites_only }}
+          EXCLUSIVE: ${{ inputs.two_hosts_only || inputs.measure_freeze }}
         run: |
-          set -o pipefail
+          set -eo pipefail
           all=$(python3 hack/native-suites.py --all)
           if [ "$EVENT" = pull_request ]; then
             suites=$(git -c core.quotePath=off diff --name-only HEAD^1 HEAD | python3 hack/native-suites.py)
+          elif [ -n "$ONLY" ]; then
+            if [ "$EXCLUSIVE" = true ]; then
+              echo 'The suites_only input cannot be combined with measure_freeze or two_hosts_only' >&2
+              exit 1
+            fi
+            suites=$(python3 hack/native-suites.py --only "$ONLY")
           else
             suites=$all
           fi
@@ -61,12 +78,17 @@ jobs:
           {
             echo "### Suites of more-suites"
             echo "Run: $(jq -r 'join(", ")' <<<"$suites")"
-            if [ -n "$left_out" ]; then
+            if [ -n "$ONLY" ]; then
+              echo "Selected by the dispatch input suites_only (\`$ONLY\`). The e2e, fleet-smoke, scoped-execution and two-host jobs were skipped."
+              if [ -n "$left_out" ]; then
+                echo "Not selected: $left_out."
+              fi
+            elif [ -n "$left_out" ]; then
               echo "Left out: $left_out. Nothing they read changed; a release PR (it changes Cargo.toml) runs them."
             fi
           } | tee -a "$GITHUB_STEP_SUMMARY"
   suites:
-    if: ${{ github.event.pull_request.draft != true && !inputs.two_hosts_only && !inputs.measure_freeze }}
+    if: ${{ github.event.pull_request.draft != true && !inputs.two_hosts_only && !inputs.measure_freeze && inputs.suites_only == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -284,7 +306,7 @@ jobs:
           if-no-files-found: ignore
 
   two-hosts:
-    if: ${{ github.event.pull_request.draft != true && !inputs.measure_freeze }}
+    if: ${{ github.event.pull_request.draft != true && !inputs.measure_freeze && inputs.suites_only == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -345,7 +367,7 @@ jobs:
           if-no-files-found: ignore
 
   measure:
-    if: ${{ github.event.pull_request.draft != true && inputs.measure_freeze }}
+    if: ${{ github.event.pull_request.draft != true && inputs.measure_freeze && inputs.suites_only == '' }}
     strategy:
       fail-fast: false
       matrix:

@@ -41,6 +41,19 @@ The watched paths, with the reason for each:
 
 The rules read `briqyard_host_condition`, `briqyard_pool_bytes`, `briqyard_machine_restarts_total`, `briqyard_events_total`, `briqyard_fleet_unschedulable_total` and `briqyard_fleet_largest_slot_mb`; the dashboards and `monitoring-check.sh` read the machine, warm pool and fleet series besides. Each is defined and rendered in the files above.
 
+## Amendment: a dispatch may name its suites
+
+A dispatch takes an optional `suites_only` input: the suites of `more-suites` to run, comma separated (`qualification`, `scale,stress`). The default is empty, which is the selection above: every suite on a dispatch, the diff on a pull request.
+
+| Decision | Setting |
+|---|---|
+| Validation | `hack/native-suites.py --only` accepts only known names, each once, none empty, and prints them in matrix order. Anything else fails `changes`, so `more-suites` does not start: a typo never runs every suite or none. An unset input and an empty one are the same to GitHub, so the default is all; a value of only spaces or commas fails |
+| Other jobs | `suites` (e2e, fleet-smoke, scoped execution), `two-hosts` and `measure` are skipped when the input is set; it selects among the matrix names only |
+| Combinations | With `measure_freeze` or `two_hosts_only`, `changes` fails with a message; nothing else runs |
+| Pull requests | The input does not exist there; the diff still decides |
+| Visible | The step summary names the suites that run and the ones not selected, and says the input selected them |
+| Unchanged | The harness comes from the workflow revision and the suites from the tested source; the watched paths, and so the release PR's full run, are as before |
+
 ## Consequences
 
 - **The residual risk.** A series is defined in one place but changed by its call sites: the restart counter, the refusal counter, `backup_failed`, the host condition and the pool read are set from the machine manager, the fleet's create path and the store. A behaviour change there that breaks an alert (a restart no longer counted, a refusal no longer recorded) does not run `alerts` or `monitoring` on that PR. `native` does not run on a push to `main`, so the next release PR, or a dispatch, is the first run that sees it. That catch is by convention, since `native` is not a required check, and by then the cause is on `main`, among every PR since the last release. The relay's answers that `monitoring-check.sh` reads (`crates/briqyardd/src/api/`, `crates/briqyard-fleet/src/main.rs`) are unwatched for the same reason: those files are too broad. A crate directory is not watched whole because a counter incremented from many call sites would then watch most of `crates/`, and the saving would go.
