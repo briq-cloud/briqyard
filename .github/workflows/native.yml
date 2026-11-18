@@ -310,6 +310,8 @@ jobs:
           path: |
             native-logs/${{ matrix.suite }}.log
             native-logs/recovery-helper.log
+            native-logs/qualification/gateway-policy-receipt.json
+            native-logs/qualification/gateway-policy-observations.jsonl
             native-logs/${{ matrix.suite }}/
           if-no-files-found: ignore
 
