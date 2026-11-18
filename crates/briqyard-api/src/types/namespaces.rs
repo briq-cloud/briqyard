@@ -121,6 +121,11 @@ pub struct GatewaySpec {
     /// program that must run once before any machine uses it.
     #[serde(default)]
     pub start: bool,
+    /// The loaded policy the gateway enforces (ADR 0143): a start that needs the gateway reads
+    /// it back from the running process before any machine bound to it is admitted. Absent: the
+    /// legacy gateway, nothing verified. It cannot be added, removed or changed in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<GatewayPolicyBinding>,
 }
 
 impl GatewaySpec {
@@ -144,6 +149,123 @@ pub struct GatewayView {
     pub machine_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
+    /// The loaded policy the gateway is bound to (ADR 0143); absent for a legacy gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<GatewayPolicyBinding>,
+}
+
+/// The loaded-policy format and enforcement contract this daemon speaks (ADR 0143).
+pub const GATEWAY_POLICY_FORMAT: u32 = 1;
+pub const GATEWAY_POLICY_ENFORCEMENT: u32 = 1;
+
+/// What a namespace's gateway enforces and what a machine bound to it requires: one shape for
+/// `GatewaySpec.policy`, the gateway's record and `Egress.gateway_policy`. Parsed strictly:
+/// an unknown field, another format or version, or a digest that is not `sha256:` and 64
+/// lowercase hex digits is refused wherever it is read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawGatewayPolicyBinding")]
+pub struct GatewayPolicyBinding {
+    pub policy_format: u32,
+    pub policy_digest: String,
+    pub enforcement_version: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGatewayPolicyBinding {
+    policy_format: u32,
+    policy_digest: String,
+    enforcement_version: u32,
+}
+
+impl TryFrom<RawGatewayPolicyBinding> for GatewayPolicyBinding {
+    type Error = String;
+
+    fn try_from(raw: RawGatewayPolicyBinding) -> Result<Self, String> {
+        let binding = Self {
+            policy_format: raw.policy_format,
+            policy_digest: raw.policy_digest,
+            enforcement_version: raw.enforcement_version,
+        };
+        binding.check()?;
+        Ok(binding)
+    }
+}
+
+impl GatewayPolicyBinding {
+    pub fn check(&self) -> Result<(), String> {
+        if self.policy_format != GATEWAY_POLICY_FORMAT {
+            return Err(format!(
+                "policy_format {}: want {GATEWAY_POLICY_FORMAT}",
+                self.policy_format
+            ));
+        }
+        if self.enforcement_version != GATEWAY_POLICY_ENFORCEMENT {
+            return Err(format!(
+                "enforcement_version {}: want {GATEWAY_POLICY_ENFORCEMENT}",
+                self.enforcement_version
+            ));
+        }
+        match self.policy_digest.strip_prefix("sha256:") {
+            Some(hex) if is_lower_hex(hex, 64) => Ok(()),
+            _ => Err("policy_digest: want sha256: and 64 lowercase hex digits".into()),
+        }
+    }
+}
+
+/// `len` lowercase hex digits and nothing else.
+pub fn is_lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// `POST /v1/namespaces/{id}/gateway/policy-status`: a fresh challenge for the gateway's
+/// loaded-policy readback.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayPolicyStatusRequest {
+    /// 64 lowercase hex digits, chosen by the caller for this one question.
+    pub challenge: String,
+}
+
+impl GatewayPolicyStatusRequest {
+    pub fn check(&self) -> Result<(), String> {
+        match is_lower_hex(&self.challenge, 64) {
+            true => Ok(()),
+            false => Err("challenge: want 64 lowercase hex digits".into()),
+        }
+    }
+}
+
+/// The process incarnation the daemon observed for the gateway's machine, from its own record
+/// of the VMM and never from the guest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeIncarnation {
+    pub pid: u32,
+    pub start_ticks: u64,
+    pub host_boot_id: String,
+}
+
+/// What the gateway's own helper reports: the challenge it was given and the policy its
+/// forwarding process has installed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayPolicyReport {
+    pub challenge: String,
+    pub policy_format: u32,
+    pub policy_digest: String,
+    pub enforcement_version: u32,
+    pub ready: bool,
+}
+
+/// The answer: the outer identity is the daemon's, the inner report the guest's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayPolicyStatus {
+    pub namespace: String,
+    pub machine_id: String,
+    pub native_incarnation: NativeIncarnation,
+    pub report: GatewayPolicyReport,
 }
 
 /// What a running machine uses, from its cgroup (jailed hosts only).

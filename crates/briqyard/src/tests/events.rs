@@ -176,6 +176,7 @@ fn describe_shows_the_machine_then_its_events() {
             mode: "via".into(),
             via: Some("gateway".into()),
             siblings: false,
+            gateway_policy: None,
         },
         endpoints: vec![
             api::Endpoint {

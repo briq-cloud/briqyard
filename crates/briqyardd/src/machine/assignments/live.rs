@@ -26,6 +26,12 @@ impl Manager {
     ) -> Result<()> {
         let intent = Intent::plan(self, request, entry, host)?;
         let machines = self.inner.machines.lock().unwrap();
+        self.check_policy_ownership_in(
+            &machines,
+            false,
+            &intent.target.egress,
+            &intent.target.namespace,
+        )?;
         anyhow::ensure!(
             machines
                 .get(&intent.source.id)
@@ -178,6 +184,12 @@ impl Manager {
             // from landing after the destination record/reader publication.
             let removed = entry.removed.lock().unwrap();
             anyhow::ensure!(!*removed, "assignment entry was removed");
+            self.check_policy_ownership_in(
+                &machines,
+                false,
+                &intent.target.egress,
+                &intent.target.namespace,
+            )?;
             self.verify_assignment_process(&intent, &live)?;
             let records = self.assignment_records(&machines)?;
             let ticket = self.begin_execution_mutation(

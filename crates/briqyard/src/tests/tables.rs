@@ -46,6 +46,7 @@ fn the_machine_table() {
         mode: "via".into(),
         via: Some("m_0123456789ab".into()),
         siblings: false,
+        gateway_policy: None,
     };
     b.limits = api::EgressLimits {
         blocked_ports: Some(vec![25, 465]),

@@ -50,7 +50,7 @@ pub(super) async fn status(State(st): S) -> Json<serde_json::Value> {
     }
     // The daemon's Status, plus what only a fleet knows.
     Json(serde_json::json!({
-        "version": briqyard_version::VERSION, "host_id": "fleet", "egress_siblings_v1": true, "placement_admission_v1": true, "placement_spill_v1": true,
+        "version": briqyard_version::VERSION, "host_id": "fleet", "egress_siblings_v1": true, "gateway_policy_v1": true, "placement_admission_v1": true, "placement_spill_v1": true,
         "prepared_upgrade_v1": st.cfg.bootstrap.script.as_os_str().is_empty(),
         "observation": st.observation,
         "capacity": cap, "used": used, "machines": machines, "running": machines,

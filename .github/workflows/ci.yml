@@ -30,6 +30,8 @@ jobs:
           python3 -m unittest discover -s hack -p "test_stress_safety.py"
           python3 -m unittest discover -s hack -p "test_stress_trend.py"
           python3 -m unittest discover -s hack -p "test_native_suites.py"
+          python3 -m unittest discover -s hack -p "test_gateway_policy_qual.py"
+          bash -n hack/qualify.sh
           python3 -m unittest discover -s hack -p "test_scoped_execution_diagnostics.py"
           python3 -m unittest discover -s hack -p "test_qualification_readiness.py"
           python3 -m unittest discover -s hack -p "test_native_clone_contract.py"

@@ -47,6 +47,7 @@ impl Manager {
                 port: r.ports.first().copied().unwrap_or(0),
                 machine_id: r.id,
                 error: r.error,
+                policy: r.gateway_policy,
             }
         });
         api::Namespace {

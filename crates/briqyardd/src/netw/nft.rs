@@ -14,7 +14,11 @@ use anyhow::{anyhow, Context, Result};
 use briqyard_api::EgressDrops;
 use std::collections::HashMap;
 use std::process::Stdio;
-use tokio::io::AsyncWriteExt;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::Instant;
+
+pub(crate) const GATE_TIMEOUT: Duration = Duration::from_secs(3);
 
 mod siblings;
 pub use siblings::attachment_elements;
@@ -162,6 +166,9 @@ pub struct Ruleset {
     /// The address of every machine on the host: its internet traffic and its drops are
     /// counted.
     pub counted: Vec<String>,
+    /// The addresses of the gateways whose loaded policy is not proven for their current
+    /// process (ADR 0143): the namespace's machines and they exchange no ARP or IP.
+    pub gated: Vec<String>,
 }
 
 /// The counter sets: bytes a machine's address sent to the internet and got back from it
@@ -343,6 +350,7 @@ impl Ruleset {
         s.push_str(&set("via_targets", "ipv4_addr . ifname", &via_targets));
         s.push_str(&set("via_sources", "ipv4_addr", &via_sources));
         s.push_str(&set("via_allowed", "ipv4_addr . ipv4_addr", &via_allowed));
+        s.push_str(&set("gateway_gate", "ipv4_addr", &self.gated));
         s.push_str(siblings::chains());
         s.push_str(siblings::prerouting());
         s.push_str("}\n");
@@ -526,6 +534,60 @@ pub async fn attachment(
     policy: Option<&Policy>,
 ) -> Result<()> {
     nft(&attachment_elements(verb, tap, bridge, ip, policy)).await
+}
+
+/// What `gateway_gate` sends: the gateway's address in the gate set; with `delete`, out of it.
+pub fn gate_elements(verb: &str, ip: &str) -> String {
+    format!("{verb} element bridge briqyard gateway_gate {{ {ip} }}\n")
+}
+
+/// Closes the bridge gate on an unverified gateway's address; `open` takes it out (missing is
+/// success).
+pub async fn gateway_gate(ip: &str, closed: bool, deadline: Instant) -> Result<()> {
+    anyhow::ensure!(Instant::now() < deadline, "nft gateway gate deadline");
+    let verb = if closed { "add" } else { "delete" };
+    let script = gate_elements(verb, ip);
+    let mut child = crate::host_process::command("nft")
+        .args(["-f", "-"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("run nft gateway gate")?;
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut output = Vec::new();
+    let write = async move { stdin.write_all(script.as_bytes()).await };
+    let exchange = async {
+        let (_, status, _) =
+            tokio::try_join!(write, child.wait(), stderr.read_to_end(&mut output))?;
+        Ok::<_, std::io::Error>(status)
+    };
+    let status = match tokio::time::timeout_at(deadline, exchange).await {
+        Ok(Ok(status)) => status,
+        failed => {
+            let _ = child.start_kill();
+            if let Err(error) = child.wait().await {
+                tracing::error!(%error, "nft gateway gate process could not be reaped; turn retained");
+                return std::future::pending().await;
+            }
+            return match failed {
+                Ok(Err(error)) => Err(error).context("settle nft gateway gate"),
+                Err(_) => Err(anyhow!("nft gateway gate deadline")),
+                Ok(Ok(_)) => unreachable!(),
+            };
+        }
+    };
+    if status.success() {
+        return Ok(());
+    }
+    let error = Err(anyhow!("nft: {}", String::from_utf8_lossy(&output).trim()));
+    if closed {
+        error
+    } else {
+        missing_is_fine(error)
+    }
 }
 
 /// Puts a machine's policy in the tables. Again is fine.

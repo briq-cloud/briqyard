@@ -68,6 +68,47 @@
         volume_gb: { type: integer, minimum: 1, description: "a data volume at `/data`, fixed for the gateway's life" }
         probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "as a machine's; with a startup or readiness probe, a start that needs the gateway waits for its `ready`, not its port" }
         start: { type: boolean, default: false, description: "start it now and answer once its port accepts (or it is ready); a running one is left as is. Nothing then keeps it running: the daemon stops it until a `via: gateway` machine starts" }
+        policy: { allOf: [{ $ref: "#/components/schemas/GatewayPolicyBinding" }], description: "the loaded policy the gateway enforces (ADR 0143): every start that needs it reads it back from the running process before the namespace's machines can reach it. Fixed at the gateway's creation: a put with another policy, or none, is refused until the gateway is deleted. Requires the `gateway_policy_v1` capability; absent is the legacy gateway" }
+    GatewayPolicyBinding:
+      type: object
+      additionalProperties: false
+      required: [policy_format, policy_digest, enforcement_version]
+      properties:
+        policy_format: { type: integer, enum: [1] }
+        policy_digest: { type: string, pattern: "^sha256:[0-9a-f]{64}$" }
+        enforcement_version: { type: integer, enum: [1] }
+    GatewayPolicyStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [challenge]
+      properties:
+        challenge: { type: string, pattern: "^[0-9a-f]{64}$", description: "chosen by the caller for this one question" }
+    GatewayPolicyStatus:
+      type: object
+      additionalProperties: false
+      required: [namespace, machine_id, native_incarnation, report]
+      properties:
+        namespace: { type: string }
+        machine_id: { type: string, description: "the gateway's machine; not a process identity: a replacement keeps it" }
+        native_incarnation:
+          type: object
+          additionalProperties: false
+          required: [pid, start_ticks, host_boot_id]
+          description: "the process the daemon observed for the gateway's machine, from its own record and never the guest's"
+          properties:
+            pid: { type: integer }
+            start_ticks: { type: integer }
+            host_boot_id: { type: string }
+        report:
+          type: object
+          additionalProperties: false
+          required: [challenge, policy_format, policy_digest, enforcement_version, ready]
+          properties:
+            challenge: { type: string }
+            policy_format: { type: integer }
+            policy_digest: { type: string }
+            enforcement_version: { type: integer }
+            ready: { type: boolean }
     GatewayView:
       type: object
       properties:
@@ -76,6 +117,7 @@
         port: { type: integer }
         machine_id: { type: string, description: "`GET /v1/machines/{id}` and its `/logs` answer for it" }
         error: { type: string, description: why it last failed to come up }
+        policy: { allOf: [{ $ref: "#/components/schemas/GatewayPolicyBinding" }], description: "the loaded policy it is bound to (ADR 0143); absent for a legacy gateway" }
     MemoryPolicy:
       type: object
       required: [version, vmm_overhead_mb]
@@ -208,6 +250,7 @@
           allOf: [{ $ref: "#/components/schemas/RuntimeObservation" }]
           description: "Serving daemon or central-fleet identity; loaded input hash is captured at startup, not reread from disk. Absent on older runtimes or unresolved daemon recovery. Not a maintenance permit."
         egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
+        gateway_policy_v1: { type: boolean, default: false, description: "explicit support for gateway loaded-policy readback and the bound-machine fence (ADR 0143); absent means unsupported, never inferred from version. A daemon without it ignores the new fields, so a caller MUST require true before sending `policy` or `egress.gateway_policy`" }
         prepared_upgrade_v1: { type: boolean, default: false, description: "fleet with embedded bootstrap only: upgrade prepares with unchanged admission, withdraws only at activation, honors stay_draining on success and checks require_ready at ownership (ADR 0136). Callers MUST require true before sending stay_draining; older fleets ignore unknown request fields" }
         placement_admission_v1: { type: boolean, default: false, description: "fleet: it serves `/v1/namespaces/{namespace}/admissions/{request_id}` (ADR 0128); absent means the route is not there (404), never capacity" }
         placement_spill_v1: { type: boolean, default: false, description: "fleet: the admission body accepts `spill_when_busy` (ADR 0130); absent means it does not, and the body is refused" }

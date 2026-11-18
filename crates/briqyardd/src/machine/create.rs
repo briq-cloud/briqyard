@@ -98,6 +98,7 @@ impl Manager {
         req: api::CreateMachineRequest,
         role: Option<Role>,
     ) -> Result<(Arc<Entry>, Make), MError> {
+        self.check_cold_born_request(&req, false)?;
         let (exclusive, _warm) = match &req.sandbox_seed {
             Some(seed) => {
                 let (exclusive, held) = self.seed_warm_admission(seed).await;
@@ -169,6 +170,7 @@ impl Manager {
         // A seed create holds both locks exclusively and may take an unbound slot.
         exclusive: bool,
     ) -> Result<(Arc<Entry>, Make), MError> {
+        self.check_cold_born_request(&req, warm_slot.is_some() || unbound_factory)?;
         req.check_sandbox_seed().map_err(invalid)?;
         // The request's turn, to the end of the record: a retry waits for the durable writes,
         // then replays the machine they made.
@@ -267,6 +269,7 @@ impl Manager {
             restart,
             probes: req.probes.clone().unwrap_or_default(),
             egress: req.egress.clone().unwrap_or_default(),
+            gateway_policy: req.gateway_policy.clone().filter(|_| role.is_some()),
             limits: req.limits.clone().unwrap_or_default(),
             disk_limits: req.disk_limits.clone().unwrap_or_default(),
             metadata: req.metadata.clone(),
@@ -346,6 +349,7 @@ impl Manager {
             let key = self.backup_key(&b, rs).await?;
             let was: Record = serde_json::from_value(backups::spec_of(&b, key.as_deref())?)
                 .map_err(|e| invalid(format!("backup {}: machine record: {e}", b.id)))?;
+            self.check_policy_source(&was)?;
             // The request says what it says; the backup fills the rest.
             inherit_run_config(&mut rec, &was);
             // A restore writes the backup's boot files again; a disk fork keeps the copied disk's.
@@ -403,6 +407,7 @@ impl Manager {
                 other => other,
             })?;
             let sr = s.snapshot();
+            self.check_policy_source(&sr)?;
             rec.runtime_class = classes::inherited(
                 &req.runtime_class,
                 &sr.runtime_class,
@@ -447,12 +452,14 @@ impl Manager {
             src = Some((s, fork.clone()));
         } else if let Some(seed) = &req.sandbox_seed {
             let source = self.own_entry(&seed.machine_id)?;
+            self.check_policy_source(&source.snapshot())?;
             let fork = self.sandbox_clone_spec(&req, &mut rec, &source.snapshot())?;
             src = Some((source, fork));
         } else {
             rec.image = req.image.clone();
         }
         self.served_class(&rec.runtime_class)?;
+        self.check_policy_ownership(rec.is_cold_born(), &rec.egress, &rec.namespace)?;
         if let (true, Some(class)) = (
             req.fork.as_ref().is_some_and(|f| f.snapshot.is_some()),
             self.memory_refusal(&rec),
@@ -478,7 +485,19 @@ impl Manager {
             self.room_on_pool(v.size_gb).await?;
         }
         let t = self.ensure_namespace(&req.namespace).await?;
-        let (e, publication) = self.add_machine(rec, &t)?;
+        // A cold-born machine routed through a gateway is admitted under the namespace's turn,
+        // which a gateway introduction or replacement also holds: what it was checked against is
+        // what the gateway keeps until the machine's record is gone (ADR 0143).
+        let (e, publication) = {
+            let _turn = match rec.egress.mode == api::egress::VIA && rec.is_cold_born() {
+                true => Some(t.lock.lock().await),
+                false => None,
+            };
+            if rec.egress.gateway_policy.is_some() {
+                self.check_egress(&rec.egress, &rec.namespace, &rec.id)?;
+            }
+            self.add_machine(rec, &t)?
+        };
         self.persist_sandbox_assignment(&e)?;
         if let Some(origin) = e.snapshot().clone_origin {
             let reserved = self
@@ -814,6 +833,10 @@ impl Manager {
                 t.rec.id
             )));
         }
+        if rec.is_gateway() && rec.gateway_policy.is_some() {
+            self.check_policy_dependents(&machines, &rec.namespace, Some(&rec.id))?;
+        }
+        self.check_policy_ownership_in(&machines, rec.is_cold_born(), &rec.egress, &rec.namespace)?;
         if self
             .inner
             .warm_names

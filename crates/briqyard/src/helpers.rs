@@ -121,8 +121,22 @@ pub(super) fn probe_arg(s: &str) -> Result<api::Probe, String> {
 }
 
 /// An egress policy, `open`, `none` or `via:MACHINE_ID` (`via:gateway`), checked as the daemon
-/// checks it.
+/// checks it. `via:gateway+policy=sha256:HEX` binds the machine to the gateway's loaded policy.
 pub(super) fn egress_arg(s: &str) -> Result<api::Egress, String> {
+    let (s, gateway_policy) = match s.split_once("+policy=") {
+        Some((s, digest)) => (
+            s,
+            Some(api::GatewayPolicyBinding {
+                policy_format: api::GATEWAY_POLICY_FORMAT,
+                policy_digest: digest.into(),
+                enforcement_version: api::GATEWAY_POLICY_ENFORCEMENT,
+            }),
+        ),
+        None => (s, None),
+    };
+    if let Some(binding) = &gateway_policy {
+        binding.check()?;
+    }
     let (s, siblings) = s
         .strip_suffix("+siblings")
         .map_or((s, false), |s| (s, true));
@@ -131,11 +145,13 @@ pub(super) fn egress_arg(s: &str) -> Result<api::Egress, String> {
             mode: api::egress::VIA.into(),
             via: Some(id.into()),
             siblings,
+            gateway_policy,
         },
         _ => api::Egress {
             mode: s.into(),
             via: None,
             siblings,
+            gateway_policy,
         },
     };
     e.check()?;

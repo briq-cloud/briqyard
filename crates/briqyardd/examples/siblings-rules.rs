@@ -41,6 +41,7 @@ fn main() {
         ],
         policies: vec![opted.clone(), via("10.64.1.5", false)],
         counted: vec![],
+        gated: vec![],
     };
     let attachment = |verb, tap, ip, policy| attachment_elements(verb, tap, "by1", ip, policy);
     println!(

@@ -479,6 +479,9 @@ pub(super) fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
     };
     lines.push(("Disk limits", disk));
     lines.push(("Egress", egress_label(&m.egress)));
+    if let Some(binding) = &m.egress.gateway_policy {
+        lines.push(("Gateway policy", binding.policy_digest.clone()));
+    }
     // What runs it (ADR 0027): the init its root disk carries, the VMM of its last boot.
     if !m.init_version.is_empty() || !m.vmm_version.is_empty() {
         let or_unknown = |v: &str| {

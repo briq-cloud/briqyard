@@ -43,10 +43,25 @@ impl Manager {
         if first.namespace == namespace {
             return Ok(self.moved(&e, &first, false));
         }
-        self.check_version(&e, at)?;
-        self.check_movable(&first, namespace)?;
-        if self.rename_namespace(&e, namespace).await? {
+        let source = first.namespace;
+        let mut namespaces = vec![source.clone(), namespace.to_owned()];
+        namespaces.sort();
+        namespaces.dedup();
+        let mut policy_turns = Vec::new();
+        for name in &namespaces {
+            policy_turns.push(
+                self.inner
+                    .namespace_turns
+                    .take(name, gateway_policy::POLICY_ADMISSION)
+                    .await,
+            );
+        }
+        let (first, renamed) = self.rename_namespace(&e, &source, namespace, at).await?;
+        if renamed {
             return Ok(self.moved(&e, &first, false));
+        }
+        if first.is_cold_born() {
+            policy_turns.clear();
         }
         if first.snapshots.iter().any(|s| s.memory.is_some()) {
             return Err(MError::Conflict(
@@ -62,9 +77,6 @@ impl Manager {
             &t,
             was_running,
         )?;
-        let mut namespaces = vec![first.namespace.clone(), namespace.to_owned()];
-        namespaces.sort();
-        namespaces.dedup();
         let publication =
             self.begin_execution_mutation(&namespaces, execution_fence::MutationMode::Broaden)?;
         if was_running {
@@ -78,6 +90,9 @@ impl Manager {
         // A refusal from here to the new address leaves the machine as it was: a running one
         // runs again.
         let joined: Result<(String, String), MError> = async {
+            if !self.holds(&e) {
+                return Err(MError::NotFound);
+            }
             let rec = e.snapshot();
             if rec.namespace != first.namespace {
                 return Err(MError::Conflict("move source namespace changed".into()));
@@ -85,6 +100,7 @@ impl Manager {
             if !matches!(rec.state.as_str(), state::STOPPED | state::CREATED) {
                 return Err(MError::BadState(rec.state));
             }
+            self.check_policy_ownership(rec.is_cold_born(), &rec.egress, namespace)?;
             self.check_movable(&rec, namespace)?;
             // A stopped record can retain a failed revocation. Do not release its old address.
             self.unplug(&rec.id, &rec.ip).await?;
@@ -138,6 +154,7 @@ impl Manager {
         let (from, left) = match joined {
             Ok(j) => j,
             Err(refusal) => {
+                drop(policy_turns);
                 if was_running && e.snapshot().state == state::STOPPED {
                     if let Err(err) = self.start_entry(&e, true).await {
                         tracing::warn!(machine = first.id, err = %err, "not started again after a refused move");
@@ -148,6 +165,7 @@ impl Manager {
         };
         self.rehome_records(&e)?;
         self.after_move(&e, &from, &left, was_running);
+        drop(policy_turns);
         if let Some(old) = self.namespace_of(&from) {
             self.refresh_dns(&old);
         }
@@ -297,13 +315,37 @@ impl Manager {
     /// The rename: the machine is alone in its namespace and `namespace` does not exist. Done
     /// in one step under the machines' lock, so a create that read the old name fails
     /// (`add_machine`) rather than land in a namespace that is gone. False when it does not
-    /// apply.
-    async fn rename_namespace(&self, e: &Arc<Entry>, namespace: &str) -> Result<bool, MError> {
+    /// apply. The checked source record also drives the slow path.
+    async fn rename_namespace(
+        &self,
+        e: &Arc<Entry>,
+        source: &str,
+        namespace: &str,
+        at: Option<u64>,
+    ) -> Result<(Record, bool), MError> {
         let _creating = self.inner.namespace_create.lock().await;
         let _turns = e.lock_once_stopped(true).await;
         self.settle_stopped_update(e)?;
+        if !self.holds(e) {
+            return Err(MError::NotFound);
+        }
         let r = e.snapshot();
+        if r.namespace != source {
+            return Err(MError::Conflict("move source namespace changed".into()));
+        }
+        if r.template_birth.is_some() || r.clone_origin.is_some() {
+            return Err(MError::Conflict(
+                "template and memory clone ownership is host-local and namespace-local".into(),
+            ));
+        }
+        if r.egress.gateway_policy.is_some() {
+            return Err(MError::Conflict(
+                "a machine bound to a gateway loaded policy stays in its namespace".into(),
+            ));
+        }
+        self.check_policy_ownership(r.is_cold_born(), &r.egress, namespace)?;
         self.check_movable(&r, namespace)?;
+        self.check_version(e, at)?;
         let from = r.namespace.clone();
         if self.assignment_namespace_held(&from)
             || self
@@ -314,7 +356,7 @@ impl Manager {
                 .values()
                 .any(|i| i.namespace == from)
         {
-            return Ok(false);
+            return Ok((r, false));
         }
         // Usage up to now belongs to the name it leaves.
         self.meter(std::slice::from_ref(e), Utc::now()).await;
@@ -354,7 +396,7 @@ impl Manager {
             }
         };
         let Some((t, publication)) = renamed else {
-            return Ok(false);
+            return Ok((r, false));
         };
         // The new record first, the old one last: a crash between leaves both, and the next
         // start keeps the one a machine names (`drop_renamed_leftovers`).
@@ -369,7 +411,7 @@ impl Manager {
         self.refresh_dns(&t);
         self.save_execution_publication(e)?;
         self.finish_execution_mutation(&publication)?;
-        Ok(true)
+        Ok((r, true))
     }
 
     /// Writes the machine's record and its endpoints' under its new namespace.

@@ -67,6 +67,11 @@ pub(super) async fn forward(
             return refusal.into_response();
         }
     }
+    if needs_gateway_policy(&method, path, &body) {
+        if let Err(refusal) = require_gateway_policy(st, host).await {
+            return refusal.into_response();
+        }
+    }
     let req = match to_host(st, host, method, path, headers) {
         Ok(r) => r.body(body).timeout(FORWARD_TIMEOUT),
         Err(refused) => return refused.into_response(),
@@ -74,6 +79,65 @@ pub(super) async fn forward(
     match req.send().await {
         Ok(resp) => relay(resp, host).await,
         Err(e) => unreachable_host(host, e),
+    }
+}
+
+/// A request a host without gateway loaded-policy support would answer by silently dropping the
+/// fields that make it one (ADR 0143): a gateway put with a `policy`, a machine create or
+/// change naming `egress.gateway_policy`, a restore that leaves `egress` to the backup, which
+/// may carry one, and the readback itself.
+pub(super) fn needs_gateway_policy(method: &Method, path: &str, body: &[u8]) -> bool {
+    let route = path.split('?').next().unwrap_or(path);
+    let namespace = route.starts_with("/v1/namespaces/") || route.starts_with("/v1/tenants/");
+    if namespace && route.ends_with("/gateway/policy-status") {
+        return true;
+    }
+    let machines =
+        matches!(*method, Method::POST | Method::PATCH) && route.starts_with("/v1/machines");
+    let gateway = *method == Method::PUT && namespace && route.ends_with("/gateway");
+    if !machines && !gateway {
+        return false;
+    }
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    (gateway && !doc["policy"].is_null())
+        || (machines && !doc["egress"]["gateway_policy"].is_null())
+        || (*method == Method::POST
+            && route == "/v1/machines"
+            && !doc["restore"].is_null()
+            && doc["egress"].is_null())
+}
+
+/// The host's own word, asked now: a status that says `gateway_policy_v1: true`. Missing,
+/// false, unreadable or unanswered is unsupported, never inferred from a version or a stale
+/// heartbeat, and only the namespace's pinned host is asked.
+pub(super) async fn require_gateway_policy(st: &AppState, host: &HostRec) -> Result<(), Refusal> {
+    let unsupported = || {
+        err(
+            StatusCode::CONFLICT,
+            "capability_unsupported",
+            format!("host {} does not support gateway loaded policies", host.id),
+        )
+    };
+    let asked = to_host(st, host, Method::GET, "/v1/status", &HeaderMap::new())?
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+    let Ok(resp) = asked else {
+        return Err(unsupported());
+    };
+    if !resp.status().is_success() {
+        return Err(unsupported());
+    }
+    let status = resp
+        .bytes()
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    match status.is_some_and(|doc| doc["gateway_policy_v1"] == true) {
+        true => Ok(()),
+        false => Err(unsupported()),
     }
 }
 

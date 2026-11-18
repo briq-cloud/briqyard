@@ -88,6 +88,7 @@ async fn startup_legacy_via_cannot_publish_an_unverified_assigned_target() {
             mode: "via".into(),
             via: Some(assigned.id.clone()),
             siblings: false,
+            gateway_policy: None,
         };
     }
     h.m.save(&via).unwrap();

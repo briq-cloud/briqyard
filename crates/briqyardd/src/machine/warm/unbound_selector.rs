@@ -174,6 +174,11 @@ impl Manager {
                 };
                 // All authority checks in the existing writer remain inside this same outer
                 // admission turn; reservation precedes any uncertain durable intent write.
+                #[cfg(test)]
+                self.inner
+                    .vmm
+                    .warm_test_barrier("assignment_stage", &source.id)
+                    .await;
                 self.stage_destination_assignment_locked(request.clone(), &entry, host)
                     .map_err(assignment_error)?;
                 drop(turn);

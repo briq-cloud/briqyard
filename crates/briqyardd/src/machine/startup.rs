@@ -175,6 +175,9 @@ impl Manager {
         }
         m.load_backing_at_start().await?;
         if m.recovery_fault().is_some() {
+            if !m.unsupported_policy_records().is_empty() {
+                m.apply_rules().await?;
+            }
             return Ok(m);
         }
         let phase = std::time::Instant::now();
@@ -275,6 +278,16 @@ impl Manager {
             .collect();
         if let Err(err) = self.inner.vmm.initialize_recovery(&recovered).await {
             self.recovery_failed("native recovery barrier", err);
+        }
+        let unsupported = self.unsupported_policy_records();
+        if !unsupported.is_empty() {
+            self.recovery_failed(
+                "gateway policy ownership",
+                anyhow!(
+                    "machines {} are not cold-born and depend on a gateway loaded policy",
+                    unsupported.join(", ")
+                ),
+            );
         }
         if self.recovery_fault().is_some() {
             return Ok(());
@@ -591,8 +604,16 @@ impl Manager {
         for gw in self.gateways_out_of_step(false) {
             let (m, namespace) = (self.clone(), gw.snapshot().namespace);
             tokio::spawn(async move {
-                if let Err(err) = m.ensure_gateway(&namespace).await {
+                if let Err(err) = m.ensure_gateway(&namespace, None).await {
                     tracing::warn!(namespace, err = %err, "gateway an adopted machine needs");
+                }
+            });
+        }
+        for gw in self.adopted_bound_gateways() {
+            let (m, namespace) = (self.clone(), gw.snapshot().namespace);
+            tokio::spawn(async move {
+                if let Err(err) = m.ensure_gateway(&namespace, None).await {
+                    tracing::warn!(namespace, err = %err, "adopted gateway policy readback");
                 }
             });
         }
@@ -811,9 +832,19 @@ impl Manager {
     /// Settles the machine's state once its process is gone.
     pub(super) fn watch(&self, e: &Arc<Entry>, vm: &fc::Vm) {
         let (m, e, pid, mut exited) = (self.clone(), e.clone(), vm.pid, vm.exited.clone());
+        let gateway = e
+            .rec
+            .lock()
+            .unwrap()
+            .gateway_policy
+            .is_some()
+            .then(|| vm.clone());
         tokio::spawn(async move {
             if exited.wait_for(|gone| *gone).await.is_ok() {
-                m.settle_exit(&e, pid).await;
+                match gateway.as_ref() {
+                    Some(vm) => m.settle_exact_exit(&e, pid, Some(vm)).await,
+                    None => m.settle_exit(&e, pid).await,
+                }
                 m.retire_after_exit(&e).await;
             } else {
                 tracing::warn!(

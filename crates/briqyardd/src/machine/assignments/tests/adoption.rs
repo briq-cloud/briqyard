@@ -328,6 +328,7 @@ async fn active_adoption_cannot_publish_a_via_dependency_before_its_own_verifica
         mode: "via".into(),
         via: Some("m_unverified".into()),
         siblings: false,
+        gateway_policy: None,
     };
     h.m.save(&original).unwrap();
     restart_load(&h.m).unwrap();

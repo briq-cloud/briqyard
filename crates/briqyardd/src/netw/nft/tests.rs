@@ -25,6 +25,7 @@ fn ruleset() -> Ruleset {
             },
         ],
         counted: vec!["10.64.0.2".into(), "10.64.0.3".into()],
+        gated: vec![],
     }
 }
 
@@ -157,6 +158,7 @@ fn no_clients_means_no_port_rules_and_empty_sets_have_no_elements() {
         members: vec![],
         policies: vec![],
         counted: vec![],
+        gated: vec![],
         ..ruleset()
     };
     let s = r.render();
@@ -483,4 +485,45 @@ fn revocation_is_idempotent_without_swallowing_a_partial_batch_error() {
     assert!(batch[..first_delete].contains("add limit inet briqyard conn_"));
     assert!(batch[first_delete..].contains("delete limit inet briqyard conn_"));
     assert!(!batch[first_delete..].contains("add "));
+}
+
+#[test]
+fn an_unverified_gateway_is_gated_both_ways_before_any_allow() {
+    let mut r = ruleset();
+    r.gated = vec!["10.64.0.2".into()];
+    let text = r.render();
+    assert!(text.contains("set gateway_gate"));
+    assert!(text
+        .split("set gateway_gate")
+        .nth(1)
+        .unwrap()
+        .contains("10.64.0.2"));
+    let chain = text.split("chain prerouting").nth(1).unwrap();
+    let at = |rule: &str| {
+        chain
+            .find(rule)
+            .unwrap_or_else(|| panic!("{rule}\n{chain}"))
+    };
+    let first_allow = at("jump via_ipv4");
+    let pinned = at("iifname . ip saddr != @pins drop");
+    for rule in [
+        "ip saddr @gateway_gate meta ibrname . ip daddr @members drop",
+        "ip daddr @gateway_gate meta ibrname . ip saddr @members drop",
+        "arp saddr ip @gateway_gate meta ibrname . arp daddr ip @members drop",
+        "arp daddr ip @gateway_gate meta ibrname . arp saddr ip @members drop",
+    ] {
+        assert!(pinned < at(rule) && at(rule) < first_allow, "{rule}");
+    }
+    assert!(gate_elements("add", "10.64.0.2")
+        .contains("add element bridge briqyard gateway_gate { 10.64.0.2 }"));
+    // With none gated the set is there and empty: nothing else in the tables changes.
+    let none = ruleset().render();
+    assert!(!none
+        .split("set gateway_gate")
+        .nth(1)
+        .unwrap()
+        .split('}')
+        .next()
+        .unwrap()
+        .contains("elements"));
 }

@@ -342,6 +342,10 @@ pub struct Status {
     /// Supports explicit via-mode access to pinned namespace siblings (ADR 0064).
     #[serde(default, skip_serializing_if = "super::limits::is_false")]
     pub egress_siblings_v1: bool,
+    /// Reads a gateway's loaded policy back and fences bound machines on it (ADR 0143); absent
+    /// is false, never inferred from a version.
+    #[serde(default, skip_serializing_if = "super::limits::is_false")]
+    pub gateway_policy_v1: bool,
     #[serde(default, skip_serializing_if = "super::limits::is_false")]
     pub named_memory_fork_v1: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -58,6 +58,10 @@ pub(super) fn prerouting() -> &'static str {
      \t\tiifname . arp saddr ether != @mac_pins drop\n\
      \t\tiifname . arp saddr ip != @pins drop\n\
      \t\tiifname . ip saddr != @pins drop\n\
+     \t\tip saddr @gateway_gate meta ibrname . ip daddr @members drop\n\
+     \t\tip daddr @gateway_gate meta ibrname . ip saddr @members drop\n\
+     \t\tarp saddr ip @gateway_gate meta ibrname . arp daddr ip @members drop\n\
+     \t\tarp daddr ip @gateway_gate meta ibrname . arp saddr ip @members drop\n\
      \t\tip saddr @via_sources jump via_ipv4\n\
      \t\tarp saddr ip @via_sources jump via_arp\n\
      \t\tiifname . arp saddr ip @pins accept\n\

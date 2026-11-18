@@ -27,6 +27,10 @@ pub struct Egress {
     /// For `via` only: also reach current pinned members of this exact namespace.
     #[serde(default, skip_serializing_if = "is_false")]
     pub siblings: bool,
+    /// For `via: "gateway"` only: the loaded policy this machine requires its namespace's
+    /// gateway to enforce (ADR 0143). Absent: the legacy gateway route, nothing verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_policy: Option<GatewayPolicyBinding>,
 }
 
 pub(super) fn is_false(value: &bool) -> bool {
@@ -43,6 +47,7 @@ impl Default for Egress {
             mode: default_egress_mode(),
             via: None,
             siblings: false,
+            gateway_policy: None,
         }
     }
 }
@@ -70,6 +75,14 @@ impl Egress {
     pub fn check(&self) -> Result<(), String> {
         if self.siblings && self.mode != egress::VIA {
             return Err("egress.siblings goes with mode \"via\" only".into());
+        }
+        if self.gateway_policy.is_some() {
+            if !self.via_gateway() {
+                return Err("egress.gateway_policy goes with via \"gateway\" only".into());
+            }
+            if self.siblings {
+                return Err("egress.gateway_policy does not combine with siblings".into());
+            }
         }
         match (self.mode.as_str(), &self.via) {
             (egress::OPEN | egress::NONE, None) => Ok(()),

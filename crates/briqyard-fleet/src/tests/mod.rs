@@ -244,6 +244,7 @@ mod daemon;
 mod endpoints;
 mod events;
 mod files;
+mod gateway_policy;
 mod hosts;
 mod join;
 mod join_trust;

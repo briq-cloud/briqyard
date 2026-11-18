@@ -326,6 +326,41 @@ impl guestc::Guest for Mock {
         let cmd = req.cmd.join(" ");
         let code = self.exec_codes.lock().unwrap().get(&cmd).copied();
         let (ours, theirs) = tokio::io::duplex(1 << 16);
+        if req.cmd.first().map(String::as_str) == Some("/credential-gateway")
+            && req.cmd.get(1).map(String::as_str) == Some("policy-status")
+        {
+            self.record(format!("exec {pid} {cmd}"));
+            let hook = self.policy_reply.lock().unwrap().clone();
+            let reply = hook.map(|hook| hook(req.cmd.get(2).map_or("", String::as_str), pid));
+            tokio::spawn(async move {
+                let mut theirs = theirs;
+                let reply = reply.unwrap_or(PolicyReply {
+                    stderr: b"not found".to_vec(),
+                    code: 127,
+                    ..Default::default()
+                });
+                if let Some(arrived) = &reply.arrived {
+                    arrived.notify_one();
+                }
+                if let Some(wait) = &reply.wait {
+                    wait.notified().await;
+                }
+                let mut out = Vec::new();
+                if !reply.stdout.is_empty() {
+                    out.push(guest::Response::chunk("stdout", reply.stdout));
+                }
+                if !reply.stderr.is_empty() {
+                    out.push(guest::Response::chunk("stderr", reply.stderr));
+                }
+                out.push(guest::Response::exit(reply.code, reply.timed_out));
+                for frame in out {
+                    let _ = theirs
+                        .write_all(&guest::encode_frame(&frame).unwrap())
+                        .await;
+                }
+            });
+            return Ok(Box::new(ours));
+        }
         if !req.interactive {
             self.record(format!("exec {pid} {cmd}"));
             let at = tokio::time::Instant::now();

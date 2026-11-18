@@ -456,6 +456,9 @@ impl Manager {
             return;
         }
         let _guard = e.lock.lock().await;
+        if self.check_gateway_isolation(e).is_err() {
+            return;
+        }
         let live = e.live.lock().unwrap().clone();
         let Some(live) = live.filter(|l| l.pid == pid) else {
             return;

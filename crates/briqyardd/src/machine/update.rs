@@ -61,9 +61,55 @@ impl Manager {
         // Under the entry's lock, like every transition: no start or stop runs in between,
         // and a destroy that ran first has removed the machine, whose record is not written
         // back.
-        let _guard = e.lock.lock().await;
-        if !self.inner.machines.lock().unwrap().contains_key(id) {
+        let egress_source = req.egress.as_ref().and_then(|egress| {
+            let r = e.snapshot();
+            let derived = !r.is_cold_born();
+            ((derived && (r.egress.mode == api::egress::VIA || egress.mode == api::egress::VIA))
+                || r.egress.gateway_policy.is_some()
+                || egress.gateway_policy.is_some()
+                || self.uses_gateway(&r.namespace, &r.egress)
+                || self.uses_gateway(&r.namespace, egress))
+            .then_some((r.namespace, derived))
+        });
+        let _lifecycle = if egress_source.is_some() {
+            Some(self.inner.namespace_lifecycle.read().await)
+        } else {
+            None
+        };
+        let _policy_turn = if let Some((namespace, true)) = &egress_source {
+            Some(
+                self.inner
+                    .namespace_turns
+                    .take(namespace, gateway_policy::POLICY_ADMISSION)
+                    .await,
+            )
+        } else {
+            None
+        };
+        let gateway_turn = if let Some((namespace, _)) = egress_source {
+            let t = self.namespace_of(&namespace).ok_or(MError::NotFound)?;
+            let turn = Arc::new(t.lock.lock_owned().await);
+            Some((namespace, turn))
+        } else {
+            None
+        };
+        let _guard = if gateway_turn.is_some() {
+            e.lock.try_lock().map_err(|_| {
+                MError::Conflict("machine transition in progress: retry the egress update".into())
+            })?
+        } else {
+            e.lock.lock().await
+        };
+        if !self.holds(&e) {
             return Err(MError::NotFound);
+        }
+        if gateway_turn
+            .as_ref()
+            .is_some_and(|(namespace, _)| e.rec.lock().unwrap().namespace != *namespace)
+        {
+            return Err(MError::Conflict(
+                "machine namespace changed before egress update".into(),
+            ));
         }
         self.check_version(&e, at)?;
         // What a create pulls, makes and starts is what it was asked (ADR 0048).
@@ -103,9 +149,32 @@ impl Manager {
                 ));
             }
         }
-        if let Some(egress) = &req.egress {
+        let verify = {
             let record = e.snapshot();
-            self.check_egress(egress, &record.namespace, &record.id)?;
+            self.check_policy_ownership(record.is_cold_born(), &record.egress, &record.namespace)?;
+            match &req.egress {
+                Some(egress) => {
+                    self.check_policy_ownership(record.is_cold_born(), egress, &record.namespace)?;
+                    if egress.gateway_policy != record.egress.gateway_policy {
+                        return Err(invalid(
+                            "egress.gateway_policy is fixed for the machine's life: destroy it and create another",
+                        ));
+                    }
+                    self.check_egress(egress, &record.namespace, id)?;
+                    gateway_turn.as_ref().and_then(|(namespace, turn)| {
+                        (record.state == state::RUNNING && self.uses_gateway(namespace, egress))
+                            .then_some((namespace, turn, egress.gateway_policy.as_ref()))
+                    })
+                }
+                None => None,
+            }
+        };
+        if let Some((namespace, turn, required)) = verify {
+            Box::pin(self.ensure_gateway_held(namespace, required, turn))
+                .await
+                .map_err(|err| self.gateway_failed(&e, err))?;
+            self.gateway_still_verified(namespace, required)
+                .map_err(|err| self.gateway_failed(&e, err))?;
         }
         // Keep the revision pending until both network effects and the owning
         // record agree. A failure cannot expose an installable partial snapshot.
@@ -117,8 +186,6 @@ impl Manager {
         } else {
             None
         };
-        // Held until the record says `via: gateway`, as a start holds it.
-        let mut gateway_turn = None;
         let reprobe;
         if req.egress.is_some() || req.limits.is_some() {
             let mut r = e.snapshot();
@@ -131,13 +198,6 @@ impl Manager {
             // The tables first: refused, the old policy stays and so does the record.
             if r.state == state::RUNNING {
                 let policy = self.policy_for(&r)?;
-                if req.egress.as_ref().is_some_and(|eg| eg.via_gateway()) {
-                    gateway_turn = Some(
-                        self.ensure_gateway(&r.namespace)
-                            .await
-                            .map_err(|err| self.gateway_failed(&e, err))?,
-                    );
-                }
                 self.replace_policy(&r.id, policy).await?;
             }
         }

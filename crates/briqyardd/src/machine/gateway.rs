@@ -18,6 +18,11 @@ impl Manager {
             return Err(invalid("a gateway needs an image and a port (1..65535)"));
         }
         spec.probes.check().map_err(invalid)?;
+        if let Some(policy) = &spec.policy {
+            policy
+                .check()
+                .map_err(|why| invalid(format!("policy: {why}")))?;
+        }
         // A machine of the daemon: no window of its own, it runs while something needs it,
         // and comes back whenever its program ends on its own.
         let req = api::CreateMachineRequest {
@@ -40,6 +45,7 @@ impl Manager {
                 max_retries: 0,
             }),
             start: Some(false),
+            gateway_policy: spec.policy.clone(),
             ..Default::default()
         };
         // A machine's own check, so a replacement is refused in the words a create would be.
@@ -48,10 +54,22 @@ impl Manager {
         // Pulled before the namespace's lock: a pull may take minutes.
         let im = self.inner.images.ensure(&req.image).await?;
         let _admission = self.inner.namespace_lifecycle.read().await;
+        let _policy_turn = self
+            .inner
+            .namespace_turns
+            .take(namespace, gateway_policy::POLICY_ADMISSION)
+            .await;
         let t = self.ensure_namespace(namespace).await?;
-        let _turn = t.lock.lock().await;
+        let turn = Arc::new(t.lock.clone().lock_owned().await);
         match self.gateway_of(namespace) {
             None => {
+                if req.gateway_policy.is_some() {
+                    self.check_policy_dependents(
+                        &self.inner.machines.lock().unwrap(),
+                        namespace,
+                        None,
+                    )?;
+                }
                 // Made before the answer: the namespace's lock orders its gateway's changes.
                 let scope = self.inner.zfs.io_scope()?;
                 let (gw, how, child_scope) = scope
@@ -63,13 +81,13 @@ impl Manager {
                     .await?;
                 self.make_admitted(child_scope, &gw, how).await?;
             }
-            Some(gw) => self.replace_gateway(&gw, req, im).await?,
+            Some(gw) => self.replace_gateway(&gw, req, im, &turn).await?,
         }
         if spec.start {
             let gw = self
                 .gateway_of(namespace)
                 .ok_or_else(|| no_gateway(namespace))?;
-            self.run_gateway(&gw).await?;
+            self.run_gateway(&gw, true, &turn).await?;
         }
         self.namespace(namespace)
     }
@@ -82,12 +100,18 @@ impl Manager {
         gw: &Arc<Entry>,
         req: api::CreateMachineRequest,
         im: image::Image,
+        turn: &GatewayTurn,
     ) -> Result<(), MError> {
         let was = gw.snapshot();
         let size_gb = |v: &Option<api::VolumeSpec>| v.as_ref().map(|v| v.size_gb);
         if size_gb(&req.volume) != size_gb(&was.volume) {
             return Err(invalid(
                 "volume_gb is fixed for the gateway's life: DELETE the gateway to change it",
+            ));
+        }
+        if req.gateway_policy != was.gateway_policy {
+            return Err(invalid(
+                "policy is fixed for the gateway's life: DELETE the gateway to change it",
             ));
         }
         let probes = req.probes.clone().unwrap_or_default();
@@ -100,6 +124,12 @@ impl Manager {
             && probes == was.probes
         {
             return Ok(());
+        }
+        self.check_gateway_isolation(gw)?;
+        if self.has_bound_consumer(&was.namespace) {
+            return Err(MError::Conflict(
+                "a machine bound to the gateway's loaded policy exists: the gateway is not replaced until it is destroyed".into(),
+            ));
         }
         let publication = self.begin_execution_mutation(
             std::slice::from_ref(&was.namespace),
@@ -155,7 +185,7 @@ impl Manager {
             self.save_execution_publication(gw)?;
         }
         if running {
-            self.run_gateway(gw).await?;
+            self.run_gateway(gw, true, turn).await?;
         }
         self.save_execution_publication(gw)?;
         self.finish_execution_mutation(&publication)?;
@@ -166,6 +196,12 @@ impl Manager {
     /// None is success.
     pub async fn delete_gateway(&self, namespace: &str) -> Result<(), MError> {
         check_namespace_id(namespace)?;
+        let _admission = self.inner.namespace_lifecycle.read().await;
+        let _policy_turn = self
+            .inner
+            .namespace_turns
+            .take(namespace, gateway_policy::POLICY_ADMISSION)
+            .await;
         let Some(t) = self.namespace_of(namespace) else {
             return Ok(());
         };
@@ -173,7 +209,21 @@ impl Manager {
         let Some(gw) = self.gateway_of(namespace) else {
             return Ok(());
         };
-        if gateway_needed(&self.inner.machines.lock().unwrap(), namespace) {
+        self.check_gateway_isolation(&gw)?;
+        if self.has_bound_consumer(namespace) {
+            return Err(MError::Conflict(
+                "a machine bound to the gateway's loaded policy exists: the gateway is not deleted until it is destroyed".into(),
+            ));
+        }
+        let policy_gateway = {
+            let g = gw.rec.lock().unwrap();
+            g.gateway_policy.is_some().then(|| g.id.clone())
+        };
+        if gateway_needed(
+            &self.inner.machines.lock().unwrap(),
+            namespace,
+            policy_gateway.as_deref(),
+        ) {
             return Err(MError::GatewayInUse);
         }
         self.destroy_machine(&gw.snapshot().id, None).await
@@ -195,19 +245,42 @@ impl Manager {
 
     /// Makes sure the namespace's gateway runs and its port answers, and returns the namespace's
     /// lock held: two starts that need the gateway boot it once.
+    ///
+    /// A gateway with a loaded policy is read back from its running process on every call
+    /// before its bridge gate opens (ADR 0143); `required` is the binding the caller needs it to
+    /// carry, and a gateway with another is refused.
     pub(super) async fn ensure_gateway(
         &self,
         namespace: &str,
-    ) -> Result<tokio::sync::OwnedMutexGuard<()>, MError> {
+        required: Option<&api::GatewayPolicyBinding>,
+    ) -> Result<GatewayTurn, MError> {
         let t = self
             .namespace_of(namespace)
             .ok_or_else(|| anyhow!("namespace network is gone"))?;
-        let turn = t.lock.clone().lock_owned().await;
+        if let Some(gw) = self.gateway_of(namespace) {
+            self.check_gateway_isolation(&gw)?;
+        }
+        let turn = Arc::new(t.lock.clone().lock_owned().await);
+        self.ensure_gateway_held(namespace, required, &turn).await?;
+        Ok(turn)
+    }
+
+    pub(super) async fn ensure_gateway_held(
+        &self,
+        namespace: &str,
+        required: Option<&api::GatewayPolicyBinding>,
+        turn: &GatewayTurn,
+    ) -> Result<(), MError> {
         let gw = self
             .gateway_of(namespace)
             .ok_or_else(|| no_gateway(namespace))?;
-        self.run_gateway(&gw).await?;
-        Ok(turn)
+        if required.is_some() && required != gw.snapshot().gateway_policy.as_ref() {
+            return Err(MError::GatewayPolicy(
+                "the namespace's gateway does not carry the loaded policy this machine requires"
+                    .into(),
+            ));
+        }
+        self.run_gateway(&gw, true, turn).await
     }
 
     /// Starts the gateway unless it runs, then waits for it to serve within the boot timeout:
@@ -215,12 +288,46 @@ impl Manager {
     /// gateway that does not serve in time is ended and left in `error` with its console's
     /// last lines, as a boot that fails is. Under the namespace's lock; the gateway's own lock is
     /// let go while it is waited for, since its probes take it to end a failed boot.
-    async fn run_gateway(&self, gw: &Arc<Entry>) -> Result<(), MError> {
+    pub(super) async fn run_gateway(
+        &self,
+        gw: &Arc<Entry>,
+        asked: bool,
+        turn: &GatewayTurn,
+    ) -> Result<(), MError> {
+        if gw.rec.lock().unwrap().gateway_policy.is_some() {
+            return Box::pin(self.verify_gateway(gw, asked, turn)).await;
+        }
+        let (_entry, live, answered) = Box::pin(self.gateway_serving(gw, asked)).await?;
+        let Err(why) = answered else {
+            return Ok(());
+        };
+        let r = gw.snapshot();
+        let unended = if gw.live.lock().unwrap().as_ref().map(|l| l.pid) == Some(live.pid) {
+            self.end_process(gw, &live, Duration::ZERO).await.err()
+        } else {
+            None
+        };
+        let tail = self.last_console_lines(&r, 5);
+        Err(self.boot_failed(
+            gw,
+            match unended {
+                None => format!("{why}: {tail}"),
+                Some(err) => format!("{why}: {tail} (its process could not be ended: {err:#})"),
+            },
+        ))
+    }
+
+    pub(super) async fn gateway_serving(
+        &self,
+        gw: &Arc<Entry>,
+        asked: bool,
+    ) -> Result<(tokio::sync::OwnedMutexGuard<()>, fc::Vm, Result<(), String>), MError> {
         let (started, live) = {
             let _turns = gw.lock_for_start().await;
+            self.check_gateway_isolation(gw)?;
             let started = gw.snapshot().state != state::RUNNING;
             if started {
-                self.start_boxed(gw, true).await?;
+                self.start_boxed(gw, asked).await?;
             }
             (started, gw.live.lock().unwrap().clone())
         };
@@ -246,35 +353,18 @@ impl Manager {
                 Err(err) => Err(format!("not ready: {err}")),
             },
         };
-        let _turn = gw.lock.lock().await;
-        let Err(why) = answered else {
-            if started {
-                gw.note(
-                    Ev::normal(
-                        reason::GATEWAY_STARTED,
-                        format!("the namespace's gateway answers on {ip}:{port}"),
-                    )
-                    .data(json!({ "port": port })),
-                );
-                let _ = self.save(gw);
-            }
-            return Ok(());
-        };
-        // A process that cannot be proven ended stays live and charged (`unresolved_launch`);
-        // the gateway still fails its boot, with that said.
-        let unended = if gw.live.lock().unwrap().as_ref().map(|l| l.pid) == Some(live.pid) {
-            self.end_process(gw, &live, Duration::ZERO).await.err()
-        } else {
-            None
-        };
-        let tail = self.last_console_lines(&r, 5);
-        Err(self.boot_failed(
-            gw,
-            match unended {
-                None => format!("{why}: {tail}"),
-                Some(err) => format!("{why}: {tail} (its process could not be ended: {err:#})"),
-            },
-        ))
+        let entry_turn = gw.lock.clone().lock_owned().await;
+        if started && answered.is_ok() {
+            gw.note(
+                Ev::normal(
+                    reason::GATEWAY_STARTED,
+                    format!("the namespace's gateway answers on {ip}:{port}"),
+                )
+                .data(json!({ "port": port })),
+            );
+            let _ = self.save(gw);
+        }
+        Ok((entry_turn, live, answered))
     }
 
     /// What a machine that needs the gateway answers when the gateway did not come up:
@@ -297,14 +387,17 @@ impl Manager {
         machines
             .values()
             .filter(|e| {
-                let namespace = {
+                let (namespace, policy_gateway) = {
                     let r = e.rec.lock().unwrap();
                     if !r.is_gateway() || (r.state == state::RUNNING) != running {
                         return false;
                     }
-                    r.namespace.clone()
+                    (
+                        r.namespace.clone(),
+                        r.gateway_policy.is_some().then(|| r.id.clone()),
+                    )
                 };
-                gateway_needed(&machines, &namespace) != running
+                gateway_needed(&machines, &namespace, policy_gateway.as_deref()) != running
             })
             .cloned()
             .collect()
@@ -320,7 +413,12 @@ impl Manager {
         let Ok(_turn) = t.lock.try_lock() else {
             return;
         };
-        if gateway_needed(&self.inner.machines.lock().unwrap(), &r.namespace) {
+        let policy_gateway = r.gateway_policy.is_some().then_some(r.id.as_str());
+        if gateway_needed(
+            &self.inner.machines.lock().unwrap(),
+            &r.namespace,
+            policy_gateway,
+        ) {
             return;
         }
         if !self.idle_stop_allowed(&r, Utc::now()) {
@@ -352,11 +450,18 @@ impl Manager {
 
 /// Whether a machine of `namespace` that sends through its gateway is running or starting: what
 /// keeps the gateway up.
-fn gateway_needed(machines: &HashMap<String, Arc<Entry>>, namespace: &str) -> bool {
+fn gateway_needed(
+    machines: &HashMap<String, Arc<Entry>>,
+    namespace: &str,
+    policy_gateway: Option<&str>,
+) -> bool {
     machines.values().any(|e| {
         let r = e.rec.lock().unwrap();
         r.namespace == namespace
-            && r.egress.via_gateway()
+            && (r.egress.via_gateway()
+                || (r.egress.mode == api::egress::VIA
+                    && policy_gateway.is_some()
+                    && r.egress.via.as_deref() == policy_gateway))
             && matches!(r.state.as_str(), state::STARTING | state::RUNNING)
     })
 }

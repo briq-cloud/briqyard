@@ -499,7 +499,21 @@ impl Manager {
         self.ensure_entry_assigned_update_backing(entry).await?;
         let _warm = self.inner.warm_lock.write().await;
         let _namespace = self.inner.namespace_lifecycle.read().await;
+        self.reserve_assigned_run_admitted(entry, checkpoint, at)
+            .await
+    }
+
+    /// The caller holds `warm_lock` exclusively, then namespace admission, and then any
+    /// namespace turn it keeps through the reservation (ADR 0143).
+    pub(super) async fn reserve_assigned_run_admitted(
+        &self,
+        entry: &Arc<Entry>,
+        checkpoint: bool,
+        at: Option<u64>,
+    ) -> Result<RunRef> {
         let _sandbox = self.inner.sandbox_create_lock.write().await;
+        let record = entry.snapshot();
+        self.check_policy_ownership(record.is_cold_born(), &record.egress, &record.namespace)?;
         let _entry = entry.lock.lock().await;
         self.check_version(entry, at)?;
         if let Some(update) = self

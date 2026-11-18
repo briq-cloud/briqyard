@@ -124,10 +124,28 @@ impl Manager {
             .collect();
         let mut counted: Vec<String> = all.iter().map(|r| r.ip.clone()).collect();
         counted.sort();
+        // A bound gateway is unverified until its current process is read back: the daemon
+        // starts with every one of them closed to the namespace's machines (ADR 0143).
+        let mut gated: Vec<String> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|entry| {
+                let r = entry.rec.lock().unwrap();
+                (r.is_gateway() && r.gateway_policy.is_some()).then(|| r.ip.clone())
+            })
+            .collect();
+        gated.sort();
         let running = all.iter().filter(|r| r.state == state::RUNNING);
+        let unsupported = self.unsupported_policy_records();
         let mut pins = Vec::new();
         let mut members = Vec::new();
         for r in running {
+            if unsupported.contains(&r.id) {
+                continue;
+            }
             if r.template_birth.as_ref().is_some_and(|b| !b.is_service())
                 || r.clone_origin
                     .as_ref()
@@ -172,6 +190,7 @@ impl Manager {
             members,
             policies,
             counted,
+            gated,
         })
     }
 
@@ -187,7 +206,12 @@ impl Manager {
     ) -> Result<(), MError> {
         e.check().map_err(invalid)?;
         if e.mode == api::egress::VIA {
-            self.via_target(e, namespace, me)?;
+            let target = self.via_target(e, namespace, me)?;
+            if e.gateway_policy.is_some() && e.gateway_policy != target.gateway_policy {
+                return Err(invalid(
+                    "egress.gateway_policy: the namespace's gateway does not carry this policy",
+                ));
+            }
         }
         Ok(())
     }
@@ -277,6 +301,13 @@ impl Manager {
             api::egress::OPEN => nft::Policy::Open { ip, limits },
             api::egress::VIA => {
                 let target = resolve(&r.egress, &r.namespace, &r.id)?;
+                if r.egress.gateway_policy.is_some()
+                    && r.egress.gateway_policy != target.gateway_policy
+                {
+                    return Err(invalid(
+                        "egress.gateway_policy: the namespace's gateway does not carry this policy",
+                    ));
+                }
                 nft::Policy::Via {
                     ip,
                     to_tap: netw::tap_name(&target.id),
@@ -515,6 +546,16 @@ impl Manager {
         {
             tracing::warn!(machine = id, ip, err = %error, "network revocation failed; address retained");
             return Err(error);
+        }
+        if rec.is_gateway() && rec.gateway_policy.is_some() {
+            // The address may serve another machine next: nothing of it stays gated.
+            self.inner.net.gateway_gate(ip, false).await?;
+            *self
+                .entry(id)
+                .map_err(anyhow::Error::from)?
+                .gateway_proof
+                .lock()
+                .unwrap() = None;
         }
         if let Some((gateway, policy)) = held {
             self.internal_dns(gateway, &policy, false);

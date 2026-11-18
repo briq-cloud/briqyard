@@ -42,6 +42,17 @@ pub(super) async fn delete_gateway(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub(super) async fn gateway_policy_status(
+    State(st): S,
+    Path(id): Path<String>,
+    Json(request): Json<api::GatewayPolicyStatusRequest>,
+) -> Result<Json<api::GatewayPolicyStatus>, AppError> {
+    let m = st.mgr.clone();
+    Ok(Json(
+        detached(async move { m.gateway_policy_status(&id, request).await }).await?,
+    ))
+}
+
 pub(super) async fn get_quota(
     State(st): S,
     Path(id): Path<String>,
