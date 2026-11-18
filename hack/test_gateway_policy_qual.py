@@ -12,6 +12,8 @@ import json
 import os
 import re
 import stat
+import sys
+import subprocess
 import tempfile
 import threading
 import time
@@ -618,6 +620,189 @@ class Harness(unittest.TestCase):
     def test_the_fake_apis_files_are_outside_the_uploaded_logs(self):
         self.assertIn("GWP=$(mktemp -d /tmp/qual-gwp-XXXXXX)", self.src)
         self.assertNotRegex(self.src, r"GWP=\$LOGS")
+
+
+class Diag(unittest.TestCase):
+    """The writer of $LOGS/gateway-policy-diag.jsonl: enums, integers and addresses, nothing else."""
+
+    CA = "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIU\n-----END CERTIFICATE-----"
+    KEY = "-----BEGIN PRIVATE KEY-----"
+    TOKEN = "qual-synthetic-gateway-token"
+    POLICY = '{"policy_format":1,"namespace":"q-gp","team_id":"qual-team","briq_id":"qual-briq","hosts":["example.com"]}'
+    DIGEST = "sha256:" + "ab" * 32
+    CONSOLE = "[    2.104] credential-gateway: listening on 0.0.0.0:3128"
+    HOST = "example.com"
+
+    def test_secret_and_text_values_are_refused_in_every_field(self):
+        for kind, schema in gpq.DIAG.items():
+            for key in schema:
+                for bad in (self.CA, self.KEY, self.TOKEN, self.POLICY, self.DIGEST, self.CONSOLE, self.HOST,
+                            self.DIGEST[7:]):
+                    row = gpq.diag_row(kind, [f"{key}={bad}"])
+                    raw = json.dumps(row)
+                    self.assertIsNone(row[key], (kind, key, bad))
+                    self.assertIn(key, row["refused"])
+                    for piece in (bad, bad[:20], "BEGIN", "sha256", "synthetic", "example.com"):
+                        self.assertNotIn(piece, raw, (kind, key))
+
+    def test_values_that_match_are_kept_typed(self):
+        row = gpq.diag_row("gateway", ["step=set_boot", "ns=main", "state=running", "error_reason=none",
+                                       "error=port_no_answer", "ip=10.64.3.2", "gate=false", "incarnations=1"])
+        self.assertEqual(row["refused"], [])
+        self.assertEqual((row["ip"], row["gate"], row["incarnations"]), ("10.64.3.2", "false", 1))
+        self.assertEqual(gpq.diag_row("reach", ["uplink_code=401", "bridge_code=000", "bridge_rc=28"])["bridge_code"], 0)
+
+    def test_unknown_kinds_keys_and_addresses(self):
+        self.assertIsNone(gpq.diag_row("console", ["text=x"]))
+        row = gpq.diag_row("step", ["name=set_boot", "output=" + self.CONSOLE, self.TOKEN + "=1"])
+        self.assertNotIn("output", row)
+        self.assertEqual(row["refused"], ["?", "output"])
+        self.assertNotIn(self.TOKEN, json.dumps(row))
+        for ip in ("10.64.3.256", "10.64.3", "::1", "10.64.3.2 "):
+            self.assertIsNone(gpq.diag_row("gateway", [f"ip={ip}"])["ip"], ip)
+
+    def test_cli_writes_one_row_and_never_echoes_a_value(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "diag.jsonl")
+            r = subprocess.run([sys.executable, "-I", str(HERE / "gateway-policy-qual.py"), "diag", "--file", f,
+                                "--kind", "step", "--set", "name=set_boot", "--set", "cause=" + self.POLICY],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0)
+            self.assertNotIn("qual-team", r.stdout + r.stderr)
+            rows = [json.loads(x) for x in open(f)]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual((rows[0]["name"], rows[0]["cause"], rows[0]["refused"]), ("set_boot", None, ["cause"]))
+            r = subprocess.run([sys.executable, "-I", str(HERE / "gateway-policy-qual.py"), "diag", "--file", f,
+                                "--kind", "console", "--set", "text=" + self.CONSOLE], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0)
+            self.assertNotIn("listening", r.stdout + r.stderr)
+            self.assertEqual(len(open(f).readlines()), 1)
+
+    def test_gateway_errors_are_classed_by_the_daemons_prefix_only(self):
+        pre = "the namespace's gateway did not come up: "
+        cases = {
+            "": "none",
+            pre + "the gateway exited: port 3128 did not answer": "exited",
+            pre + "port 3128 did not answer: deadline elapsed: [ 1.2] not ready": "port_no_answer",
+            "port 3128 did not answer: x": "port_no_answer",
+            pre + "not ready: the gateway exited": "not_ready",
+            "gateway loaded policy not verified: the gateway did not become ready": "unverified",
+            pre + self.CONSOLE: "other",
+            "[ 1.2] the gateway exited": "other",
+        }
+        for text, want in cases.items():
+            self.assertEqual(gpq.classify_gwerror(text), want, text)
+
+    def test_in_range(self):
+        self.assertEqual(gpq.in_range("10.64.0.1", "10.64.0.0/10"), "true")
+        self.assertEqual(gpq.in_range("10.128.0.1", "10.64.0.0/10"), "false")
+        self.assertEqual(gpq.in_range("", "10.64.0.0/10"), "null")
+        self.assertEqual(gpq.in_range("10.0.0.1", "nonsense"), "null")
+
+    def test_api_summary_counts_by_method_path_status_and_role(self):
+        t = 1_000_000
+        rows = [
+            {"event": "recv", "method": "PUT", "path": "/internal/credential-gateway/ca", "peer": "10.64.0.2", "t": t + 10},
+            {"event": "done", "method": "PUT", "path": "/internal/credential-gateway/ca", "peer": "10.64.0.2", "status": 200, "t": t + 8010},
+            {"event": "done", "method": "GET", "path": "/internal/credential-gateway/config", "peer": "10.64.0.2", "status": 200, "t": t + 9000},
+            {"event": "done", "method": "GET", "path": "/internal/credential-gateway/config", "peer": "10.64.0.2", "status": 200, "t": t + 9500},
+            {"event": "done", "method": "GET", "path": "/", "peer": "10.64.0.5", "status": 401, "t": t + 5},
+            {"event": "done", "method": "DELETE", "path": "/" + self.TOKEN, "peer": "10.9.9.9", "status": 401, "t": t + 7},
+        ]
+        out = gpq.api_summary(rows, {"10.64.0.2": "gateway", "10.64.0.5": "open"}, t)
+        raw = json.dumps(out)
+        self.assertNotIn(self.TOKEN, raw)
+        self.assertNotIn("10.9.9.9", raw)
+        got = {(r["method"], r["path"], r["status"], r["peer"]): (r["count"], r["first_ms"], r["last_ms"]) for r in out}
+        self.assertEqual(got, {
+            ("PUT", "ca", 200, "gateway"): (1, 8010, 8010),
+            ("GET", "config", 200, "gateway"): (2, 9000, 9500),
+            ("GET", "other", 401, "open"): (1, 5, 5),
+            ("other", "other", 401, "other"): (1, 7, 7),
+        })
+        self.assertTrue(all(r["refused"] == [] for r in out))
+
+
+def shell_function(src, name):
+    start = src.index(f"\n{name}() {{\n") + 1
+    return src[start:src.index("\n}\n", start) + 3]
+
+
+class HarnessShell(unittest.TestCase):
+    """The section's API address, its preflight, its early exits and its diag rows."""
+
+    src = (HERE / "qualify.sh").read_text()
+
+    def section(self):
+        return self.src[self.src.index("\ngateway_policy() {\n"):self.src.index("\ngateway_policy || bad")]
+
+    def test_the_gateways_api_url_is_the_uplink_address_never_a_bridge(self):
+        self.assertIn('-e "BRIQ_API_URL=$GWP_API"', self.src)
+        self.assertIn("  GWP_API=http://$hostip:9443\n", self.section())
+        self.assertIn("hostip=$(ip -4 route get 1.1.1.1 |", self.src)
+        self.assertNotRegex(shell_function(self.src, "gwargs"), r"\$br")
+        calls = re.findall(r"gwargs ([^;]*);", self.src)
+        self.assertGreaterEqual(len(calls), 6)
+        for c in calls:
+            self.assertNotRegex(c, r'"\$br[lm]?"', c)
+
+    def test_the_preflight_is_required_emitted_judged_and_gates_every_boot(self):
+        self.assertIn("c2.api_reachable_preflight", gpq.REQUIRED["C2"])
+        sec = self.section()
+        emit = sec.index('obs c2.api_reachable_preflight C2 assert subject ""')
+        self.assertIn("judged c2.api_reachable_preflight\n", sec)
+        self.assertIn('[ "$upc" = 401 ] && [ "$uprc" = 0 ]', sec)
+        self.assertIn('[ "$bpc" = 000 ] && [ "$bprc" = 28 ]', sec)
+        for step in ("set_boot", "set_legacy", "set_mismatch"):
+            at = sec.index(f"gstep {step} ")
+            self.assertLess(emit, at, step)
+            guard = sec.rindex("\n  if ", 0, at)
+            self.assertIn('[ "$GWP_UPLINK" = ok ]', sec[guard:sec.index("\n", guard + 1)], step)
+
+    def run_bash(self, script, timeout=20):
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=timeout)
+
+    def test_wait_set_ends_once_its_set_has_exited(self):
+        fn = shell_function(self.src, "wait_set")
+        pre = 'gdiag() { shift; echo "$*" >>"$D"; }\nD=$(mktemp)\n' + fn
+        cases = [
+            ('sleep 0 & p=$!; wait $p; wait_set w 50 "$p" false "" 0.01', 1, "name=w --set iterations=1 --set end=set_exited"),
+            ('sleep 0 & p=$!; wait $p; wait_set w 5 "$p" false false 0.01', 1, "iterations=5 --set end=exhausted"),
+            ('sleep 5 & p=$!; wait_set w 3 "$p" false "" 0.01; r=$?; kill $p; wait $p 2>/dev/null; (exit $r)', 1, "iterations=3 --set end=exhausted"),
+            ('wait_set w 3 "" false "" 0.01', 1, "iterations=3 --set end=exhausted"),
+            ('(sleep 0.3; touch "$D.ok") & p=$!; wait_set w 500 "$p" "[ -e \\"$D.ok\\" ]" "" 0.01; rm -f "$D.ok"', 0, "end=met"),
+            ('wait_set w 3 "" true', 0, "iterations=1 --set end=met"),
+        ]
+        for body, rc, want in cases:
+            r = self.run_bash(pre + body + '\nrc=$?; cat "$D"; rm -f "$D"; exit $rc')
+            self.assertEqual(r.returncode, rc, (body, r.stdout, r.stderr))
+            self.assertIn(want, r.stdout, body)
+
+    def test_gstep_passes_output_and_rc_and_keeps_its_diag_out_of_a_capture(self):
+        script = ("GWP=$(mktemp -d); GWP_T0=0; T=q; GWP_DIAG=$GWP/d\n"
+                  "now_ms() { echo 5; }\n"
+                  'gq() { echo "gateway policy readback noise" >&2; [ "$1" = classify ] && echo ok; return 0; }\n'
+                  + re.search(r"^gdiag\(\) \{.*\}$", self.src, re.M).group(0) + "\n"
+                  + "gwp_view() { echo 'gateway policy view noise' >&2; }\n"
+                  + shell_function(self.src, "gstep")
+                  + "out=$(gstep x main sh -c 'echo out; echo err >&2; exit 3' 2>&1); rc=$?\n"
+                  + 'printf "%s|%s" "$out" "$rc"; rm -rf "$GWP"')
+        r = self.run_bash(script)
+        self.assertEqual(r.stdout, "out\nerr|3", r.stderr)
+
+    def test_every_diag_row_comes_from_the_helpers_writer(self):
+        self.assertEqual(self.src.count("gateway-policy-diag.jsonl"), 1)
+        allowed = (
+            "GWP_DIAG=$LOGS/gateway-policy-diag.jsonl; : >\"$GWP_DIAG\"",
+            'gdiag() { local k=$1; shift; gq diag --file "$GWP_DIAG" --kind "$k" "$@" 2>/dev/null; }',
+            'gq diag-api --file "$GWP_DIAG" --dir "$GWP" --since',
+            "done < <(jq -r 'select(.kind == \"gateway\" and .ip != null) | \"\\(.ns) \\(.ip)\"' \"$GWP_DIAG\" 2>/dev/null | sort -u)",
+        )
+        for line in self.src.splitlines():
+            if "GWP_DIAG" in line and "GWP_DIAG_PENDING" not in line.replace("GWP_DIAG\"", ""):
+                self.assertTrue(any(a in line for a in allowed), line)
+        self.assertIn("[ -z \"$" + "{GWP_DIAG_PENDING:-}\" ] || gwp_diag_end", shell_function(self.src, "cleanup"))
+        self.assertRegex(self.section(), r'cp "\$GWP_OBS" "\$LOGS/gateway-policy-observations.jsonl"\n  gwp_diag_end\n')
 
 
 if __name__ == "__main__":

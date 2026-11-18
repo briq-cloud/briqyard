@@ -60,6 +60,8 @@ cleanup() {
   local rc=$?
   echo "cleanup"
   set +e
+  # The gateway-policy section's diagnostics, when the run ended inside it.
+  [ -z "${GWP_DIAG_PENDING:-}" ] || gwp_diag_end
   for p in "${BGPIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done
   [ -z "$FILLED" ] || sudo zfs destroy -f "$FILLED" 2>/dev/null
   # A run that ended while a service was down starts it again.
@@ -424,6 +426,8 @@ GWP_SOURCE=e5203d2e4522243355a3280e47343ee8c631222a
 GWQ=$HERE/gateway-policy-qual.py
 GWP=$(mktemp -d /tmp/qual-gwp-XXXXXX); chmod 700 "$GWP"
 GWP_OBS=$GWP/observations.jsonl; : >"$GWP_OBS"
+# The section's diagnostics, uploaded: every row from the helper's writer (gq diag), never text.
+GWP_DIAG=$LOGS/gateway-policy-diag.jsonl; : >"$GWP_DIAG"
 GWP_NS=$T-gp; GWP_NSM=$T-gpm; GWP_NSL=$T-gpl
 # Public test names only. The allowed host serves HTTPS; the unlisted one too, so that its
 # denial is the gateway's and not the target's.
@@ -468,13 +472,90 @@ api_mark() { jq -r --arg ev "$1" --arg peer "$2" 'select(.event == $ev and .meth
 api_count() { jq -r --arg ev "$1" --arg peer "$2" 'select(.event == $ev and .method == "PUT" and .peer == $peer) | .t' "$GWP/api.jsonl" 2>/dev/null | wc -l | tr -d ' '; }
 api_config_after() { jq -r --arg p "$1" --argjson t "$2" 'select(.event == "done" and .method == "GET" and .peer == $p and .t > $t) | .t' "$GWP/api.jsonl" 2>/dev/null | wc -l | tr -d ' '; }
 wait_for() { local i n=$1; shift; for i in $(seq 1 "$n"); do eval "$1" && return 0; sleep "${2:-1}"; done; return 1; }
-# gwargs NAMESPACE BRIDGE POLICY_JSON|"" [DIGEST]: the gateway as briq would put it, against the
-# fake API, as the argv GWA (an argv, so that timeout can run it).
+# gdiag KIND --set K=V...: one diag row. Its notices are dropped: a step's captured output is
+# classified (refused, readback_refusal), and the row lists what it refused anyway.
+gdiag() { local k=$1; shift; gq diag --file "$GWP_DIAG" --kind "$k" "$@" 2>/dev/null; }
+# wait_set NAME N PID COND [STOP] [SLEEP]: as wait_for, and once PID (a background set; none
+# when empty) has exited, COND is tried once more and the wait ends if STOP holds (by default
+# at once). Its iterations and its end (met, set_exited, exhausted) go to the diag.
+wait_set() {
+  local _wi=0 _wend=exhausted _wrc=1
+  while [ "$_wi" -lt "$2" ]; do
+    _wi=$((_wi + 1))
+    if eval "$4"; then _wend=met; _wrc=0; break; fi
+    if [ -n "$3" ] && ! kill -0 "$3" 2>/dev/null; then
+      if eval "$4"; then _wend=met; _wrc=0; break; fi
+      if eval "${5:-true}"; then _wend=set_exited; break; fi
+    fi
+    sleep "${6:-1}"
+  done
+  gdiag loop --set "name=$1" --set "iterations=$_wi" --set "end=$_wend"
+  return "$_wrc"
+}
+# gwp_view STEP NSROLE: the namespace's gateway as the daemon shows it after STEP: its state,
+# its machine's error_reason, its error as a class (never its text: it carries console lines),
+# its address, its gate and its incarnations.
+gwp_view() {
+  local ns v ip mid er a=()
+  case $2 in main) ns=$GWP_NS;; legacy) ns=$GWP_NSL;; mismatch) ns=$GWP_NSM;; *) return 0;; esac
+  v=$(briqyard namespace get "$ns" 2>/dev/null)
+  ip=$(jq -r '.gateway.ip // empty' <<<"$v" 2>/dev/null); mid=$(jq -r '.gateway.machine_id // empty' <<<"$v" 2>/dev/null)
+  if [ -n "$mid" ]; then
+    echo "$2 gateway $mid" >>"$GWP/gw-ids"
+    er=$(briqyard machine get "$mid" 2>/dev/null | jq -r '.error_reason // empty' 2>/dev/null)
+    a+=(--set "incarnations=$(incarnations "$mid" | wc -l | tr -d ' ')")
+  fi
+  [ -z "$ip" ] || a+=(--set "ip=$ip" --set "gate=$(gate_read "$ip")")
+  gdiag gateway --set "step=$1" --set "ns=$2" --set "state=$(jq -r '.gateway.state // "none"' <<<"$v" 2>/dev/null)" \
+    --set "error_reason=${er:-none}" --set "error=$(jq -r '.gateway.error // empty' <<<"$v" 2>/dev/null | gq classify gwerror)" "${a[@]}"
+}
+# gstep NAME NSROLE CMD...: CMD as it is, its stdout and stderr passed on and its rc returned;
+# its rc, its times from the section's start and its cause class go to the diag, then the
+# namespace's gateway as it stands.
+gstep() {
+  local _sn=$1 _sr=$2 _st0 _src _se; shift 2
+  _se=$(mktemp "$GWP/step-XXXXXX")
+  _st0=$(now_ms); "$@" 2>"$_se"; _src=$?
+  gdiag step --set "name=$_sn" --set "ns=$_sr" --set "rc=$_src" --set "t0=$((_st0 - GWP_T0))" --set "t1=$(( $(now_ms) - GWP_T0 ))" \
+    --set "cause=$(gq classify cause --rc "$_src" --ignore "$T gp-" <"$_se" 2>/dev/null)"
+  cat "$_se" >&2; rm -f "$_se"
+  gwp_view "$_sn" "$_sr" 2>/dev/null
+  return "$_src"
+}
+# gwp_diag_end: the fake API's log as counts, its health and the size of its output, and each
+# machine's events by reason. Once, at the section's end or at the run's exit.
+gwp_diag_end() {
+  GWP_DIAG_PENDING=
+  local p=() r k m ns ip n
+  while read -r r ip; do
+    case $r in main) p+=(--peer "gateway=$ip");; legacy|mismatch) p+=(--peer "$r=$ip");; esac
+  done < <(jq -r 'select(.kind == "gateway" and .ip != null) | "\(.ns) \(.ip)"' "$GWP_DIAG" 2>/dev/null | sort -u)
+  for ip in $GWIP; do p+=(--peer "gateway=$ip"); done
+  for ip in $LGWIP; do p+=(--peer "legacy=$ip"); done
+  for ip in $MGWIP; do p+=(--peer "mismatch=$ip"); done
+  for m in $U $UL $UM; do ip=$(briqyard machine get "$m" 2>/dev/null | jq -r '.ip // empty'); [ -z "$ip" ] || p+=(--peer "open=$ip"); done
+  for m in $BC $LC; do ip=$(briqyard machine get "$m" 2>/dev/null | jq -r '.ip // empty'); [ -z "$ip" ] || p+=(--peer "bound=$ip"); done
+  gq diag-api --file "$GWP_DIAG" --dir "$GWP" --since "${GWP_T0:-0}" "${p[@]}"
+  curl -fsS -m 2 http://127.0.0.1:9443/healthz >/dev/null 2>&1; r=$?
+  gdiag end --set "healthz_rc=$r" --set "api_out_bytes=$([ -f "$GWP/api.out" ] && wc -c <"$GWP/api.out" | tr -d ' ')"
+  { sort -u "$GWP/gw-ids" 2>/dev/null; echo "main open $U"; echo "main bound $BC"; echo "legacy open $UL"; echo "legacy bound $LC"; echo "mismatch open $UM"; } |
+  while read -r r k m; do
+    [ -n "$m" ] || continue
+    case $r in main) ns=$GWP_NS;; legacy) ns=$GWP_NSL;; mismatch) ns=$GWP_NSM;; *) continue;; esac
+    api "/v1/events?namespace=$ns&machine=$m" 2>/dev/null |
+      jq -r '(if type == "array" then . else (.events // []) end) | group_by(.reason)[] | "\(.[0].reason) \(map(.count // 1) | add)"' 2>/dev/null |
+      while read -r ip n; do gdiag events --set "ns=$r" --set "machine=$k" --set "reason=$ip" --set "count=$n"; done
+  done
+  return 0
+}
+# gwargs NAMESPACE POLICY_JSON|"" [DIGEST]: the gateway as briq would put it, against the
+# fake API at the host's uplink address (GWP_API), as the argv GWA (an argv, so that timeout
+# can run it).
 gwargs() {
-  local ns=$1 br=$2 pol=$3 dig=${4:-}
+  local ns=$1 pol=$2 dig=${3:-}
   GWA=(briqyard namespace gateway set "$ns" --image "$GWP_IMAGE" --port 3128)
   [ -z "$dig" ] || GWA+=(--policy-digest "$dig")
-  GWA+=(-e "BRIQ_API_URL=http://$br:9443" -e "BRIQ_GATEWAY_TOKEN=$GWP_TOKEN" -e "BRIQ_TEAM=$GWP_TEAM"
+  GWA+=(-e "BRIQ_API_URL=$GWP_API" -e "BRIQ_GATEWAY_TOKEN=$GWP_TOKEN" -e "BRIQ_TEAM=$GWP_TEAM"
         -e GATEWAY_STATE_DIR=/var/lib/qual-gateway -e GATEWAY_REFRESH_MS=1000)
   [ -z "$pol" ] || GWA+=(-e "BRIQ_EGRESS_POLICY=$pol")
   GWA+=(--start)
@@ -503,7 +584,7 @@ refused() {
   local c=$1 k=$2 lim=$3; shift 3
   local before after out rc cause
   before=$(listing 2>/dev/null)
-  out=$(timeout 150 "$@" 2>&1); rc=$?
+  out=$(gstep "${c//./_}" main timeout 150 "$@" 2>&1); rc=$?
   sleep 2; after=$(listing 2>/dev/null)
   cause=$(printf '%s' "$out" | gq classify cause --rc "$rc" --ignore "$T $BC $GWID $U gp-")
   echo "   $c: rc $rc, cause $cause"
@@ -600,8 +681,12 @@ lc_step() { "$@" >/dev/null 2>&1 && briqyard machine wait --for running "$BC" >/
 
 gateway_policy() {
   local t_start; t_start=$(date +%s)
-  U=; UL=; UM=; BC=; LC=; GWIP=; GWID=; MGWIP=; LGWIP=; ALLOWED_IP=; SSH_IP=; BIND0=; br=; brl=; brm=; PX=
-  # The fake control API on host_ports (9443): the only host port a guest reaches.
+  U=; UL=; UM=; BC=; LC=; GWIP=; GWID=; MGWIP=; LGWIP=; ALLOWED_IP=; SSH_IP=; BIND0=; br=; brl=; PX=
+  GWP_T0=$(now_ms); GWP_DIAG_PENDING=1; GWP_UPLINK=failed; : >"$GWP/gw-ids"
+  # The fake control API on host_ports (9443), the only host port a guest reaches, and only at
+  # an address outside network.range (the input chain's accept, ADR 0028): the host's uplink
+  # address (hostip, as at the control check above), never a namespace's .1, where it is dropped.
+  GWP_API=http://$hostip:9443
   python3 -I "$GWQ" serve --port 9443 --hold 8 --dir "$GWP" --token "$GWP_TOKEN" >"$GWP/api.out" 2>&1 &
   BGPIDS+=("$!")
   : >"$GWP/api.jsonl"; gwp_config
@@ -613,15 +698,32 @@ gateway_policy() {
   # -- C2 and C1: the boot of a policy gateway, its gate held closed by the CA reply
   # An open machine of the namespace, made before the gateway: the packet probe and the
   # unrestricted control of every denial. Its image has curl and busybox (arping, nslookup).
-  U=$(run --image $NGINX --name gp-open --namespace "$GWP_NS" --memory 256 -- sleep 7200)
+  U=$(gstep run_open main run --image $NGINX --name gp-open --namespace "$GWP_NS" --memory 256 -- sleep 7200 2>/dev/null)
   uip=$(briqyard machine get "$U" 2>/dev/null | jq -r '.ip // empty'); br=${uip%.*}.1
+  # The fake API from a guest, before any gateway boots: at GWP_API it answers 401 to a request
+  # without the token; at the namespace's .1 it times out. No gateway boots without the first.
+  local up='' bp='' upc='' uprc='' bpc='' bprc='' nftin rule range
+  if [ -n "$uip" ] && [ -n "$hostip" ]; then
+    up=$(probe "$U" "--noproxy '*' $GWP_API/"); bp=$(probe "$U" "--noproxy '*' http://$br:9443/")
+    read -r upc _ _ _ uprc <<<"$up"; read -r bpc _ _ _ bprc <<<"$bp"
+  fi
+  nftin=$(sudo nft list chain inet briqyard input 2>/dev/null)
+  rule=$(grep -E 'ip daddr != [0-9./]+ tcp dport .*9443.* accept' <<<"$nftin" | head -1)
+  range=$(sed -nE 's/.*ip daddr != ([0-9./]+) .*/\1/p' <<<"$rule")
+  gdiag reach --set "uplink_code=$upc" --set "uplink_rc=$uprc" --set "bridge_code=$bpc" --set "bridge_rc=$bprc" \
+    --set "accept_rule=$(if [ -z "$nftin" ]; then echo unknown; elif [ -n "$rule" ]; then echo present; else echo absent; fi)" \
+    --set "hostip_in_range=$(if [ -n "$range" ] && [ -n "$hostip" ]; then gq inrange "$hostip" "$range"; else echo null; fi)"
+  if [ "$upc" = 401 ] && [ "$uprc" = 0 ]; then GWP_UPLINK=ok; fi
+  echo "   fake API from a guest: uplink ${upc:-none} rc ${uprc:-none}, bridge ${bpc:-none} rc ${bprc:-none}"
+  obs c2.api_reachable_preflight C2 assert subject "" --set "value=$(if [ -z "$up" ]; then echo null; elif [ "$GWP_UPLINK" = ok ] && [ "$bpc" = 000 ] && [ "$bprc" = 28 ]; then echo true; else echo false; fi)"
+  judged c2.api_reachable_preflight
   POL=$(gwp_policy "$GWP_NS" "$GWP_ALLOWED"); DIG=$(gq digest "$POL")
   echo "   policy digest $DIG"
   local setpid='' bcpid='' gsp='' asp='' held='' l2='' t0 t1 c1='' rb='' rbinc=''
-  if [ -n "$uip" ]; then
-    gwargs "$GWP_NS" "$br" "$POL" "$DIG"; "${GWA[@]}" >"$GWP/set.out" 2>&1 &
+  if [ "$GWP_UPLINK" = ok ]; then
+    gwargs "$GWP_NS" "$POL" "$DIG"; gstep set_boot main "${GWA[@]}" >"$GWP/set.out" 2>&1 &
     setpid=$!; BGPIDS+=("$setpid")
-    if wait_for 900 '[ -n "$(gw_view "$GWP_NS" ip)" ] && [ -n "$(api_mark recv "$(gw_view "$GWP_NS" ip)")" ]' 0.2; then
+    if wait_set boot_recv 900 "$setpid" '[ -n "$(gw_view "$GWP_NS" ip)" ] && [ -n "$(api_mark recv "$(gw_view "$GWP_NS" ip)")" ]' true 0.2; then
       GWIP=$(gw_view "$GWP_NS" ip); GWID=$(gw_view "$GWP_NS" machine_id)
       mark boot hold_recv "$(api_mark recv "$GWIP")"
       held=$(incarnations "$GWID" | tr '\n' ' ')
@@ -631,17 +733,20 @@ gateway_policy() {
       obs l2.boot C2 l2 sample boot --set "value=$l2" --set "t0=$t0" --set "t1=$t1"
       # A bound consumer asked for during the hold: its record is sampled until the readback.
       cp "$GWP/ca-$GWIP.pem" "$GWP/ca.pem" 2>/dev/null
-      ( id=$(run --image $NGINX --name gp-bound --namespace "$GWP_NS" --memory 256 --egress "via:gateway+policy=$DIG" \
+      ( id=$(gstep run_bound main run --image $NGINX --name gp-bound --namespace "$GWP_NS" --memory 256 --egress "via:gateway+policy=$DIG" \
           --file "/etc/qual-ca.pem=$GWP/ca.pem" -- sleep 7200) && echo "$id" >"$GWP/bound.out" ) >/dev/null 2>&1 &
       bcpid=$!; BGPIDS+=("$bcpid")
-      wait_for 60 '[ -n "$(api_mark "done" "$GWIP")" ]' 0.2 && mark boot release "$(api_mark "done" "$GWIP")"
-      wait_for 120 'c1=$(challenge); rb=$(readback "$GWP_NS" "$c1" 2>/dev/null)' && mark boot readback
+      wait_set boot_release 60 "" '[ -n "$(api_mark "done" "$GWIP")" ]' true 0.2 && mark boot release "$(api_mark "done" "$GWIP")"
+      wait_set boot_readback 120 "" 'c1=$(challenge); rb=$(readback "$GWP_NS" "$c1" 2>/dev/null)' && mark boot readback
+      gwp_view boot_readback main
       rbinc=$(inc_of "$rb")
-      wait_for 300 '[ -s "$GWP/bound.out" ] || ! kill -0 "$bcpid" 2>/dev/null'
+      wait_set boot_bound 300 "" '[ -s "$GWP/bound.out" ] || ! kill -0 "$bcpid" 2>/dev/null'
       sleep 2
       stop_bg "$gsp" "$asp"
     fi
     wait "$setpid" 2>/dev/null
+  else
+    gdiag loop --set name=boot_recv --set iterations=0 --set end=skipped
   fi
   BC=$(cat "$GWP/bound.out" 2>/dev/null)
   echo "   CA reply held for gateway $GWIP; bound consumer: ${BC:-none}"
@@ -662,37 +767,41 @@ gateway_policy() {
   PX="--proxy http://$GWIP:3128 --cacert /etc/qual-ca.pem"
 
   # -- the unbound and legacy control (C1, C8): a gateway with no policy, a via:gateway consumer
-  UL=$(run --image $NGINX --name gpl-open --namespace "$GWP_NSL" --memory 256 -- sleep 7200)
+  UL=$(gstep run_open legacy run --image $NGINX --name gpl-open --namespace "$GWP_NSL" --memory 256 -- sleep 7200 2>/dev/null)
   ulip=$(briqyard machine get "$UL" 2>/dev/null | jq -r '.ip // empty'); brl=${ulip%.*}.1
   local lmark; lmark=$(now_ms)
-  if [ -n "$ulip" ]; then gwargs "$GWP_NSL" "$brl" ""; timeout 900 "${GWA[@]}" >"$GWP/set-legacy.out" 2>&1; fi
-  LC=$(run --image $NGINX --name gpl-bound --namespace "$GWP_NSL" --memory 256 --egress via:gateway -- sleep 7200)
+  if [ -n "$ulip" ] && [ "$GWP_UPLINK" = ok ]; then gwargs "$GWP_NSL" ""; gstep set_legacy legacy timeout 900 "${GWA[@]}" >"$GWP/set-legacy.out" 2>&1; fi
+  LC=$(gstep run_bound legacy run --image $NGINX --name gpl-bound --namespace "$GWP_NSL" --memory 256 --egress via:gateway -- sleep 7200 2>/dev/null)
   gwp_config
   LGWIP=$(gw_view "$GWP_NSL" ip)
   obs c1.legacy_gateway_alive C1 observed subject "" --set "value=$(bool '[ -n "$LGWIP" ] && [ "$(gw_view "$GWP_NSL" state)" = running ] && [ "$(api_config_after "$LGWIP" "$lmark")" -ge 1 ]')"
   local out rc
-  out=$(readback "$GWP_NSL" "$(challenge)" 2>&1); rc=$?
+  out=$(gstep readback_legacy legacy readback "$GWP_NSL" "$(challenge)" 2>&1); rc=$?
   obs c1.legacy_readback_refused C1 assert subject "" --set "value=$(readback_refusal "$out" "$rc")"
   obs c8.legacy_gate_empty C8 assert subject "" --set "value=$([ -n "$LGWIP" ] && { r=$(gate_read "$LGWIP"); [ "$r" = null ] && echo null || { [ "$r" = false ] && echo true || echo false; }; } || echo null)"
   obs c8.legacy_unbound_reaches C8 assert subject "" --set "value=$(bool '[ -n "$LC" ] && [ "$(probe "$LC" "--proxy http://$LGWIP:3128 -k https://$GWP_UNLISTED/" | awk "{print \$2, \$5}")" = "200 0" ]')"
   judged c1.legacy_gateway_alive c1.legacy_readback_refused c8.legacy_gate_empty c8.legacy_unbound_reaches
 
   # -- the mismatch case (C2): a gateway bound to a digest its loaded policy does not produce
-  UM=$(run --image $NGINX --name gpm-open --namespace "$GWP_NSM" --memory 256 -- sleep 7200)
-  umip=$(briqyard machine get "$UM" 2>/dev/null | jq -r '.ip // empty'); brm=${umip%.*}.1
-  local POLM DIGM DIGM_LOADED mjmark jout jrc mprobe st
+  UM=$(gstep run_open mismatch run --image $NGINX --name gpm-open --namespace "$GWP_NSM" --memory 256 -- sleep 7200 2>/dev/null)
+  umip=$(briqyard machine get "$UM" 2>/dev/null | jq -r '.ip // empty')
+  local POLM DIGM DIGM_LOADED mjmark jout jrc mprobe st msetpid
   POLM=$(gwp_policy "$GWP_NSM" "$GWP_ALLOWED"); DIGM=$(gq digest "$(gwp_policy "$GWP_NSM" example.org)")
   DIGM_LOADED=$(gq digest "$POLM")
   # From before its boot: the daemon's own boot readback of the mismatch gateway is inside it.
   mjmark=$(date '+%Y-%m-%d %H:%M:%S'); sleep 1
-  if [ -n "$umip" ]; then
-    gwargs "$GWP_NSM" "$brm" "$POLM" "$DIGM"; "${GWA[@]}" >"$GWP/set-mismatch.out" 2>&1 &
-    BGPIDS+=("$!")
-    wait_for 900 '[ -n "$(gw_view "$GWP_NSM" ip)" ] && [ -n "$(api_mark "done" "$(gw_view "$GWP_NSM" ip)")" ]' 0.5 && MGWIP=$(gw_view "$GWP_NSM" ip)
+  if [ -n "$umip" ] && [ "$GWP_UPLINK" = ok ]; then
+    gwargs "$GWP_NSM" "$POLM" "$DIGM"; gstep set_mismatch mismatch "${GWA[@]}" >"$GWP/set-mismatch.out" 2>&1 &
+    msetpid=$!; BGPIDS+=("$msetpid")
+    # Once its set has exited, waited on only while its CA reply is still to be released.
+    wait_set mismatch_done 900 "$msetpid" '[ -n "$(gw_view "$GWP_NSM" ip)" ] && [ -n "$(api_mark "done" "$(gw_view "$GWP_NSM" ip)")" ]' \
+      '[ -z "$(api_mark recv "$(gw_view "$GWP_NSM" ip)")" ]' 0.5 && MGWIP=$(gw_view "$GWP_NSM" ip)
+  else
+    gdiag loop --set name=mismatch_done --set iterations=0 --set end=skipped
   fi
   sleep 5
   obs c2.mismatch_gateway_alive C2 observed subject "" --set "value=$(bool '[ -n "$MGWIP" ] && [ "$(gw_view "$GWP_NSM" state)" = running ] && [ "$(api_config_after "$MGWIP" 0)" -ge 1 ]')"
-  out=$(readback "$GWP_NSM" "$(challenge)" 2>&1); rc=$?
+  out=$(gstep readback_mismatch mismatch readback "$GWP_NSM" "$(challenge)" 2>&1); rc=$?
   obs c2.mismatch_readback_refused C2 assert subject "" --set "value=$([ -n "$MGWIP" ] && readback_refusal "$out" "$rc" || echo null)"
   jout=$(sudo journalctl -u briqyardd --no-pager --since "$mjmark" 2>/dev/null); jrc=$?
   obs c1.no_guest_output_in_errors C1 assert subject "" --set "value=$([ "$jrc" = 0 ] && [ -n "$jout" ] && [ -n "$MGWIP" ] && { ! grep -qF "${DIGM_LOADED#sha256:}" <<<"$out$jout" && echo true || echo false; } || echo null)"
@@ -754,10 +863,10 @@ gateway_policy() {
   # -- C7: a bound gateway is neither replaced nor deleted while a bound record exists
   local pre post
   pre=$(inc_of "$(readback "$GWP_NS" "$(challenge)" 2>/dev/null)")
-  gwargs "$GWP_NS" "$br" "$(gwp_policy "$GWP_NS" example.org)" "$DIGM"; refused c7.replace_other_spec C7 "" "${GWA[@]}"
-  gwargs "$GWP_NS" "$br" ""; refused c7.replace_no_policy C7 "" "${GWA[@]}"
+  gwargs "$GWP_NS" "$(gwp_policy "$GWP_NS" example.org)" "$DIGM"; refused c7.replace_other_spec C7 "" "${GWA[@]}"
+  gwargs "$GWP_NS" ""; refused c7.replace_no_policy C7 "" "${GWA[@]}"
   refused c7.rm_running C7 "" briqyard namespace gateway rm "$GWP_NS"
-  gwargs "$GWP_NS" "$br" "$POL" "$DIG"; timeout 300 "${GWA[@]}" >"$GWP/same.out" 2>&1; rc=$?
+  gwargs "$GWP_NS" "$POL" "$DIG"; gstep set_same_spec main timeout 300 "${GWA[@]}" >"$GWP/same.out" 2>&1; rc=$?
   post=$(inc_of "$(readback "$GWP_NS" "$(challenge)" 2>/dev/null)")
   obs c7.same_spec_noop C7 assert subject "" --set "value=$(if [ -z "$pre" ]; then echo null; elif [ "$rc" = 0 ] && [ "$pre" = "$post" ]; then echo true; else echo false; fi)"
   judged c7.replace_other_spec c7.replace_no_policy c7.rm_running c7.same_spec_noop
@@ -769,21 +878,21 @@ gateway_policy() {
   # is on its root disk, which a VMM's death keeps).
   probe_loop gateway_kill & lp=$!; BGPIDS+=("$lp")
   gate_sampler gateway_kill & gp=$!; BGPIDS+=("$gp")
-  wait_for 90 'loop_alive_since gateway_kill 0'
+  wait_set gateway_kill_alive 90 "" 'loop_alive_since gateway_kill 0'
   oldinc=$(inc_of "$(readback "$GWP_NS" "$(challenge)" 2>/dev/null)"); nrecv=$(api_count recv "$GWIP")
   if [ -n "$oldinc" ]; then mark gateway_kill kill; sudo kill -9 "${oldinc%%:*}"; fi
   # The restarted gateway's address is read again on every poll: its CA registration names it.
   local oldip=$GWIP base
-  if wait_for 1200 'newip=$(gw_view "$GWP_NS" ip); base=$([ "$newip" = "$oldip" ] && echo "$nrecv" || echo 0); [ -n "$newip" ] && [ "$(api_count recv "$newip")" -gt "$base" ]' 0.2; then
+  if wait_set gateway_kill_recv 1200 "" 'newip=$(gw_view "$GWP_NS" ip); base=$([ "$newip" = "$oldip" ] && echo "$nrecv" || echo 0); [ -n "$newip" ] && [ "$(api_count recv "$newip")" -gt "$base" ]' true 0.2; then
     [ "$newip" = "$GWIP" ] || { echo "   the gateway's address changed: $GWIP -> $newip"; GWIP=$newip; PX="--proxy http://$GWIP:3128 --cacert /etc/qual-ca.pem"; }
     mark gateway_kill hold_recv "$(api_mark recv "$GWIP")"
-    wait_for 60 '[ "$(api_count "done" "$GWIP")" -gt "$base" ]' 0.5 && mark gateway_kill release "$(api_mark "done" "$GWIP")"
+    wait_set gateway_kill_release 60 "" '[ "$(api_count "done" "$GWIP")" -gt "$base" ]' true 0.5 && mark gateway_kill release "$(api_mark "done" "$GWIP")"
   fi
-  newrb=; wait_for 120 'newrb=$(readback "$GWP_NS" "$(challenge)" 2>/dev/null)' && { reopen=$(now_ms); mark gateway_kill reopen "$reopen"; }
+  newrb=; wait_set gateway_kill_readback 120 "" 'newrb=$(readback "$GWP_NS" "$(challenge)" 2>/dev/null)' && { reopen=$(now_ms); mark gateway_kill reopen "$reopen"; }
   newinc=$(inc_of "$newrb")
   newip=$(gw_view "$GWP_NS" ip)
   [ -z "$newip" ] || [ "$newip" = "$GWIP" ] || { echo "   the gateway's address changed: $GWIP -> $newip"; GWIP=$newip; PX="--proxy http://$GWIP:3128 --cacert /etc/qual-ca.pem"; }
-  [ -z "${reopen:-}" ] || wait_for 120 'loop_alive_since gateway_kill "$reopen"'
+  [ -z "${reopen:-}" ] || wait_set gateway_kill_alive_after 120 "" 'loop_alive_since gateway_kill "$reopen"'
   stop_bg "$lp" "$gp"
   gq derive --file "$GWP_OBS" --phase gateway_kill
   obs c5.gateway_kill.readback_new_incarnation C5 assert subject "" --set "value=$(if [ -z "$oldinc" ]; then echo null; else bool '! live_inc "$oldinc" && [ -n "$newinc" ] && [ "$newinc" != "$oldinc" ] && live_inc "$newinc"'; fi)"
@@ -796,10 +905,10 @@ gateway_policy() {
   reopen=
   probe_loop daemon_kill & lp=$!; BGPIDS+=("$lp")
   gate_sampler daemon_kill & gp=$!; BGPIDS+=("$gp")
-  wait_for 90 'loop_alive_since daemon_kill 0'
+  wait_set daemon_kill_alive 90 "" 'loop_alive_since daemon_kill 0'
   mark daemon_kill kill; WAIT_API_RETURN=1 crash_daemon || echo "   the daemon did not recover: its checks stay unproven"
-  drb=; wait_for 120 'drb=$(readback "$GWP_NS" "$(challenge)" 2>/dev/null)' && { reopen=$(now_ms); mark daemon_kill reopen "$reopen"; }
-  [ -z "$reopen" ] || wait_for 120 'loop_alive_since daemon_kill "$reopen"'
+  drb=; wait_set daemon_kill_readback 120 "" 'drb=$(readback "$GWP_NS" "$(challenge)" 2>/dev/null)' && { reopen=$(now_ms); mark daemon_kill reopen "$reopen"; }
+  [ -z "$reopen" ] || wait_set daemon_kill_alive_after 120 "" 'loop_alive_since daemon_kill "$reopen"'
   stop_bg "$lp" "$gp"
   gq derive --file "$GWP_OBS" --phase daemon_kill
   obs c5.daemon_kill.readback_live_incarnation C5 assert subject "" --set "value=$(bool '[ -n "$drb" ] && live_inc "$(inc_of "$drb")"')"
@@ -824,7 +933,7 @@ gateway_policy() {
   refused c7.rm_stopped C7 "" briqyard namespace gateway rm "$GWP_NS"
   judged c7.rm_stopped
   briqyard machine rm "$BC" >/dev/null 2>&1
-  out=$(timeout 300 briqyard namespace gateway rm "$GWP_NS" 2>&1); rc=$?
+  out=$(gstep rm_after_destroy main timeout 300 briqyard namespace gateway rm "$GWP_NS" 2>&1); rc=$?
   local nsv nsrc
   nsv=$(briqyard namespace get "$GWP_NS" 2>&1); nsrc=$?
   obs c7.rm_after_destroy C7 assert subject "" --set "value=$(if [ "$rc" != 0 ]; then echo false; elif [ "$nsrc" = 0 ] && jq -e . >/dev/null 2>&1 <<<"$nsv"; then [ -z "$(jq -r '.gateway.machine_id // empty' <<<"$nsv")" ] && echo true || echo false; elif grep -qiE 'not found|404|no such' <<<"$nsv"; then echo true; else echo null; fi)"
@@ -834,7 +943,8 @@ gateway_policy() {
   # Teardown, whatever happened above: consumers first, then the gateways, then the proof.
   local m ns ms gv cv=true
   for m in $BC $LC $U $UL $UM; do briqyard machine rm "$m" >/dev/null 2>&1; done
-  for ns in $GWP_NS $GWP_NSL $GWP_NSM; do timeout 300 briqyard namespace gateway rm "$ns" >/dev/null 2>&1; done
+  local nr
+  for nr in "$GWP_NS main" "$GWP_NSL legacy" "$GWP_NSM mismatch"; do gstep rm_teardown "${nr#* }" timeout 300 briqyard namespace gateway rm "${nr%% *}" >/dev/null 2>&1; done
   for ns in $GWP_NS $GWP_NSL $GWP_NSM; do
     if gv=$(briqyard namespace get "$ns" 2>&1); then
       [ -z "$(jq -r '.gateway.machine_id // empty' <<<"$gv" 2>/dev/null)" ] || cv=false
@@ -858,6 +968,7 @@ gateway_policy() {
     '{native_sha: $native, harness_sha256: $harness, helper_sha256: $helper, gateway_image: $image, gateway_source_sha: $gsrc,
       briq_sha: $briq, run_id: $run, kernel: $kernel, boot_timeout_sec: $bt, elapsed_sec: $el}' >"$GWP/meta.json"
   cp "$GWP_OBS" "$LOGS/gateway-policy-observations.jsonl"
+  gwp_diag_end
   check "gateway policy: the receipt names every required check and each C1-C7 one passed" 'gq receipt --file "$GWP_OBS" --meta "$GWP/meta.json" --out "$LOGS/gateway-policy-receipt.json" "${GWP_ACCEPT[@]}"'
   return 0
 }

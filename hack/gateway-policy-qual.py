@@ -23,6 +23,7 @@ gate's closed state can be observed.
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -70,7 +71,7 @@ REQUIRED = {
     "C1": ["c1.readback_challenge", "c1.readback_digest", "c1.readback_identity",
            "c1.readback_live_incarnation", "c1.fresh_challenge", "c1.restart_new_incarnation",
            "c1.legacy_gateway_alive", "c1.legacy_readback_refused", "c1.no_guest_output_in_errors"],
-    "C2": ["c2.fake_api_listening", "c2.closed_observed", "c2.hold_arp_blocked",
+    "C2": ["c2.fake_api_listening", "c2.api_reachable_preflight", "c2.closed_observed", "c2.hold_arp_blocked",
            "c2.hold_icmp_blocked", "c2.no_admission_during_hold", "c2.held_is_readback",
            "c2.open_arp_reached", "c2.open_icmp_reached", "c2.mismatch_gateway_alive",
            "c2.mismatch_readback_refused", "c2.mismatch_arp_blocked", "c2.mismatch_icmp_blocked",
@@ -554,6 +555,109 @@ def verify(receipt, accept=()) -> list:
     return bad
 
 
+# ---- the diagnostics: what the run uploads besides the receipt ----
+# Every row of $LOGS/gateway-policy-diag.jsonl is written here, field by field against a fixed
+# pattern: enums, integers and IPv4 addresses only. A value that does not match is written as
+# null and its key listed in "refused", so no output text, console line, CA, token, policy,
+# digest or hostname can reach the uploaded logs through it.
+
+INT = re.compile(r"^-?[0-9]{1,13}$")
+WORD = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+IPV4 = re.compile(r"^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$")
+TRI = ("true", "false", "null")
+GW_ERRORS = ("none", "exited", "port_no_answer", "not_ready", "unverified", "other")
+CAUSES = ("ok", "policy", "usage", "timeout", "other")
+NS_ROLES = ("main", "legacy", "mismatch")
+PEER_ROLES = ("gateway", "legacy", "mismatch", "open", "bound", "other")
+API_PATHS = {"/internal/credential-gateway/ca": "ca", "/internal/credential-gateway/config": "config",
+             "/internal/credential-gateway/events": "events", "/healthz": "healthz"}
+DIAG = {
+    "step": {"name": WORD, "ns": NS_ROLES, "rc": INT, "t0": INT, "t1": INT, "cause": CAUSES},
+    "gateway": {"step": WORD, "ns": NS_ROLES, "state": WORD, "error_reason": WORD, "error": GW_ERRORS,
+                "ip": IPV4, "gate": TRI, "incarnations": INT},
+    "events": {"ns": NS_ROLES, "machine": ("gateway", "open", "bound"), "reason": WORD, "count": INT},
+    "api": {"method": ("GET", "PUT", "POST", "other"), "path": tuple(API_PATHS.values()) + ("other",),
+            "status": INT, "peer": PEER_ROLES, "count": INT, "first_ms": INT, "last_ms": INT},
+    "reach": {"uplink_code": INT, "uplink_rc": INT, "bridge_code": INT, "bridge_rc": INT,
+              "accept_rule": ("present", "absent", "unknown"), "hostip_in_range": TRI},
+    "loop": {"name": WORD, "iterations": INT, "end": ("met", "set_exited", "exhausted", "skipped")},
+    "end": {"healthz_rc": INT, "api_out_bytes": INT},
+}
+
+
+def diag_row(kind, sets=()):
+    """One diag row, or None for an unknown kind. Unknown keys and unmatched values are refused."""
+    schema = DIAG.get(kind)
+    if schema is None:
+        return None
+    row, refused = {"kind": kind}, []
+    for k in schema:
+        row[k] = None
+    for kv in sets:
+        k, _, v = kv.partition("=")
+        rule = schema.get(k)
+        ok = rule is not None and (v in rule if isinstance(rule, tuple) else bool(rule.match(v)))
+        if not ok:
+            refused.append(k if WORD.match(k) else "?")
+            if k in schema:
+                row[k] = None
+            continue
+        row[k] = int(v) if rule is INT else v
+    row["refused"] = sorted(set(refused))
+    return row
+
+
+def classify_gwerror(text: str) -> str:
+    """A gateway's error, as one class: the daemon's own prefix decides, the console lines it
+    appends never do (gateway.rs boot_failed, gateway_policy.rs unverified)."""
+    t = text.strip()
+    if not t:
+        return "none"
+    t = re.sub(r"^the namespace's gateway did not come up: ", "", t)
+    if t.startswith("the gateway exited"):
+        return "exited"
+    if re.match(r"port [0-9]+ did not answer", t):
+        return "port_no_answer"
+    if t.startswith("not ready"):
+        return "not_ready"
+    if t.startswith("gateway loaded policy not verified"):
+        return "unverified"
+    return "other"
+
+
+def in_range(addr: str, cidr: str) -> str:
+    try:
+        return "true" if ipaddress.ip_address(addr) in ipaddress.ip_network(cidr, strict=False) else "false"
+    except ValueError:
+        return "null"
+
+
+def api_summary(rows, peers, since):
+    """The fake API's log as counts by method, path, status and peer role, with the first and
+    last time relative to SINCE (ms). PEERS maps an address to its role; any other is other."""
+    groups = {}
+    for r in rows:
+        if r.get("event") != "done":
+            continue
+        method = r.get("method") if r.get("method") in ("GET", "PUT", "POST") else "other"
+        path = API_PATHS.get(r.get("path"), "other")
+        status = r.get("status") if isinstance(r.get("status"), int) else -1
+        peer = peers.get(r.get("peer"), "other")
+        t = r.get("t") if isinstance(r.get("t"), int) else since
+        g = groups.setdefault((method, path, status, peer), [0, t, t])
+        g[0] += 1
+        g[1], g[2] = min(g[1], t), max(g[2], t)
+    return [diag_row("api", [f"method={m}", f"path={p}", f"status={s}", f"peer={pr}", f"count={n}",
+                             f"first_ms={a - since}", f"last_ms={b - since}"])
+            for (m, p, s, pr), (n, a, b) in sorted(groups.items())]
+
+
+def write_rows(path, rows):
+    with open(path, "a") as f:
+        for r in rows:
+            f.write(json.dumps(r, sort_keys=True) + "\n")
+
+
 # ---- the fake control API ----
 
 class FakeApi(BaseHTTPRequestHandler):
@@ -659,9 +763,21 @@ def main(argv=None) -> int:
     s = sub.add_parser("digest")
     s.add_argument("policy")
     s = sub.add_parser("classify")
-    s.add_argument("kind", choices=["dns", "l2", "cause"])
+    s.add_argument("kind", choices=["dns", "l2", "cause", "gwerror"])
     s.add_argument("--rc", type=int, default=1)
     s.add_argument("--ignore", default="")
+    s = sub.add_parser("inrange")
+    s.add_argument("addr")
+    s.add_argument("cidr")
+    s = sub.add_parser("diag")
+    s.add_argument("--file", required=True)
+    s.add_argument("--kind", required=True)
+    s.add_argument("--set", action="append", default=[])
+    s = sub.add_parser("diag-api")
+    s.add_argument("--file", required=True)
+    s.add_argument("--dir", required=True)
+    s.add_argument("--since", type=int, required=True)
+    s.add_argument("--peer", action="append", default=[], help="ROLE=ADDRESS")
     s = sub.add_parser("obs")
     s.add_argument("--file", required=True)
     s.add_argument("--check", required=True)
@@ -701,7 +817,29 @@ def main(argv=None) -> int:
     if a.cmd == "classify":
         text = sys.stdin.read()
         print({"dns": lambda: classify_dns(text), "l2": lambda: classify_l2(text),
-               "cause": lambda: classify_cause(text, a.rc, a.ignore.split())}[a.kind]())
+               "cause": lambda: classify_cause(text, a.rc, a.ignore.split()),
+               "gwerror": lambda: classify_gwerror(text)}[a.kind]())
+        return 0
+    if a.cmd == "inrange":
+        print(in_range(a.addr, a.cidr))
+        return 0
+    if a.cmd == "diag":
+        # Never fails the caller, never echoes a value: a refused row or key is named, no more.
+        row = diag_row(a.kind, a.set)
+        if row is None:
+            print("   diag row not recorded: unknown kind", file=sys.stderr)
+            return 0
+        if row["refused"]:
+            print(f"   diag {a.kind}: refused {row['refused']}", file=sys.stderr)
+        write_rows(a.file, [row])
+        return 0
+    if a.cmd == "diag-api":
+        peers = {}
+        for kv in a.peer:
+            role, _, addr = kv.partition("=")
+            if role in PEER_ROLES and IPV4.match(addr):
+                peers.setdefault(addr, role)
+        write_rows(a.file, api_summary(load(os.path.join(a.dir, "api.jsonl")), peers, a.since))
         return 0
     if a.cmd == "obs":
         # Never fails the caller: a row it cannot record leaves its check absent, which blocks.
