@@ -84,9 +84,11 @@ trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 RECOVERY_SINCE=$(date +%s)
 wait_api() {
   if ! python3 "$HERE/qualification-readiness.py" "$LOGS" "$RECOVERY_SINCE"; then
+    if [ -n "${WAIT_API_RETURN:-}" ]; then
+      bad "daemon recovery readiness: observation and protected machine list"
+      return 1
+    fi
     bad "daemon recovery readiness: observation and protected machine list"
-    # WAIT_API_RETURN=1: the caller records it and goes on (the gateway-policy section).
-    [ -n "${WAIT_API_RETURN:-}" ] && return 1
     exit 1
   fi
 }
