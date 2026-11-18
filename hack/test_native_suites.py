@@ -138,7 +138,9 @@ class NativeSuites(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertEqual(done.stdout, "")
 
-    def selection_step(self, event: str, only: str = "", exclusive: str = "") -> subprocess.CompletedProcess:
+    def selection_step(
+        self, event: str, only: str = "", exclusive: str = "", script: str = ""
+    ) -> subprocess.CompletedProcess:
         # Runs the shell of the workflow's "Select the suites" step on a two-commit repository.
         workflow = (SCRIPT.parent.parent / ".github" / "workflows" / "native.yml").read_text()
         body = workflow.split("name: Select the suites", 1)[1].split("run: |\n", 1)[1].split("\n  suites:\n", 1)[0]
@@ -147,6 +149,8 @@ class NativeSuites(unittest.TestCase):
             root = Path(tmp)
             (root / "hack").mkdir()
             shutil.copy(SCRIPT, root / "hack" / SCRIPT.name)
+            if script:
+                (root / "hack" / SCRIPT.name).write_text(script)
             (root / "docs").mkdir()
             git = ["git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@example.com"]
             subprocess.run([*git, "init", "-q"], check=True)
@@ -197,6 +201,7 @@ class NativeSuites(unittest.TestCase):
         self.assertEqual(done.output, 'suites=["qualification"]\n')
         self.assertIn("Run: qualification", done.summary)
         self.assertIn("Selected by the dispatch input suites_only (`qualification`)", done.summary)
+        self.assertIn("The `suites` job (e2e, fleet-smoke, scoped execution) and the `two-hosts` job were skipped.", done.summary)
         self.assertIn("Not selected: stress, monitoring, alerts, restore, scale.", done.summary)
         done = self.selection_step("workflow_dispatch", "scale, stress")
         self.assertEqual(done.output, 'suites=["stress", "scale"]\n')
@@ -214,6 +219,16 @@ class NativeSuites(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertEqual(done.output, "")
         self.assertIn("cannot be combined", done.stderr)
+
+    @unittest.skipUnless(shutil.which("jq") and shutil.which("git"), "needs jq and git")
+    def test_the_step_never_passes_an_empty_selection_to_the_matrix(self):
+        for printed in ["[]", "", "{}", "null"]:
+            with self.subTest(printed=printed):
+                script = f"import sys\nprint({printed!r})\n"
+                for event, only in [("workflow_dispatch", ""), ("workflow_dispatch", "scale"), ("pull_request", "")]:
+                    done = self.selection_step(event, only, script=script)
+                    self.assertNotEqual(done.returncode, 0, (event, only, done.stderr))
+                    self.assertEqual(done.output, "")
 
     def test_the_dispatch_input_skips_the_jobs_that_are_not_in_the_matrix(self):
         workflow = (SCRIPT.parent.parent / ".github" / "workflows" / "native.yml").read_text()

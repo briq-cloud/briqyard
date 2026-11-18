@@ -73,13 +73,17 @@ jobs:
           else
             suites=$all
           fi
+          if ! jq -e 'type == "array" and length > 0' <<<"$suites" > /dev/null; then
+            echo "No suite selected: $suites" >&2
+            exit 1
+          fi
           echo "suites=$suites" >> "$GITHUB_OUTPUT"
           left_out=$(jq -rn --argjson all "$all" --argjson run "$suites" '$all - $run | join(", ")')
           {
             echo "### Suites of more-suites"
             echo "Run: $(jq -r 'join(", ")' <<<"$suites")"
             if [ -n "$ONLY" ]; then
-              echo "Selected by the dispatch input suites_only (\`$ONLY\`). The e2e, fleet-smoke, scoped-execution and two-host jobs were skipped."
+              echo "Selected by the dispatch input suites_only (\`$ONLY\`). The \`suites\` job (e2e, fleet-smoke, scoped execution) and the \`two-hosts\` job were skipped."
               if [ -n "$left_out" ]; then
                 echo "Not selected: $left_out."
               fi
@@ -236,8 +240,12 @@ jobs:
           path: .native-harness
           persist-credentials: false
       - name: Record tested identity and host
+        env:
+          HARNESS_SHA: ${{ github.sha }}
+          REQUESTED_REF: ${{ inputs.ref }}
         run: |
           git -C "$GITHUB_WORKSPACE" rev-parse HEAD | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Harness: $HARNESS_SHA; requested ref: ${REQUESTED_REF:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
           uname -a | tee -a "$GITHUB_STEP_SUMMARY"
           ls -l /dev/kvm
           free -m
