@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import stat
 import sys
 import subprocess
@@ -803,6 +804,211 @@ class HarnessShell(unittest.TestCase):
                 self.assertTrue(any(a in line for a in allowed), line)
         self.assertIn("[ -z \"$" + "{GWP_DIAG_PENDING:-}\" ] || gwp_diag_end", shell_function(self.src, "cleanup"))
         self.assertRegex(self.section(), r'cp "\$GWP_OBS" "\$LOGS/gateway-policy-observations.jsonl"\n  gwp_diag_end\n')
+
+
+ROOT = HERE.parent
+CLI_MAIN = (ROOT / "crates/briqyard/src/main.rs").read_text()
+
+
+def clap_block(header, within=None):
+    """A clap variant's or struct's body, from its header line to its closing brace."""
+    src = CLI_MAIN
+    base = src.index(within) if within else 0
+    start = src.index("\n" + header + "\n", base) + 1
+    indent = header[:len(header) - len(header.lstrip())]
+    return src[start + len(header) + 1:src.index("\n" + indent + "}", start)]
+
+
+def clap_args(header, within=None):
+    """(flags, positionals, required): each flag to whether it takes a value, positionals in order."""
+    flags, positionals, required, attrs = {}, [], set(), []
+    for line in clap_block(header, within).splitlines():
+        s = line.strip()
+        if s.startswith("#["):
+            attrs.append(s)
+            continue
+        m = re.match(r"^(\w+): (.+),$", s)
+        if not m:
+            continue
+        name, ty, attr = m.group(1), m.group(2), " ".join(attrs)
+        attrs = []
+        if "flatten" in attr or "last = true" in attr:
+            continue
+        takes = ty != "bool"
+        optional = ty.startswith(("Option<", "Vec<")) or ty == "bool" or "default_value" in attr
+        if re.search(r"\blong\b", attr):
+            long = re.search(r'long = "([\w-]+)"', attr)
+            flag = "--" + (long.group(1) if long else name.replace("_", "-"))
+            flags[flag] = takes
+            short = re.search(r"short = '(\w)'", attr)
+            if short:
+                flags["-" + short.group(1)] = takes
+            if not optional:
+                required.add(flag)
+        else:
+            positionals.append(name)
+    return flags, positionals, required
+
+
+def parse_argv(tokens, spec):
+    flags, positionals, required = spec
+    seen, pos, i = set(), [], 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t.startswith("-"):
+            if t not in flags:
+                raise AssertionError(f"unknown flag {t}")
+            seen.add(t)
+            i += 2 if flags[t] else 1
+            continue
+        pos.append(t)
+        i += 1
+    if len(pos) != len(positionals):
+        raise AssertionError(f"positionals {pos} for {positionals}")
+    if required - seen:
+        raise AssertionError(f"missing {sorted(required - seen)}")
+    return dict(zip(positionals, pos)), seen
+
+
+class CliArgv(unittest.TestCase):
+    """Each refused invocation of the section parses under the CLI's clap definitions, so its
+    refusal is the daemon's (crates/briqyard/src/main.rs, read here, never built)."""
+
+    src = (HERE / "qualify.sh").read_text()
+    MACHINE = "enum MachineCmd {"
+    EGRESS = re.compile(r"^(open|none|via:gateway)(\+policy=\$\w+)?$")
+    # refusal -> (command words, clap header, enum it is in)
+    CASES = {
+        "c6.fork_bound": ("machine fork", "    Fork {", MACHINE),
+        "c6.template": ("machine run", "struct RunArgs {", None),
+        "c6.restore_from_backup": ("machine restore", "    Restore {", MACHINE),
+        "c6.patch_remove_open": ("machine set-egress", "    SetEgress {", MACHINE),
+        "c6.patch_remove_plain": ("machine set-egress", "    SetEgress {", MACHINE),
+        "c6.patch_change": ("machine set-egress", "    SetEgress {", MACHINE),
+        "c6.patch_add": ("machine set-egress", "    SetEgress {", MACHINE),
+    }
+
+    def argv_of(self, name):
+        line = re.search(rf"^\s*refused {re.escape(name)} C\d \S+ briqyard (.+)$", self.src, re.M).group(1)
+        return shlex.split(line)
+
+    def test_the_subcommands_are_the_clis(self):
+        self.assertIn("    Run(Box<RunArgs>),", CLI_MAIN)
+        self.assertIn("    Set(Box<GatewaySetArgs>),", CLI_MAIN)
+        self.assertIn("let cli = Cli::parse();", CLI_MAIN)
+        self.assertRegex(CLI_MAIN, r'eprintln!\("error: \{e:#\}"\);\n\s*std::process::exit\(1\);')
+
+    def test_each_machine_refusal_parses(self):
+        for name, (words, header, within) in self.CASES.items():
+            with self.subTest(name):
+                argv = self.argv_of(name)
+                self.assertEqual(argv[:2], words.split())
+                pos, seen = parse_argv(argv[2:], clap_args(header, within))
+                if "egress" in pos:
+                    self.assertRegex(pos["egress"], self.EGRESS)
+                if "--egress" in seen:
+                    self.assertRegex(argv[argv.index("--egress") + 1], self.EGRESS)
+                if "--template-build" in seen:
+                    self.assertIn(argv[argv.index("--template-build") + 1], ("init-ready-v1", "service-ready-v1"))
+                    self.assertIn('value_parser = ["init-ready-v1", "service-ready-v1"]', CLI_MAIN)
+
+    def gwargs(self, pol, dig):
+        fn = self.src[self.src.index("\ngwargs() {\n"):]
+        fn = fn[:fn.index("\n}\n")]
+        argv = []
+        for m in re.finditer(r"(\[ -(z|n) \"\$(pol|dig)\" \] \|\| )?GWA\+?=\(([^)]*)\)", fn):
+            cond, kind, var, body = m.group(1), m.group(2), m.group(3), m.group(4)
+            have = {"pol": pol, "dig": dig}.get(var)
+            if cond and kind == "z" and not have:
+                continue
+            argv += shlex.split(body.replace("\n", " "))
+        return argv
+
+    def test_each_gateway_refusal_parses(self):
+        for name, pol, dig in (("c7.replace_other_spec", True, True), ("c7.replace_no_policy", False, False)):
+            with self.subTest(name):
+                self.assertRegex(self.src, rf'gwargs "\$GWP_NS" [^;]*; refused {re.escape(name)} C7 "" "\$\{{GWA\[@\]\}}"')
+                argv = self.gwargs(pol, dig)
+                self.assertEqual(argv[:4], ["briqyard", "namespace", "gateway", "set"])
+                pos, seen = parse_argv(argv[4:], clap_args("struct GatewaySetArgs {"))
+                self.assertEqual(pos, {"namespace": "$ns"})
+                self.assertEqual("--policy-digest" in seen, dig)
+                self.assertIn("--start", seen)
+
+
+class DaemonRefusals(unittest.TestCase):
+    """The daemon's own refusal texts, as the CLI prints them, read as the cause they are."""
+
+    def daemon(self, path, text):
+        self.assertIn(text, (ROOT / path).read_text(), path)
+        return text
+
+    def test_invalid_requests_are_the_daemons_never_usage(self):
+        mod = (ROOT / "crates/briqyardd/src/machine/mod.rs").read_text()
+        self.assertIn('#[error("invalid request: {0}")]', mod)
+        names = ("qual-42", "gp-")
+        for path, text in (
+            ("crates/briqyardd/src/machine/update.rs", "egress.gateway_policy is fixed for the machine's life: destroy it and create another"),
+            ("crates/briqyardd/src/machine/gateway.rs", "policy is fixed for the gateway's life: DELETE the gateway to change it"),
+        ):
+            line = f"error: invalid request: {self.daemon(path, text)} (invalid)"
+            self.assertEqual(gpq.classify_cause(line, 1, names), "policy", text)
+        gp = "crates/briqyardd/src/machine/gateway_policy.rs"
+        prefix = self.daemon(gp, "a gateway loaded policy serves only machines created fresh: ")
+        for what in ("no fork, restore, seed, template, warm slot or assigned run is bound to it",
+                     "a machine bound to it is not forked, restored or seeded"):
+            line = f"error: invalid request: {prefix}{self.daemon(gp, what)} (invalid)"
+            self.assertEqual(gpq.classify_cause(line, 1, names), "policy", what)
+        other = "error: invalid request: template build requires the fixed public Alpine recipe (invalid)"
+        self.assertEqual(gpq.classify_cause(other, 1, names), "other")
+        clap = ("error: unexpected argument '--frm' found\n\n  tip: a similar argument exists: '--from'\n\n"
+                "Usage: briqyard machine restore --from <FROM> --namespace <NAMESPACE> --name <NAME>\n\n"
+                "For more information, try '--help'.\n")
+        self.assertEqual(gpq.classify_cause(clap, 2, names), "usage")
+        self.assertEqual(gpq.classify_cause("error: invalid value 'x' for '<EGRESS>': bad\n\nFor more information, try '--help'.\n", 2, names), "usage")
+        self.assertNotEqual(gpq.classify_cause(clap, 1, names), "usage")
+
+    def test_the_clients_own_refusals_are_not_the_policy(self):
+        client = "crates/briqyard/src/client.rs"
+        for text in ("server does not support gateway policies", "server cannot safely inherit restore egress; provide an explicit egress policy"):
+            self.assertEqual(gpq.classify_cause(f"error: {self.daemon(client, text)}", 1, ()), "other", text)
+
+    def test_the_mismatch_refusal_is_the_daemons_text(self):
+        src = (HERE / "qualify.sh").read_text()
+        want = re.search(r'^GWP_MISMATCH_REFUSAL="([^"]+)"$', src, re.M).group(1)
+        gp = (ROOT / "crates/briqyardd/src/machine/gateway_policy.rs").read_text()
+        prefix = re.search(r'format!\("(gateway loaded policy not verified: )\{why\}"\)', gp).group(1)
+        self.assertIn('unverified("the loaded policy is not the gateway\'s binding")', gp)
+        self.assertEqual(want, prefix + "the loaded policy is not the gateway's binding")
+
+
+class MismatchAndDns(unittest.TestCase):
+    """The mismatch gateway is probed only while seen running with its gate closed; DNS is
+    proven on names a via source's resolver answers."""
+
+    src = (HERE / "qualify.sh").read_text()
+
+    def test_the_probe_checks_read_only_a_running_closed_window(self):
+        for name in ("c2.mismatch_arp_blocked", "c2.mismatch_icmp_blocked", "c2.mismatch_readback_refused"):
+            line = re.search(rf"^\s*obs {re.escape(name)} .*$", self.src, re.M).group(0)
+            self.assertIn('[ -z "$mwin" ]', line, name)
+        self.assertIn('if [ "$mpre" = true:running ] && [ "$mpost" = true:running ]; then mwin=$mtry; break; fi', self.src)
+        self.assertIn('mpre=$(gate_read "$MGWIP"):$(gw_view "$GWP_NSM" state)', self.src)
+        self.assertIn("c2.mismatch_gateway_stopped", gpq.REQUIRED["C2"])
+        self.assertNotIn("c2.mismatch_gateway_alive", self.src)
+        self.assertNotIn("sleep 5\n  obs c2.mismatch", self.src)
+        self.assertIn("reason::GATEWAY_STOPPED", (ROOT / "crates/briqyardd/src/machine/gateway.rs").read_text())
+        self.assertIn("interval(Duration::from_secs(15))", (ROOT / "crates/briqyardd/src/machine/tick.rs").read_text())
+
+    def test_dns_names_are_the_sections_own_machines(self):
+        self.assertIn("--name gp-open --namespace \"$GWP_NS\"", self.src)
+        self.assertIn("--name gpl-open --namespace \"$GWP_NSL\"", self.src)
+        self.assertIn('dns_answer control "$b" --set "value=$(dnsq "$BC" "$br" gp-open.internal)"', self.src)
+        self.assertIn('udp_denial subject "$b" --set "value=$(dnsq "$BC" "$brl" gpl-open.internal)"', self.src)
+        self.assertIn('on "$BC" "nslookup gp-open.internal $br 2>&1" | grep -qwF "$uip"', self.src)
+        self.assertNotIn('dnsq "$BC" "$br")', self.src)
+        nx = "** server can't find example.com: NXDOMAIN\nrc=1\n"
+        self.assertEqual(gpq.classify_dns(nx), "other")
 
 
 if __name__ == "__main__":

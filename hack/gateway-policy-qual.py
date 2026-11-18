@@ -73,9 +73,10 @@ REQUIRED = {
            "c1.legacy_gateway_alive", "c1.legacy_readback_refused", "c1.no_guest_output_in_errors"],
     "C2": ["c2.fake_api_listening", "c2.api_reachable_preflight", "c2.closed_observed", "c2.hold_arp_blocked",
            "c2.hold_icmp_blocked", "c2.no_admission_during_hold", "c2.held_is_readback",
-           "c2.open_arp_reached", "c2.open_icmp_reached", "c2.mismatch_gateway_alive",
+           "c2.open_arp_reached", "c2.open_icmp_reached", "c2.mismatch_gateway_refused",
            "c2.mismatch_readback_refused", "c2.mismatch_arp_blocked", "c2.mismatch_icmp_blocked",
-           "c2.mismatch_alive_after_probe", "c2.mismatch_not_admitted"],
+           "c2.mismatch_running_gate_closed", "c2.mismatch_not_admitted",
+           "c2.mismatch_gateway_stopped"],
     "C3": ["c3.preresolved", "c3.allowed", "c3.unlisted", "c3.ip_literal_proxied",
            "c3.other_port_proxied", "c3.plain_http_proxied", "c3.direct_allowed_ip",
            "c3.direct_tcp80", "c3.direct_tcp22", "c3.direct_udp_dns", "c3.dns_other_namespace",
@@ -148,8 +149,13 @@ def classify_cause(text: str, rc: int, ignore=()) -> str:
         return "ok"
     if rc in (124, 137, 143):
         return "timeout"
-    if USAGE.search(text):
+    # clap refuses its own arguments with exit 2 and its usage; the CLI exits 1 for everything
+    # the daemon answers, whose "invalid request: ..." (MError::Invalid) is never a usage error.
+    if rc == 2 and USAGE.search(text) and re.search(r"^Usage:|try '--help'", text, re.M):
         return "usage"
+    # The client's own refusal, before any request: it names the policy but is not the daemon's.
+    if re.search(r"^error: server (does not support|cannot safely)", text, re.M):
+        return "other"
     words = [w for w in text.split() if not any(x and x in w for x in ignore)]
     return "policy" if re.search(r"polic|binding|gateway|readback", " ".join(words), re.I) else "other"
 

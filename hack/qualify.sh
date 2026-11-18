@@ -434,6 +434,8 @@ GWP_NS=$T-gp; GWP_NSM=$T-gpm; GWP_NSL=$T-gpl
 GWP_ALLOWED=example.com; GWP_UNLISTED=one.one.one.one; GWP_LITERAL=1.1.1.1; GWP_SSH=github.com
 # Synthetic values: the fake API accepts this token and nothing else.
 GWP_TOKEN=qual-synthetic-gateway-token; GWP_TEAM=qual-team
+# The daemon's refusal of a gateway whose loaded policy is not its binding (gateway_policy.rs).
+GWP_MISMATCH_REFUSAL="gateway loaded policy not verified: the loaded policy is not the gateway's binding"
 gwp_policy() { printf '{"policy_format":1,"namespace":"%s","team_id":"%s","briq_id":"qual-briq","hosts":["%s"]}' "$1" "$GWP_TEAM" "$2"; }
 gq() { python3 -I "$GWQ" "$@"; }
 now_ms() { date +%s%3N; }
@@ -449,7 +451,8 @@ judged() { local c; for c in "$@"; do check "gateway policy: $c" "judge $c"; don
 # curl from a machine: "http_code http_connect time_total time_connect rc"; an exec that fails is rc -1.
 probe() { on "$1" "curl -sS -o /dev/null --connect-timeout 5 --max-time 15 -w '%{http_code} %{http_connect} %{time_total} %{time_connect}' $2 2>/dev/null; echo \" \$?\"" 2>/dev/null | tail -1 || echo "000 000 0 0 -1"; }
 # A DNS query from a machine to SERVER, classified: answer, timeout or other.
-dnsq() { { on "$1" "timeout 20 nslookup $GWP_ALLOWED $2 2>&1; echo rc=\$?" 2>/dev/null || echo rc=-1; } | gq classify dns; }
+# dnsq MACHINE SERVER [NAME]: NAME (the allowed host by default) to SERVER, classified.
+dnsq() { { on "$1" "timeout 20 nslookup ${3:-$GWP_ALLOWED} $2 2>&1; echo rc=\$?" 2>/dev/null || echo rc=-1; } | gq classify dns; }
 # ARP and ICMP from a machine to IP, at once, classified: ARP-ICMP, each reached, blocked or unknown.
 l2probe() { on "$1" "d=\$(ls /sys/class/net | grep -v '^lo\$' | head -1); arping -c 2 -w 3 -I \$d $2 2>&1 & ping -c 2 -W 2 $2 2>&1 & wait" 2>/dev/null | gq classify l2; }
 gate_read() { local s; s=$(sudo nft list set bridge briqyard gateway_gate 2>/dev/null) || { echo null; return; }; grep -qwF "$1" <<<"$s" && echo true || echo false; }
@@ -655,9 +658,13 @@ c3_batch() {
     obs c3.direct_tcp22 C3 reach control "$b" --curl "$(probe "$U" "--noproxy '*' -m 6 telnet://$SSH_IP:22 </dev/null")"
     obs c3.direct_udp_dns C3 udp_denial subject "$b" --set "value=$(dnsq "$BC" "$GWP_LITERAL")"
     obs c3.direct_udp_dns C3 dns_answer control "$b" --set "value=$(dnsq "$U" "$GWP_LITERAL")"
+    # A via source gets internal answers only, NXDOMAIN for any outside name (ADR 0015):
+    # its own resolver is proven on a name of its namespace, another namespace's on one of that
+    # namespace and on an outside name, neither answered.
+    obs c3.dns_other_namespace C3 udp_denial subject "$b" --set "value=$(dnsq "$BC" "$brl" gpl-open.internal)"
     obs c3.dns_other_namespace C3 udp_denial subject "$b" --set "value=$(dnsq "$BC" "$brl")"
-    obs c3.dns_other_namespace C3 dns_answer control "$b" --set "value=$(dnsq "$BC" "$br")"
-    obs c3.dns_own_resolver C3 observed subject "$b" --set "value=$([ "$(dnsq "$BC" "$br")" = answer ] && echo true || echo false)"
+    obs c3.dns_other_namespace C3 dns_answer control "$b" --set "value=$(dnsq "$BC" "$br" gp-open.internal)"
+    obs c3.dns_own_resolver C3 observed subject "$b" --set "value=$(bool '[ -n "$uip" ] && on "$BC" "nslookup gp-open.internal $br 2>&1" | grep -qwF "$uip"')"
     out=$(get "$BC" "http://$br:9999/s")
     obs c3.iso_host_bridge C3 assert subject "$b" --set "value=$(bool 'grep -qF "timed out" <<<"$out" && ! grep -qF host-secret <<<"$out"')"
     out=$(get "$BC" "http://$brl:9999/s")
@@ -785,13 +792,13 @@ gateway_policy() {
   # -- the mismatch case (C2): a gateway bound to a digest its loaded policy does not produce
   UM=$(gstep run_open mismatch run --image $NGINX --name gpm-open --namespace "$GWP_NSM" --memory 256 -- sleep 7200 2>/dev/null)
   umip=$(briqyard machine get "$UM" 2>/dev/null | jq -r '.ip // empty')
-  local POLM DIGM DIGM_LOADED mjmark jout jrc mprobe st msetpid
+  local POLM DIGM DIGM_LOADED mjmark jout jrc st msetpid='' msrc='' mtry mpre mpost mrb='' mrbrc='' ml2=unknown-unknown mwin='' mopen='' mend='' mg=''
   POLM=$(gwp_policy "$GWP_NSM" "$GWP_ALLOWED"); DIGM=$(gq digest "$(gwp_policy "$GWP_NSM" example.org)")
   DIGM_LOADED=$(gq digest "$POLM")
   # From before its boot: the daemon's own boot readback of the mismatch gateway is inside it.
   mjmark=$(date '+%Y-%m-%d %H:%M:%S'); sleep 1
   if [ -n "$umip" ] && [ "$GWP_UPLINK" = ok ]; then
-    gwargs "$GWP_NSM" "$POLM" "$DIGM"; gstep set_mismatch mismatch "${GWA[@]}" >"$GWP/set-mismatch.out" 2>&1 &
+    gwargs "$GWP_NSM" "$POLM" "$DIGM"; gstep set_mismatch mismatch timeout 900 "${GWA[@]}" >"$GWP/set-mismatch.out" 2>&1 &
     msetpid=$!; BGPIDS+=("$msetpid")
     # Once its set has exited, waited on only while its CA reply is still to be released.
     wait_set mismatch_done 900 "$msetpid" '[ -n "$(gw_view "$GWP_NSM" ip)" ] && [ -n "$(api_mark "done" "$(gw_view "$GWP_NSM" ip)")" ]' \
@@ -799,17 +806,32 @@ gateway_policy() {
   else
     gdiag loop --set name=mismatch_done --set iterations=0 --set end=skipped
   fi
-  sleep 5
-  obs c2.mismatch_gateway_alive C2 observed subject "" --set "value=$(bool '[ -n "$MGWIP" ] && [ "$(gw_view "$GWP_NSM" state)" = running ] && [ "$(api_config_after "$MGWIP" 0)" -ge 1 ]')"
-  out=$(gstep readback_mismatch mismatch readback "$GWP_NSM" "$(challenge)" 2>&1); rc=$?
-  obs c2.mismatch_readback_refused C2 assert subject "" --set "value=$([ -n "$MGWIP" ] && readback_refusal "$out" "$rc" || echo null)"
+  # Its set is refused for the mismatch itself: the daemon's readback finds a loaded policy that
+  # is not the gateway's binding (gateway_policy.rs, read_gateway_policy), after the gateway
+  # booted and served (its config fetched).
+  [ -z "$msetpid" ] || { wait "$msetpid" 2>/dev/null; msrc=$?; }
+  obs c2.mismatch_gateway_refused C2 assert subject "" --set "value=$(if [ -z "$MGWIP" ] || [ -z "$msrc" ]; then echo null; elif [ "$msrc" = 0 ]; then echo false; elif grep -qF "$GWP_MISMATCH_REFUSAL" "$GWP/set-mismatch.out" 2>/dev/null && [ "$(api_config_after "$MGWIP" 0)" -ge 1 ]; then echo true; else echo null; fi)"
+  # Nothing is admitted through it, so the sleeper stops it at its next tick (ADR 0016, every
+  # 15 s, gateway.rs sleep_gateway): the readback and the probes run in a window where it is
+  # put again (refused again) and seen running with its gate closed before and after them.
+  # Each pair is read gate first: a stopped gateway's address leaves the gate set.
+  for mtry in 1 2 3 4 5 6; do
+    [ -n "$MGWIP" ] || { mtry=0; break; }
+    gwargs "$GWP_NSM" "$POLM" "$DIGM"; gstep put_mismatch mismatch timeout 300 "${GWA[@]}" >"$GWP/put-mismatch.out" 2>&1
+    mpre=$(gate_read "$MGWIP"):$(gw_view "$GWP_NSM" state)
+    ml2=$(l2probe "$UM" "$MGWIP")
+    mrb=$(gstep readback_mismatch mismatch readback "$GWP_NSM" "$(challenge)" 2>&1); mrbrc=$?
+    mpost=$(gate_read "$MGWIP"):$(gw_view "$GWP_NSM" state)
+    [ "$mpre" != false:running ] && [ "$mpost" != false:running ] || mopen=1
+    if [ "$mpre" = true:running ] && [ "$mpost" = true:running ]; then mwin=$mtry; break; fi
+  done
+  gdiag loop --set name=mismatch_window --set "iterations=$mtry" --set "end=$([ -n "$mwin" ] && echo met || echo exhausted)"
+  obs c2.mismatch_running_gate_closed C2 assert subject "" --set "value=$(if [ -n "$mopen" ]; then echo false; elif [ -n "$mwin" ]; then echo true; else echo null; fi)"
+  obs c2.mismatch_readback_refused C2 assert subject "" --set "value=$(if [ -z "$mwin" ]; then echo null; elif [ "$mrbrc" = 0 ]; then echo false; elif grep -qF "$GWP_MISMATCH_REFUSAL" <<<"$mrb"; then echo true; else echo null; fi)"
   jout=$(sudo journalctl -u briqyardd --no-pager --since "$mjmark" 2>/dev/null); jrc=$?
-  obs c1.no_guest_output_in_errors C1 assert subject "" --set "value=$([ "$jrc" = 0 ] && [ -n "$jout" ] && [ -n "$MGWIP" ] && { ! grep -qF "${DIGM_LOADED#sha256:}" <<<"$out$jout" && echo true || echo false; } || echo null)"
-  l2=$([ -n "$MGWIP" ] && l2probe "$UM" "$MGWIP" || echo unknown-unknown); mprobe=$(now_ms)
-  obs c2.mismatch_arp_blocked C2 assert subject "" --set "value=$(case "${l2%-*}" in blocked) echo true;; reached) echo false;; *) echo null;; esac)"
-  obs c2.mismatch_icmp_blocked C2 assert subject "" --set "value=$(case "${l2#*-}" in blocked) echo true;; reached) echo false;; *) echo null;; esac)"
-  sleep 3
-  obs c2.mismatch_alive_after_probe C2 observed subject "" --set "value=$(bool '[ -n "$MGWIP" ] && [ "$(gw_view "$GWP_NSM" state)" = running ] && [ "$(api_config_after "$MGWIP" "$mprobe")" -ge 1 ]')"
+  obs c1.no_guest_output_in_errors C1 assert subject "" --set "value=$([ "$jrc" = 0 ] && [ -n "$jout" ] && [ -n "$mwin" ] && { ! grep -qF "${DIGM_LOADED#sha256:}" <<<"$mrb$jout$(cat "$GWP/set-mismatch.out" "$GWP/put-mismatch.out" 2>/dev/null)" && echo true || echo false; } || echo null)"
+  obs c2.mismatch_arp_blocked C2 assert subject "" --set "value=$([ -z "$mwin" ] && echo null || case "${ml2%-*}" in (blocked) echo true;; (reached) echo false;; (*) echo null;; esac)"
+  obs c2.mismatch_icmp_blocked C2 assert subject "" --set "value=$([ -z "$mwin" ] && echo null || case "${ml2#*-}" in (blocked) echo true;; (reached) echo false;; (*) echo null;; esac)"
   # Sampled throughout: a refused create may stay in error (create.rs, create_failed_locked) but
   # is never starting or running.
   local msp
@@ -819,10 +841,13 @@ gateway_policy() {
     sleep 2; stop_bg "$msp"
     obs mark.mismatch C2 mark sample mismatch --set value=create --set "rc=$rc" --set "t0=$(now_ms)"
     destroy_named "$GWP_NSM" gpm-bound
+    # Then stopped, readably, and never seen open while it ran.
+    wait_set mismatch_sleep 45 "" 'mg=$(gate_read "$MGWIP"); mend=$(gw_view "$GWP_NSM" state); [ "$mg:$mend" != false:running ] || mopen=1; [ "$mend" != running ] && [ "$mend" != starting ] && [ "$mend" != stopping ]' true 1
   fi
+  obs c2.mismatch_gateway_stopped C2 assert subject "" --set "value=$(if [ -n "$mopen" ]; then echo false; elif [ -z "$MGWIP" ]; then echo null; elif [ "$mend" = stopped ]; then echo true; elif [ "$mend" = running ] || [ "$mend" = starting ]; then echo false; else echo null; fi)"
   gq derive --file "$GWP_OBS" --phase mismatch
-  judged c2.mismatch_gateway_alive c2.mismatch_readback_refused c1.no_guest_output_in_errors c2.mismatch_arp_blocked c2.mismatch_icmp_blocked \
-         c2.mismatch_alive_after_probe c2.mismatch_not_admitted
+  judged c2.mismatch_gateway_refused c2.mismatch_readback_refused c1.no_guest_output_in_errors c2.mismatch_arp_blocked c2.mismatch_icmp_blocked \
+         c2.mismatch_running_gate_closed c2.mismatch_not_admitted c2.mismatch_gateway_stopped
 
   if [ -n "$BC" ] && [ -n "$U" ]; then
   # -- C3: what the bound machine reaches, each denial beside an unrestricted control
