@@ -12,12 +12,15 @@
 //! * [`objects`]: `X`, `Proc`, `Q`, `Reg`/`Ack`/`Ctx`, `Members`, `Plan`, capacity and clock objects.
 //! * [`trial`]: the single sealed-trial ABI and its native command/result commitments.
 //! * [`custody`]: the custody frame ABI's wire and signed bodies.
+//! * [`transition`]: the durable gate, guard and cut, the action permits, the signed reads, the
+//!   launch/death/resume evidence and the private control envelopes of the v2 transition.
 
 pub mod canonical;
 pub mod custody;
 pub mod objects;
 pub mod prim;
 pub mod sig;
+pub mod transition;
 pub mod trial;
 
 pub use canonical::{decode, decode_with, encode, encode_with, h, CodecError, Limits, Wire};

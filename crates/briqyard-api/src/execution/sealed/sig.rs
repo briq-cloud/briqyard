@@ -53,6 +53,58 @@ pub enum Tag {
     Trial3Issued,
     #[serde(rename = "trial3.status")]
     Trial3Status,
+    #[serde(rename = "retired")]
+    Retired,
+    #[serde(rename = "decision")]
+    Decision,
+    #[serde(rename = "receiver")]
+    Receiver,
+    #[serde(rename = "intent")]
+    Intent,
+    #[serde(rename = "host.read")]
+    HostRead,
+    #[serde(rename = "authority.read")]
+    AuthorityRead,
+    #[serde(rename = "api.read")]
+    ApiRead,
+    #[serde(rename = "query.observe")]
+    QueryObserve,
+    #[serde(rename = "authority.observe")]
+    AuthorityObserve,
+    #[serde(rename = "review.request")]
+    ReviewRequest,
+    #[serde(rename = "launch.receiver")]
+    LaunchReceiver,
+    #[serde(rename = "launch.api")]
+    LaunchApi,
+    #[serde(rename = "resume.request")]
+    ResumeRequest,
+    #[serde(rename = "resume.challenge")]
+    ResumeChallenge,
+    #[serde(rename = "resume.receiver")]
+    ResumeReceiver,
+    #[serde(rename = "resume.api")]
+    ResumeApi,
+    #[serde(rename = "client.stage")]
+    ClientStage,
+    #[serde(rename = "client.query")]
+    ClientQuery,
+    #[serde(rename = "client.enable")]
+    ClientEnable,
+    #[serde(rename = "final.query")]
+    FinalQuery,
+    #[serde(rename = "final.read")]
+    FinalRead,
+    #[serde(rename = "trial3.offer.query")]
+    Trial3OfferQuery,
+    #[serde(rename = "trial3.offer")]
+    Trial3Offer,
+    #[serde(rename = "trial3.observe")]
+    Trial3Observe,
+    #[serde(rename = "trial3.archive")]
+    Trial3Archive,
+    #[serde(rename = "trial3.archive.reply")]
+    Trial3ArchiveReply,
 }
 
 impl Tag {
@@ -70,7 +122,50 @@ impl Tag {
             Tag::Trial3Api => "trial3.api",
             Tag::Trial3Issued => "trial3.issued",
             Tag::Trial3Status => "trial3.status",
+            Tag::Retired => "retired",
+            Tag::Decision => "decision",
+            Tag::Receiver => "receiver",
+            Tag::Intent => "intent",
+            Tag::HostRead => "host.read",
+            Tag::AuthorityRead => "authority.read",
+            Tag::ApiRead => "api.read",
+            Tag::QueryObserve => "query.observe",
+            Tag::AuthorityObserve => "authority.observe",
+            Tag::ReviewRequest => "review.request",
+            Tag::LaunchReceiver => "launch.receiver",
+            Tag::LaunchApi => "launch.api",
+            Tag::ResumeRequest => "resume.request",
+            Tag::ResumeChallenge => "resume.challenge",
+            Tag::ResumeReceiver => "resume.receiver",
+            Tag::ResumeApi => "resume.api",
+            Tag::ClientStage => "client.stage",
+            Tag::ClientQuery => "client.query",
+            Tag::ClientEnable => "client.enable",
+            Tag::FinalQuery => "final.query",
+            Tag::FinalRead => "final.read",
+            Tag::Trial3OfferQuery => "trial3.offer.query",
+            Tag::Trial3Offer => "trial3.offer",
+            Tag::Trial3Observe => "trial3.observe",
+            Tag::Trial3Archive => "trial3.archive",
+            Tag::Trial3ArchiveReply => "trial3.archive.reply",
         }
+    }
+
+    /// The single-use trial ABI 3 vocabulary. A `trial3.` tag is never a v2 transition
+    /// authorization and a v2 tag is never a trial3 one: the two sets are disjoint.
+    pub const fn is_trial3(self) -> bool {
+        matches!(
+            self,
+            Tag::Trial3Receiver
+                | Tag::Trial3Api
+                | Tag::Trial3Issued
+                | Tag::Trial3Status
+                | Tag::Trial3OfferQuery
+                | Tag::Trial3Offer
+                | Tag::Trial3Observe
+                | Tag::Trial3Archive
+                | Tag::Trial3ArchiveReply
+        )
     }
 
     /// The roles allowed to sign this tag: a query is signed by a participant of the
@@ -87,6 +182,32 @@ impl Tag {
             Tag::Trial3Receiver => &[Role::Rk],
             Tag::Trial3Api | Tag::Trial3Issued => &[Role::Bk],
             Tag::Trial3Status => &[Role::Ak],
+            Tag::Retired => &[Role::Hk],
+            Tag::Decision => &[Role::Bk],
+            Tag::Receiver => &[Role::Rk],
+            Tag::Intent => &[Role::Ak],
+            Tag::HostRead => &[Role::Hk],
+            Tag::AuthorityRead => &[Role::Ak],
+            Tag::ApiRead => &[Role::Bk],
+            Tag::QueryObserve => &[Role::Rk, Role::Bk],
+            Tag::AuthorityObserve => &[Role::Ak],
+            Tag::ReviewRequest => &[Role::Bk],
+            Tag::LaunchReceiver => &[Role::Rk],
+            Tag::LaunchApi => &[Role::Bk],
+            Tag::ResumeRequest => &[Role::Rk],
+            Tag::ResumeChallenge => &[Role::Rk],
+            Tag::ResumeReceiver => &[Role::Rk],
+            Tag::ResumeApi => &[Role::Bk],
+            Tag::ClientStage => &[Role::Bk],
+            Tag::ClientQuery => &[Role::Bk, Role::Rk],
+            Tag::ClientEnable => &[Role::Bk],
+            Tag::FinalQuery => &[Role::Rk],
+            Tag::FinalRead => &[Role::Bk],
+            Tag::Trial3OfferQuery => &[Role::Rk],
+            Tag::Trial3Offer => &[Role::Bk],
+            Tag::Trial3Observe => &[Role::Rk, Role::Bk],
+            Tag::Trial3Archive => &[Role::Rk],
+            Tag::Trial3ArchiveReply => &[Role::Bk],
         }
     }
 }

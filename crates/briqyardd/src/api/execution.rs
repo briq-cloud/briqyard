@@ -15,8 +15,8 @@ use briqyard_api::{
     execution::{
         self as access,
         admission::{
-            HostDelegation, HostOwnership, HostRegistration, InstalledProtection, Journal,
-            PreparedAdmission,
+            Error as JournalError, HostDelegation, HostOwnership, HostRegistration,
+            InstalledProtection, Journal, PreparedAdmission,
         },
         channel::*,
         AllocationRef, Clock, DelegationContext, DispatchContext, Operation, Trust,
@@ -222,17 +222,38 @@ async fn register(
     let _write = st.admission.write().await;
     let mut journal = st.journal.lock().await;
     st.registered_keys(&record)?;
-    let changed = journal.registration().map_err(|_| StatusCode::CONFLICT)? != Some(&record);
-    journal
-        .register_host(record.clone(), st.clock()?)
-        .map_err(|_| {
-            st.active.end_all();
-            StatusCode::CONFLICT
-        })?;
-    if changed {
-        st.active.end_all();
-    }
+    register_host(&mut journal, &st.active, &record, st.clock()?)?;
     Ok(Json(ack(journal.instance(), record.generation, &record)?))
+}
+
+fn register_host(
+    journal: &mut Journal,
+    active: &crate::guestc::active_operations::ActiveOperations,
+    record: &HostRegistration,
+    clock: Clock,
+) -> Result<(), StatusCode> {
+    let Ok(current) = journal.registration() else {
+        active.end_all();
+        return Err(StatusCode::CONFLICT);
+    };
+    let changed = current != Some(record);
+    match journal.register_host(record.clone(), clock) {
+        Ok(()) => {}
+        Err(
+            JournalError::Binding
+            | JournalError::Exhausted
+            | JournalError::AlreadyAdmitted
+            | JournalError::Full,
+        ) => return Err(StatusCode::CONFLICT),
+        Err(_) => {
+            active.end_all();
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+    if changed {
+        active.end_all();
+    }
+    Ok(())
 }
 
 async fn discover(
@@ -852,6 +873,148 @@ async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guestc::{active_lease::ActiveLease, active_operations::ActiveOperations};
+    use briqyard_api::execution::{
+        admission::{ActiveOperation, Role},
+        clock::ClockSample,
+    };
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn refused_registration_leaves_an_owned_active_lease_running() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../briqyard-api/tests/fixtures/execution-continuation-v1.json"
+        ))
+        .unwrap();
+        let evidence: ActiveOperation = serde_json::from_value(fixture["active"].clone()).unwrap();
+        let sample = ClockSample {
+            wall: Duration::from_secs(1035),
+            monotonic: std::time::Instant::now(),
+            uncertainty: Duration::from_secs(1),
+        };
+        let clock = Clock {
+            now: 1010,
+            uncertainty: 1,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal =
+            Journal::open(&dir.path().join("host"), Role::Host("host-1".into())).unwrap();
+        let current = HostRegistration {
+            authority: "authority-1".into(),
+            epoch: "epoch-2".into(),
+            key_id: "key-2".into(),
+            public_key: [7; 32],
+            host_instance: journal.instance().into(),
+            generation: 2,
+        };
+        let active = Arc::new(ActiveOperations::default());
+        register_host(&mut journal, &active, &current, clock).unwrap();
+
+        let lease = ActiveLease::from_committed(evidence.clone(), &sample).unwrap();
+        let _owner = active
+            .register(&evidence.binding.admission, lease.clone())
+            .unwrap();
+        lease.observe(&evidence, &sample).unwrap();
+
+        register_host(&mut journal, &active, &current, clock).unwrap();
+        lease.observe(&evidence, &sample).unwrap();
+
+        let stale = HostRegistration {
+            epoch: "epoch-1".into(),
+            generation: 1,
+            ..current.clone()
+        };
+        let other_host = HostRegistration {
+            host_instance: "another-host".into(),
+            generation: 3,
+            ..current.clone()
+        };
+        for refused in [stale, other_host] {
+            assert_eq!(
+                register_host(&mut journal, &active, &refused, clock),
+                Err(StatusCode::CONFLICT)
+            );
+            assert_eq!(journal.registration().unwrap(), Some(&current));
+            assert!(active.get(&evidence.binding.admission).is_some());
+            lease.observe(&evidence, &sample).unwrap();
+        }
+
+        let next = HostRegistration {
+            epoch: "epoch-3".into(),
+            generation: 3,
+            ..current
+        };
+        register_host(&mut journal, &active, &next, clock).unwrap();
+        assert_eq!(journal.registration().unwrap(), Some(&next));
+        assert!(lease.observe(&evidence, &sample).is_err());
+    }
+
+    #[tokio::test]
+    async fn ambiguous_registration_persistence_contains_active_leases_and_poisons_the_journal() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../briqyard-api/tests/fixtures/execution-continuation-v1.json"
+        ))
+        .unwrap();
+        let evidence: ActiveOperation = serde_json::from_value(fixture["active"].clone()).unwrap();
+        let sample = ClockSample {
+            wall: Duration::from_secs(1035),
+            monotonic: std::time::Instant::now(),
+            uncertainty: Duration::from_secs(1),
+        };
+        let clock = Clock {
+            now: 1010,
+            uncertainty: 1,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host");
+        let mut journal = Journal::open(&path, Role::Host("host-1".into())).unwrap();
+        let current = HostRegistration {
+            authority: "authority-1".into(),
+            epoch: "epoch-2".into(),
+            key_id: "key-2".into(),
+            public_key: [7; 32],
+            host_instance: journal.instance().into(),
+            generation: 2,
+        };
+        let active = Arc::new(ActiveOperations::default());
+        register_host(&mut journal, &active, &current, clock).unwrap();
+
+        let lease = ActiveLease::from_committed(evidence.clone(), &sample).unwrap();
+        let _owner = active
+            .register(&evidence.binding.admission, lease.clone())
+            .unwrap();
+        lease.observe(&evidence, &sample).unwrap();
+
+        std::fs::write(path.join("journal.next"), b"unresolved").unwrap();
+        let next = HostRegistration {
+            epoch: "epoch-3".into(),
+            generation: 3,
+            ..current.clone()
+        };
+        assert_eq!(
+            register_host(&mut journal, &active, &next, clock),
+            Err(StatusCode::CONFLICT)
+        );
+        assert!(lease.observe(&evidence, &sample).is_err());
+        assert!(matches!(journal.owned(), Err(JournalError::Persistence)));
+        assert!(matches!(
+            journal.registration(),
+            Err(JournalError::Persistence)
+        ));
+        assert!(matches!(
+            journal.register_host(next.clone(), clock),
+            Err(JournalError::Persistence)
+        ));
+
+        let later = ActiveLease::from_committed(evidence.clone(), &sample).unwrap();
+        let _later_owner = active.register("later", later.clone()).unwrap();
+        later.observe(&evidence, &sample).unwrap();
+        assert_eq!(
+            register_host(&mut journal, &active, &current, clock),
+            Err(StatusCode::CONFLICT)
+        );
+        assert!(later.observe(&evidence, &sample).is_err());
+    }
 
     #[test]
     fn exact_millisecond_receipt_covers_inward_rounded_grant() {

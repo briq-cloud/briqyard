@@ -92,6 +92,33 @@ pub struct DescriptorFloor {
 }
 
 impl DescriptorFloor {
+    pub(super) fn for_artifacts(listener_count: usize, count: usize) -> Result<Self, CustodyError> {
+        let bad_limit = || CustodyError::Protocol("open-file limit cannot hold native artifacts");
+        let listener_end = i32::try_from(listener_count)
+            .ok()
+            .and_then(|count| count.checked_add(3))
+            .ok_or_else(bad_limit)?;
+        let highest = open_descriptors()?.into_iter().max().unwrap_or(2);
+        let minimum = 32768
+            .max(listener_end)
+            .max(highest.checked_add(1).ok_or_else(bad_limit)?);
+        let (soft, hard) = nofile_limit()?;
+        let end = i32::try_from(count)
+            .ok()
+            .and_then(|count| minimum.checked_add(count))
+            .ok_or_else(bad_limit)?;
+        if soft == libc::RLIM_INFINITY
+            || hard == libc::RLIM_INFINITY
+            || soft > hard
+            || hard > i32::MAX as u64
+            || end as u64 > soft
+            || minimum as u64 >= soft
+        {
+            return Err(bad_limit());
+        }
+        Ok(Self { minimum })
+    }
+
     pub fn preserving(listeners: &[RawFd]) -> Result<Self, CustodyError> {
         let mut minimum = 0;
         for fd in listeners {
@@ -155,6 +182,34 @@ impl DescriptorFloor {
         }
         Ok(duplicate)
     }
+}
+
+pub(super) fn open_descriptors() -> Result<Vec<RawFd>, CustodyError> {
+    let list = std::fs::read_dir("/proc/self/fd")
+        .map_err(|error| io_error("list local descriptors", error))?;
+    let mut open = Vec::new();
+    for entry in list {
+        let entry = entry.map_err(|error| io_error("list local descriptors", error))?;
+        let name = entry.file_name();
+        let fd = name
+            .to_str()
+            .and_then(|name| name.parse::<RawFd>().ok())
+            .filter(|&fd| fd >= 0)
+            .ok_or(CustodyError::Protocol("invalid local descriptor listing"))?;
+        open.push(fd);
+    }
+    let mut retained = Vec::with_capacity(open.len());
+    for fd in open {
+        if unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0 {
+            retained.push(fd);
+        } else {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EBADF) {
+                return Err(io_error("inspect local descriptor listing", error));
+            }
+        }
+    }
+    Ok(retained)
 }
 
 pub fn compare_open_descriptions(

@@ -4,6 +4,8 @@ mod fd;
 mod process;
 mod transport;
 
+pub mod artifacts;
+
 #[cfg(test)]
 mod tests;
 
