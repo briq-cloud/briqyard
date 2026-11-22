@@ -275,6 +275,46 @@ fn registration_with_ambiguous_durability_never_reads_as_ready() {
 }
 
 #[test]
+fn sealed_snapshot_is_recognized_but_legacy_open_does_not_rotate_it() {
+    use crate::execution::sealed::prim::KeyBytes;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("authority");
+    let role = Role::Authority("authority-1".into());
+    let journal = Journal::open(&path, role.clone()).unwrap();
+    let file = path.join("journal.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert!(state.get("sealed_authority").is_none());
+    let key = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+    let key = Ed25519KeyPair::from_pkcs8(key.as_ref()).unwrap();
+    let key_bytes = KeyBytes::from_array(key.public_key().as_ref().try_into().unwrap());
+    let hash = "a".repeat(64);
+    state["sealed_authority"] = json!({"guard": {
+        "x": {"aud": "staging", "host": "host-1", "op": hash, "serial": 1},
+        "plan": hash, "phase": "started", "launch": hash,
+        "proc": {"boot": "00000000-0000-4000-8000-000000000001", "pid": 13, "start": 3,
+                 "exe": hash, "build": "candidate"},
+        "epoch": journal.instance(), "ordinary_kid": "key-1", "ordinary_key": key_bytes,
+        "set": hash, "bind": null, "armed_gate": null, "adoption": null
+    }});
+    drop(journal);
+    let bytes = serde_json::to_vec(&state).unwrap();
+    std::fs::write(&file, &bytes).unwrap();
+    assert!(
+        read_state(&file).is_ok(),
+        "guarded snapshots must be recognized"
+    );
+    assert!(matches!(Journal::open(&path, role), Err(Error::Binding)));
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    state["sealed_authority"]["guard"]["armed_gate"] = json!(hash);
+    std::fs::write(&file, serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(
+        matches!(read_state(&file), Err(Error::Binding)),
+        "a started Guard with adoption fields must not decode as persisted state"
+    );
+}
+
+#[test]
 fn installation_highwater_and_restart_retire_old_epoch() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("host");

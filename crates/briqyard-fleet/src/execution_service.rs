@@ -21,6 +21,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{sync::Arc, time::Instant};
 use tokio::sync::{Mutex, MutexGuard};
 
+pub(crate) mod protected;
 pub(crate) mod renewal;
 
 #[cfg(test)]
@@ -175,6 +176,9 @@ pub(super) fn router_with_continuation(
     let renewable = continuation.is_some();
     // The authority name and epoch are fixed when the journal opens.
     let reader = issuer.reader();
+    if reader.view().is_guarded_authority() {
+        return Err("guarded authority cannot mount ordinary routes");
+    }
     let Role::Authority(authority) = reader.view().role().clone() else {
         return Err("invalid authority configuration");
     };

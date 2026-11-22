@@ -29,13 +29,11 @@ pub struct ClockSample {
 }
 /// The common wall-time interval at one immutable monotonic origin. Accepted
 /// observations may narrow this evidence, but never replace or widen it.
-#[cfg(any(target_os = "linux", test))]
 struct ClockEvidence {
     origin: Instant,
     lower: Duration,
     upper: Duration,
 }
-#[cfg(any(target_os = "linux", test))]
 impl ClockEvidence {
     fn first(sample: &ClockSample) -> Option<Self> {
         Some(Self {
@@ -65,6 +63,24 @@ impl ClockEvidence {
     }
 }
 impl ClockSample {
+    /// The peer's qualified UTC interval must intersect the time that could actually
+    /// have elapsed between two compatible local kernel observations.
+    pub fn bracket_peer(&self, after: &Self, peer: Clock) -> Option<Clock> {
+        self.interval()?;
+        let local = after.interval()?;
+        let elapsed = after.monotonic.checked_duration_since(self.monotonic)?;
+        if elapsed >= Duration::from_secs(5) || peer.uncertainty > 5 {
+            return None;
+        }
+        let mut evidence = ClockEvidence::first(self)?;
+        evidence.admit(after)?;
+        let earliest = evidence.lower;
+        let latest = evidence.upper.checked_add(elapsed)?;
+        let peer_earliest = Duration::from_secs(peer.now.checked_sub(peer.uncertainty)?);
+        let peer_latest = Duration::from_secs(peer.now.checked_add(peer.uncertainty)?);
+        (peer_earliest <= latest && peer_latest >= earliest).then_some(local)
+    }
+
     pub fn interval(&self) -> Option<Clock> {
         // Whole seconds: `now` is the floored wall time, so the true time is
         // within one second above it. The margin is the error rounded up plus
@@ -128,8 +144,7 @@ impl ClockSample {
         }
         Some(sample)
     }
-    #[cfg(test)]
-    fn follows(&self, previous: &Self) -> bool {
+    pub(super) fn follows(&self, previous: &Self) -> bool {
         let Some(elapsed) = self.monotonic.checked_duration_since(previous.monotonic) else {
             return false;
         };
@@ -189,6 +204,50 @@ impl ClockSample {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_time_must_fit_two_compatible_local_samples_in_order() {
+        let before = ClockSample {
+            wall: Duration::from_millis(100_400),
+            monotonic: Instant::now(),
+            uncertainty: Duration::from_millis(50),
+        };
+        let mut after = ClockSample {
+            wall: Duration::from_millis(100_900),
+            monotonic: before.monotonic + Duration::from_millis(500),
+            uncertainty: before.uncertainty,
+        };
+        let peer = Clock {
+            now: 100,
+            uncertainty: 1,
+        };
+        let local = after.interval().unwrap();
+        assert!(before.bracket_peer(&after, peer).is_some_and(|clock| {
+            clock.now == local.now && clock.uncertainty == local.uncertainty
+        }));
+        assert!(after.bracket_peer(&before, peer).is_none());
+        assert!(before
+            .bracket_peer(
+                &after,
+                Clock {
+                    now: 98,
+                    uncertainty: 1
+                }
+            )
+            .is_none());
+        assert!(before
+            .bracket_peer(
+                &after,
+                Clock {
+                    now: 102,
+                    uncertainty: 1
+                }
+            )
+            .is_none());
+        after.wall = Duration::from_millis(99_900);
+        assert!(before.bracket_peer(&after, peer).is_none());
+    }
+
     #[test]
     fn forward_and_backward_steps_do_not_replace_monotonic_anchor() {
         let first = ClockSample {
