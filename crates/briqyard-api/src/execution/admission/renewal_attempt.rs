@@ -62,7 +62,7 @@ impl Journal {
         let mut next = State::clone(&self.state);
         next.renewal_attempts.insert(attempt.id.clone(), attempt);
         next.clock_floor = clock.now;
-        self.commit(next)?;
+        self.commit(next, Some(clock))?;
         Ok(true)
     }
     pub fn renewal_operation(
@@ -164,7 +164,7 @@ impl Journal {
             .ok_or(Error::Binding)?
             .continuation_digest = Some(digest);
         next.clock_floor = clock.now;
-        self.commit(next)?;
+        self.commit(next, Some(clock))?;
         Ok(true)
     }
 }

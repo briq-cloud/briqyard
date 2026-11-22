@@ -106,9 +106,6 @@ impl Journal {
             }
             return Err(Error::Binding);
         }
-        if self.state.delegation_intents.len() >= MAX_RECORDS {
-            return Err(Error::Full);
-        }
         for prior in self
             .state
             .delegation_intents
@@ -134,7 +131,7 @@ impl Journal {
         let mut next = State::clone(&self.state);
         next.delegation_intents.insert(intent_id.into(), intended);
         next.clock_floor = clock.now;
-        self.commit(next)?;
+        self.commit_install(next, clock)?;
         Ok(true)
     }
 
@@ -176,7 +173,7 @@ impl Journal {
             .ok_or(Error::Binding)?
             .acknowledgement = Some(ack);
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     pub fn acknowledge_operation_policy(
@@ -203,7 +200,7 @@ impl Journal {
             .ok_or(Error::Binding)?
             .operation_policy_ack = Some(ack);
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 }
 
@@ -256,7 +253,7 @@ impl Journal {
         history.push(record.clone());
         next.delegations.insert(record.id.clone(), record);
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 }
 

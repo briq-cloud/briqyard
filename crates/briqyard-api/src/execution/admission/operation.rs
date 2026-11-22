@@ -90,13 +90,10 @@ impl Journal {
         {
             return Err(Error::Binding);
         }
-        if self.state.operation_intents.len() >= MAX_RECORDS {
-            return Err(Error::Full);
-        }
         let mut next = State::clone(&self.state);
         next.operation_intents.insert(intent.id.clone(), intent);
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     pub fn bind_operation_permit(
@@ -118,7 +115,7 @@ impl Journal {
         op.permit_digest = Some(permit_digest);
         op.phase = OperationPhase::Reserved;
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     /// Persist an exact typed ACK. A mismatch leaves the reserved operation unusable.
@@ -157,7 +154,7 @@ impl Journal {
         op.prepared = Some(ack);
         op.phase = OperationPhase::Prepared;
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     pub fn mark_operation_dispatch(&mut self, id: &str, clock: Clock) -> Result<(), Error> {
@@ -175,7 +172,7 @@ impl Journal {
             .ok_or(Error::Binding)?
             .phase = OperationPhase::Dispatched;
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     pub fn record_operation_evidence(
@@ -201,7 +198,7 @@ impl Journal {
         op.phase = phase;
         op.outcome_digest = outcome_digest;
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     pub fn mark_operation_unconfirmed(&mut self, id: &str, clock: Clock) -> Result<(), Error> {
@@ -212,7 +209,7 @@ impl Journal {
             .ok_or(Error::Binding)?
             .unconfirmed = true;
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 }
 

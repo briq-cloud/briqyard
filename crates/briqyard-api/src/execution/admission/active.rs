@@ -121,7 +121,7 @@ impl Journal {
             },
         );
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     /// Trusted guest transport calls this exactly once after the first request
@@ -151,7 +151,7 @@ impl Journal {
         saved.phase = ActivePhase::Active;
         let evidence = saved.clone();
         next.clock_floor = clock.now;
-        self.commit(next)?;
+        self.commit(next, Some(clock))?;
         Ok(evidence)
     }
 
@@ -200,7 +200,7 @@ impl Journal {
         saved.protection = c.protection.clone();
         let evidence = saved.clone();
         next.clock_floor = clock.now;
-        self.commit(next)?;
+        self.commit(next, Some(clock))?;
         Ok(evidence)
     }
 
@@ -220,7 +220,7 @@ impl Journal {
             .ok_or(Error::Binding)?;
         if matches!(saved.phase, ActivePhase::Consumed | ActivePhase::Active) {
             saved.phase = ActivePhase::Unresolved;
-            self.commit(next)?;
+            self.commit(next, None)?;
         }
         Ok(())
     }

@@ -234,7 +234,7 @@ impl Journal {
         let mut next = State::clone(&self.state);
         next.discovery_intents.insert(id.into(), intended);
         next.clock_floor = clock.now;
-        self.commit(next)?;
+        self.commit_install(next, clock)?;
         Ok(true)
     }
 
@@ -264,7 +264,7 @@ impl Journal {
             .ok_or(Error::Binding)?
             .receipt = Some(receipt);
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     pub fn begin_protection_intent(
@@ -336,7 +336,7 @@ impl Journal {
         let mut next = State::clone(&self.state);
         next.protection_intents.insert(id.into(), intended);
         next.clock_floor = clock.now;
-        self.commit(next)?;
+        self.commit_install(next, clock)?;
         Ok(true)
     }
 
@@ -373,7 +373,7 @@ impl Journal {
             .ok_or(Error::Binding)?
             .acknowledgement = Some(ack);
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 }
 

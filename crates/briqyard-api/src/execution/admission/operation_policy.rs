@@ -56,7 +56,7 @@ impl Journal {
         next.operation_policies
             .insert(record.grant_digest.clone(), record);
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
     pub fn operation_policy(
         &self,
