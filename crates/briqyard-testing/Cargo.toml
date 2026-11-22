@@ -12,6 +12,7 @@ publish = false
 scoped-native = ["dep:anyhow", "dep:base64", "dep:briqyard-api", "dep:reqwest", "dep:ring", "dep:serde_json", "dep:tokio"]
 
 [dependencies]
+libc = { workspace = true }
 anyhow = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 briqyard-api = { workspace = true, features = ["execution-admission", "tls"], optional = true }
@@ -24,6 +25,10 @@ tokio = { workspace = true, optional = true }
 name = "scoped-execution-native"
 path = "src/scoped_execution_native.rs"
 required-features = ["scoped-native"]
+
+[[bin]]
+name = "execution-custody-child"
+path = "src/execution_custody_child.rs"
 
 [dev-dependencies]
 tempfile = "3"

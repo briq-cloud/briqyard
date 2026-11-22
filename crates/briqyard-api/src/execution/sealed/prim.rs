@@ -100,23 +100,33 @@ macro_rules! text_type {
 
 text_type!(
     /// `I`: 1..128 ASCII bytes of `[A-Za-z0-9_.:/-]`, the native ID validator.
-    Ident, valid_ident, "identifier"
+    Ident,
+    valid_ident,
+    "identifier"
 );
 text_type!(
     /// A build label: `I` plus ASCII `+`, 1..128 bytes.
-    Build, valid_build, "build label"
+    Build,
+    valid_build,
+    "build label"
 );
 text_type!(
     /// A lowercase Linux boot ID, UUID text 8-4-4-4-12.
-    BootId, valid_uuid, "boot id"
+    BootId,
+    valid_uuid,
+    "boot id"
 );
 text_type!(
     /// `V4`: lowercase canonical RFC 4122 version-4 UUID (variant nibble 8, 9, a or b).
-    V4, valid_v4, "version-4 uuid"
+    V4,
+    valid_v4,
+    "version-4 uuid"
 );
 text_type!(
     /// `D`: 64 lowercase hex digits.
-    HexDigest, valid_hex_digest, "hex digest"
+    HexDigest,
+    valid_hex_digest,
+    "hex digest"
 );
 
 impl HexDigest {

@@ -140,12 +140,21 @@ macro_rules! frame {
         }
     };
 }
-frame!(/// Candidate to custodian; no FD.
-    RequestFrame, RequestKind);
-frame!(/// Custodian to candidate; carries one pidfd out of band.
-    HandleFrame, HandleKind);
-frame!(/// Candidate to custodian; returns the same descriptor out of band.
-    EchoFrame, EchoKind);
+frame!(
+    /// Candidate to custodian; no FD.
+    RequestFrame,
+    RequestKind
+);
+frame!(
+    /// Custodian to candidate; carries one pidfd out of band.
+    HandleFrame,
+    HandleKind
+);
+frame!(
+    /// Candidate to custodian; returns the same descriptor out of band.
+    EchoFrame,
+    EchoKind
+);
 
 /// `custody.match` body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

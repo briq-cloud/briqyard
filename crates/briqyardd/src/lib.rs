@@ -7,6 +7,8 @@ pub mod conditions;
 pub mod config;
 pub mod console;
 pub mod events;
+#[cfg(target_os = "linux")]
+pub mod execution_custody;
 pub mod fc;
 pub mod guestc;
 pub mod heartbeat;

@@ -477,6 +477,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "briqyard-api",
+ "libc",
  "reqwest",
  "ring",
  "serde_json",
