@@ -54,6 +54,23 @@ refuse expired projection access. There is no v1 payload misinterpretation requi
 versioned retired representation or downgrade barrier. Historical versions still maintain
 no automatic headroom.
 
+## Aggregate capacity projection
+
+`briqyard-fleet authority journal-project <journal.json> <qualified-lower-bound-ms>` reads
+one validated authority snapshot without taking the writer lock. It does not load fleet
+configuration or credentials, rotate the epoch, persist anything or make a network call.
+It prints only the supplied bound, input bytes before, projected encoded bytes after,
+reclamation, whether the
+projection fits, and per-collection counts before/after. Its retained-byte categories split
+remaining raw credentials from retained delegation evidence and reconcile exactly to the
+projected size. No token, identifier, key or record value is printed. JSON object keys are
+fixed category names; every leaf is a number or boolean.
+
+The caller supplies an already-qualified lower bound. The command does not claim to qualify
+wall time, establish readiness or execute a prune. A wrong bound changes only the computed
+example, never the input file. This diagnostic makes the local bytes spent on retained
+history visible without inventing infinite capacity.
+
 ## Capacity limit
 
 Compaction relieves expired payloads; it is not unbounded execution history. Perpetual

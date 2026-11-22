@@ -1415,8 +1415,9 @@ protection. Clock loss refuses admission, protected broadening and idle stop;
 explicit removal and revocation remain possible. Retained protection adds at least
 60 seconds to recovery before a fresh qualified observation can release it. Removing
 execution configuration does not remove protection or the permanent compatibility
-floor. Do not prune or replace scoped journals to recover capacity. The fixed bounds
-and remaining qualification requirements are in ADR 0124.
+floor. Do not manually prune or replace scoped journals to recover capacity. The authority
+automatically compacts only fully acknowledged expired credentials during a qualified write;
+all refusal evidence and the fixed bounds remain (ADRs 0124 and 0144).
 
 ### Standalone authority
 
@@ -1454,3 +1455,17 @@ retains the evidence with a permanent refusal key. A recovered clock cannot repl
 revive that intent. Reconcile under a fresh intent and the required fencing protocol;
 never remove refusal evidence. Native qualification of the real authenticated guest
 path is still required before the first protected admission.
+
+To inspect authority capacity without changing the journal:
+
+```sh
+briqyard-fleet authority journal-project <journal.json> <qualified-lower-bound-ms>
+```
+
+Pass an already-qualified absolute epoch lower bound in milliseconds. The command reports
+input and projected bytes, byte and count changes, and aggregates for every retained
+category. It takes no writer lock, reads no fleet configuration or credentials, rotates no
+epoch, writes no files and makes no network calls. It prints no token, identifier or record
+contents. It neither qualifies the supplied bound itself nor proposes manual record
+processing; it answers only whether that bound would reclaim credential bytes and how much
+history would remain.

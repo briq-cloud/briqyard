@@ -178,6 +178,12 @@ pub(super) fn provision(
     ))
 }
 
+pub(super) fn project(journal: &Path, lower_bound_ms: u64) -> Result<()> {
+    let report = api::execution::admission::project_capacity(journal, lower_bound_ms)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
 pub(super) async fn run(path: &Path) -> Result<()> {
     let config = AuthorityConfig::load(path)?;
     let (host_admin, fleet_admin) = config.administrators()?;
@@ -365,7 +371,7 @@ mod tests {
         let path = root.path().join("missing.yaml");
         assert!(crate::run(crate::Args {
             config: path,
-            cmd: Some(crate::Cmd::Authority)
+            cmd: Some(crate::Cmd::Authority { command: None })
         })
         .await
         .is_err());
@@ -376,7 +382,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(crate::run(crate::Args {
             config: path,
-            cmd: Some(crate::Cmd::Authority)
+            cmd: Some(crate::Cmd::Authority { command: None })
         })
         .await
         .is_err());

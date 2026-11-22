@@ -148,7 +148,7 @@ fn allocation_expired(token: &str, earliest_ms: u64) -> bool {
     claims.exp <= MAX_SAFE_INTEGER && claims.exp.saturating_mul(1000) <= earliest_ms
 }
 
-fn collection_lengths(state: &State) -> [usize; 21] {
+pub(super) fn collection_lengths(state: &State) -> [usize; 21] {
     [
         state.allocations.len(),
         state.fences.len(),

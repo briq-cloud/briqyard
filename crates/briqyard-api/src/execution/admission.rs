@@ -4,6 +4,8 @@
 //! requires the trusted control channel's acknowledgement of this exact new instance.
 use super::*;
 mod active;
+mod capacity;
+pub use capacity::{project as project_capacity, CapacityProjection, CollectionProjection};
 use compaction::{compact_authority, near_capacity, over_capacity};
 mod compaction;
 pub use active::{ActiveOperation, ActivePhase};
@@ -1096,6 +1098,10 @@ fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_-.:/".contains(&b))
 }
 fn read_state(path: &Path) -> Result<Option<State>, Error> {
+    read_state_size(path).map(|state| state.map(|(state, _)| state))
+}
+
+fn read_state_size(path: &Path) -> Result<Option<(State, usize)>, Error> {
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -1123,8 +1129,9 @@ fn read_state(path: &Path) -> Result<Option<State>, Error> {
     if bytes.len() as u64 > MAX_BYTES {
         return Err(Error::Full);
     }
+    let size = usize::try_from(metadata.len()).map_err(|_| Error::Full)?;
     serde_json::from_slice(&bytes)
-        .map(Some)
+        .map(|state| Some((state, size)))
         .map_err(|_| Error::Persistence)
 }
 
