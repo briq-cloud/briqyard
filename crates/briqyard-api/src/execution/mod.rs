@@ -27,6 +27,8 @@ pub mod provision;
 #[cfg(feature = "execution-verifier")]
 mod request;
 #[cfg(feature = "execution-admission")]
+pub mod sealed;
+#[cfg(feature = "execution-admission")]
 pub use continuation::*;
 #[cfg(feature = "execution-verifier")]
 pub use file_request::*;
