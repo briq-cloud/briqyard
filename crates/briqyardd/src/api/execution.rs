@@ -603,9 +603,8 @@ async fn invalidate(
             }
             StatusCode::CONFLICT
         })?;
-    st.active.revoke_where(Some(&request), |admission| {
-        journal.active_operation(admission).ok().flatten().cloned()
-    });
+    st.active
+        .revoke_where(|admission| journal.active_operation(admission).ok().flatten().cloned());
     Ok(Json(Instance {
         host_instance: journal.instance().into(),
     }))
@@ -627,9 +626,8 @@ async fn revoke(
             }
             StatusCode::CONFLICT
         })?;
-    st.active.revoke_where(Some(&request), |admission| {
-        journal.active_operation(admission).ok().flatten().cloned()
-    });
+    st.active
+        .revoke_where(|admission| journal.active_operation(admission).ok().flatten().cloned());
     Ok(Json(Instance {
         host_instance: journal.instance().into(),
     }))

@@ -571,3 +571,55 @@ async fn retired_owner_can_fsync_only_its_collected_intent_and_cancel_cannot_fin
         assert_eq!(reopened.status(&admission).unwrap(), Some(status));
     }
 }
+
+#[tokio::test]
+async fn current_installer_revocation_ends_the_retired_owners_effect() {
+    let dir = tempfile::tempdir().unwrap();
+    let Fixture {
+        journal,
+        registration,
+        intent,
+        permit,
+        active,
+    } = active_operation(&dir.path().join("journal"));
+    let gate = Arc::new(TestGate::default());
+    let old = cohort(&registration, false);
+    gate.publish(Some(old.clone()), vec![]);
+    let turns = AdmissionTurns::new(&journal)
+        .unwrap()
+        .with_sealed_contexts(gate.clone());
+    let mut journal = Mutex::new(journal);
+    let registry = Arc::new(ActiveOperations::default());
+    let effect = turns
+        .capture(RequestRole::Execution, EXECUTION, b"")
+        .unwrap();
+    let (_owner, lease) = reserve(&registry, effect, intent, permit, &active);
+    let transition = turns.turn.write().await;
+    let mut successor = registration.clone();
+    successor.epoch = "new-epoch".into();
+    successor.generation += 1;
+    journal
+        .get_mut()
+        .register_host(successor.clone(), CLOCK)
+        .unwrap();
+    turns.publish(journal.get_mut()).unwrap();
+    gate.publish(Some(cohort(&successor, true)), vec![old]);
+    drop(transition);
+    let current = turns
+        .capture(RequestRole::Installer, b"successor installer", b"")
+        .unwrap();
+    let _read = turns.read(&current, &journal).await.unwrap();
+    let ledger = journal.lock().await;
+    let revoked = ledger
+        .active_operation(&active.binding.admission)
+        .unwrap()
+        .unwrap()
+        .clone();
+    assert_eq!(revoked.phase, ActivePhase::Revoked);
+    assert!(registry
+        .in_context(&active.binding.admission, &current)
+        .is_err());
+    lease.observe(&active, &sample()).unwrap();
+    registry.revoke_where(|_| Some(revoked.clone()));
+    assert!(lease.observe(&active, &sample()).is_err());
+}

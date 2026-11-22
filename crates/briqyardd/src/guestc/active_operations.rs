@@ -107,20 +107,8 @@ impl ActiveOperations {
         Ok(Some(owner.clone()))
     }
 
-    pub(crate) fn revoke_where(
-        &self,
-        request: Option<&RequestIdentity>,
-        mut evidence: impl FnMut(&str) -> Option<ActiveOperation>,
-    ) {
+    pub(crate) fn revoke_where(&self, mut evidence: impl FnMut(&str) -> Option<ActiveOperation>) {
         for (admission, owner) in self.0.lock().unwrap().iter() {
-            if request.is_some_and(|r| {
-                !owner
-                    .intent
-                    .as_ref()
-                    .is_some_and(|i| i.request.same_context(r))
-            }) {
-                continue;
-            }
             if let (Some(lease), Some(record)) = (owner.lease(), evidence(admission)) {
                 let _ = lease.revoke_committed(&record);
             }
@@ -285,9 +273,7 @@ mod tests {
             .register(&evidence.binding.admission, lease.clone())
             .unwrap();
         evidence.phase = briqyard_api::execution::admission::ActivePhase::Revoked;
-        registry.revoke_where(None, |id| {
-            (id == evidence.binding.admission).then(|| evidence.clone())
-        });
+        registry.revoke_where(|id| (id == evidence.binding.admission).then(|| evidence.clone()));
         assert!(lease.observe(&evidence, &sample).is_err());
     }
 }
