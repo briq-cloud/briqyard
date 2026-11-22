@@ -1,4 +1,4 @@
-use super::compaction::collection_lengths;
+use super::compaction::{collection_lengths, compact_authority_at_lower_bound};
 use super::*;
 use serde::Serialize;
 
@@ -21,19 +21,10 @@ pub struct CapacityProjection {
 
 pub fn project(path: &Path, qualified_lower_bound_ms: u64) -> Result<CapacityProjection, Error> {
     let (state, bytes_before) = read_state_size(path)?.ok_or(Error::Binding)?;
-    if !matches!(state.role, Role::Authority(_)) {
+    if qualified_lower_bound_ms > MAX_SAFE_INTEGER {
         return Err(Error::Binding);
     }
-    let now = (qualified_lower_bound_ms / 1000)
-        .checked_add(1)
-        .ok_or(Error::Binding)?;
-    let (after, _) = compact_authority(
-        &state,
-        Clock {
-            now,
-            uncertainty: 1,
-        },
-    )?;
+    let (after, compaction) = compact_authority_at_lower_bound(&state, qualified_lower_bound_ms)?;
     let mut without_credentials = State::clone(&after);
     for intent in without_credentials.delegation_intents.values_mut() {
         intent.request.grant.clear();
@@ -143,7 +134,7 @@ pub fn project(path: &Path, qualified_lower_bound_ms: u64) -> Result<CapacityPro
         qualified_lower_bound_ms,
         bytes_before,
         bytes_after,
-        bytes_reclaimed: bytes_before.saturating_sub(bytes_after),
+        bytes_reclaimed: compaction.reclaimed_bytes,
         fits_capacity: !over_capacity(&after),
         collections,
         retained_bytes: retained,

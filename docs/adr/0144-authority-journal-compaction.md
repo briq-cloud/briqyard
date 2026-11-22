@@ -60,8 +60,11 @@ no automatic headroom.
 one validated authority snapshot without taking the writer lock. It does not load fleet
 configuration or credentials, rotate the epoch, persist anything or make a network call.
 It prints only the supplied bound, input bytes before, projected encoded bytes after,
-reclamation, whether the
-projection fits, and per-collection counts before/after. Its retained-byte categories split
+credential reclamation, whether the
+projection fits, and per-collection counts before/after. JSON formatting differences are not
+credential reclamation: `bytes_reclaimed` comes directly from the compactor's canonical-state
+delta, separately from the stored and projected sizes. The command rejects unsupported journal
+versions and routes failure diagnostics to stderr, leaving report stdout empty. Its retained-byte categories split
 remaining raw credentials from retained delegation evidence and reconcile exactly to the
 projected size. No token, identifier, key or record value is printed. JSON object keys are
 fixed category names; every leaf is a number or boolean.

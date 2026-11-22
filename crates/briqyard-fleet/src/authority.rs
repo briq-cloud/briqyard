@@ -388,6 +388,26 @@ mod tests {
         .is_err());
         assert!(!root.path().join("registry").exists());
     }
+    #[tokio::test]
+    async fn authority_journal_projection_does_not_load_fleet_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = root.path().join("journal.json");
+        let bytes = include_bytes!("../../briqyard-api/tests/fixtures/authority-compacted-v1.json");
+        private_file(&journal, bytes);
+        crate::run(crate::Args {
+            config: root.path().join("nonexistent.yaml"),
+            cmd: Some(crate::Cmd::Authority {
+                command: Some(crate::AuthorityCmd::JournalProject {
+                    journal: journal.clone(),
+                    lower_bound_ms: 1_999_000,
+                }),
+            }),
+        })
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(journal).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
     fn private_file(path: &Path, bytes: &[u8]) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(path, bytes).unwrap();

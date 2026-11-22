@@ -9,8 +9,7 @@ pub struct Compaction {
 }
 
 pub fn compact_authority(state: &State, clock: Clock) -> Result<(State, Compaction), Error> {
-    if !matches!(state.role, Role::Authority(_))
-        || clock.now < state.clock_floor
+    if clock.now < state.clock_floor
         || clock.now > MAX_SAFE_INTEGER
         || clock.uncertainty > MAX_SAFE_INTEGER
     {
@@ -21,6 +20,16 @@ pub fn compact_authority(state: &State, clock: Clock) -> Result<(State, Compacti
         .checked_sub(clock.uncertainty)
         .and_then(|now| now.checked_mul(1000))
         .ok_or(Error::Binding)?;
+    compact_authority_at_lower_bound(state, earliest_ms)
+}
+
+pub(super) fn compact_authority_at_lower_bound(
+    state: &State,
+    earliest_ms: u64,
+) -> Result<(State, Compaction), Error> {
+    if state.v != 1 || !matches!(state.role, Role::Authority(_)) {
+        return Err(Error::Binding);
+    }
     let before = serde_json::to_vec(state)
         .map_err(|_| Error::Persistence)?
         .len();

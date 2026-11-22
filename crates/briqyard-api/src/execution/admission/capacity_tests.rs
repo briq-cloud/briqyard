@@ -25,7 +25,7 @@ fn projection_measures_reclaimable_raw_credentials() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("journal.json");
     let before = serde_json::to_vec(&initial).unwrap();
-    std::fs::write(&path, before).unwrap();
+    std::fs::write(&path, &before).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let report = project_capacity(&path, 2_000_000).unwrap();
     assert_eq!(report.bytes_reclaimed, 1734);
@@ -37,18 +37,22 @@ fn projection_measures_reclaimable_raw_credentials() {
     let serialized = serde_json::to_string(&report).unwrap();
     assert!(!serialized.contains(signed["grant_token"].as_str().unwrap()));
     assert!(!serialized.contains(signed["allocation_token"].as_str().unwrap()));
+
+    let pretty = serde_json::to_vec_pretty(&initial).unwrap();
+    assert!(pretty.len() > before.len());
+    std::fs::write(&path, &pretty).unwrap();
+    let pretty_report = project_capacity(&path, 2_000_000).unwrap();
+    assert_eq!(pretty_report.bytes_before, pretty.len());
+    assert_eq!(pretty_report.bytes_after, report.bytes_after);
+    assert_eq!(pretty_report.bytes_reclaimed, report.bytes_reclaimed);
 }
 
 #[test]
 fn projection_is_read_only_and_reports_only_aggregates() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("journal.json");
-    let initial: Value = serde_json::from_slice(include_bytes!(
-        "../../../tests/fixtures/authority-compacted-v1.json"
-    ))
-    .unwrap();
-    let bytes = serde_json::to_vec(&initial).unwrap();
-    std::fs::write(&path, &bytes).unwrap();
+    let bytes = include_bytes!("../../../tests/fixtures/authority-compacted-v1.json");
+    std::fs::write(&path, bytes).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let lock_path = directory.path().join("writer.lock");
     let lock = OpenOptions::new()
@@ -100,6 +104,69 @@ fn projection_is_read_only_and_reports_only_aggregates() {
     assert!(matches!(
         Journal::open(directory.path(), Role::Authority("authority".into())),
         Err(Error::Ownership)
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn projection_uses_the_exact_qualified_lower_bound() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("journal.json");
+    let mut initial: Value = serde_json::from_slice(include_bytes!(
+        "../../../tests/fixtures/authority-compacted-v1.json"
+    ))
+    .unwrap();
+    initial["clock_floor"] = serde_json::json!(100);
+    std::fs::write(&path, serde_json::to_vec(&initial).unwrap()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (state, _) = read_state_size(&path).unwrap().unwrap();
+    let (writer_projection, _) = compact_authority(
+        &state,
+        Clock {
+            now: 100,
+            uncertainty: 3,
+        },
+    )
+    .unwrap();
+    let report = project_capacity(&path, 97_000).unwrap();
+    assert_eq!(report.bytes_reclaimed, 0);
+    assert_eq!(
+        report.bytes_after,
+        serde_json::to_vec(&writer_projection).unwrap().len()
+    );
+}
+
+#[test]
+fn projection_rejects_an_unsafe_lower_bound() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("journal.json");
+    std::fs::write(
+        &path,
+        include_bytes!("../../../tests/fixtures/authority-compacted-v1.json"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(matches!(
+        project_capacity(&path, MAX_SAFE_INTEGER + 1),
+        Err(Error::Binding)
+    ));
+}
+
+#[test]
+fn projection_rejects_unsupported_journal_versions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("journal.json");
+    let mut initial: Value = serde_json::from_slice(include_bytes!(
+        "../../../tests/fixtures/authority-compacted-v1.json"
+    ))
+    .unwrap();
+    initial["v"] = serde_json::json!(2);
+    let bytes = serde_json::to_vec(&initial).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(matches!(
+        project_capacity(&path, 1_999_000),
+        Err(Error::Binding)
     ));
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }

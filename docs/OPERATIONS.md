@@ -1463,9 +1463,10 @@ briqyard-fleet authority journal-project <journal.json> <qualified-lower-bound-m
 ```
 
 Pass an already-qualified absolute epoch lower bound in milliseconds. The command reports
-input and projected bytes, byte and count changes, and aggregates for every retained
-category. It takes no writer lock, reads no fleet configuration or credentials, rotates no
-epoch, writes no files and makes no network calls. It prints no token, identifier or record
-contents. It neither qualifies the supplied bound itself nor proposes manual record
-processing; it answers only whether that bound would reclaim credential bytes and how much
-history would remain.
+input and projected bytes, credential reclamation, count changes and aggregates for every
+retained category. JSON formatting differences do not count as credential reclamation. It
+takes no writer lock, reads no fleet configuration or credentials, rotates no epoch, writes
+no files and makes no network calls. It prints no token, identifier or record contents.
+Failure diagnostics go to stderr; stdout stays empty on failure. It neither qualifies the
+supplied bound itself nor proposes manual record processing; it answers only whether that
+bound would reclaim credential bytes and how much history would remain.
