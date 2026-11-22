@@ -5,7 +5,7 @@ use crate::execution::sealed::canonical::{decode, encode, CodecError};
 use crate::execution::sealed::custody::{CustodyWire, Resource, Slot};
 use crate::execution::sealed::objects::X;
 use crate::execution::sealed::sig::{Sig, SigError, Tag};
-use crate::execution::sealed::tests::{dg, id, n, proc, x, TestSigner};
+use crate::execution::sealed::tests::{dg, fixture_nonce, id, proc, x, TestSigner};
 use crate::execution::sealed::transition::*;
 
 fn launch(stage: LaunchStage) -> Launch {
@@ -14,24 +14,24 @@ fn launch(stage: LaunchStage) -> Launch {
         x: x(),
         plan: plan_hash(),
         resource: Resource::Authority,
-        owner: n(3),
+        owner: fixture_nonce(3),
         stage,
         old: proc(12),
         custodian: proc(10),
         successor: (rank >= 3).then(authority_new),
         death: (rank >= 4).then(|| authority_death().hash().unwrap()),
-        nonce: n(4),
+        nonce: fixture_nonce(4),
     }
 }
 
 fn authority_death() -> Death {
     Death {
         resource: Resource::Authority,
-        owner: n(3),
+        owner: fixture_nonce(3),
         old: proc(12),
         next: authority_new(),
         custodian: proc(10),
-        challenge: n(5),
+        challenge: fixture_nonce(5),
         ..daemon_death()
     }
 }
@@ -92,8 +92,8 @@ fn a_launch_advances_one_stage_at_a_time_and_keeps_owner_and_nonce() {
         .check_next(&launch(LaunchStage::Consumed))
         .is_err());
     for mutate in [
-        (|l: &mut Launch| l.owner = n(9)) as fn(&mut Launch),
-        |l| l.nonce = n(9),
+        (|l: &mut Launch| l.owner = fixture_nonce(9)) as fn(&mut Launch),
+        |l| l.nonce = fixture_nonce(9),
         |l| l.old = proc(13),
         |l| l.custodian = proc(11),
         |l| l.plan = dg('2'),
@@ -117,19 +117,19 @@ fn the_spec_capture_wire_is_this_launchs_capture() {
         x: x(),
         plan: plan_hash(),
         resource: Resource::Authority,
-        owner: n(3),
+        owner: fixture_nonce(3),
         custodian: proc(10),
         old: proc(12),
         next: None,
-        challenge: n(4),
+        challenge: fixture_nonce(4),
         slot: Slot::new(27).unwrap(),
     };
     launch(LaunchStage::Captured)
         .check_capture(&capture)
         .unwrap();
     for mutate in [
-        (|c: &mut CustodyWire| c.challenge = n(5)) as fn(&mut CustodyWire),
-        |c| c.owner = n(9),
+        (|c: &mut CustodyWire| c.challenge = fixture_nonce(5)) as fn(&mut CustodyWire),
+        |c| c.owner = fixture_nonce(9),
         |c| c.old = proc(13),
         |c| c.next = Some(proc(18)),
         |c| c.resource = Resource::Daemon,
@@ -158,7 +158,7 @@ fn the_launch_death_link_names_the_same_owner_processes_and_hash() {
     let retired = launch(LaunchStage::Retired);
     retired.check_death(&authority_death()).unwrap();
     for mutate in [
-        (|d: &mut Death| d.owner = n(9)) as fn(&mut Death),
+        (|d: &mut Death| d.owner = fixture_nonce(9)) as fn(&mut Death),
         |d| d.old = proc(13),
         |d| d.next = proc(41),
         |d| d.profile = dg('0'),
@@ -190,16 +190,16 @@ fn death_is_true_exited_zero_writers_durable_and_its_challenge_is_the_wire_chall
         x: x(),
         plan: plan_hash(),
         resource: Resource::Authority,
-        owner: n(3),
+        owner: fixture_nonce(3),
         custodian: proc(10),
         old: proc(12),
         next: Some(authority_new()),
-        challenge: n(5),
+        challenge: fixture_nonce(5),
         slot: Slot::new(27).unwrap(),
     };
     death.check_wire(&request).unwrap();
     let mut other = request;
-    other.challenge = n(6);
+    other.challenge = fixture_nonce(6);
     assert!(death.check_wire(&other).is_err());
 }
 
@@ -208,9 +208,9 @@ fn decision(action: LKind) -> LDecision {
         x: x(),
         plan: plan_hash(),
         action,
-        owner: n(3),
+        owner: fixture_nonce(3),
         expected: proc(12),
-        nonce: n(21),
+        nonce: fixture_nonce(21),
     }
 }
 
@@ -235,7 +235,7 @@ fn a_launch_grant_is_two_signatures_over_one_identical_decision() {
     let g = grant(&decision(LKind::LaunchA));
     assert!(g.verify(&bk(), &rk()).is_err(), "swapped keys");
     let mut other = decision(LKind::LaunchA);
-    other.nonce = n(22);
+    other.nonce = fixture_nonce(22);
     let mixed = LGrant {
         receiver: g.receiver.clone(),
         api: Sig::sign(Tag::LaunchApi, other, &TestSigner::bk()).unwrap(),
@@ -264,7 +264,7 @@ fn a_decision_is_for_this_resources_launch_owner_and_expected_process() {
         "launch_d is the daemon's"
     );
     let mut wrong_owner = decision(LKind::LaunchA);
-    wrong_owner.owner = n(9);
+    wrong_owner.owner = fixture_nonce(9);
     assert!(wrong_owner.check_launch(&consumed).is_err());
     let mut wrong_proc = decision(LKind::LaunchA);
     wrong_proc.expected = proc(13);
@@ -310,7 +310,7 @@ fn a_seal_request_carries_only_a_seal_grant() {
 
 #[test]
 fn secrets_are_redacted_validated_and_checked_against_the_member_digest() {
-    let value = Bearer::from_random(&n(7));
+    let value = Bearer::from_random(&fixture_nonce(7));
     assert!(value.expose().starts_with("brx_") && value.expose().len() == 47);
     assert_eq!(format!("{value:?}"), "Bearer(<redacted>)");
     let secrets = Secrets {
@@ -415,8 +415,8 @@ fn a_resume_challenge_answers_exactly_the_request_envelope() {
             x: x(),
             plan: plan_hash(),
             resource: Resource::Authority,
-            owner: n(3),
-            nonce: n(31),
+            owner: fixture_nonce(3),
+            nonce: fixture_nonce(31),
         },
         &TestSigner::rk(),
     )
@@ -447,7 +447,7 @@ fn reattach_needs_identical_resume_bodies_under_both_roles() {
     assert_eq!(reattach.verify(&rk(), &bk()).unwrap(), &body);
     assert!(reattach.verify(&bk(), &rk()).is_err());
     let mut other = body;
-    other.q.nonce = n(99);
+    other.q.nonce = fixture_nonce(99);
     let mixed = Reattach {
         receiver: reattach.receiver.clone(),
         api: Sig::sign(Tag::ResumeApi, other, &TestSigner::bk()).unwrap(),

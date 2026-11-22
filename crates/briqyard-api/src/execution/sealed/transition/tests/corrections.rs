@@ -8,7 +8,7 @@ use crate::execution::sealed::canonical::{decode, encode, h, CodecError, Wire};
 use crate::execution::sealed::custody::Resource;
 use crate::execution::sealed::objects::{ClaimKind, Q};
 use crate::execution::sealed::sig::{Sig, Tag};
-use crate::execution::sealed::tests::{dg, id, n, pos, proc, x, TestSigner};
+use crate::execution::sealed::tests::{dg, fixture_nonce, id, pos, proc, x, TestSigner};
 use crate::execution::sealed::transition::*;
 use serde_json::{json, Value};
 
@@ -235,7 +235,7 @@ fn the_registration_row_is_compared_by_its_original_claim_permit_and_witness() {
         for (what, tweak) in [
             (
                 "claim",
-                (|i: &mut Intent| i.claim = n(1)) as fn(&mut Intent),
+                (|i: &mut Intent| i.claim = fixture_nonce(1)) as fn(&mut Intent),
             ),
             ("permit", |i| i.permit = dg('0')),
             ("witness", |i| i.witness = dg('0')),
@@ -307,7 +307,7 @@ fn release_view(water: u64) -> (ApiViewBody, crate::execution::sealed::objects::
         bind: Some(b.clone()),
         step: Some(ClaimKind::RecordAck),
         state: ApiState::Observed,
-        claim: Some(n(21)),
+        claim: Some(fixture_nonce(21)),
         permit: Some(dg('a')),
         api_water: crate::execution::sealed::prim::Uint::new(water).unwrap(),
         row_ack: Some(ack),
@@ -322,20 +322,23 @@ fn release_view(water: u64) -> (ApiViewBody, crate::execution::sealed::objects::
 #[test]
 fn a_release_view_is_record_ack_observed_with_the_row_triple_and_n_plus_one_together() {
     let (view, b) = release_view(3);
-    view.check_release_ready(&b, &n(21)).unwrap();
+    view.check_release_ready(&b, &fixture_nonce(21)).unwrap();
     let (stale, b) = release_view(2);
     assert!(
-        stale.check_release_ready(&b, &n(21)).is_err(),
+        stale.check_release_ready(&b, &fixture_nonce(21)).is_err(),
         "N is the water before the registration commit"
     );
     let (mut view, b) = release_view(3);
     view.snapshot = None;
     view.row_ack = None;
     view.row_intent = None;
-    assert!(view.check_release_ready(&b, &n(21)).is_err(), "no triple");
+    assert!(
+        view.check_release_ready(&b, &fixture_nonce(21)).is_err(),
+        "no triple"
+    );
     let (mut view, b) = release_view(3);
     view.step = Some(ClaimKind::Release);
-    assert!(view.check_release_ready(&b, &n(21)).is_err());
+    assert!(view.check_release_ready(&b, &fixture_nonce(21)).is_err());
 }
 
 #[test]
@@ -445,7 +448,7 @@ fn a_client_query_is_for_the_staged_operation_and_plan() {
         role: ClientRole::Ng,
         bind: bind(),
         member: state.member.clone(),
-        nonce: n(41),
+        nonce: fixture_nonce(41),
     };
     let query = ClientQueryBody {
         q: state.q.clone(),
@@ -477,7 +480,7 @@ fn client_enable_pins_the_trial_to_its_bind() {
         proc: proc(50),
         bind: bind(),
         trial: trial.hash().unwrap(),
-        nonce: n(43),
+        nonce: fixture_nonce(43),
     };
     assert!(
         enable.check_trial(&trial).is_err(),
@@ -516,9 +519,9 @@ fn nested_launch_signatures_carry_their_own_tags() {
         x: x(),
         plan: plan_hash(),
         action: LKind::LaunchA,
-        owner: n(3),
+        owner: fixture_nonce(3),
         expected: proc(12),
-        nonce: n(21),
+        nonce: fixture_nonce(21),
     };
     let ok = LGrant {
         receiver: Sig::sign(Tag::LaunchReceiver, d.clone(), &TestSigner::rk()).unwrap(),
@@ -603,7 +606,7 @@ fn a_nested_observe_clock_reattach_and_archive_carry_their_tags() {
         kind: ObserveKind::Clock,
         id: None,
     };
-    let salt = n(70);
+    let salt = fixture_nonce(70);
     let clock = host_clock(&request.q, &salt);
     let u = |v| crate::execution::sealed::prim::Uint::new(v).unwrap();
     let mut response = AuthorityObserveBody {
@@ -688,7 +691,7 @@ fn nested_trial_signatures_carry_their_tags() {
     let query = TrialQueryBody {
         q: Q {
             x: x(),
-            nonce: n(60),
+            nonce: fixture_nonce(60),
         },
         plan: dg('1'),
         trial: t.hash().unwrap(),
@@ -713,8 +716,8 @@ fn a_resume_request_is_the_resume_request_tag() {
         x: x(),
         plan: plan_hash(),
         resource: Resource::Authority,
-        owner: n(3),
-        nonce: n(31),
+        owner: fixture_nonce(3),
+        nonce: fixture_nonce(31),
     };
     let request = Sig::sign(Tag::ResumeApi, body, &TestSigner::rk()).unwrap();
     let challenge = ResumeChallengeBody {
@@ -748,13 +751,13 @@ fn process_tuple_inequality_is_not_a_codec_rule() {
         x: x(),
         plan: plan_hash(),
         resource: Resource::Authority,
-        owner: n(3),
+        owner: fixture_nonce(3),
         stage: LaunchStage::Observed,
         old: proc(12),
         custodian: proc(10),
         successor: Some(proc(12)),
         death: None,
-        nonce: n(4),
+        nonce: fixture_nonce(4),
     };
     round_trip(&launch);
 }
@@ -765,8 +768,8 @@ fn a_resume_challenge_nonce_is_the_custodians_to_choose() {
         x: x(),
         plan: plan_hash(),
         resource: Resource::Authority,
-        owner: n(3),
-        nonce: n(31),
+        owner: fixture_nonce(3),
+        nonce: fixture_nonce(31),
     };
     let request = Sig::sign(Tag::ResumeRequest, body, &TestSigner::rk()).unwrap();
     let challenge = ResumeChallengeBody {
@@ -774,7 +777,7 @@ fn a_resume_challenge_nonce_is_the_custodians_to_choose() {
         resume: Resume {
             q: Q {
                 x: x(),
-                nonce: n(31),
+                nonce: fixture_nonce(31),
             },
             plan: plan_hash(),
             resource: Resource::Authority,

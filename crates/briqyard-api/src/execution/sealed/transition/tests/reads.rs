@@ -5,7 +5,7 @@ use crate::execution::sealed::canonical::CodecError;
 use crate::execution::sealed::objects::{ClaimKind, ProjectionAction, Q};
 use crate::execution::sealed::prim::Bytes;
 use crate::execution::sealed::sig::{Sig, SigError, Tag};
-use crate::execution::sealed::tests::{dg, id, n, pos, x, TestSigner};
+use crate::execution::sealed::tests::{dg, fixture_nonce, id, pos, x, TestSigner};
 use crate::execution::sealed::transition::*;
 
 const PHASES: [GatePhase; 5] = [
@@ -107,14 +107,14 @@ fn an_authority_read_links_guard_process_and_the_salted_host_clock() {
     b.proc = crate::execution::sealed::tests::proc(99);
     assert!(refused(&b), "guard.proc is the actual process");
     let mut b = body.clone();
-    b.salt = n(1);
+    b.salt = fixture_nonce(1);
     assert_eq!(
         decode_err(&b),
         CodecError::Value("host clock challenge"),
         "the nested clock answers the salted challenge"
     );
     let mut b = body.clone();
-    b.q.nonce = n(77);
+    b.q.nonce = fixture_nonce(77);
     assert_eq!(decode_err(&b), CodecError::Value("host clock challenge"));
     let mut b = body.clone();
     b.host_clock.body.plan = dg('2');
@@ -135,7 +135,7 @@ fn decode_err<T: crate::execution::sealed::canonical::Wire>(value: &T) -> CodecE
 #[test]
 fn the_salted_challenge_is_a_sha256_of_the_canonical_outer_query_plan_and_salt() {
     let outer = q(5);
-    let salt = n(105);
+    let salt = fixture_nonce(105);
     let nonce = host_challenge_nonce(&outer, &plan_hash(), &salt).unwrap();
     let canonical = format!(
         r#"{{"outer":{},"plan":"{}","salt":"{}"}}"#,
@@ -147,7 +147,7 @@ fn the_salted_challenge_is_a_sha256_of_the_canonical_outer_query_plan_and_salt()
     assert_eq!(nonce, Bytes::from_array(expected.into()));
     assert_ne!(
         nonce,
-        host_challenge_nonce(&outer, &plan_hash(), &n(106)).unwrap()
+        host_challenge_nonce(&outer, &plan_hash(), &fixture_nonce(106)).unwrap()
     );
     assert_ne!(
         nonce,
@@ -300,7 +300,7 @@ fn api_view(state: ApiState, bind_present: bool) -> ApiViewBody {
 
 fn with_identity(mut v: ApiViewBody) -> ApiViewBody {
     v.step = Some(ClaimKind::RecordAck);
-    v.claim = Some(n(11));
+    v.claim = Some(fixture_nonce(11));
     v
 }
 
@@ -336,7 +336,7 @@ fn api_view_states_have_exactly_their_identity_fields() {
         "an observed record_ack keeps its row triple and N+1 water"
     );
     let mut frozen = api_view(ApiState::Frozen, true);
-    frozen.claim = Some(n(1));
+    frozen.claim = Some(fixture_nonce(1));
     assert!(refused(&frozen), "frozen has no claim");
     let mut frozen = api_view(ApiState::Frozen, false);
     frozen.step = Some(ClaimKind::Arm);
@@ -366,7 +366,7 @@ fn the_row_triple_is_all_null_or_all_present_and_bound_to_the_original_row() {
         |v| v.row_intent = None,
         |v| v.snapshot = Some(dg('0')),
         |v| v.row_intent = Some(id("register:sealed:other")),
-        |v| v.row_ack.as_mut().unwrap().digest = n(1),
+        |v| v.row_ack.as_mut().unwrap().digest = fixture_nonce(1),
         |v| v.bind = None,
         |v| v.api_water = crate::execution::sealed::prim::Uint::new(2).unwrap(),
     ] {
@@ -374,14 +374,18 @@ fn the_row_triple_is_all_null_or_all_present_and_bound_to_the_original_row() {
         mutate(&mut v);
         assert!(refused(&v));
     }
-    ready.check_release_ready(&b, &n(11)).unwrap();
-    assert!(ready.check_release_ready(&b, &n(12)).is_err());
+    ready.check_release_ready(&b, &fixture_nonce(11)).unwrap();
+    assert!(ready.check_release_ready(&b, &fixture_nonce(12)).is_err());
     let mut arm_step = ready.clone();
     arm_step.step = Some(ClaimKind::Arm);
-    assert!(arm_step.check_release_ready(&b, &n(11)).is_err());
+    assert!(arm_step
+        .check_release_ready(&b, &fixture_nonce(11))
+        .is_err());
     let mut unobserved = ready;
     unobserved.state = ApiState::Committing;
-    assert!(unobserved.check_release_ready(&b, &n(11)).is_err());
+    assert!(unobserved
+        .check_release_ready(&b, &fixture_nonce(11))
+        .is_err());
 }
 
 #[test]
@@ -390,35 +394,35 @@ fn a_crossing_needs_the_committing_exact_slot_owned_holds_and_the_right_api_wate
     let mut v = with_identity(api_view(ApiState::Committing, true));
     v.step = Some(ClaimKind::Arm);
     v.permit = Some(permit.clone());
-    v.check_crossing(&bind(), ClaimKind::Arm, &n(11), &permit)
+    v.check_crossing(&bind(), ClaimKind::Arm, &fixture_nonce(11), &permit)
         .unwrap();
     assert!(v
-        .check_crossing(&bind(), ClaimKind::Adopt, &n(11), &permit)
+        .check_crossing(&bind(), ClaimKind::Adopt, &fixture_nonce(11), &permit)
         .is_err());
     assert!(v
-        .check_crossing(&bind(), ClaimKind::Arm, &n(12), &permit)
+        .check_crossing(&bind(), ClaimKind::Arm, &fixture_nonce(12), &permit)
         .is_err());
     assert!(v
-        .check_crossing(&bind(), ClaimKind::Arm, &n(11), &dg('b'))
+        .check_crossing(&bind(), ClaimKind::Arm, &fixture_nonce(11), &dg('b'))
         .is_err());
     let mut released = v.clone();
     released.pause_owned = false;
     assert!(released
-        .check_crossing(&bind(), ClaimKind::Arm, &n(11), &permit)
+        .check_crossing(&bind(), ClaimKind::Arm, &fixture_nonce(11), &permit)
         .is_err());
     let mut observed = v.clone();
     observed.state = ApiState::Observed;
     assert!(observed
-        .check_crossing(&bind(), ClaimKind::Arm, &n(11), &permit)
+        .check_crossing(&bind(), ClaimKind::Arm, &fixture_nonce(11), &permit)
         .is_err());
     let mut registered = v;
     registered.step = Some(ClaimKind::Register);
     assert!(registered
-        .check_crossing(&bind(), ClaimKind::Register, &n(11), &permit)
+        .check_crossing(&bind(), ClaimKind::Register, &fixture_nonce(11), &permit)
         .is_err());
     registered.api_water = crate::execution::sealed::prim::Uint::new(3).unwrap();
     registered
-        .check_crossing(&bind(), ClaimKind::Register, &n(11), &permit)
+        .check_crossing(&bind(), ClaimKind::Register, &fixture_nonce(11), &permit)
         .unwrap();
 }
 
@@ -432,7 +436,7 @@ fn observe_pair(
         kind,
         id: id_text.map(id),
     };
-    let salt = n(70);
+    let salt = fixture_nonce(70);
     let clock = host_clock(&request.q, &salt);
     let (status, ident) = match kind {
         ObserveKind::Clock => (ObserveStatus::NotRequested, None),
@@ -511,7 +515,7 @@ fn observe_kind_id_and_status_must_agree() {
     b.host_now = u(1);
     assert!(refused(&b), "the host sample equals the nested clock reply");
     let mut b = clock;
-    b.salt = n(1);
+    b.salt = fixture_nonce(1);
     assert!(refused(&b), "the nested clock answers A's salted challenge");
     let (query_clock_id, _) = observe_pair(ObserveKind::Clock, None);
     let mut bad = query_clock_id;
@@ -568,7 +572,7 @@ fn final_read_has_a_trial_commitment_only_once_verified() {
     let other = FinalQueryBody {
         q: Q {
             x: x(),
-            nonce: n(9),
+            nonce: fixture_nonce(9),
         },
         plan: plan_hash(),
     };

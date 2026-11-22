@@ -43,3 +43,4 @@ briqyard-testing = { workspace = true }
 ctor = { workspace = true }
 rcgen = { workspace = true }
 tempfile = "3"
+getrandom = "0.4"

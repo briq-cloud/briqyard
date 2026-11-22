@@ -5,7 +5,7 @@ use super::fixtures::*;
 use crate::execution::sealed::canonical::{decode, encode, h, CodecError, Wire};
 use crate::execution::sealed::objects::ClaimKind;
 use crate::execution::sealed::sig::{Sig, SigError, Tag};
-use crate::execution::sealed::tests::{dg, n, pos, TestSigner};
+use crate::execution::sealed::tests::{dg, fixture_nonce, pos, TestSigner};
 use crate::execution::sealed::transition::*;
 
 const ALL: [ClaimKind; 5] = [
@@ -177,10 +177,10 @@ fn b_and_r_reads_use_independent_nonces() {
 #[test]
 fn the_receiver_approval_echoes_owner_claim_and_challenge() {
     assert!(packet_refused(ClaimKind::Arm, "packet receiver ok", |p| {
-        p.ok_nonce = n(99)
+        p.ok_nonce = fixture_nonce(99)
     }));
     assert!(packet_refused(ClaimKind::Arm, "packet receiver ok", |p| {
-        p.ok_claim = n(99)
+        p.ok_claim = fixture_nonce(99)
     }));
     assert!(packet_refused(ClaimKind::Arm, "packet receiver ok", |p| {
         p.ok_action = ClaimKind::Adopt
@@ -286,16 +286,16 @@ fn review_request_is_answered_by_exactly_the_approval_that_echoes_it() {
         plan: plan_hash(),
         action: ClaimKind::Arm,
         bind: bind(),
-        owner: n(12),
-        claim: n(21),
-        nonce: n(13),
+        owner: fixture_nonce(12),
+        claim: fixture_nonce(21),
+        nonce: fixture_nonce(13),
     };
     round_trip(&review);
     packet.ok.body.check_review(&review).unwrap();
     for mutate in [
-        (|r: &mut ReviewRequestBody| r.nonce = n(1)) as fn(&mut _),
-        |r| r.claim = n(1),
-        |r| r.owner = n(1),
+        (|r: &mut ReviewRequestBody| r.nonce = fixture_nonce(1)) as fn(&mut _),
+        |r| r.claim = fixture_nonce(1),
+        |r| r.owner = fixture_nonce(1),
         |r| r.action = ClaimKind::Adopt,
     ] {
         let mut other = review.clone();
@@ -320,7 +320,7 @@ fn a_register_request_carries_the_authoritys_witness_for_exactly_its_permit() {
 
     for mutate in [
         (|b: &mut WitnessBody| b.permit = dg('0')) as fn(&mut _),
-        |b| b.claim = n(1),
+        |b| b.claim = fixture_nonce(1),
         |b| b.guard = dg('0'),
         |b| b.proc = crate::execution::sealed::tests::proc(99),
     ] {

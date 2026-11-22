@@ -3,7 +3,7 @@
 use super::fixtures::*;
 use crate::execution::sealed::prim::Bytes;
 use crate::execution::sealed::sig::{Role, Tag};
-use crate::execution::sealed::tests::{n, x};
+use crate::execution::sealed::tests::{fixture_nonce, x};
 use crate::execution::sealed::transition::*;
 
 #[test]
@@ -103,7 +103,7 @@ impl HostClockOrQuery {
         FinalQueryBody {
             q: crate::execution::sealed::objects::Q {
                 x: x(),
-                nonce: n(7),
+                nonce: fixture_nonce(7),
             },
             plan: plan_hash(),
         }

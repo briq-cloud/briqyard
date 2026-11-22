@@ -1,4 +1,0 @@
-name: briqyard-codeql
-paths-ignore:
-  - crates/**/tests/**/*.rs
-  - crates/**/tests.rs

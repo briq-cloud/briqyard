@@ -378,6 +378,7 @@ dependencies = [
  "chrono",
  "ctor",
  "ed25519-dalek",
+ "getrandom 0.4.3",
  "hex",
  "nix 0.29.0",
  "rcgen",

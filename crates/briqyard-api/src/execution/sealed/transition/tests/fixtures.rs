@@ -8,7 +8,7 @@ use crate::execution::sealed::objects::{
 };
 use crate::execution::sealed::prim::{Build, Bytes, HexDigest, Nonce, PosInt, Uint};
 use crate::execution::sealed::sig::{PinnedKey, Role, Sig, Signer, Tag};
-use crate::execution::sealed::tests::{dg, id, key, n, pos, proc, x, TestSigner};
+use crate::execution::sealed::tests::{dg, fixture_nonce, id, key, pos, proc, x, TestSigner};
 use crate::execution::sealed::transition::*;
 use ed25519_dalek::SigningKey;
 use serde::Serialize;
@@ -165,11 +165,11 @@ pub(super) fn daemon_death() -> Death {
         x: x(),
         plan: plan_hash(),
         resource: Resource::Daemon,
-        owner: n(1),
+        owner: fixture_nonce(1),
         old: daemon_old(),
         next: daemon_new(),
         custodian: custodian(),
-        challenge: n(8),
+        challenge: fixture_nonce(8),
         profile: dg('7'),
         exited: crate::execution::sealed::prim::LitBool,
         external_writers: crate::execution::sealed::prim::LitU,
@@ -203,7 +203,7 @@ pub(super) fn reg_done() -> RegDone {
         ack: bind.record.ack(),
         host_water: bind.record.generation,
         bind,
-        claim: n(11),
+        claim: fixture_nonce(11),
         permit: dg('a'),
         witness: dg('b'),
     }
@@ -251,7 +251,7 @@ pub(super) fn intent(phase: IntentPhase) -> Intent {
     let record = new_record();
     Intent {
         id: bind().intent,
-        claim: n(11),
+        claim: fixture_nonce(11),
         permit: dg('a'),
         guard: guard_hash(GuardPhase::Adopted),
         witness: dg('b'),
@@ -266,7 +266,7 @@ pub(super) fn witness_body() -> WitnessBody {
         x: x(),
         plan: plan_hash(),
         bind: bind(),
-        claim: n(11),
+        claim: fixture_nonce(11),
         permit: dg('a'),
         guard: guard_hash(GuardPhase::Adopted),
         proc: authority_new(),
@@ -278,7 +278,7 @@ pub(super) fn witness_body() -> WitnessBody {
 pub(super) fn q(nonce: u8) -> Q {
     Q {
         x: x(),
-        nonce: n(nonce),
+        nonce: fixture_nonce(nonce),
     }
 }
 
@@ -410,7 +410,7 @@ pub(super) fn aread_with(
 ) -> ARead {
     let guard_hash = guard.hash().unwrap();
     let outer = q(nonce);
-    let salt = n(nonce + 100);
+    let salt = fixture_nonce(nonce + 100);
     let past: &[ProjectionAction] = match intent.as_ref().map(|i| i.phase) {
         None => &[],
         Some(IntentPhase::Pending) => &[ProjectionAction::AuthorityIntent],
@@ -494,12 +494,12 @@ pub(super) struct Parts {
     pub expires: u64,
 }
 
-/// The registration's original claim is n(11); every other action has its own new claim.
+/// The registration's original claim is fixture_nonce(11); every other action has its own new claim.
 pub(super) fn claim_of(action: ClaimKind) -> Nonce {
     if action == ClaimKind::Register {
-        n(11)
+        fixture_nonce(11)
     } else {
-        n(21)
+        fixture_nonce(21)
     }
 }
 
@@ -518,7 +518,7 @@ pub(super) fn parts(action: ClaimKind) -> Parts {
         ropts: AOpts::default(),
         claim: claim_of(action),
         nonces: [1, 2, 3, 4],
-        ok_nonce: n(13),
+        ok_nonce: fixture_nonce(13),
         ok_claim: claim_of(action),
         ok_action: action,
         ok_bind: bind(),
@@ -545,7 +545,7 @@ pub(super) fn build(action: ClaimKind, p: Parts) -> Packet {
         plan: plan_hash(),
         action: p.ok_action,
         bind: p.ok_bind,
-        owner: n(12),
+        owner: fixture_nonce(12),
         claim: p.ok_claim,
         host_proof: h(&rh).unwrap(),
         authority_proof: h(&ra).unwrap(),
@@ -559,8 +559,8 @@ pub(super) fn build(action: ClaimKind, p: Parts) -> Packet {
         plan: plan_hash(),
         action,
         claim: p.claim,
-        owner: n(12),
-        challenge: n(13),
+        owner: fixture_nonce(12),
+        challenge: fixture_nonce(13),
         bind: p.ticket_bind,
         prior_gate: bh.body.gate_hash.clone(),
         auth_guard: p.auth_guard.or_else(|| Some(ba.body.guard_hash.clone())),

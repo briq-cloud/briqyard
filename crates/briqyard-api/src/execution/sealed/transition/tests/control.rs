@@ -5,7 +5,7 @@ use super::fixtures::*;
 use crate::execution::sealed::canonical::{decode, h};
 use crate::execution::sealed::objects::{Q, X};
 use crate::execution::sealed::sig::{Sig, SigError, Tag};
-use crate::execution::sealed::tests::{dg, id, n, proc, x, TestSigner};
+use crate::execution::sealed::tests::{dg, fixture_nonce, id, n, proc, x, TestSigner};
 use crate::execution::sealed::transition::*;
 use crate::execution::sealed::trial::{
     grant_hash, projection_hash, ExecOk, Finished, IssuedBody, Pair, StatusBody, Trial, TrialResult,
@@ -57,7 +57,7 @@ fn stage(role: ClientRole) -> ClientStageBody {
             ClientRole::Ni => members.ni,
             ClientRole::Ng => members.ng,
         },
-        nonce: n(41),
+        nonce: fixture_nonce(41),
     }
 }
 
@@ -128,7 +128,7 @@ fn client_state_answers_one_query_from_the_staged_slot() {
     };
     normal.check(&query, &stage).unwrap();
     for mutate in [
-        (|s: &mut ClientState| s.q.nonce = n(1)) as fn(&mut ClientState),
+        (|s: &mut ClientState| s.q.nonce = fixture_nonce(1)) as fn(&mut ClientState),
         |s| s.proc = proc(51),
         |s| s.member = dg('0'),
         |s| s.role = ClientRole::Ni,
@@ -152,7 +152,7 @@ fn client_enable_carries_h_trial_never_the_status_hash() {
         proc: proc(50),
         bind: bind(),
         trial: pinned.hash().unwrap(),
-        nonce: n(43),
+        nonce: fixture_nonce(43),
     };
     round_trip(&enable);
     enable.check_trial(&pinned).unwrap();
@@ -180,7 +180,7 @@ fn the_archived_status_is_the_complete_b_challenged_envelope() {
     let query = TrialQueryBody {
         q: Q {
             x: x(),
-            nonce: n(60),
+            nonce: fixture_nonce(60),
         },
         plan: dg('1'),
         trial: trial().hash().unwrap(),
@@ -230,7 +230,7 @@ fn the_archived_status_is_the_complete_b_challenged_envelope() {
     other_plan.plan = dg('2');
     assert!(refused(&other_plan));
     let mut other_nonce = reply.clone();
-    other_nonce.q.nonce = n(61);
+    other_nonce.q.nonce = fixture_nonce(61);
     assert!(other_nonce.check_query(&query).is_err());
 }
 
@@ -245,7 +245,7 @@ fn offer_is_one_trial_for_the_queried_plan_and_bind_hash() {
     let offer = OfferBody {
         q: Q {
             x: trial().x,
-            nonce: n(70),
+            nonce: fixture_nonce(70),
         },
         trial: trial(),
     };
@@ -255,7 +255,7 @@ fn offer_is_one_trial_for_the_queried_plan_and_bind_hash() {
     other_bind.bind_hash = dg('3');
     assert!(offer.check_query(&other_bind).is_err());
     let mut other_nonce = offer.clone();
-    other_nonce.q.nonce = n(71);
+    other_nonce.q.nonce = fixture_nonce(71);
     assert!(other_nonce.check_query(&query).is_err());
     let mut other_scope = offer.clone();
     other_scope.q.x = X {

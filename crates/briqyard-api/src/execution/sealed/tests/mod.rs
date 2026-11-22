@@ -54,6 +54,19 @@ pub(crate) fn n(k: u8) -> Nonce {
     Bytes::from_array([k; 32])
 }
 
+pub(crate) fn fixture_nonce(label: u8) -> Nonce {
+    use std::sync::{Mutex, OnceLock};
+    static NONCES: OnceLock<Mutex<[Option<Nonce>; 256]>> = OnceLock::new();
+    let nonces = NONCES.get_or_init(|| Mutex::new([None; 256]));
+    let mut nonces = nonces.lock().unwrap();
+    let entry = &mut nonces[usize::from(label)];
+    *entry.get_or_insert_with(|| {
+        let mut raw = [0; 32];
+        getrandom::fill(&mut raw).unwrap();
+        Bytes::from_array(raw)
+    })
+}
+
 pub(crate) fn key(k: u8) -> KeyBytes {
     Bytes::from_array([k; 32])
 }

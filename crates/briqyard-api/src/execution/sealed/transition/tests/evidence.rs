@@ -6,7 +6,7 @@ use crate::execution::sealed::canonical::{decode, encode, h};
 use crate::execution::sealed::custody::Resource;
 use crate::execution::sealed::prim::{Bytes, HexDigest};
 use crate::execution::sealed::sig::{Role, Sig, SigError, Tag};
-use crate::execution::sealed::tests::{dg, id, key, n, pos, proc, x, TestSigner};
+use crate::execution::sealed::tests::{dg, fixture_nonce, id, key, pos, proc, x, TestSigner};
 use crate::execution::sealed::transition::*;
 
 #[test]
@@ -255,7 +255,7 @@ fn intent_pending_has_no_ack_and_ready_has_the_exact_one() {
     r.ack = None;
     assert!(refused(&r));
     let mut r = intent(IntentPhase::Ready);
-    r.ack.as_mut().unwrap().digest = n(1);
+    r.ack.as_mut().unwrap().digest = fixture_nonce(1);
     assert!(refused(&r));
 }
 
