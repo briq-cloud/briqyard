@@ -1,0 +1,98 @@
+{
+  "v": 1,
+  "role": {
+    "kind": "authority",
+    "identity": "authority"
+  },
+  "instance": "HRZU70XEDhFuM4tyGl7g-ACkT0u8Ihv4",
+  "clock_floor": 1010,
+  "allocations": {},
+  "fences": {},
+  "retired": {},
+  "admissions": {},
+  "registration": null,
+  "registration_highwater": 0,
+  "ownership": {},
+  "ownership_highwater": {},
+  "delegations": {},
+  "delegation_versions": {},
+  "delegation_tombstones": {},
+  "prepared": {},
+  "protections": {},
+  "authority_intents": {},
+  "authority_highwater": {},
+  "discovery_intents": {},
+  "protection_intents": {},
+  "delegation_intents": {
+    "legacy": {
+      "host": "host",
+      "authority_epoch": "epoch",
+      "registration": "registration",
+      "ownership": "ownership",
+      "protection": "protection",
+      "trusted_source": {
+        "kind": "api_key",
+        "id": "credential-1",
+        "expires_at": 1100
+      },
+      "projection": {
+        "version": 1,
+        "bytes": [
+          112,
+          114,
+          111,
+          106,
+          101,
+          99,
+          116,
+          105,
+          111,
+          110
+        ],
+        "digest": "GyUOoZm-xz05LKrTnRFn1u3EPIHyDt6thu6lLFK5T8E"
+      },
+      "policy_revision": "policy",
+      "request": {
+        "installation": "ownership",
+        "generation": 1,
+        "id": "grant-1",
+        "version": 1,
+        "principal": "key:credential-1",
+        "grant": "",
+        "allocations": [],
+        "protection_expires_at_ms": 1080000
+      },
+      "expected": {
+        "id": "grant-1",
+        "version": 1,
+        "ownership": "ownership",
+        "ownership_generation": 1,
+        "grant_digest": "xVioG2kgsqhJbM8FdKEwBd9g_mcb8TElbT8DCbs8Szo",
+        "allocation_digests": [
+          "au6qo6e8nGt9ANsU7iO8blGottXiE93gInT1LOjOhi4"
+        ],
+        "principal": "key:credential-1",
+        "expires_at": 1050
+      },
+      "acknowledgement": {
+        "id": "grant-1",
+        "version": 1,
+        "ownership": "ownership",
+        "ownership_generation": 1,
+        "grant_digest": "xVioG2kgsqhJbM8FdKEwBd9g_mcb8TElbT8DCbs8Szo",
+        "allocation_digests": [
+          "au6qo6e8nGt9ANsU7iO8blGottXiE93gInT1LOjOhi4"
+        ],
+        "principal": "key:credential-1",
+        "expires_at": 1050
+      },
+      "operation_policy": null,
+      "operation_policy_ack": null
+    }
+  },
+  "operation_intents": {},
+  "uncertain_installations": [],
+  "active_operations": {},
+  "operation_policies": {},
+  "renewal_attempts": {}
+}

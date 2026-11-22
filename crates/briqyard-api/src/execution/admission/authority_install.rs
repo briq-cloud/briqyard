@@ -201,9 +201,31 @@ impl Journal {
         }
         let mut next = State::clone(&self.state);
         next.authority_highwater.insert(key, generation);
+        let qualified = matches!(
+            intended.payload,
+            AuthorityPayload::Registration(_) | AuthorityPayload::Ownership(_)
+        )
+        .then_some(clock);
         next.authority_intents.insert(id.into(), intended);
         next.clock_floor = clock.now;
-        self.commit(next)?;
+        if let Some(clock) = qualified {
+            let ack = next.authority_intents[id]
+                .payload
+                .expected_ack(host_instance)?;
+            let mut reserve = next.clone();
+            reserve
+                .authority_intents
+                .get_mut(id)
+                .ok_or(Error::Binding)?
+                .acknowledgement = Some(ack);
+            reserve.clock_floor = MAX_SAFE_INTEGER;
+            reserve
+                .uncertain_installations
+                .insert(format!("authority:{id}"));
+            self.commit_install(next, clock, reserve)?;
+        } else {
+            self.commit(next, None)?;
+        }
         Ok(true)
     }
 
@@ -243,7 +265,7 @@ impl Journal {
             .ok_or(Error::Binding)?
             .acknowledgement = Some(ack);
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     /// Invalidation and revocation return the current host instance only.
@@ -273,7 +295,7 @@ impl Journal {
             .ok_or(Error::Binding)?
             .instance_confirmed = true;
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, None)
     }
 }
 

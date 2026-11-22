@@ -178,6 +178,12 @@ pub(super) fn provision(
     ))
 }
 
+pub(super) fn project(journal: &Path, lower_bound_ms: u64) -> Result<()> {
+    let report = api::execution::admission::project_capacity(journal, lower_bound_ms)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
 pub(super) async fn run(path: &Path) -> Result<()> {
     let config = AuthorityConfig::load(path)?;
     let (host_admin, fleet_admin) = config.administrators()?;
@@ -365,7 +371,7 @@ mod tests {
         let path = root.path().join("missing.yaml");
         assert!(crate::run(crate::Args {
             config: path,
-            cmd: Some(crate::Cmd::Authority)
+            cmd: Some(crate::Cmd::Authority { command: None })
         })
         .await
         .is_err());
@@ -376,11 +382,31 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(crate::run(crate::Args {
             config: path,
-            cmd: Some(crate::Cmd::Authority)
+            cmd: Some(crate::Cmd::Authority { command: None })
         })
         .await
         .is_err());
         assert!(!root.path().join("registry").exists());
+    }
+    #[tokio::test]
+    async fn authority_journal_projection_does_not_load_fleet_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = root.path().join("journal.json");
+        let bytes = include_bytes!("../../briqyard-api/tests/fixtures/authority-compacted-v1.json");
+        private_file(&journal, bytes);
+        crate::run(crate::Args {
+            config: root.path().join("nonexistent.yaml"),
+            cmd: Some(crate::Cmd::Authority {
+                command: Some(crate::AuthorityCmd::JournalProject {
+                    journal: journal.clone(),
+                    lower_bound_ms: 1_999_000,
+                }),
+            }),
+        })
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(journal).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
     fn private_file(path: &Path, bytes: &[u8]) {
         use std::os::unix::fs::PermissionsExt;

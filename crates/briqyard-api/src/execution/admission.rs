@@ -4,6 +4,10 @@
 //! requires the trusted control channel's acknowledgement of this exact new instance.
 use super::*;
 mod active;
+mod capacity;
+pub use capacity::{project as project_capacity, CapacityProjection, CollectionProjection};
+use compaction::{compact_authority, near_capacity, over_capacity};
+mod compaction;
 pub use active::{ActiveOperation, ActivePhase};
 mod authority_install;
 mod delegation_install;
@@ -295,7 +299,7 @@ impl Journal {
         }
         let mut next = State::clone(&self.state);
         next.uncertain_installations.insert(format!("{kind}:{id}"));
-        let result = self.commit(next);
+        let result = self.commit(next, None);
         if result.is_err() {
             self.fence.poisoned.store(true, Ordering::SeqCst);
         }
@@ -387,23 +391,7 @@ impl Journal {
                 renewal_attempts: BTreeMap::new(),
             },
         };
-        if state
-            .delegation_versions
-            .values()
-            .map(Vec::len)
-            .sum::<usize>()
-            > MAX_RECORDS
-            || state.renewal_attempts.len() > MAX_RECORDS
-            || state.operation_policies.len() > MAX_RECORDS
-            || state.active_operations.len() > MAX_RECORDS
-            || state.admissions.len() > MAX_RECORDS
-            || state.allocations.len() > MAX_RECORDS
-            || state.discovery_intents.len() > MAX_RECORDS
-            || state.protection_intents.len() > MAX_RECORDS
-            || state.delegation_intents.len() > MAX_RECORDS
-            || state.operation_intents.len() > MAX_RECORDS
-            || state.uncertain_installations.len() > MAX_RECORDS
-        {
+        if over_capacity(&state) {
             return Err(Error::Full);
         }
         let mut random = [0u8; 24];
@@ -443,7 +431,7 @@ impl Journal {
             published: Arc::new(RwLock::new(view.clone())),
             view,
         };
-        journal.commit(State::clone(&journal.state))?;
+        journal.commit(State::clone(&journal.state), None)?;
         journal.publish();
         Ok(journal)
     }
@@ -491,7 +479,7 @@ impl Journal {
         next.prepared.clear();
         next.protections.clear();
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     pub fn installed_ownership(&self, installation: &str) -> Result<Option<&HostOwnership>, Error> {
@@ -550,7 +538,7 @@ impl Journal {
             .retain(|_, p| p.installation != record.installation);
         next.ownership.insert(record.installation.clone(), record);
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     pub fn invalidate_ownership(
@@ -587,7 +575,7 @@ impl Journal {
         next.protections
             .retain(|_, p| p.installation != installation);
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     pub fn delegation(&self, id: &str) -> Result<Option<&HostDelegation>, Error> {
@@ -630,7 +618,7 @@ impl Journal {
         let mut next = State::clone(&self.state);
         next.protections.insert(record.admission.clone(), record);
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     pub fn revoke_delegation(&mut self, id: &str, version: u64, clock: Clock) -> Result<(), Error> {
@@ -653,7 +641,7 @@ impl Journal {
             }
         }
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     pub fn prepared(&self, id: &str) -> Result<Option<&PreparedAdmission>, Error> {
@@ -689,7 +677,7 @@ impl Journal {
         let mut next = State::clone(&self.state);
         next.prepared.insert(record.admission.clone(), record);
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     /// Called before invoking the manager. A lost response can only be inspected.
@@ -726,7 +714,7 @@ impl Journal {
         let record = saved.clone();
         saved.dispatched = true;
         next.clock_floor = clock.now;
-        self.commit(next)?;
+        self.commit(next, Some(clock))?;
         Ok(record)
     }
 
@@ -768,7 +756,7 @@ impl Journal {
         });
         next.fences.insert(authority.into(), epoch.into());
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     /// Install the exact signed allocation vector after trusted ownership/fencing
@@ -850,7 +838,7 @@ impl Journal {
             }
         }
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     /// Authority-side transaction, before the signed permit is returned to any caller.
@@ -926,7 +914,7 @@ impl Journal {
             },
         );
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
 
     /// Completion records evidence only; capacity is never refunded. Absence of this
@@ -959,7 +947,7 @@ impl Journal {
             }
         }
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
     /// Only expired evidence may be pruned. The persisted clock floor prevents a local
     /// clock rollback from making a pruned credential live again. Never refunds units.
@@ -980,7 +968,7 @@ impl Journal {
         // High-water and tombstones remain: a delayed installation cannot revive
         // a previously revoked identity even after its status record is pruned.
         next.clock_floor = clock.now;
-        self.commit(next)
+        self.commit(next, Some(clock))
     }
     fn bound(&self, bundle: &VerifiedBundle) -> bool {
         let permit = bundle.permit();
@@ -995,51 +983,101 @@ impl Journal {
             }
         }
     }
-    fn commit(&mut self, next: State) -> Result<(), Error> {
+    fn commit(&mut self, next: State, clock: Option<Clock>) -> Result<(), Error> {
+        self.commit_inner(next, clock, None)
+    }
+
+    fn commit_install(&mut self, next: State, clock: Clock, reserve: State) -> Result<(), Error> {
+        self.commit_inner(next, Some(clock), Some(reserve))
+    }
+
+    fn commit_inner(
+        &mut self,
+        next: State,
+        clock: Option<Clock>,
+        reserve: Option<State>,
+    ) -> Result<(), Error> {
         self.ownership()?;
-        if next
-            .delegation_versions
-            .values()
-            .map(Vec::len)
-            .sum::<usize>()
-            > MAX_RECORDS
-            || next.renewal_attempts.len() > MAX_RECORDS
-            || next.operation_policies.len() > MAX_RECORDS
-            || next.active_operations.len() > MAX_RECORDS
-            || next.admissions.len() > MAX_RECORDS
-            || next.allocations.len() > MAX_RECORDS
-            || next.retired.values().map(Vec::len).sum::<usize>() > MAX_RECORDS
-            || next.ownership.len() > MAX_RECORDS
-            || next.ownership_highwater.len() > MAX_RECORDS
-            || next.delegations.len() > MAX_RECORDS
-            || next.delegation_tombstones.len() > MAX_RECORDS
-            || next.prepared.len() > MAX_RECORDS
-            || next.protections.len() > MAX_RECORDS
-            || next.authority_intents.len() > MAX_RECORDS
-            || next.authority_highwater.len() > MAX_RECORDS
-            || next.discovery_intents.len() > MAX_RECORDS
-            || next.protection_intents.len() > MAX_RECORDS
-            || next.uncertain_installations.len() > MAX_RECORDS
+        if matches!(next.role, Role::Authority(_))
+            && (near_capacity(&next)
+                || over_capacity(&next)
+                || reserve.as_ref().is_some_and(over_capacity))
         {
+            let Some(clock) = clock else {
+                return if over_capacity(&next) {
+                    Err(Error::Full)
+                } else {
+                    self.persist(next)
+                };
+            };
+            self.check(clock)?;
+            let (compacted, report) = compact_authority(&next, clock)?;
+            debug_assert_eq!(report.retired_versions > 0, report.reclaimed_bytes > 0);
+            if let Some(mut reserve) = reserve {
+                for (id, original) in &next.delegation_intents {
+                    if !original.request.grant.is_empty()
+                        && compacted.delegation_intents[id].request.grant.is_empty()
+                    {
+                        let reserved = reserve
+                            .delegation_intents
+                            .get_mut(id)
+                            .ok_or(Error::Binding)?;
+                        reserved.request.grant.clear();
+                        reserved.request.allocations.clear();
+                    }
+                }
+                if over_capacity(&reserve) {
+                    return Err(Error::Full);
+                }
+            }
+            self.persist(compacted)
+        } else {
+            self.persist(next)
+        }
+    }
+
+    fn persist(&mut self, next: State) -> Result<(), Error> {
+        self.persist_inner(next, &mut |_| false)
+    }
+
+    fn persist_inner(
+        &mut self,
+        next: State,
+        fail: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<(), Error> {
+        self.ownership()?;
+        if over_capacity(&next) {
             return Err(Error::Full);
         }
         let bytes = serde_json::to_vec(&next).map_err(|_| Error::Persistence)?;
         if bytes.len() as u64 > MAX_BYTES {
             return Err(Error::Full);
         }
-        let write = || -> std::io::Result<()> {
+        let mut write = || -> std::io::Result<()> {
+            let mut checkpoint = |stage| -> std::io::Result<()> {
+                if fail(stage) {
+                    Err(std::io::ErrorKind::WriteZero.into())
+                } else {
+                    Ok(())
+                }
+            };
+            checkpoint("create")?;
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(self.fence.root.join("journal.next"))?;
+            checkpoint("write")?;
             file.write_all(&bytes)?;
+            checkpoint("file_fsync")?;
             file.sync_all()?;
+            checkpoint("rename")?;
             std::fs::rename(
                 self.fence.root.join("journal.next"),
                 self.fence.root.join("journal.json"),
             )?;
+            checkpoint("directory_fsync")?;
             self.fence.directory.sync_all()
         };
         // A retained temp file is uncertain evidence. It is not silently removed or retried.
@@ -1060,6 +1098,10 @@ fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_-.:/".contains(&b))
 }
 fn read_state(path: &Path) -> Result<Option<State>, Error> {
+    read_state_size(path).map(|state| state.map(|(state, _)| state))
+}
+
+fn read_state_size(path: &Path) -> Result<Option<(State, usize)>, Error> {
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -1087,8 +1129,9 @@ fn read_state(path: &Path) -> Result<Option<State>, Error> {
     if bytes.len() as u64 > MAX_BYTES {
         return Err(Error::Full);
     }
+    let size = usize::try_from(metadata.len()).map_err(|_| Error::Full)?;
     serde_json::from_slice(&bytes)
-        .map(Some)
+        .map(|state| Some((state, size)))
         .map_err(|_| Error::Persistence)
 }
 

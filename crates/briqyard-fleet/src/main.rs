@@ -70,9 +70,24 @@ struct Args {
 }
 
 #[derive(Subcommand)]
+enum AuthorityCmd {
+    /// Print aggregate capacity evidence from an authority journal without opening its writer.
+    JournalProject {
+        /// Existing authority journal.json; it is only read, never rotated or replaced.
+        journal: PathBuf,
+        /// A caller-supplied qualified absolute epoch lower bound in milliseconds.
+        #[arg(value_name = "QUALIFIED_LOWER_BOUND_MS")]
+        lower_bound_ms: u64,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Serve only the scoped authority listener, using a separate strict configuration.
-    Authority,
+    Authority {
+        #[command(subcommand)]
+        command: Option<AuthorityCmd>,
+    },
     /// Make an age identity for the registry's backup (ADR 0032): written to OUT (0600), its
     /// recipient printed, for `backup.recipient`. Keep OUT off the fleet's host.
     Keygen {
@@ -277,15 +292,34 @@ const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900)
 /// takes longer is listed as unreachable, so a single host never holds the list.
 const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+fn authority_projection(args: &Args) -> Option<(&std::path::Path, u64)> {
+    if let Some(Cmd::Authority {
+        command:
+            Some(AuthorityCmd::JournalProject {
+                journal,
+                lower_bound_ms,
+            }),
+    }) = &args.cmd
+    {
+        Some((journal.as_path(), *lower_bound_ms))
+    } else {
+        None
+    }
+}
+
 fn main() {
     let args = Args::parse();
     let filter = tracing_subscriber::EnvFilter::try_from_env("BRIQYARD_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt()
+    let diagnostics = tracing_subscriber::fmt()
         .json()
         .with_env_filter(filter)
-        .with_target(false)
-        .init();
+        .with_target(false);
+    if authority_projection(&args).is_some() {
+        diagnostics.with_writer(std::io::stderr).init();
+    } else {
+        diagnostics.init();
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -339,7 +373,10 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
 }
 
 async fn run(args: Args) -> Result<()> {
-    if matches!(args.cmd, Some(Cmd::Authority)) {
+    if let Some((journal, lower_bound_ms)) = authority_projection(&args) {
+        return authority::project(journal, lower_bound_ms);
+    }
+    if matches!(args.cmd, Some(Cmd::Authority { command: None })) {
         return authority::run(&args.config).await;
     }
     let path = if args.config.exists() {
@@ -359,7 +396,9 @@ async fn run(args: Args) -> Result<()> {
         Some(Cmd::Restore { identity, from }) => {
             return restore(&cfg, &state_path, &identity, &from).await
         }
-        Some(Cmd::Authority) => unreachable!("authority dispatched before fleet configuration"),
+        Some(Cmd::Authority { .. }) => {
+            unreachable!("authority dispatched before fleet configuration")
+        }
         None => {}
     }
     // The registry holds every host's token and pool key: the fleet's alone.
