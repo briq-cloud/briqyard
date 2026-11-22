@@ -1,4 +1,7 @@
+mod native_image;
+
 use super::*;
+use native_image::native_image;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::{fs::PermissionsExt, net::UnixStream, process::CommandExt};
@@ -266,18 +269,15 @@ fn assets_require_every_exact_field_and_resource_array_order() {
     }
 }
 
-fn candidate_file() -> (File, Vec<u8>) {
-    let file = File::open("/usr/bin/cat").unwrap();
-    let size = file.metadata().unwrap().len();
-    assert!((0..1024 * 1024).contains(&size));
-    let mut bytes = Vec::with_capacity(size as usize);
-    (&file).take(size + 1).read_to_end(&mut bytes).unwrap();
-    assert_eq!(bytes.len() as u64, size);
-    (file, bytes)
+fn candidate_file() -> (tempfile::NamedTempFile, File, Vec<u8>) {
+    let bytes = native_image();
+    assert!((1..1024 * 1024).contains(&bytes.len()));
+    let (temporary, file) = source(&bytes);
+    (temporary, file, bytes)
 }
 
 fn delivery(same_bytes: bool) -> (AssetOffer, ReceivedAssetFds) {
-    let (candidate, image_bytes) = candidate_file();
+    let (_temporary, candidate, image_bytes) = candidate_file();
     let mut assets = Vec::new();
     let mut fds = Vec::new();
     for (index, class) in classes(Resource::Daemon).into_iter().enumerate() {
@@ -459,7 +459,7 @@ fn no_script_or_regular_file_can_substitute_for_the_sealed_native_image() {
         ))
     ));
     let (offer, mut packet) = delivery(false);
-    packet.fds[4] = candidate_file().0.into();
+    packet.fds[4] = candidate_file().1.into();
     let result = BoundAssets::bind(
         Resource::Daemon,
         offer,
@@ -503,7 +503,7 @@ fn execveat_keeps_pid_and_maps_the_sealed_digest() {
             break;
         }
     }
-    let (_, expected_image) = candidate_file();
+    let (_, _, expected_image) = candidate_file();
     let mut mapped_image = vec![0; expected_image.len()];
     reader.read_exact(&mut mapped_image).unwrap();
     let expected_digest = HexDigest::of(&expected_image);
@@ -556,8 +556,7 @@ fn native_asset_child() {
             .unwrap();
             println!("synthetic guard pid {}", std::process::id());
             io::stdout().flush().unwrap();
-            let Err(error) =
-                assets.exec(&[c"cat", c"/proc/self/exe", c"-"], &listeners, None, None);
+            let Err(error) = assets.exec(&[c"native-fixture"], &listeners, None, None);
             panic!("real kernel execveat failed: {error}");
         }
         "listeners" => fixture_listeners(),
