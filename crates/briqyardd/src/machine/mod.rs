@@ -55,8 +55,11 @@ mod observe;
 mod scoped_exec;
 pub use execution_resources::ExecutionResourceScope;
 use memory::host_memory;
+pub(crate) use scoped_exec::ChannelDispatch;
+#[cfg(test)]
+use scoped_exec::RenewableDispatch;
 pub use scoped_exec::{
-    ExecutionProtectionReceipt, ExecutionProtectionRequest, RenewableDispatch, ScopedCredentials,
+    ExecutionProtectionReceipt, ExecutionProtectionRequest, ScopedCredentials,
     ScopedExecutionContext,
 };
 mod persist;

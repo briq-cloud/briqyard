@@ -168,6 +168,113 @@ fn host(path: &Path, fixture: &Fixture) -> Journal {
 }
 
 #[test]
+fn refused_registration_leaves_the_original_fence_and_exact_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host");
+    let mut journal = Journal::open(&path, Role::Host("host-1".into())).unwrap();
+    let original = HostRegistration {
+        authority: "authority-1".into(),
+        epoch: "epoch-1".into(),
+        key_id: "key-1".into(),
+        public_key: [7; 32],
+        host_instance: journal.instance().into(),
+        generation: 1,
+    };
+    journal.register_host(original.clone(), clock()).unwrap();
+    let mut next = State::clone(&journal.state);
+    let mut permit = Fixture::new(&original.epoch).permit;
+    let allocation = permit.allocations[0].clone();
+    permit.allocations = (0..MAX_ALLOCATIONS)
+        .map(|n| AllocationRef {
+            id: format!("allocation-{n}"),
+            ..allocation.clone()
+        })
+        .collect();
+    let mut used = serde_json::to_vec(&next).unwrap().len() - 1;
+    for n in 0..MAX_RECORDS {
+        permit.admission = format!("{n:05}{}", "x".repeat(123));
+        let item = Admission {
+            permit: permit.clone(),
+            status: Status::Finished,
+        };
+        let bytes = serde_json::to_vec(&item).unwrap().len() + 4 + permit.admission.len();
+        if MAX_BYTES as usize - 64 - used < bytes + 30 {
+            break;
+        }
+        used += bytes;
+        next.admissions.insert(permit.admission.clone(), item);
+    }
+    let mut epochs = Vec::new();
+    let mut free = MAX_BYTES as usize - 64 - used - r#""other-authority":[]"#.len() + 1;
+    while free > 131 {
+        let width = (free - 10).min(128);
+        epochs.push(format!("{:04}{}", epochs.len(), "x".repeat(width - 4)));
+        free -= width + 3;
+    }
+    epochs.push(format!("{:04}{}", epochs.len(), "x".repeat(free - 7)));
+    next.retired.insert("other-authority".into(), epochs);
+    journal.persist(next).unwrap();
+    journal.publish();
+    let before = std::fs::read(path.join("journal.json")).unwrap();
+    assert_eq!(MAX_BYTES as usize - before.len(), 64);
+
+    let refused = HostRegistration {
+        epoch: "epoch-2".into(),
+        key_id: "n".repeat(128),
+        generation: 2,
+        ..original.clone()
+    };
+    assert!(matches!(
+        journal.register_host(refused, clock()),
+        Err(Error::Full)
+    ));
+    assert!(
+        std::fs::read(path.join("journal.json")).unwrap() == before,
+        "refusal changed the durable journal"
+    );
+    assert_eq!(journal.registration().unwrap(), Some(&original));
+    assert_eq!(journal.state.fences[&original.authority], original.epoch);
+    assert!(!journal.state.retired.contains_key(&original.authority));
+}
+
+#[test]
+fn registration_with_ambiguous_durability_never_reads_as_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host");
+    let mut journal = Journal::open(&path, Role::Host("host-1".into())).unwrap();
+    let reader = journal.reader();
+    let record = HostRegistration {
+        authority: "authority-1".into(),
+        epoch: "epoch-1".into(),
+        key_id: "key-1".into(),
+        public_key: [7; 32],
+        host_instance: journal.instance().into(),
+        generation: 1,
+    };
+    let next = journal
+        .registered_state(record.clone(), clock())
+        .unwrap()
+        .unwrap();
+    assert!(reader.view().registration().unwrap().is_none());
+    assert!(matches!(
+        journal.persist_inner(next, &mut |stage| stage == "directory_fsync"),
+        Err(Error::Persistence)
+    ));
+    assert_eq!(
+        read_state(&path.join("journal.json"))
+            .unwrap()
+            .unwrap()
+            .registration,
+        Some(record)
+    );
+    journal.publish();
+    assert!(matches!(
+        reader.view().registration(),
+        Err(Error::Persistence)
+    ));
+}
+
+#[test]
 fn installation_highwater_and_restart_retire_old_epoch() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("host");

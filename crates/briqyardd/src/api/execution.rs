@@ -1,11 +1,11 @@
 //! Host installation and dispatch on a dedicated opt-in authenticated TLS listener.
 use crate::machine::{
-    ExecutionProtectionRequest, ExecutionResourceScope, Manager, RenewableDispatch,
+    ChannelDispatch, ExecutionProtectionRequest, ExecutionResourceScope, Manager,
     ScopedCredentials, ScopedExecutionContext,
 };
 use axum::{
-    extract::{DefaultBodyLimit, State},
-    http::{header, HeaderMap, StatusCode},
+    extract::{DefaultBodyLimit, FromRequestParts, State},
+    http::{header, request::Parts, HeaderMap, StatusCode},
     routing::{get, post},
     Json, Router,
 };
@@ -23,15 +23,46 @@ use briqyard_api::{
         VerificationKey,
     },
 };
+use context::{AdmissionTurns, RequestIdentity, RequestRole, SealedContextSource};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, MutexGuard};
 
+pub mod context;
 mod renewal;
 
 type Answer<T> = Result<Json<T>, StatusCode>;
 type Channel = State<Arc<HostExecutionChannel>>;
+
+struct InstallerRequest(RequestIdentity);
+struct ExecutionRequest(RequestIdentity);
+
+#[axum::async_trait]
+impl FromRequestParts<Arc<HostExecutionChannel>> for InstallerRequest {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        st: &Arc<HostExecutionChannel>,
+    ) -> Result<Self, Self::Rejection> {
+        st.authorize(&parts.headers, RequestRole::Installer)
+            .map(Self)
+    }
+}
+
+#[axum::async_trait]
+impl FromRequestParts<Arc<HostExecutionChannel>> for ExecutionRequest {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        st: &Arc<HostExecutionChannel>,
+    ) -> Result<Self, Self::Rejection> {
+        st.authorize(&parts.headers, RequestRole::Execution)
+            .map(Self)
+    }
+}
 
 fn ack<T: Serialize>(
     host_instance: &str,
@@ -50,7 +81,7 @@ fn ack<T: Serialize>(
 pub struct HostExecutionChannel {
     manager: Manager,
     journal: Mutex<Journal>,
-    admission: RwLock<()>,
+    admission: AdmissionTurns,
     active: Arc<crate::guestc::active_operations::ActiveOperations>,
     installer_token: String,
     execution_token: String,
@@ -85,10 +116,11 @@ impl HostExecutionChannel {
         {
             return Err(StatusCode::FORBIDDEN);
         }
+        let admission = AdmissionTurns::new(&journal)?;
         Ok(Self {
             manager,
             journal: Mutex::new(journal),
-            admission: RwLock::new(()),
+            admission,
             active: Arc::new(crate::guestc::active_operations::ActiveOperations::default()),
             installer_token,
             execution_token,
@@ -98,6 +130,13 @@ impl HostExecutionChannel {
             audience,
             clock_uncertainty_seconds,
         })
+    }
+
+    /// Select protected admission before publishing the listener. The protected
+    /// startup driver must supply committed guard evidence, even when closed.
+    pub fn with_sealed_contexts(mut self, source: Arc<dyn SealedContextSource>) -> Self {
+        self.admission = self.admission.with_sealed_contexts(source);
+        self
     }
 
     fn trust<'a>(&'a self, keys: &'a [VerificationKey]) -> Trust<'a> {
@@ -122,21 +161,32 @@ impl HostExecutionChannel {
             .ok_or(StatusCode::SERVICE_UNAVAILABLE)
     }
 
-    fn authorize(&self, headers: &HeaderMap, installer: bool) -> Result<(), StatusCode> {
-        let expected = if installer {
-            &self.installer_token
-        } else {
-            &self.execution_token
+    fn authorize(
+        &self,
+        headers: &HeaderMap,
+        role: RequestRole,
+    ) -> Result<RequestIdentity, StatusCode> {
+        let expected = match role {
+            RequestRole::Installer => &self.installer_token,
+            RequestRole::Execution => &self.execution_token,
         };
         let got = headers
             .get(header::AUTHORIZATION)
             .and_then(|h| h.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        if got.is_empty() || !api::constant_eq(got.as_bytes(), expected.as_bytes()) {
+        if got.is_empty() {
             return Err(StatusCode::UNAUTHORIZED);
         }
-        Ok(())
+        self.admission
+            .capture(role, got.as_bytes(), expected.as_bytes())
+    }
+
+    async fn authorized_journal(
+        &self,
+        request: &RequestIdentity,
+    ) -> Result<MutexGuard<'_, Journal>, StatusCode> {
+        self.admission.writer(request, &self.journal).await
     }
 }
 
@@ -195,8 +245,11 @@ pub fn router(state: Arc<HostExecutionChannel>) -> Router {
         .with_state(state)
 }
 
-async fn authorization_clock(State(st): Channel, headers: HeaderMap) -> Answer<ClockObservation> {
-    st.authorize(&headers, true)?;
+async fn authorization_clock(
+    State(st): Channel,
+    InstallerRequest(request): InstallerRequest,
+) -> Answer<ClockObservation> {
+    let _read = st.admission.read(&request, &st.journal).await?;
     let sample = st.clock()?;
     Ok(Json(ClockObservation {
         now: sample.now,
@@ -204,10 +257,12 @@ async fn authorization_clock(State(st): Channel, headers: HeaderMap) -> Answer<C
     }))
 }
 
-async fn instance(State(st): Channel, headers: HeaderMap) -> Answer<Instance> {
-    st.authorize(&headers, true)?;
-    let _read = st.admission.read().await;
-    let journal = st.journal.lock().await;
+async fn instance(
+    State(st): Channel,
+    InstallerRequest(request): InstallerRequest,
+) -> Answer<Instance> {
+    let _read = st.admission.read(&request, &st.journal).await?;
+    let journal = st.authorized_journal(&request).await?;
     Ok(Json(Instance {
         host_instance: journal.instance().into(),
     }))
@@ -215,15 +270,19 @@ async fn instance(State(st): Channel, headers: HeaderMap) -> Answer<Instance> {
 
 async fn register(
     State(st): Channel,
-    headers: HeaderMap,
+    InstallerRequest(request): InstallerRequest,
     Json(record): Json<HostRegistration>,
 ) -> Answer<InstallationAck> {
-    st.authorize(&headers, true)?;
-    let _write = st.admission.write().await;
-    let mut journal = st.journal.lock().await;
+    if request.protected() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let _write = st.admission.write(&request, &st.journal).await?;
+    let mut journal = st.authorized_journal(&request).await?;
     st.registered_keys(&record)?;
     register_host(&mut journal, &st.active, &record, st.clock()?)?;
-    Ok(Json(ack(journal.instance(), record.generation, &record)?))
+    let response = ack(journal.instance(), record.generation, &record)?;
+    st.admission.publish(&journal)?;
+    Ok(Json(response))
 }
 
 fn register_host(
@@ -258,12 +317,11 @@ fn register_host(
 
 async fn discover(
     State(st): Channel,
-    headers: HeaderMap,
+    InstallerRequest(request): InstallerRequest,
     Json(req): Json<access::DiscoveryRequest>,
 ) -> Answer<access::DiscoveryReceipt> {
-    st.authorize(&headers, true)?;
-    let _read = st.admission.read().await;
-    let journal = st.journal.lock().await;
+    let _read = st.admission.read(&request, &st.journal).await?;
+    let journal = st.authorized_journal(&request).await?;
     if journal
         .registration()
         .map_err(|_| StatusCode::CONFLICT)?
@@ -322,6 +380,7 @@ async fn discover(
     if public.iter().any(|seed| !all_public.contains(seed)) {
         return Err(StatusCode::CONFLICT);
     }
+    drop(st.authorized_journal(&request).await?);
     Ok(Json(access::DiscoveryReceipt {
         host_instance: req.host_instance,
         primary,
@@ -333,18 +392,16 @@ async fn discover(
 
 async fn ownership(
     State(st): Channel,
-    headers: HeaderMap,
+    InstallerRequest(request): InstallerRequest,
     Json(owner): Json<HostOwnership>,
 ) -> Answer<InstallationAck> {
-    st.authorize(&headers, true)?;
-    let _write = st.admission.write().await;
+    let _write = st.admission.write(&request, &st.journal).await?;
     st.manager
         .verify_execution_ownership(&owner, &st.journal)
         .await
         .map_err(|_| StatusCode::CONFLICT)?;
-    st.journal
-        .lock()
-        .await
+    st.authorized_journal(&request)
+        .await?
         .install_ownership(owner.clone(), st.clock()?)
         .map_err(|_| StatusCode::CONFLICT)?;
     Ok(Json(ack(&owner.host_instance, owner.generation, &owner)?))
@@ -352,15 +409,13 @@ async fn ownership(
 
 async fn protect(
     State(st): Channel,
-    headers: HeaderMap,
+    InstallerRequest(request): InstallerRequest,
     Json(req): Json<Protect>,
 ) -> Answer<ProtectionAck> {
-    st.authorize(&headers, true)?;
-    let _read = st.admission.read().await;
+    let _read = st.admission.read(&request, &st.journal).await?;
     let owner = st
-        .journal
-        .lock()
-        .await
+        .authorized_journal(&request)
+        .await?
         .installed_ownership(&req.installation)
         .map_err(|_| StatusCode::CONFLICT)?
         .cloned()
@@ -391,9 +446,8 @@ async fn protect(
         )
         .await
         .map_err(|_| StatusCode::CONFLICT)?;
-    st.journal
-        .lock()
-        .await
+    st.authorized_journal(&request)
+        .await?
         .record_protection(
             InstalledProtection {
                 installation: req.installation,
@@ -418,7 +472,6 @@ async fn protect(
 enum DelegationRefusal {
     OwnershipRead,
     OwnershipMissing,
-    RegistrationRead,
     RegistrationMissing,
     Generation,
     OwnershipLive,
@@ -438,26 +491,19 @@ fn delegation_conflict(stage: DelegationRefusal) -> StatusCode {
 
 async fn delegation(
     State(st): Channel,
-    headers: HeaderMap,
+    InstallerRequest(request): InstallerRequest,
     Json(req): Json<InstallDelegation>,
 ) -> Answer<HostDelegation> {
-    st.authorize(&headers, true)?;
-    let _write = st.admission.write().await;
+    let _write = st.admission.write(&request, &st.journal).await?;
     let owner = st
-        .journal
-        .lock()
-        .await
+        .authorized_journal(&request)
+        .await?
         .installed_ownership(&req.installation)
         .map_err(|_| delegation_conflict(DelegationRefusal::OwnershipRead))?
         .cloned()
         .ok_or_else(|| delegation_conflict(DelegationRefusal::OwnershipMissing))?;
-    let registration = st
-        .journal
-        .lock()
-        .await
+    let registration = request
         .registration()
-        .map_err(|_| delegation_conflict(DelegationRefusal::RegistrationRead))?
-        .cloned()
         .ok_or_else(|| delegation_conflict(DelegationRefusal::RegistrationMissing))?;
     if owner.generation != req.generation {
         return Err(delegation_conflict(DelegationRefusal::Generation));
@@ -472,7 +518,7 @@ async fn delegation(
         .map(String::as_str)
         .collect::<Vec<_>>();
     let keys = st
-        .registered_keys(&registration)
+        .registered_keys(registration)
         .map_err(|_| delegation_conflict(DelegationRefusal::RegisteredKeys))?;
     let checked = access::verify_delegation(
         &req.grant,
@@ -495,9 +541,8 @@ async fn delegation(
         delegation_conflict(DelegationRefusal::Verification)
     })?;
     let protection = st
-        .journal
-        .lock()
-        .await
+        .authorized_journal(&request)
+        .await?
         .protection(&checked.grant().idle.admission)
         .map_err(|_| delegation_conflict(DelegationRefusal::ProtectionRead))?
         .cloned()
@@ -524,9 +569,8 @@ async fn delegation(
         principal: checked.grant().principal.clone(),
         expires_at: checked.grant().exp,
     };
-    st.journal
-        .lock()
-        .await
+    st.authorized_journal(&request)
+        .await?
         .install_delegation(record.clone(), st.clock()?)
         .map_err(|_| delegation_conflict(DelegationRefusal::JournalInstall))?;
     Ok(Json(record))
@@ -545,21 +589,23 @@ fn idle_receipt_covers(
 
 async fn invalidate(
     State(st): Channel,
-    headers: HeaderMap,
+    InstallerRequest(request): InstallerRequest,
     Json(req): Json<Invalidate>,
 ) -> Answer<Instance> {
-    st.authorize(&headers, true)?;
-    let _write = st.admission.write().await;
-    let mut journal = st.journal.lock().await;
+    let _write = st.admission.write(&request, &st.journal).await?;
+    let mut journal = st.authorized_journal(&request).await?;
     let order = journal.revocation_order();
     journal
         .invalidate_ownership(&req.installation, req.generation, order)
         .map_err(|_| {
-            st.active.end_all();
+            if journal.owned().is_err() {
+                st.active.end_all();
+            }
             StatusCode::CONFLICT
         })?;
-    st.active
-        .revoke_where(|admission| journal.active_operation(admission).ok().flatten().cloned());
+    st.active.revoke_where(Some(&request), |admission| {
+        journal.active_operation(admission).ok().flatten().cloned()
+    });
     Ok(Json(Instance {
         host_instance: journal.instance().into(),
     }))
@@ -567,21 +613,23 @@ async fn invalidate(
 
 async fn revoke(
     State(st): Channel,
-    headers: HeaderMap,
+    InstallerRequest(request): InstallerRequest,
     Json(req): Json<Revoke>,
 ) -> Answer<Instance> {
-    st.authorize(&headers, true)?;
-    let _write = st.admission.write().await;
-    let mut journal = st.journal.lock().await;
+    let _write = st.admission.write(&request, &st.journal).await?;
+    let mut journal = st.authorized_journal(&request).await?;
     let order = journal.revocation_order();
     journal
         .revoke_delegation(&req.id, req.version, order)
         .map_err(|_| {
-            st.active.end_all();
+            if journal.owned().is_err() {
+                st.active.end_all();
+            }
             StatusCode::CONFLICT
         })?;
-    st.active
-        .revoke_where(|admission| journal.active_operation(admission).ok().flatten().cloned());
+    st.active.revoke_where(Some(&request), |admission| {
+        journal.active_operation(admission).ok().flatten().cloned()
+    });
     Ok(Json(Instance {
         host_instance: journal.instance().into(),
     }))
@@ -631,16 +679,12 @@ fn candidate_refs(token: &str) -> Result<Vec<AllocationRef>, StatusCode> {
 
 async fn installed(
     st: &HostExecutionChannel,
+    request: &RequestIdentity,
     req: &BundleRequest,
-) -> Result<(HostOwnership, HostRegistration, HostDelegation), StatusCode> {
-    let journal = st.journal.lock().await;
+) -> Result<(HostOwnership, HostDelegation), StatusCode> {
+    let journal = st.authorized_journal(request).await?;
     let owner = journal
         .installed_ownership(&req.installation)
-        .map_err(|_| StatusCode::CONFLICT)?
-        .cloned()
-        .ok_or(StatusCode::CONFLICT)?;
-    let registration = journal
-        .registration()
         .map_err(|_| StatusCode::CONFLICT)?
         .cloned()
         .ok_or(StatusCode::CONFLICT)?;
@@ -662,17 +706,27 @@ async fn installed(
     {
         return Err(StatusCode::CONFLICT);
     }
-    Ok((owner, registration, delegation))
+    Ok((owner, delegation))
 }
 
 async fn prepare(
     State(st): Channel,
-    headers: HeaderMap,
+    ExecutionRequest(request): ExecutionRequest,
     Json(req): Json<Prepare>,
 ) -> Answer<PreparedAdmission> {
-    st.authorize(&headers, false)?;
-    let _read = st.admission.read().await;
-    let (owner, registration, delegation) = installed(&st, &req.bundle).await?;
+    let _read = st.admission.read(&request, &st.journal).await?;
+    if request.protected()
+        && st
+            .authorized_journal(&request)
+            .await?
+            .status(&req.admission)
+            .map_err(|_| StatusCode::CONFLICT)?
+            .is_some()
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    let registration = request.registration().ok_or(StatusCode::CONFLICT)?;
+    let (owner, delegation) = installed(&st, &request, &req.bundle).await?;
     st.manager
         .verify_execution_ownership(&owner, &st.journal)
         .await
@@ -680,7 +734,7 @@ async fn prepare(
     let refs = candidate_refs(&req.bundle.permit)?;
     let context = dispatch_context(
         &owner,
-        &registration,
+        registration,
         &delegation.principal,
         &refs,
         &req.request_digest,
@@ -691,7 +745,7 @@ async fn prepare(
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let keys = st.registered_keys(&registration)?;
+    let keys = st.registered_keys(registration)?;
     let checked = access::verify_bundle(
         &req.bundle.grant,
         &req.bundle.permit,
@@ -707,9 +761,13 @@ async fn prepare(
         return Err(StatusCode::CONFLICT);
     }
     if checked.permit().limits.execution_mode.is_some() {
-        renewal::installed_policy(&*st.journal.lock().await, &req.bundle, &delegation)?;
+        renewal::installed_policy(
+            &*st.authorized_journal(&request).await?,
+            &req.bundle,
+            &delegation,
+        )?;
     }
-    let host_instance = st.journal.lock().await.instance().to_owned();
+    let host_instance = st.authorized_journal(&request).await?.instance().to_owned();
     let record = PreparedAdmission {
         admission: req.admission,
         delegation: req.bundle.delegation,
@@ -723,7 +781,15 @@ async fn prepare(
         expires_at: checked.permit().exp,
         dispatched: false,
     };
-    let mut journal = st.journal.lock().await;
+    let mut journal = st.authorized_journal(&request).await?;
+    if request.protected()
+        && journal
+            .status(&record.admission)
+            .map_err(|_| StatusCode::CONFLICT)?
+            .is_some()
+    {
+        return Err(StatusCode::CONFLICT);
+    }
     journal
         .install(&checked, &host_instance, st.clock()?)
         .map_err(|_| StatusCode::CONFLICT)?;
@@ -735,20 +801,19 @@ async fn prepare(
 
 async fn dispatch(
     State(st): Channel,
-    headers: HeaderMap,
+    ExecutionRequest(request): ExecutionRequest,
     Json(req): Json<Dispatch>,
 ) -> Answer<api::ExecResult> {
-    st.authorize(&headers, false)?;
-    let admission_guard = st.admission.read().await;
-    let (owner, registration, delegation) = installed(&st, &req.bundle).await?;
+    let admission_guard = st.admission.read(&request, &st.journal).await?;
+    let registration = request.registration().ok_or(StatusCode::CONFLICT)?;
+    let (owner, delegation) = installed(&st, &request, &req.bundle).await?;
     st.manager
         .verify_execution_ownership(&owner, &st.journal)
         .await
         .map_err(|_| StatusCode::CONFLICT)?;
     let prepared = st
-        .journal
-        .lock()
-        .await
+        .authorized_journal(&request)
+        .await?
         .prepared(&req.admission)
         .map_err(|_| StatusCode::CONFLICT)?
         .cloned()
@@ -763,7 +828,7 @@ async fn dispatch(
     }
     let context = dispatch_context(
         &owner,
-        &registration,
+        registration,
         &delegation.principal,
         &prepared.allocation_refs,
         &prepared.request_digest,
@@ -774,7 +839,7 @@ async fn dispatch(
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let keys = st.registered_keys(&registration)?;
+    let keys = st.registered_keys(registration)?;
     let checked = access::verify_bundle(
         &req.bundle.grant,
         &req.bundle.permit,
@@ -794,18 +859,23 @@ async fn dispatch(
     }
     let renewable_policy = if checked.permit().limits.execution_mode.is_some() {
         Some(renewal::installed_policy(
-            &*st.journal.lock().await,
+            &*st.authorized_journal(&request).await?,
             &req.bundle,
             &delegation,
         )?)
     } else {
         None
     };
-    st.journal
-        .lock()
-        .await
+    let mut journal = st.authorized_journal(&request).await?;
+    journal
         .mark_dispatched(&req.admission, st.clock()?)
         .map_err(|_| StatusCode::CONFLICT)?;
+    let dispatched = journal
+        .prepared(&req.admission)
+        .map_err(|_| StatusCode::CONFLICT)?
+        .cloned()
+        .ok_or(StatusCode::CONFLICT)?;
+    drop(journal);
     let credentials = ScopedCredentials {
         grant: &req.bundle.grant,
         permit: &req.bundle.permit,
@@ -818,55 +888,48 @@ async fn dispatch(
             required: &owner.public_seeds,
         },
     };
-    let result = if let Some(policy) = renewable_policy {
-        st.manager
-            .renewable_scoped_exec(
-                req.request,
-                credentials,
-                &st.trust(&keys),
-                installed,
-                &st.journal,
-                st.clock_uncertainty_seconds,
-                RenewableDispatch {
-                    guard: admission_guard,
-                    registry: st.active.clone(),
-                    policy,
-                },
-            )
-            .await
-    } else {
-        let _legacy_fence = admission_guard;
-        st.manager
-            .scoped_exec(
-                req.request,
-                credentials,
-                &st.trust(&keys),
-                installed,
-                &st.journal,
-                st.clock_uncertainty_seconds,
-            )
-            .await
-    };
+    let result = st
+        .manager
+        .channel_scoped_exec(
+            req.request,
+            credentials,
+            &st.trust(&keys),
+            installed,
+            &st.journal,
+            st.clock_uncertainty_seconds,
+            ChannelDispatch {
+                guard: admission_guard,
+                registry: st.active.clone(),
+                policy: renewable_policy,
+                admission: &st.admission,
+                request: request.clone(),
+                prepared: dispatched,
+            },
+        )
+        .await;
     result.map(Json).map_err(|_| StatusCode::CONFLICT)
 }
 
 async fn status(
     State(st): Channel,
-    headers: HeaderMap,
+    ExecutionRequest(request): ExecutionRequest,
     Json(req): Json<StatusRequest>,
 ) -> Answer<AdmissionStatus> {
-    st.authorize(&headers, false)?;
-    let _read = st.admission.read().await;
-    let journal = st.journal.lock().await;
+    let _read = st.admission.read(&request, &st.journal).await?;
+    let journal = st.authorized_journal(&request).await?;
     let prepared = journal
         .prepared(&req.admission)
         .map_err(|_| StatusCode::CONFLICT)?;
+    let state = journal
+        .status(&req.admission)
+        .map_err(|_| StatusCode::CONFLICT)?;
+    if request.protected() && prepared.is_none() && state.is_some() {
+        return Err(StatusCode::CONFLICT);
+    }
     Ok(Json(AdmissionStatus {
         prepared: prepared.is_some(),
         dispatched: prepared.is_some_and(|p| p.dispatched),
-        journal: journal
-            .status(&req.admission)
-            .map_err(|_| StatusCode::CONFLICT)?,
+        journal: state,
     }))
 }
 

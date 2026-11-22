@@ -436,14 +436,18 @@ impl Journal {
         Ok(journal)
     }
 
-    pub fn registration(&self) -> Result<Option<&HostRegistration>, Error> {
-        self.ownership()?;
-        Ok(self.state.registration.as_ref())
+    pub fn register_host(&mut self, record: HostRegistration, clock: Clock) -> Result<(), Error> {
+        if let Some(next) = self.registered_state(record, clock)? {
+            self.commit(next, Some(clock))?;
+        }
+        Ok(())
     }
 
-    /// The installer supplies the expected current instance. Fencing is durable before
-    /// registration can be acknowledged; a crash between writes leaves no ready ACK.
-    pub fn register_host(&mut self, record: HostRegistration, clock: Clock) -> Result<(), Error> {
+    fn registered_state(
+        &self,
+        record: HostRegistration,
+        clock: Clock,
+    ) -> Result<Option<State>, Error> {
         self.check(clock)?;
         if !matches!(self.role(), Role::Host(_))
             || record.host_instance != self.instance()
@@ -455,18 +459,13 @@ impl Journal {
             return Err(Error::Binding);
         }
         if self.state.registration.as_ref() == Some(&record) {
-            return Ok(());
+            return Ok(None);
         }
         if record.generation <= self.state.registration_highwater {
             return Err(Error::Binding);
         }
-        self.fence(
-            &record.authority,
-            &record.epoch,
-            &record.host_instance,
-            clock,
-        )?;
-        let mut next = State::clone(&self.state);
+        let mut next =
+            self.fenced_state(&record.authority, &record.epoch, &record.host_instance)?;
         next.registration_highwater = record.generation;
         next.registration = Some(record);
         for operation in next.active_operations.values_mut() {
@@ -479,7 +478,7 @@ impl Journal {
         next.prepared.clear();
         next.protections.clear();
         next.clock_floor = clock.now;
-        self.commit(next, Some(clock))
+        Ok(Some(next))
     }
 
     pub fn installed_ownership(&self, installation: &str) -> Result<Option<&HostOwnership>, Error> {
@@ -729,6 +728,12 @@ impl Journal {
         clock: Clock,
     ) -> Result<(), Error> {
         self.check(clock)?;
+        let mut next = self.fenced_state(authority, epoch, instance)?;
+        next.clock_floor = clock.now;
+        self.commit(next, Some(clock))
+    }
+
+    fn fenced_state(&self, authority: &str, epoch: &str, instance: &str) -> Result<State, Error> {
         if !matches!(self.role(), Role::Host(_))
             || instance != self.instance()
             || !valid_id(authority)
@@ -755,8 +760,7 @@ impl Journal {
             a.allocation.authority != authority || a.allocation.authority_epoch == epoch
         });
         next.fences.insert(authority.into(), epoch.into());
-        next.clock_floor = clock.now;
-        self.commit(next, Some(clock))
+        Ok(next)
     }
 
     /// Install the exact signed allocation vector after trusted ownership/fencing
@@ -1136,6 +1140,11 @@ fn read_state_size(path: &Path) -> Result<Option<(State, usize)>, Error> {
 }
 
 impl JournalView {
+    pub fn registration(&self) -> Result<Option<&HostRegistration>, Error> {
+        self.ownership()?;
+        Ok(self.state.registration.as_ref())
+    }
+
     pub fn instance(&self) -> &str {
         &self.state.instance
     }
