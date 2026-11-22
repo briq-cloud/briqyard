@@ -5,6 +5,7 @@ mod process;
 mod transport;
 
 pub mod artifacts;
+pub mod sealed_input;
 
 #[cfg(test)]
 mod tests;

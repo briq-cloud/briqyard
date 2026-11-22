@@ -7,6 +7,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod sealed_entry;
+
 /// jemalloc: freed memory goes back to the system after a few seconds, so the daemon's RSS
 /// follows what it holds rather than its peak (ADR 0052).
 #[cfg(target_os = "linux")]
@@ -44,6 +46,10 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Enter the sealed daemon startup guard, without legacy recovery.
+    SealedGuard(sealed_entry::Options),
+    /// Enter sealed custody for exactly one resource, without starting a service.
+    SealedCustodian(sealed_entry::Options),
     /// Validate configuration and print only its loaded identity, without opening host state.
     CheckConfig,
     /// Print retained scoped execution protection support without opening host state.
@@ -66,6 +72,11 @@ enum Cmd {
 fn main() {
     one_malloc_arena();
     let args = Args::parse();
+    match args.cmd.as_ref() {
+        Some(Cmd::SealedGuard(options)) => options.refuse(sealed_entry::Mode::Guard),
+        Some(Cmd::SealedCustodian(options)) => options.refuse(sealed_entry::Mode::Custodian),
+        _ => {}
+    }
     // This path validates only configuration: no runtime, host state, TLS or listeners.
     if matches!(args.cmd, Some(Cmd::CheckConfig)) {
         let checked = config_path(&args.config).and_then(config::Config::load);

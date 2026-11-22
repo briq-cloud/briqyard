@@ -585,6 +585,7 @@ pub struct ReceivedAssetFds {
 
 pub struct BoundAssets {
     base: RawFd,
+    offer: AssetOffer,
     artifacts: Vec<FrozenArtifact>,
 }
 
@@ -622,7 +623,7 @@ impl BoundAssets {
         let mut artifacts = Vec::with_capacity(offer.assets.len());
         let mut unique = HashSet::new();
         let mut next = floor.minimum();
-        for (descriptor, fd) in offer.assets.into_iter().zip(received) {
+        for (descriptor, fd) in offer.assets.iter().zip(received) {
             let class = descriptor.class();
             let (bytes, digest) = descriptor.integrity();
             check_length(class, bytes)?;
@@ -656,8 +657,13 @@ impl BoundAssets {
         }
         Ok(Self {
             base: floor.minimum(),
+            offer,
             artifacts,
         })
+    }
+
+    pub(super) fn offer(&self) -> &AssetOffer {
+        &self.offer
     }
 
     pub fn artifact(&self, class: Class) -> Option<&FrozenArtifact> {
