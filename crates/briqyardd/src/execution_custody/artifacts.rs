@@ -3,6 +3,7 @@
 
 use super::fd::open_descriptors;
 use super::{io_error, CustodyError, DescriptorFloor, StageDeadline};
+use briqyard_api::execution::ordinary_key::{self, OrdinaryAuthorityKey};
 use briqyard_api::execution::sealed::{
     canonical::MAX_MESSAGE_BYTES,
     custody::Resource,
@@ -55,6 +56,7 @@ pub enum Class {
     Signer(Signer),
     TlsCert,
     TlsKey,
+    OrdinaryAuthorityKey,
 }
 
 impl Class {
@@ -76,14 +78,15 @@ impl Class {
             Self::Signer(Signer::Ak) => "BRIQ_SEALED_SIGNER_AK_FD",
             Self::TlsCert => "BRIQ_SEALED_TLS_CERT_FD",
             Self::TlsKey => "BRIQ_SEALED_TLS_KEY_FD",
+            Self::OrdinaryAuthorityKey => ordinary_key::FD_ENV,
         }
     }
 
-    fn limit(self) -> u64 {
-        if self == Self::Candidate {
-            IMAGE_LIMIT
-        } else {
-            MAX_MESSAGE_BYTES as u64
+    fn accepts(self, bytes: u64) -> bool {
+        match self {
+            Self::Candidate => (1..=IMAGE_LIMIT).contains(&bytes),
+            Self::OrdinaryAuthorityKey => bytes == ordinary_key::PKCS8_BYTES as u64,
+            _ => (1..=MAX_MESSAGE_BYTES as u64).contains(&bytes),
         }
     }
 
@@ -146,6 +149,10 @@ pub enum Descriptor {
         bytes: Uint,
         digest: HexDigest,
     },
+    OrdinaryAuthorityKey {
+        bytes: Uint,
+        public: KeyBytes,
+    },
 }
 
 impl Descriptor {
@@ -162,6 +169,7 @@ impl Descriptor {
             Self::Signer { role, .. } => Class::Signer(*role),
             Self::TlsCert { .. } => Class::TlsCert,
             Self::TlsKey { .. } => Class::TlsKey,
+            Self::OrdinaryAuthorityKey { .. } => Class::OrdinaryAuthorityKey,
         }
     }
 
@@ -177,7 +185,9 @@ impl Descriptor {
             | Self::Member { bytes, digest, .. }
             | Self::TlsCert { bytes, digest }
             | Self::TlsKey { bytes, digest } => (bytes.get(), Some(digest)),
-            Self::Signer { bytes, .. } => (bytes.get(), None),
+            Self::Signer { bytes, .. } | Self::OrdinaryAuthorityKey { bytes, .. } => {
+                (bytes.get(), None)
+            }
         }
     }
 }
@@ -225,10 +235,11 @@ impl Wire for AssetOffer {
         if !matches!(self.format, Format::Assets) {
             return Err(CodecError::Value("native assets format"));
         }
-        if self.assets.iter().any(|asset| {
-            let (bytes, _) = asset.integrity();
-            bytes == 0 || bytes > asset.class().limit()
-        }) {
+        if self
+            .assets
+            .iter()
+            .any(|asset| !asset.class().accepts(asset.integrity().0))
+        {
             return Err(CodecError::Value("native asset length"));
         }
         Ok(())
@@ -281,10 +292,12 @@ impl AssetOffer {
             Class::TlsCert,
             Class::TlsKey,
         ];
+        let ordinary = (resource == Resource::Authority).then_some(Class::OrdinaryAuthorityKey);
         if !self.assets.iter().map(Descriptor::class).eq(common
             .into_iter()
             .chain(members.iter().copied())
-            .chain(tail))
+            .chain(tail)
+            .chain(ordinary))
         {
             return Err(CodecError::Value("native asset class order or role"));
         }
@@ -345,6 +358,9 @@ impl AssetOffer {
                             Signer::Ak => &plan.ak,
                         }
                 }
+                Descriptor::OrdinaryAuthorityKey { public, .. } => {
+                    public == &plan.ordinary_key && public.as_array() == &plan.pre_record.public_key
+                }
                 _ => true,
             };
             if !valid {
@@ -378,6 +394,11 @@ impl FrozenArtifact {
         digest: &HexDigest,
         deadline: StageDeadline,
     ) -> Result<Self, CustodyError> {
+        if class == Class::OrdinaryAuthorityKey {
+            return Err(CustodyError::Protocol(
+                "the ordinary authority key is staged from memory, never from a file",
+            ));
+        }
         check_length(class, bytes)?;
         let metadata = source
             .metadata()
@@ -421,7 +442,69 @@ impl FrozenArtifact {
         Ok(frozen)
     }
 
+    /// Stage the ordinary authority key from the provisioner's private memory into a fresh
+    /// sealed descriptor; nothing is sourced from a file at the destination. The exact profile
+    /// and the advertised public key are checked before any descriptor exists, no digest of
+    /// the private bytes is computed, and the writable staging descriptor is closed here. The
+    /// caller owns, and should clear, `bytes`.
+    pub fn freeze_ordinary_key(
+        bytes: &[u8],
+        public: &KeyBytes,
+        deadline: StageDeadline,
+    ) -> Result<Self, CustodyError> {
+        let key = OrdinaryAuthorityKey::from_profile(bytes)
+            .map_err(|_| CustodyError::Protocol("invalid ordinary authority key"))?;
+        if key.public() != *public.as_array() {
+            return Err(CustodyError::Protocol(
+                "ordinary authority key differs from its advertised public key",
+            ));
+        }
+        let class = Class::OrdinaryAuthorityKey;
+        let file = create_memfd()?;
+        (&file)
+            .write_all(bytes)
+            .map_err(|e| io_error("stage ordinary authority key", e))?;
+        check_syscall(
+            unsafe { libc::fchmod(file.as_raw_fd(), class.mode()) },
+            "set ordinary authority key mode",
+        )?;
+        check_syscall(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, SEALS) },
+            "seal ordinary authority key",
+        )?;
+        let readonly = File::open(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .map_err(|e| io_error("open sealed ordinary authority key read-only", e))?;
+        let frozen = Self {
+            file: readonly,
+            class,
+            bytes: bytes.len() as u64,
+        };
+        frozen.check_metadata()?;
+        if frozen.ordinary_key()?.public() != key.public() {
+            return Err(CustodyError::Protocol(
+                "sealed ordinary authority key changed",
+            ));
+        }
+        deadline.check()?;
+        Ok(frozen)
+    }
+
+    /// The validated key and nothing else: the private bytes never leave as a buffer. The
+    /// caller still compares its derived public key with the independently pinned identity.
+    pub fn ordinary_key(&self) -> Result<OrdinaryAuthorityKey, CustodyError> {
+        if self.class != Class::OrdinaryAuthorityKey {
+            return Err(CustodyError::Protocol("not the ordinary authority key"));
+        }
+        ordinary_key::read_sealed(self.as_fd())
+            .map_err(|_| CustodyError::Protocol("invalid ordinary authority key"))
+    }
+
     pub fn read_small(&self, deadline: StageDeadline) -> Result<Vec<u8>, CustodyError> {
+        if self.class == Class::OrdinaryAuthorityKey {
+            return Err(CustodyError::Protocol(
+                "private key bytes are not a readable artifact",
+            ));
+        }
         if self.bytes > MAX_MESSAGE_BYTES as u64 {
             return Err(CustodyError::Protocol(
                 "native artifact exceeds small read bound",
@@ -437,6 +520,10 @@ impl FrozenArtifact {
 
     fn check_metadata(&self) -> Result<(u64, u64), CustodyError> {
         let fd = self.as_fd();
+        if self.class == Class::OrdinaryAuthorityKey {
+            return ordinary_key::check_sealed(fd)
+                .map_err(|_| CustodyError::Protocol("unexpected sealed native artifact metadata"));
+        }
         let metadata = self
             .file
             .metadata()
@@ -473,6 +560,9 @@ impl FrozenArtifact {
         digest: Option<&HexDigest>,
         deadline: StageDeadline,
     ) -> Result<(), CustodyError> {
+        if self.class == Class::OrdinaryAuthorityKey {
+            return deadline.check();
+        }
         let hash = hash_exact(&self.file, self.bytes, deadline, |_| Ok(()))?;
         check_hash(hash, digest)?;
         if self.class == Class::Candidate {
@@ -494,7 +584,7 @@ impl FrozenArtifact {
 }
 
 fn check_length(class: Class, bytes: u64) -> Result<(), CustodyError> {
-    if bytes == 0 || bytes > class.limit() {
+    if !class.accepts(bytes) {
         return Err(CustodyError::Protocol("invalid native artifact length"));
     }
     Ok(())

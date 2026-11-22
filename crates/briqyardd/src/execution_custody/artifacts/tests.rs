@@ -176,7 +176,34 @@ fn classes(resource: Resource) -> Vec<Class> {
         Class::TlsCert,
         Class::TlsKey,
     ]);
+    if resource == Resource::Authority {
+        all.push(Class::OrdinaryAuthorityKey);
+    }
     all
+}
+
+const KEY_SEED: u8 = 5;
+
+fn key_profile(seed: u8) -> Vec<u8> {
+    let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap();
+    let mut bytes = hex::decode("3051020101300506032b657004220420").unwrap();
+    bytes.extend([seed; 32]);
+    bytes.extend([0x81, 0x21, 0x00]);
+    bytes.extend(ring::signature::KeyPair::public_key(&pair).as_ref());
+    assert_eq!(bytes.len(), 83);
+    bytes
+}
+
+fn key_public(seed: u8) -> KeyBytes {
+    KeyBytes::from_array(key_profile(seed)[51..].try_into().unwrap())
+}
+
+fn payload(class: Class, index: usize) -> Vec<u8> {
+    if class == Class::OrdinaryAuthorityKey {
+        key_profile(KEY_SEED)
+    } else {
+        format!("synthetic fixture {index}").into_bytes()
+    }
 }
 
 fn descriptor_value(class: Class, bytes: &[u8]) -> serde_json::Value {
@@ -203,6 +230,11 @@ fn descriptor_value(class: Class, bytes: &[u8]) -> serde_json::Value {
         }
         Class::TlsCert => "tls-cert",
         Class::TlsKey => "tls-key",
+        Class::OrdinaryAuthorityKey => {
+            return serde_json::json!({
+                "class": "ordinary-authority-key", "bytes": length, "public": key_public(KEY_SEED),
+            })
+        }
     };
     serde_json::json!({"class": literal, "bytes": length, "digest": digest})
 }
@@ -219,7 +251,7 @@ fn assets_require_every_exact_field_and_resource_array_order() {
     for resource in [Resource::Daemon, Resource::Authority] {
         let fields: Vec<_> = classes(resource)
             .into_iter()
-            .map(|class| descriptor_value(class, b"synthetic payload"))
+            .map(|class| descriptor_value(class, &payload(class, 0)))
             .collect();
         let wire = envelope(fields.clone());
         let offer = AssetOffer::decode(resource, &wire).unwrap();
@@ -254,11 +286,14 @@ fn assets_require_every_exact_field_and_resource_array_order() {
         refuses(|assets| assets[7]["secret"] = "synthetic".into());
         refuses(|assets| assets[0]["class"] = "opaque.frame".into());
         refuses(|assets| {
-            let signer = assets.len() - 3;
+            let signer = assets.iter().position(|a| a["class"] == "signer").unwrap();
             assets[signer]["digest"] = serde_json::json!(HexDigest::of(b"synthetic"));
         });
         let mut wrong_signer = fields;
-        let signer_index = wrong_signer.len() - 3;
+        let signer_index = wrong_signer
+            .iter()
+            .position(|asset| asset["class"] == "signer")
+            .unwrap();
         wrong_signer[signer_index]["role"] = if resource == Resource::Daemon {
             "ak"
         } else {
@@ -269,6 +304,77 @@ fn assets_require_every_exact_field_and_resource_array_order() {
     }
 }
 
+fn authority_fields() -> Vec<serde_json::Value> {
+    classes(Resource::Authority)
+        .into_iter()
+        .map(|class| descriptor_value(class, &payload(class, 0)))
+        .collect()
+}
+
+#[test]
+fn authority_slot_fifteen_is_mandatory_last_unique_and_closed() {
+    let fields = authority_fields();
+    assert_eq!(fields.len(), 16);
+    assert_eq!(fields[15]["class"], "ordinary-authority-key");
+    let decode =
+        |fields: Vec<serde_json::Value>| AssetOffer::decode(Resource::Authority, &envelope(fields));
+    let offer = decode(fields.clone()).unwrap();
+    assert_eq!(offer.descriptors()[15].class(), Class::OrdinaryAuthorityKey);
+    let mutate = |alter: fn(&mut Vec<serde_json::Value>)| {
+        let mut invalid = fields.clone();
+        alter(&mut invalid);
+        decode(invalid)
+    };
+    assert!(mutate(|a| drop(a.pop())).is_err(), "missing slot 15");
+    assert!(mutate(|a| a.swap(14, 15)).is_err(), "misordered");
+    assert!(mutate(|a| a.swap(0, 15)).is_err(), "misordered");
+    assert!(mutate(|a| a.push(a[15].clone())).is_err(), "duplicate");
+    assert!(
+        mutate(|a| a[14] = a[15].clone()).is_err(),
+        "aliased in place of a TLS key"
+    );
+    assert!(
+        mutate(|a| a[15]["digest"] = serde_json::json!(HexDigest::of(b"private bytes"))).is_err()
+    );
+    assert!(mutate(|a| a[15]["role"] = "ak".into()).is_err());
+    assert!(
+        mutate(|a| a[15]["path"] = "/etc/briq-execution/authority/signing.pk8".into()).is_err()
+    );
+    assert!(mutate(|a| a[15]["name"] = "ordinary".into()).is_err());
+    assert!(mutate(|a| a[15]["slot"] = 15.into()).is_err());
+    assert!(mutate(|a| drop(a[15].as_object_mut().unwrap().remove("public"))).is_err());
+    assert!(mutate(|a| drop(a[15].as_object_mut().unwrap().remove("bytes"))).is_err());
+    for bytes in [0, 1, 82, 84, 85, 4096, MAX_MESSAGE_BYTES as u64] {
+        assert!(mutate_bytes(&fields, bytes).is_err(), "{bytes}");
+    }
+    assert!(mutate(|a| a[15]["public"] = "not-a-key".into()).is_err());
+}
+
+fn mutate_bytes(fields: &[serde_json::Value], bytes: u64) -> Result<AssetOffer, CodecError> {
+    let mut invalid = fields.to_vec();
+    invalid[15]["bytes"] = bytes.into();
+    AssetOffer::decode(Resource::Authority, &envelope(invalid))
+}
+
+#[test]
+fn the_daemon_rejects_the_authority_only_right_and_the_authority_requires_it() {
+    let authority = authority_fields();
+    let daemon: Vec<_> = classes(Resource::Daemon)
+        .into_iter()
+        .map(|class| descriptor_value(class, &payload(class, 0)))
+        .collect();
+    assert!(AssetOffer::decode(Resource::Daemon, &envelope(daemon.clone())).is_ok());
+    let mut with_key = daemon.clone();
+    with_key.push(authority[15].clone());
+    assert!(AssetOffer::decode(Resource::Daemon, &envelope(with_key)).is_err());
+    let mut hybrid = daemon;
+    hybrid.insert(9, authority[15].clone());
+    assert!(AssetOffer::decode(Resource::Daemon, &envelope(hybrid)).is_err());
+    let mut without_key = authority;
+    without_key.pop();
+    assert!(AssetOffer::decode(Resource::Authority, &envelope(without_key)).is_err());
+}
+
 fn candidate_file() -> (tempfile::NamedTempFile, File, Vec<u8>) {
     let bytes = native_image();
     assert!((1..1024 * 1024).contains(&bytes.len()));
@@ -277,11 +383,15 @@ fn candidate_file() -> (tempfile::NamedTempFile, File, Vec<u8>) {
 }
 
 fn delivery(same_bytes: bool) -> (AssetOffer, ReceivedAssetFds) {
+    delivery_for(Resource::Daemon, same_bytes)
+}
+
+fn delivery_for(resource: Resource, same_bytes: bool) -> (AssetOffer, ReceivedAssetFds) {
     let (_temporary, candidate, image_bytes) = candidate_file();
     let mut assets = Vec::new();
     let mut fds = Vec::new();
-    for (index, class) in classes(Resource::Daemon).into_iter().enumerate() {
-        let fixture = format!("synthetic fixture {}", if same_bytes { 0 } else { index });
+    for (index, class) in classes(resource).into_iter().enumerate() {
+        let index = if same_bytes { 0 } else { index };
         let (frozen, bytes) = if class == Class::Candidate {
             let frozen = freeze_fixture_file(
                 &candidate,
@@ -290,17 +400,24 @@ fn delivery(same_bytes: bool) -> (AssetOffer, ReceivedAssetFds) {
                 StageDeadline::frame("test candidate freeze"),
             )
             .unwrap();
-            (frozen, image_bytes.as_slice())
-        } else {
-            (
-                freeze_fixture(class, fixture.as_bytes()),
-                fixture.as_bytes(),
+            (frozen, image_bytes.clone())
+        } else if class == Class::OrdinaryAuthorityKey {
+            let bytes = payload(class, index);
+            let frozen = FrozenArtifact::freeze_ordinary_key(
+                &bytes,
+                &key_public(KEY_SEED),
+                StageDeadline::frame("test key stage"),
             )
+            .unwrap();
+            (frozen, bytes)
+        } else {
+            let bytes = payload(class, index);
+            (freeze_fixture(class, &bytes), bytes)
         };
-        assets.push(descriptor_value(class, bytes));
+        assets.push(descriptor_value(class, &bytes));
         fds.push(frozen.file.into());
     }
-    let offer = AssetOffer::decode(Resource::Daemon, &envelope(assets)).unwrap();
+    let offer = AssetOffer::decode(resource, &envelope(assets)).unwrap();
     (
         offer,
         ReceivedAssetFds {
@@ -551,6 +668,344 @@ fn fixture_child_inherits_no_descriptor_another_test_left_inheritable() {
     drop(output);
 }
 
+fn raw_key_memfd(bytes: &[u8], mode: u32, seals: libc::c_int) -> OwnedFd {
+    let fd = unsafe {
+        libc::memfd_create(
+            c"raw-key".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )
+    };
+    assert!(fd >= 0);
+    let file = unsafe { File::from_raw_fd(fd) };
+    (&file).write_all(bytes).unwrap();
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+        .unwrap();
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_ADD_SEALS, seals) }, 0);
+    File::open(format!("/proc/self/fd/{fd}")).unwrap().into()
+}
+
+fn bind_authority(
+    mutation: impl FnOnce(&mut ReceivedAssetFds),
+) -> Result<BoundAssets, CustodyError> {
+    let (offer, mut packet) = delivery_for(Resource::Authority, false);
+    mutation(&mut packet);
+    BoundAssets::bind(
+        Resource::Authority,
+        offer,
+        packet,
+        &no_listeners(),
+        StageDeadline::frame("authority key delivery"),
+    )
+}
+
+#[test]
+fn staging_accepts_only_the_exact_profile_bound_to_the_advertised_public_key() {
+    let deadline = StageDeadline::frame("key staging");
+    let good = key_profile(KEY_SEED);
+    let public = key_public(KEY_SEED);
+    let frozen = FrozenArtifact::freeze_ordinary_key(&good, &public, deadline).unwrap();
+    assert_eq!(frozen.ordinary_key().unwrap().public(), *public.as_array());
+    assert_eq!(frozen.file.metadata().unwrap().mode() & 0o7777, 0o400);
+    assert_eq!(
+        access_flags(frozen.as_fd()).unwrap() & libc::O_ACCMODE,
+        libc::O_RDONLY
+    );
+    let fd = frozen.as_fd().as_raw_fd();
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_GET_SEALS) } & SEALS, SEALS);
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(format!("/proc/self/fd/{fd}"))
+        .is_err());
+    assert_eq!(descriptor_flags(fd).unwrap(), libc::FD_CLOEXEC);
+    assert!(
+        frozen.read_small(deadline).is_err(),
+        "no raw private bytes leave"
+    );
+
+    let mut inconsistent = good.clone();
+    inconsistent[60] ^= 1;
+    let mut other_public = good.clone();
+    other_public[51..].copy_from_slice(key_public(KEY_SEED + 1).as_array());
+    for (name, bytes, advertised) in [
+        ("short", good[..82].to_vec(), &public),
+        ("long", [good.clone(), vec![0]].concat(), &public),
+        ("seed only", good[16..48].to_vec(), &public),
+        ("inconsistent embedded public", inconsistent, &public),
+        ("seed with another embedded public", other_public, &public),
+        (
+            "advertised-but-wrong actual key",
+            key_profile(KEY_SEED + 1),
+            &public,
+        ),
+        (
+            "advertised public of another key",
+            good.clone(),
+            &key_public(KEY_SEED + 1),
+        ),
+    ] {
+        assert!(
+            FrozenArtifact::freeze_ordinary_key(&bytes, advertised, deadline).is_err(),
+            "{name}"
+        );
+    }
+    let (_temporary, file) = source(&good);
+    assert!(
+        freeze_fixture_file(&file, Class::OrdinaryAuthorityKey, &good, deadline).is_err(),
+        "no digest or path route exists for the private key"
+    );
+}
+
+#[test]
+fn staging_closes_every_descriptor_it_opened_on_success_and_on_every_refusal() {
+    let mut child = FixtureChild::spawn("stage", Stdio::null());
+    assert!(child.wait().success());
+}
+
+fn fixture_stage() {
+    let deadline = StageDeadline::frame("isolated key staging");
+    let good = key_profile(KEY_SEED);
+    let public = key_public(KEY_SEED);
+    let before = open_descriptors().unwrap().len();
+    let frozen = FrozenArtifact::freeze_ordinary_key(&good, &public, deadline).unwrap();
+    assert_eq!(
+        open_descriptors().unwrap().len(),
+        before + 1,
+        "the writable staging descriptor is closed"
+    );
+    drop(frozen);
+    assert_eq!(open_descriptors().unwrap().len(), before);
+    let mut inconsistent = good.clone();
+    inconsistent[60] ^= 1;
+    for bytes in [&good[..82], &inconsistent[..], &good[16..48]] {
+        assert!(FrozenArtifact::freeze_ordinary_key(bytes, &public, deadline).is_err());
+    }
+    assert!(
+        FrozenArtifact::freeze_ordinary_key(&good, &key_public(KEY_SEED + 1), deadline).is_err()
+    );
+    assert_eq!(
+        open_descriptors().unwrap().len(),
+        before,
+        "refusals leak nothing"
+    );
+}
+
+#[test]
+fn authority_delivery_binds_slot_fifteen_to_the_actual_descriptor_at_any_slot() {
+    let bound = bind_authority(|_| {}).unwrap();
+    let key = bound.artifact(Class::OrdinaryAuthorityKey).unwrap();
+    let env: Vec<_> = bound.descriptor_env().collect();
+    assert_eq!(env.len(), 17);
+    assert_eq!(env[16].0, "BRIQ_SEALED_ORDINARY_AUTHORITY_KEY_FD");
+    assert_eq!(env[16].1, key.as_fd().as_raw_fd());
+    assert_eq!(env.iter().filter(|(name, _)| *name == env[16].0).count(), 1);
+    let slots: HashSet<_> = env.iter().skip(1).map(|(_, slot)| *slot).collect();
+    assert_eq!(slots.len(), 16, "no two logical indices share a slot");
+    assert_eq!(descriptor_flags(env[16].1).unwrap(), libc::FD_CLOEXEC);
+    assert_eq!(
+        key.ordinary_key().unwrap().public(),
+        *key_public(KEY_SEED).as_array()
+    );
+
+    let listeners = no_listeners();
+    let (offer, packet) = delivery_for(Resource::Authority, false);
+    let floor = DescriptorFloor::for_artifacts(0, packet.fds.len()).unwrap();
+    let gap = unsafe {
+        libc::fcntl(
+            packet.fds[0].as_raw_fd(),
+            libc::F_DUPFD_CLOEXEC,
+            floor.minimum() + 2,
+        )
+    };
+    assert!(gap >= floor.minimum() + 2);
+    let gap = unsafe { OwnedFd::from_raw_fd(gap) };
+    let assets = BoundAssets::relocate(
+        offer,
+        packet.fds,
+        floor,
+        StageDeadline::frame("shifted slots"),
+    )
+    .unwrap();
+    let env: Vec<_> = assets.descriptor_env().collect();
+    let key_slot = env[16].1;
+    assert_eq!(
+        key_slot,
+        assets
+            .artifact(Class::OrdinaryAuthorityKey)
+            .unwrap()
+            .as_fd()
+            .as_raw_fd()
+    );
+    if gap.as_raw_fd() == floor.minimum() + 2 {
+        assert_ne!(
+            key_slot,
+            floor.minimum() + 15,
+            "logical index is not the base plus 15"
+        );
+    }
+    drop(listeners);
+}
+
+#[test]
+fn authority_key_descriptor_must_be_an_exact_immutable_mode_0400_regular_memfd() {
+    let good = key_profile(KEY_SEED);
+    let refuse = |mutation: fn(&mut ReceivedAssetFds)| {
+        assert!(matches!(
+            bind_authority(mutation),
+            Err(CustodyError::Protocol(
+                "unexpected sealed native artifact metadata"
+            ))
+        ));
+    };
+    refuse(|p| p.fds[15] = raw_key_memfd(&key_profile(KEY_SEED), 0o600, SEALS));
+    refuse(|p| p.fds[15] = raw_key_memfd(&key_profile(KEY_SEED), 0o440, SEALS));
+    refuse(|p| {
+        p.fds[15] = raw_key_memfd(&key_profile(KEY_SEED), 0o400, SEALS & !libc::F_SEAL_WRITE)
+    });
+    refuse(|p| p.fds[15] = raw_key_memfd(&key_profile(KEY_SEED)[..82], 0o400, SEALS));
+    refuse(|p| p.fds[15] = raw_key_memfd(&[key_profile(KEY_SEED), vec![0]].concat(), 0o400, SEALS));
+    refuse(|p| p.fds[15] = TcpListener::bind("127.0.0.1:0").unwrap().into());
+    refuse(|p| {
+        let (_temporary, file) = source(&key_profile(KEY_SEED));
+        file.set_permissions(std::fs::Permissions::from_mode(0o400))
+            .unwrap();
+        p.fds[15] = file.into();
+    });
+    assert!(bind_authority(|p| {
+        p.fds[15] = raw_key_memfd(&good, 0o400, SEALS);
+    })
+    .is_ok());
+    assert!(matches!(
+        bind_authority(|p| {
+            assert_eq!(
+                unsafe { libc::fcntl(p.fds[15].as_raw_fd(), libc::F_SETFD, 0) },
+                0
+            )
+        }),
+        Err(CustodyError::Protocol(
+            "native artifact arrived inheritable"
+        ))
+    ));
+}
+
+#[test]
+fn authority_delivery_refuses_missing_extra_misordered_and_aliased_key_descriptors() {
+    let truncated = |mutation: fn(&mut ReceivedAssetFds)| {
+        assert!(matches!(
+            bind_authority(mutation),
+            Err(CustodyError::Protocol(
+                "invalid native asset packet delivery"
+            ))
+        ));
+    };
+    truncated(|p| drop(p.fds.pop()));
+    truncated(|p| p.fds.push(p.fds[0].try_clone().unwrap()));
+    truncated(|p| p.truncated = true);
+    truncated(|p| p.unexpected_control = true);
+    truncated(|p| p.queued_packet = true);
+    assert!(matches!(
+        bind_authority(|p| p.fds.swap(14, 15)),
+        Err(CustodyError::Protocol(_))
+    ));
+
+    let (offer, mut packet) = delivery_for(Resource::Authority, false);
+    let mut fields: Vec<_> = serde_json::to_value(&offer.assets)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone();
+    let key = key_profile(KEY_SEED);
+    fields[14] =
+        serde_json::json!({"class": "tls-key", "bytes": 83, "digest": HexDigest::of(&key)});
+    let offer = AssetOffer::decode(Resource::Authority, &envelope(fields)).unwrap();
+    packet.fds[14] = packet.fds[15].try_clone().unwrap();
+    assert!(matches!(
+        BoundAssets::bind(
+            Resource::Authority,
+            offer,
+            packet,
+            &no_listeners(),
+            StageDeadline::frame("alias")
+        ),
+        Err(CustodyError::Protocol(
+            "duplicate native artifact descriptor"
+        ))
+    ));
+}
+
+#[test]
+fn the_daemon_resource_cannot_receive_the_authority_key_at_any_position() {
+    let (offer, mut packet) = delivery_for(Resource::Authority, false);
+    let extra = packet.fds.pop().unwrap();
+    assert!(BoundAssets::bind(
+        Resource::Daemon,
+        offer,
+        ReceivedAssetFds {
+            fds: packet.fds,
+            truncated: false,
+            unexpected_control: false,
+            queued_packet: false,
+        },
+        &no_listeners(),
+        StageDeadline::frame("daemon refuses authority offer"),
+    )
+    .is_err());
+    drop(extra);
+}
+
+#[test]
+fn the_sealed_key_descriptor_crosses_the_one_exec_at_its_actual_slot_without_cloexec() {
+    let (mut output, writer) = UnixStream::pair().unwrap();
+    output
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut child = FixtureChild::spawn("exec-authority", Stdio::from(OwnedFd::from(writer)));
+    let pid = child.child.id();
+    let mut reader = BufReader::new(&mut output);
+    let expected_line = format!("synthetic guard pid {pid}\n");
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert_ne!(
+            reader.read_line(&mut line).unwrap(),
+            0,
+            "fixture ended before exec"
+        );
+        if line == expected_line {
+            break;
+        }
+    }
+    let (_, _, image) = candidate_file();
+    let mut mapped = vec![0; image.len()];
+    reader.read_exact(&mut mapped).unwrap();
+    let env = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
+    let slot: i32 = env
+        .split(|&byte| byte == 0)
+        .find_map(|entry| entry.strip_prefix(b"BRIQ_SEALED_ORDINARY_AUTHORITY_KEY_FD="))
+        .map(|value| std::str::from_utf8(value).unwrap().parse().unwrap())
+        .expect("the guard names logical index 15 in the environment");
+    assert!(slot >= 32768);
+    let target = std::fs::read_link(format!("/proc/{pid}/fd/{slot}")).unwrap();
+    assert!(target.to_string_lossy().contains("memfd:briq-sealed-asset"));
+    let info = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{slot}")).unwrap();
+    let flags = info
+        .lines()
+        .find_map(|line| line.strip_prefix("flags:"))
+        .map(|value| i32::from_str_radix(value.trim(), 8).unwrap())
+        .unwrap();
+    assert_eq!(
+        flags & libc::O_CLOEXEC,
+        0,
+        "inheritable across this exec only"
+    );
+    assert_eq!(flags & libc::O_ACCMODE, libc::O_RDONLY);
+    assert_eq!(
+        std::fs::read(format!("/proc/{pid}/fd/{slot}")).unwrap(),
+        key_profile(KEY_SEED)
+    );
+    drop(child.child.stdin.take());
+    assert!(child.wait().success());
+}
+
 #[test]
 fn native_asset_child() {
     let Ok(mode) = std::env::var(FIXTURE_MODE) else {
@@ -573,6 +1028,23 @@ fn native_asset_child() {
             let Err(error) = assets.exec(&[c"native-fixture"], &listeners, None, None);
             panic!("real kernel execveat failed: {error}");
         }
+        "exec-authority" => {
+            let (offer, packet) = delivery_for(Resource::Authority, false);
+            let listeners = no_listeners();
+            let assets = BoundAssets::bind(
+                Resource::Authority,
+                offer,
+                packet,
+                &listeners,
+                StageDeadline::frame("authority exec fixture"),
+            )
+            .unwrap();
+            println!("synthetic guard pid {}", std::process::id());
+            io::stdout().flush().unwrap();
+            let Err(error) = assets.exec(&[c"native-fixture"], &listeners, None, None);
+            panic!("real kernel execveat failed: {error}");
+        }
+        "stage" => fixture_stage(),
         "listeners" => fixture_listeners(),
         _ => panic!("unknown fixture mode"),
     }

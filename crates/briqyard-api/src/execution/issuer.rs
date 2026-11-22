@@ -155,7 +155,7 @@ impl DurableIssuer {
 
     pub fn open_guarded(
         root: &Path,
-        ordinary_pkcs8: &[u8],
+        ordinary: ordinary_key::OrdinaryAuthorityKey,
         kid: String,
         start: GuardStart<'_>,
         request_deadline: Instant,
@@ -172,7 +172,7 @@ impl DurableIssuer {
         } = start;
         validate_authority_plan(plan)?;
         launch.validate().map_err(|_| Binding)?;
-        let key = Ed25519KeyPair::from_pkcs8(ordinary_pkcs8).map_err(|_| Binding)?;
+        let key = ordinary.into_pair();
         if h(plan).map_err(|_| Binding)? != *plan_hash
             || launch.old != plan.pre_a
             || launch.resource != Resource::Authority

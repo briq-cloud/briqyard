@@ -381,7 +381,7 @@ impl Fixture {
         let receipt = Sig::sign(Tag::Retired, ReceiptBody::new(cut.clone()), &hk).unwrap();
         let issuer = DurableIssuer::open_guarded(
             &path,
-            &pkcs8,
+            OrdinaryAuthorityKey::from_profile(&pkcs8).unwrap(),
             "key-1".into(),
             GuardStart {
                 plan: &plan,
@@ -850,7 +850,7 @@ async fn pending_original_survives_without_a_live_reopen_and_dirty_reads_fail() 
     let open = || {
         DurableIssuer::open_guarded(
             &path,
-            &pkcs8,
+            OrdinaryAuthorityKey::from_profile(&pkcs8).unwrap(),
             "key-1".into(),
             GuardStart {
                 plan: &plan,

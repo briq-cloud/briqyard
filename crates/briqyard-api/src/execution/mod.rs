@@ -15,6 +15,8 @@ pub mod channel;
 #[cfg(feature = "execution-admission")]
 mod issuer;
 #[cfg(feature = "execution-admission")]
+pub mod ordinary_key;
+#[cfg(feature = "execution-admission")]
 pub use issuer::*;
 #[cfg(feature = "execution-admission")]
 pub mod clock;

@@ -69,6 +69,7 @@ struct Fixture {
     authority: Proc,
     receipt: Receipt,
     ordinary: Vec<u8>,
+    ak_pkcs8: Vec<u8>,
     ak: Key,
     bk: Key,
     hk: Key,
@@ -79,7 +80,7 @@ impl Fixture {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("authority");
         let (ordinary, ordinary_bytes) = keypair();
-        let ak = keypair().0;
+        let (ak, ak_pkcs8) = keypair();
         let bk = keypair().0;
         let hk = keypair().0;
         let rk = keypair().0;
@@ -170,6 +171,7 @@ impl Fixture {
             authority,
             receipt,
             ordinary: ordinary_bytes,
+            ak_pkcs8,
             ak,
             bk,
             hk,
@@ -204,9 +206,13 @@ impl Fixture {
     }
 
     fn issuer(&self) -> Result<DurableIssuer, Error> {
+        self.issuer_with(&self.ordinary)
+    }
+
+    fn issuer_with(&self, pkcs8: &[u8]) -> Result<DurableIssuer, Error> {
         DurableIssuer::open_guarded(
             &self.path,
-            &self.ordinary,
+            ordinary_key::OrdinaryAuthorityKey::from_profile(pkcs8).map_err(|_| Error::Binding)?,
             "ordinary".into(),
             GuardStart {
                 plan: &self.plan,
@@ -332,6 +338,52 @@ fn guarded_start_does_not_write_a_plan_that_reuses_keys_or_members() {
         );
         assert_eq!(std::fs::read(&file).unwrap(), before);
     }
+}
+
+#[test]
+fn guarded_issuer_accepts_only_the_pinned_actual_ordinary_key_before_any_journal_write() {
+    let f = Fixture::new();
+    let file = f.path.join("journal.json");
+    let before = std::fs::read(&file).unwrap();
+    let (_, other) = keypair();
+    let mut advertised = other.clone();
+    advertised[51..].copy_from_slice(f.plan.ordinary_key.as_array());
+    for (name, wrong) in [
+        ("transition evidence key", f.ak_pkcs8.clone()),
+        ("unrelated key", other.clone()),
+        ("seed-only form", other[16..48].to_vec()),
+        ("trailing bytes", [f.ordinary.clone(), vec![0]].concat()),
+        ("pinned public advertised over another seed", advertised),
+    ] {
+        assert!(
+            matches!(f.issuer_with(&wrong), Err(Error::Binding)),
+            "{name} was accepted"
+        );
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            before,
+            "{name} changed the journal"
+        );
+    }
+    let key = ordinary_key::OrdinaryAuthorityKey::from_profile(&f.ordinary).unwrap();
+    let result = DurableIssuer::open_guarded(
+        &f.path,
+        key,
+        "another-key-id".into(),
+        GuardStart {
+            plan: &f.plan,
+            plan_hash: &f.hash,
+            launch: &f.launch,
+            proc: &f.authority,
+            receipt: &f.receipt,
+            clock: || None,
+        },
+        Instant::now() + Duration::from_secs(5),
+    );
+    assert!(matches!(result, Err(Error::Binding)));
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+    let issuer = f.issuer().unwrap();
+    assert_eq!(issuer.public_key(), f.plan.ordinary_key.as_array());
 }
 
 #[test]

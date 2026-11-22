@@ -4,6 +4,7 @@ use super::Issuer;
 use briqyard_api::execution::{
     admission::{self, AuthorityTransitionView, RegistrationState},
     clock::ClockSample,
+    ordinary_key::OrdinaryAuthorityKey,
     sealed::{
         custody::{self, Capture, CustodyWire, Exited, LoadBody, Matched, Resource},
         h,
@@ -134,7 +135,7 @@ impl Protected {
     /// only independently verified custody inputs, not values parsed from an HTTP body.
     pub(crate) async fn from_custody(
         root: &Path,
-        ordinary_pkcs8: &[u8],
+        ordinary: OrdinaryAuthorityKey,
         kid: String,
         start: CustodyStart<'_>,
         ak: Arc<dyn Signer + Send + Sync>,
@@ -167,7 +168,7 @@ impl Protected {
         }
         let issuer = DurableIssuer::open_guarded(
             root,
-            ordinary_pkcs8,
+            ordinary,
             kid,
             GuardStart {
                 plan: &start.plan,

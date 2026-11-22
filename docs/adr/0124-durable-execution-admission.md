@@ -875,3 +875,25 @@ authenticated gateway observation route retains status after that authority ends
 without another prepare, quota debit or guest dispatch. The native scenarios check
 both eligible duplicates and expired/revoked refusal, then recover through observation;
 the guest counter independently proves one launch for each scenario.
+
+## Ordinary authority key transfer profile
+
+The guarded authority issuer receives the unchanged ordinary signing key only as an
+`OrdinaryAuthorityKey`, never as caller bytes or a path. It is built from exactly 83 bytes of
+PKCS#8 v2: the fixed 16-byte prefix `3051020101300506032b657004220420`, 32 seed bytes,
+`812100` and 32 public bytes. `ring` checks the seed against the embedded public key and
+the explicit profile rejects every other form it would still accept. The public key is always
+derived from the actual key and compared with the Plan and predecessor pins before the
+guarded journal opens. The legacy path-based reader is not a fallback.
+
+The key crosses native custody as authority-only logical right 15 in the asset vector:
+`{class:"ordinary-authority-key", bytes:83, public:K}`, with no digest of the private bytes,
+role, name or path. It is an anonymous sealed memfd, mode 0400, opened read-only, read at
+offsets 0..83 and closed after validation. The staging primitive takes bytes from the
+provisioner's memory, so no writable file exists at the destination. The descriptor's
+logical index is its position in the right vector; the guard's environment names its actual
+slot. The candidate claims that slot, sets close-on-exec first, refuses any alias with another
+artifact and closes it on every refusal. This does not guarantee physical erasure of copies.
+
+Only the key primitives exist so far. The right vector and prepare/assets selectors are the
+startup owner's, and nothing here opens a journal, gate or permit.

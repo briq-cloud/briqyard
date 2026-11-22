@@ -253,7 +253,7 @@ impl Startup {
     async fn start(&self) -> Result<Protected, Error> {
         Protected::from_custody(
             &self.path,
-            &self.ordinary,
+            OrdinaryAuthorityKey::from_profile(&self.ordinary).unwrap(),
             "key-1".into(),
             self.custody(),
             self.ak.clone(),

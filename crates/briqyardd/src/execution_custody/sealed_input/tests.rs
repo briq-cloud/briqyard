@@ -12,13 +12,50 @@ use briqyard_api::execution::sealed::{
     transition::{Bearer, LDecision, LKind, LaunchStage, Member, Secrets},
 };
 use ring::signature::{Ed25519KeyPair, KeyPair};
-use std::{fs::File, io::Write, os::fd::AsFd, os::unix::fs::MetadataExt, path::PathBuf};
+use std::{
+    fs::File, io::Write, os::fd::AsFd, os::fd::OwnedFd, os::unix::fs::MetadataExt, path::PathBuf,
+};
 
 const INPUTS: &[u8] = b"synthetic opaque inputs, intentionally not a manifest codec";
 const CANDIDATE: &[u8] = b"\x7fELFsynthetic candidate bytes, not an executable";
 const CONFIG: &[u8] = b"synthetic config";
 const CERT: &[u8] = b"synthetic certificate";
 const TLS_KEY: &[u8] = b"synthetic TLS key";
+
+fn ordinary_profile(vector: usize) -> Vec<u8> {
+    let signer = FixtureSigner::from_test_vector(vector);
+    let seed = [
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+        "f5e5767cf153319517630f226876b86c8160cc583bc013744c6bf255f5cc0ee5",
+        "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42",
+    ][vector - 1];
+    let mut bytes = hex::decode("3051020101300506032b657004220420").unwrap();
+    bytes.extend(hex::decode(seed).unwrap());
+    bytes.extend([0x81, 0x21, 0x00]);
+    bytes.extend(signer.key().as_array());
+    bytes
+}
+
+fn sealed_key_fd(bytes: &[u8]) -> OwnedFd {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::fs::PermissionsExt;
+    let fd = unsafe {
+        libc::memfd_create(
+            c"synthetic-ordinary-key".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )
+    };
+    assert!(fd >= 0);
+    let file = unsafe { File::from_raw_fd(fd) };
+    (&file).write_all(bytes).unwrap();
+    file.set_permissions(std::fs::Permissions::from_mode(0o400))
+        .unwrap();
+    let seals = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_ADD_SEALS, seals) }, 0);
+    File::open(format!("/proc/self/fd/{fd}")).unwrap().into()
+}
 
 struct FixtureSigner(Ed25519KeyPair);
 
@@ -105,6 +142,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(resource: Resource) -> Self {
+        Self::with_predecessor_key(resource, 5)
+    }
+
+    fn with_predecessor_key(resource: Resource, vector: usize) -> Self {
         let rk = FixtureSigner::from_test_vector(1);
         let bk = FixtureSigner::from_test_vector(2);
         let ak = FixtureSigner::from_test_vector(3).key();
@@ -121,7 +162,7 @@ impl Fixture {
             authority: id("auth"),
             epoch: id("ep"),
             key_id: id("k"),
-            public_key: *ordinary_key.as_array(),
+            public_key: *FixtureSigner::from_test_vector(vector).key().as_array(),
             host_instance: id("hi"),
             generation: PosInt::new(2).unwrap(),
         };
@@ -325,11 +366,24 @@ impl Fixture {
             };
             assets.push((desc, data.to_vec()));
         }
+        if self.resource == Resource::Authority {
+            assets.push((
+                Descriptor::OrdinaryAuthorityKey {
+                    bytes: Uint::new(83).unwrap(),
+                    public: self.plan.ordinary_key,
+                },
+                ordinary_profile(5),
+            ));
+        }
         tweak(&mut assets);
         let mut fds = Vec::new();
         let descriptors = assets
             .into_iter()
             .map(|(descriptor, bytes)| {
+                if descriptor.class() == Class::OrdinaryAuthorityKey {
+                    fds.push(sealed_key_fd(&bytes));
+                    return descriptor;
+                }
                 let mut source = tempfile::NamedTempFile::new().unwrap();
                 source.write_all(&bytes).unwrap();
                 let file = File::open(source.path()).unwrap();
@@ -400,7 +454,91 @@ fn exact_daemon_and_authority_bundles_preserve_typed_records_and_opaque_inputs()
         assert_eq!(decoded.capture(), &fixture.capture_load().capture);
         assert_eq!(decoded.load(), &fixture.capture_load().load);
         assert!(decoded.inputs_bytes() == INPUTS);
+        if resource == Resource::Authority {
+            let key = decoded.ordinary_authority_key().unwrap();
+            assert_eq!(key.public(), *fixture.plan.ordinary_key.as_array());
+            assert_eq!(key.public(), fixture.plan.pre_record.public_key);
+            let artifact = decoded.artifact(Class::OrdinaryAuthorityKey).unwrap();
+            assert!(artifact
+                .read_small(StageDeadline::frame("no raw read"))
+                .is_err());
+        } else {
+            assert!(decoded.artifact(Class::OrdinaryAuthorityKey).is_none());
+            assert!(decoded.ordinary_authority_key().is_err());
+        }
     }
+}
+
+fn decode_with_key(
+    fixture: &Fixture,
+    change: impl FnOnce(&mut (Descriptor, Vec<u8>)),
+) -> Result<SealedInput, CustodyError> {
+    let deadline = StageDeadline::frame("synthetic startup fixtures");
+    let assets = fixture.bind(
+        &fixture.grant(),
+        &fixture.capture_load(),
+        |assets| change(assets.last_mut().unwrap()),
+        deadline,
+    );
+    SealedInput::decode(
+        assets,
+        &fixture.directory(),
+        &h(&fixture.plan).unwrap(),
+        deadline,
+    )
+}
+
+#[test]
+fn the_actual_key_must_derive_the_advertised_and_independently_pinned_public_key() {
+    let fixture = Fixture::new(Resource::Authority);
+    assert!(decode_with_key(&fixture, |_| {}).is_ok());
+    for substitute in [1, 3, 4] {
+        rejected(
+            decode_with_key(&fixture, |(_, bytes)| *bytes = ordinary_profile(substitute)),
+            "startup ordinary key public binding",
+        );
+    }
+    rejected(
+        decode_with_key(&fixture, |(_, bytes)| bytes[60] ^= 1),
+        "invalid ordinary authority key",
+    );
+    rejected(
+        decode_with_key(&fixture, |(_, bytes)| {
+            bytes[16..48].copy_from_slice(&ordinary_profile(4)[16..48])
+        }),
+        "invalid ordinary authority key",
+    );
+    rejected(
+        decode_with_key(&fixture, |(entry, _)| {
+            let Descriptor::OrdinaryAuthorityKey { public, .. } = entry else {
+                panic!()
+            };
+            *public = FixtureSigner::from_test_vector(3).key();
+        }),
+        "startup asset plan pins",
+    );
+    rejected(
+        decode_with_key(&fixture, |(entry, bytes)| {
+            *bytes = ordinary_profile(3);
+            let Descriptor::OrdinaryAuthorityKey { public, .. } = entry else {
+                panic!()
+            };
+            *public = FixtureSigner::from_test_vector(3).key();
+        }),
+        "startup asset plan pins",
+    );
+    let predecessor = Fixture::with_predecessor_key(Resource::Authority, 4);
+    rejected(
+        decode_with_key(&predecessor, |_| {}),
+        "startup asset plan pins",
+    );
+}
+
+#[test]
+fn the_key_is_not_supplied_before_a_consumed_launch() {
+    let mut fixture = Fixture::new(Resource::Authority);
+    fixture.launch.stage = LaunchStage::Captured;
+    rejected(fixture.verify(), "startup launch scope or stage");
 }
 
 #[test]

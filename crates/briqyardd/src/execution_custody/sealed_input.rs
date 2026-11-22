@@ -4,6 +4,7 @@
 
 use super::artifacts::{BoundAssets, Class, Descriptor, FrozenArtifact, Member as AssetMember};
 use super::{CustodyError, StageDeadline};
+use briqyard_api::execution::ordinary_key::OrdinaryAuthorityKey;
 use briqyard_api::execution::sealed::{
     custody::{Capture, LoadBody, Resource},
     decode, h,
@@ -199,17 +200,55 @@ impl SealedInput {
         }
 
         let inputs = read(Class::Inputs)?;
-        deadline.check()?;
-        Ok(Self {
+        let input = Self {
             assets,
             plan,
             launch,
             grant,
             custody,
             inputs,
-        })
+        };
+        if resource == Resource::Authority {
+            input.ordinary_authority_key()?;
+        }
+        deadline.check()?;
+        Ok(input)
     }
 
+    /// The validated ordinary key, re-read from the sealed descriptor of a consumed launch.
+    /// Its derived public key equals the offer's and the independently pinned predecessor
+    /// identity; the private bytes never leave the descriptor as a buffer. Possession is no
+    /// permission: the candidate still needs its authenticated post-exec custody match
+    /// before this reaches the guarded issuer.
+    pub fn ordinary_authority_key(&self) -> Result<OrdinaryAuthorityKey, CustodyError> {
+        let artifact = self
+            .assets
+            .artifact(Class::OrdinaryAuthorityKey)
+            .ok_or(CustodyError::Protocol("missing ordinary authority key"))?;
+        let key = artifact.ordinary_key()?;
+        let advertised = self
+            .assets
+            .offer()
+            .descriptors()
+            .iter()
+            .find_map(|d| match d {
+                Descriptor::OrdinaryAuthorityKey { public, .. } => Some(public),
+                _ => None,
+            });
+        let derived = key.public();
+        if advertised.map(|public| public.as_array()) != Some(&derived)
+            || derived != *self.plan.ordinary_key.as_array()
+            || derived != self.plan.pre_record.public_key
+        {
+            return Err(CustodyError::Protocol(
+                "startup ordinary key public binding",
+            ));
+        }
+        Ok(key)
+    }
+}
+
+impl SealedInput {
     pub fn plan(&self) -> &Plan {
         &self.plan
     }
