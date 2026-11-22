@@ -19,7 +19,7 @@ const PHASES: [GatePhase; 5] = [
 #[test]
 fn host_reads_of_every_phase_are_valid_and_signed_by_hk() {
     for phase in PHASES {
-        let read = hread(gate(phase), 1);
+        let read = hread(gate(phase), fixture_nonce(1));
         round_trip(&read);
         read.verify(Tag::HostRead, &HkSigner::new().pinned())
             .unwrap();
@@ -32,7 +32,7 @@ fn host_reads_of_every_phase_are_valid_and_signed_by_hk() {
 
 #[test]
 fn a_host_read_links_its_gate_by_hash_scope_and_water() {
-    let body = hread(gate(GatePhase::Sealed), 1).body;
+    let body = hread(gate(GatePhase::Sealed), fixture_nonce(1)).body;
     let mut b = body.clone();
     b.gate_hash = dg('0');
     assert!(refused(&b));
@@ -45,13 +45,13 @@ fn a_host_read_links_its_gate_by_hash_scope_and_water() {
     let mut b = body.clone();
     b.q.x.serial = pos(2);
     assert!(refused(&b));
-    let registered = hread(gate(GatePhase::Registered), 1).body;
+    let registered = hread(gate(GatePhase::Registered), fixture_nonce(1)).body;
     assert_eq!(registered.water.get(), 3, "registered water is N+1");
 }
 
 #[test]
 fn host_capacity_rows_are_based_on_the_gate_and_past_rows_are_null() {
-    let body = hread(gate(GatePhase::Armed), 1).body;
+    let body = hread(gate(GatePhase::Armed), fixture_nonce(1)).body;
     let mut b = body.clone();
     b.cap.projections[1].basis = dg('0');
     assert!(refused(&b), "arm row basis is H(Gate)");
@@ -87,7 +87,7 @@ fn authority_reads_are_valid_and_signed_by_ak() {
             3,
         ),
     ] {
-        let read = aread(guard, intent, water, 5);
+        let read = aread(guard, intent, water);
         round_trip(&read);
         read.verify(Tag::AuthorityRead, &ak()).unwrap();
         assert_eq!(
@@ -99,7 +99,7 @@ fn authority_reads_are_valid_and_signed_by_ak() {
 
 #[test]
 fn an_authority_read_links_guard_process_and_the_salted_host_clock() {
-    let body = aread(guard(GuardPhase::Adopted), None, 2, 5).body;
+    let body = aread(guard(GuardPhase::Adopted), None, 2).body;
     let mut b = body.clone();
     b.guard_hash = dg('0');
     assert!(refused(&b));
@@ -134,7 +134,7 @@ fn decode_err<T: crate::execution::sealed::canonical::Wire>(value: &T) -> CodecE
 
 #[test]
 fn the_salted_challenge_is_a_sha256_of_the_canonical_outer_query_plan_and_salt() {
-    let outer = q(5);
+    let outer = q(fixture_nonce(5));
     let salt = fixture_nonce(105);
     let nonce = host_challenge_nonce(&outer, &plan_hash(), &salt).unwrap();
     let canonical = format!(
@@ -151,7 +151,7 @@ fn the_salted_challenge_is_a_sha256_of_the_canonical_outer_query_plan_and_salt()
     );
     assert_ne!(
         nonce,
-        host_challenge_nonce(&q(6), &plan_hash(), &salt).unwrap()
+        host_challenge_nonce(&q(fixture_nonce(6)), &plan_hash(), &salt).unwrap()
     );
 }
 
@@ -161,7 +161,6 @@ fn ready_needs_a_ready_intent_and_no_permanent_uncertainty() {
         guard(GuardPhase::Adopted),
         Some(intent(IntentPhase::Ready)),
         3,
-        5,
     )
     .body;
     assert!(body.ready);
@@ -175,7 +174,6 @@ fn ready_needs_a_ready_intent_and_no_permanent_uncertainty() {
         guard(GuardPhase::Adopted),
         Some(intent(IntentPhase::Pending)),
         3,
-        5,
     )
     .body;
     assert!(!pending.ready);
@@ -196,7 +194,6 @@ fn an_actual_intent_must_be_the_adopted_guards_original() {
         guard(GuardPhase::Adopted),
         Some(intent(IntentPhase::Pending)),
         3,
-        5,
     )
     .body;
     let mut b = body.clone();
@@ -219,7 +216,7 @@ fn an_actual_intent_must_be_the_adopted_guards_original() {
 
 #[test]
 fn authority_capacity_rows_report_passed_actions_as_all_null() {
-    let started = aread(guard(GuardPhase::Started), None, 2, 5).body;
+    let started = aread(guard(GuardPhase::Started), None, 2).body;
     let mut b = started.clone();
     b.cap.projections[0].basis = dg('0');
     assert!(refused(&b), "A rows are based on H(Guard)");
@@ -227,7 +224,6 @@ fn authority_capacity_rows_report_passed_actions_as_all_null() {
         guard(GuardPhase::Adopted),
         Some(intent(IntentPhase::Pending)),
         3,
-        5,
     )
     .body;
     assert!(pending.cap.projections[0].target.is_none());
@@ -245,7 +241,7 @@ fn authority_capacity_rows_report_passed_actions_as_all_null() {
 
 #[test]
 fn intent_selection_follows_the_bind_or_the_preview_of_an_unbound_started_guard() {
-    let started = aread(guard(GuardPhase::Started), None, 2, 5).body;
+    let started = aread(guard(GuardPhase::Started), None, 2).body;
     started.check_selection(None).unwrap();
     started.check_selection(Some(&bind())).unwrap();
     let mut wrong_epoch = bind();
@@ -271,7 +267,6 @@ fn intent_selection_follows_the_bind_or_the_preview_of_an_unbound_started_guard(
         guard(GuardPhase::Adopted),
         Some(intent(IntentPhase::Pending)),
         3,
-        5,
     )
     .body;
     adopted.check_selection(None).unwrap();
@@ -282,7 +277,7 @@ fn intent_selection_follows_the_bind_or_the_preview_of_an_unbound_started_guard(
 
 fn api_view(state: ApiState, bind_present: bool) -> ApiViewBody {
     ApiViewBody {
-        q: q(9),
+        q: q(fixture_nonce(9)),
         plan: plan_hash(),
         bind: bind_present.then(bind),
         step: None,
@@ -431,7 +426,7 @@ fn observe_pair(
     id_text: Option<&str>,
 ) -> (ObserveQueryBody, AuthorityObserveBody) {
     let request = ObserveQueryBody {
-        q: q(7),
+        q: q(fixture_nonce(7)),
         plan: plan_hash(),
         kind,
         id: id_text.map(id),
@@ -529,7 +524,7 @@ fn observe_kind_id_and_status_must_agree() {
 #[test]
 fn final_read_has_a_trial_commitment_only_once_verified() {
     let base = FinalReadBody {
-        q: q(8),
+        q: q(fixture_nonce(8)),
         plan: plan_hash(),
         stage: FinalStage::Held,
         trial: None,
@@ -565,7 +560,7 @@ fn final_read_has_a_trial_commitment_only_once_verified() {
     held.trial = Some(dg('c'));
     assert!(refused(&held));
     let query = FinalQueryBody {
-        q: q(8),
+        q: q(fixture_nonce(8)),
         plan: plan_hash(),
     };
     base.check_query(&query).unwrap();

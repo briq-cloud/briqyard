@@ -2,16 +2,16 @@
 //! contract's trial vectors where it publishes them.
 
 use super::fixtures::*;
+use super::vectors_json::vector_inputs;
 use crate::execution::sealed::canonical::{decode, h};
 use crate::execution::sealed::objects::{Q, X};
 use crate::execution::sealed::sig::{Sig, SigError, Tag};
-use crate::execution::sealed::tests::{dg, fixture_nonce, id, n, proc, x, TestSigner};
+use crate::execution::sealed::tests::{dg, fixture_nonce, id, proc, x, TestSigner};
 use crate::execution::sealed::transition::*;
 use crate::execution::sealed::trial::{
     grant_hash, projection_hash, ExecOk, Finished, IssuedBody, Pair, StatusBody, Trial, TrialResult,
 };
 
-const TRIAL_C: &str = r#"{"bind_hash":"2222222222222222222222222222222222222222222222222222222222222222","briq":"bq_test","command_hash":"2185b234c3057b055f3b29f9a70ff91c3bf02ecbfff0e68a4a23f30528e30287","delegation_intent":"00000000-0000-4000-8000-000000000002","gateway_origin_hash":"a22d921f8a3627f28785fddc967a13ef72b3895f66606e838fd5f9effae14c2f","grant_id":"00000000-0000-4000-8000-000000000001","key_id":"key.test","machine":"machine.test","namespace":"ns.test","nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","plan":"1111111111111111111111111111111111111111111111111111111111111111","run":"00000000-0000-4000-8000-000000000003","stack":"stack.test","team":"team.test","x":{"aud":"staging","host":"host.test","op":"0000000000000000000000000000000000000000000000000000000000000000","serial":1}}"#;
 const TRIAL_HASH: &str = "19cb57255012b10e768c516d3b8db7bc30d45932a4612d63d5f9610d6f841b76";
 const STATUS_B_SIG: &str =
     "mfZG9eB4fJHNXs3x3t57HF7D7VpuMB6PKkfqsJ4cxd1QANhso-iRkGhHEMZx4YZ7dGQbJUdQJz6r9Ueh-Dn4Ag";
@@ -19,15 +19,24 @@ const STATUS_B_HASH: &str = "c76d347393ec9b593327adfeddeaff66557525fe2cc9d2808c7
 const STATUS_R_HASH: &str = "349f372c0208ced612812f743064b99033f8ac9188756fd685b73ec124c77ac1";
 
 pub(super) fn trial() -> Trial {
-    decode(TRIAL_C.as_bytes()).unwrap()
+    decode(vector_inputs().trial.c.as_bytes()).expect("invalid sealed vectors.json trial.c")
 }
 
-pub(super) fn status(nonce: u8) -> Sig<StatusBody> {
+pub(super) enum StatusChallenge {
+    B,
+    R,
+}
+
+pub(super) fn status(challenge: StatusChallenge) -> Sig<StatusBody> {
     let t = trial();
+    let vectors = &vector_inputs().trial;
     let body = StatusBody {
         q: Q {
             x: t.x.clone(),
-            nonce: n(nonce),
+            nonce: match challenge {
+                StatusChallenge::B => vectors.status_b_nonce,
+                StatusChallenge::R => vectors.status_r_nonce,
+            },
         },
         plan: t.plan.clone(),
         trial: t.hash().unwrap(),
@@ -96,7 +105,7 @@ fn client_stage_names_the_roles_member_in_the_set_the_bind_pins() {
 fn client_state_answers_one_query_from_the_staged_slot() {
     let stage = stage(ClientRole::Ng);
     let query = ClientQueryBody {
-        q: q(42),
+        q: q(fixture_nonce(42)),
         plan: plan_hash(),
         role: ClientRole::Ng,
         proc: stage.proc.clone(),
@@ -164,7 +173,7 @@ fn client_enable_carries_h_trial_never_the_status_hash() {
         "the trial pins this exact Bind"
     );
     let mut with_status = enable.clone();
-    with_status.trial = h(&status(1)).unwrap();
+    with_status.trial = h(&status(StatusChallenge::B)).unwrap();
     assert!(with_status.check_trial(&pinned).is_err());
     let signed = Sig::sign(Tag::ClientEnable, enable, &TestSigner::bk()).unwrap();
     signed.verify(Tag::ClientEnable, &bk()).unwrap();
@@ -172,10 +181,11 @@ fn client_enable_carries_h_trial_never_the_status_hash() {
 
 #[test]
 fn the_archived_status_is_the_complete_b_challenged_envelope() {
-    let b_status = status(1);
+    let b_status = status(StatusChallenge::B);
     assert_eq!(b_status.sig.to_text(), STATUS_B_SIG);
     assert_eq!(h(&b_status).unwrap().as_str(), STATUS_B_HASH);
-    assert_eq!(h(&status(2)).unwrap().as_str(), STATUS_R_HASH);
+    let r_status_hash = h(&status(StatusChallenge::R)).unwrap();
+    assert_eq!(r_status_hash.as_str(), STATUS_R_HASH);
 
     let query = TrialQueryBody {
         q: Q {
@@ -219,7 +229,7 @@ fn the_archived_status_is_the_complete_b_challenged_envelope() {
     signed.verify(Tag::Trial3ArchiveReply, &bk()).unwrap();
     assert_ne!(
         reply.archived_status_hash().unwrap(),
-        h(&status(2)).unwrap(),
+        r_status_hash,
         "R's own status is a different envelope and never the archive"
     );
 
@@ -237,7 +247,7 @@ fn the_archived_status_is_the_complete_b_challenged_envelope() {
 #[test]
 fn offer_is_one_trial_for_the_queried_plan_and_bind_hash() {
     let query = OfferQueryBody {
-        q: q(70),
+        q: q(fixture_nonce(70)),
         plan: dg('1'),
         bind_hash: dg('2'),
     };

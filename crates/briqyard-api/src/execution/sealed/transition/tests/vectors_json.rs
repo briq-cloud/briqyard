@@ -2,24 +2,79 @@
 //! consumers read. These tests pin it to the Rust implementation, so the three languages can
 //! only agree on values the Rust codec reproduces too, and the fixture cannot drift.
 
-use super::control::{status, trial};
+use super::control::{status, trial, StatusChallenge};
 use super::fixtures::*;
 use crate::execution::sealed::canonical::{decode, encode, h};
 use crate::execution::sealed::custody::{
     CaptureBody, CustodyWire, ExitBody, MatchBody, Resource, Slot,
 };
 use crate::execution::sealed::objects::{ProofQuery, Reg};
-use crate::execution::sealed::prim::LitBool;
+use crate::execution::sealed::prim::{LitBool, Nonce};
 use crate::execution::sealed::sig::{Sig, Tag};
-use crate::execution::sealed::tests::{dg, n, proc, x, TestSigner};
+use crate::execution::sealed::tests::{dg, proc, x, TestSigner};
 use crate::execution::sealed::trial::{command_hash, command_preimage, trial_timeout_ms, Origin};
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
+use std::sync::OnceLock;
+
+const VECTORS_JSON: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/testdata/sealed_v3_1/vectors.json"
+));
+const _: () = assert!(
+    VECTORS_JSON.len() <= 16 * 1024,
+    "sealed vectors exceed 16 KiB"
+);
+
+#[derive(Deserialize)]
+pub(super) struct VectorInputs {
+    pub trial: TrialInputs,
+    custody: CustodyInputs,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TrialInputs {
+    pub c: String,
+    #[serde(rename = "status_b_nonce_fill", deserialize_with = "nonce_from_fill")]
+    pub status_b_nonce: Nonce,
+    #[serde(rename = "status_r_nonce_fill", deserialize_with = "nonce_from_fill")]
+    pub status_r_nonce: Nonce,
+}
+
+#[derive(Deserialize)]
+struct CustodyInputs {
+    capture: CaptureInputs,
+    request: RequestInputs,
+}
+
+#[derive(Deserialize)]
+struct CaptureInputs {
+    #[serde(rename = "owner_fill", deserialize_with = "nonce_from_fill")]
+    owner: Nonce,
+    #[serde(rename = "challenge_fill", deserialize_with = "nonce_from_fill")]
+    challenge: Nonce,
+}
+
+#[derive(Deserialize)]
+struct RequestInputs {
+    #[serde(rename = "challenge_fill", deserialize_with = "nonce_from_fill")]
+    challenge: Nonce,
+}
+
+fn nonce_from_fill<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Nonce, D::Error> {
+    let fill = u8::deserialize(deserializer)?;
+    Ok(Nonce::from_array([fill; 32]))
+}
+
+pub(super) fn vector_inputs() -> &'static VectorInputs {
+    static INPUTS: OnceLock<VectorInputs> = OnceLock::new();
+    INPUTS.get_or_init(|| {
+        serde_json::from_slice(VECTORS_JSON).expect("invalid sealed vectors.json inputs")
+    })
+}
 
 fn vectors() -> Value {
-    serde_json::from_str(include_str!(
-        "../../../../../testdata/sealed_v3_1/vectors.json"
-    ))
-    .unwrap()
+    serde_json::from_slice(VECTORS_JSON).expect("invalid sealed vectors.json")
 }
 
 fn text<'a>(value: &'a Value, path: &[&str]) -> &'a str {
@@ -97,15 +152,15 @@ fn trial_vectors_match_the_rust_codec() {
         text(&v, &["trial", "command_hash"])
     );
     assert_eq!(
-        status(1).sig.to_text(),
+        status(StatusChallenge::B).sig.to_text(),
         text(&v, &["trial", "status_b_sig"])
     );
     assert_eq!(
-        h(&status(1)).unwrap().as_str(),
+        h(&status(StatusChallenge::B)).unwrap().as_str(),
         text(&v, &["trial", "status_b_hash"])
     );
     assert_eq!(
-        h(&status(2)).unwrap().as_str(),
+        h(&status(StatusChallenge::R)).unwrap().as_str(),
         text(&v, &["trial", "status_r_hash"])
     );
     assert_eq!(
@@ -131,20 +186,21 @@ fn trial_vectors_match_the_rust_codec() {
 #[test]
 fn custody_vectors_match_the_rust_codec() {
     let v = vectors();
+    let custody = &vector_inputs().custody;
     let wire = CustodyWire {
         x: x(),
         plan: dg('1'),
         resource: Resource::Authority,
-        owner: n(3),
+        owner: custody.capture.owner,
         custodian: proc(10),
         old: proc(12),
         next: None,
-        challenge: n(4),
+        challenge: custody.capture.challenge,
         slot: Slot::new(27).unwrap(),
     };
     let request = CustodyWire {
         next: Some(proc(18)),
-        challenge: n(5),
+        challenge: custody.request.challenge,
         ..wire.clone()
     };
     let capture = Sig::sign(Tag::CustodyCapture, CaptureBody { wire }, &TestSigner::rk()).unwrap();

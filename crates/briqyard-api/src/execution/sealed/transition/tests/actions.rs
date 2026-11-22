@@ -165,12 +165,12 @@ fn b_and_r_reads_use_independent_nonces() {
     assert!(packet_refused(
         ClaimKind::Arm,
         "packet reads disagree",
-        |p| p.nonces = [1, 1, 3, 4]
+        |p| p.host_nonces[1] = p.host_nonces[0]
     ));
     assert!(packet_refused(
         ClaimKind::Arm,
         "packet reads disagree",
-        |p| p.nonces = [1, 2, 3, 3]
+        |p| p.authority_challenges[1] = p.authority_challenges[0]
     ));
 }
 

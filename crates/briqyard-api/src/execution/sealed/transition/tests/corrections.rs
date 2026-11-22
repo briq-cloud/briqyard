@@ -3,6 +3,7 @@
 //! rules this codec must not invent. Each case is written against the contract clause it
 //! cites and was run against the pre-correction code first.
 
+use super::control::{status, StatusChallenge};
 use super::fixtures::*;
 use crate::execution::sealed::canonical::{decode, encode, h, CodecError, Wire};
 use crate::execution::sealed::custody::Resource;
@@ -34,11 +35,11 @@ const H_ROWS: [&str; 4] = ["seal", "arm", "host_register", "release"];
 const A_ROWS: [&str; 2] = ["authority_intent", "authority_ack"];
 
 fn host_read() -> Value {
-    val(&hread(gate(GatePhase::Closed), 1))
+    val(&hread(gate(GatePhase::Closed), fixture_nonce(1)))
 }
 
 fn authority_read() -> Value {
-    val(&aread(guard(GuardPhase::Started), None, 2, 5))
+    val(&aread(guard(GuardPhase::Started), None, 2))
 }
 
 fn rows_of(read: &Value, names: &[&str]) -> Vec<Value> {
@@ -162,14 +163,14 @@ fn an_owners_rows_keep_their_basis_even_when_all_null() {
 
 #[test]
 fn a_host_read_is_by_the_process_the_cut_started() {
-    let mut body = hread(gate(GatePhase::Sealed), 1).body;
+    let mut body = hread(gate(GatePhase::Sealed), fixture_nonce(1)).body;
     assert_eq!(body.proc, body.gate.committed_cut().new_proc);
     body.proc = proc(99);
     assert!(
         refused(&body),
         "HRead.proc is gate.cut.new_proc for this serial"
     );
-    let mut body = hread(gate(GatePhase::Sealed), 1).body;
+    let mut body = hread(gate(GatePhase::Sealed), fixture_nonce(1)).body;
     body.proc = daemon_old();
     assert!(refused(&body), "not the process the cut retired");
 }
@@ -302,7 +303,7 @@ fn release_view(water: u64) -> (ApiViewBody, crate::execution::sealed::objects::
     let ack = b.record.ack();
     let snapshot = h(&json!({"bind": b, "intent": b.intent, "ack": ack})).unwrap();
     let view = ApiViewBody {
-        q: q(9),
+        q: q(fixture_nonce(9)),
         plan: plan_hash(),
         bind: Some(b.clone()),
         step: Some(ClaimKind::RecordAck),
@@ -362,7 +363,7 @@ fn an_observed_record_ack_row_carries_its_triple_and_n_plus_one_but_later_steps_
 
 fn final_read(stage: FinalStage) -> FinalReadBody {
     FinalReadBody {
-        q: q(8),
+        q: q(fixture_nonce(8)),
         plan: plan_hash(),
         stage,
         trial: (stage != FinalStage::Held).then(|| dg('c')),
@@ -417,7 +418,7 @@ fn readmitted_records_a_ready_placement_and_held_bans_nothing_but_a_trial() {
 
 fn client_state() -> ClientState {
     ClientState {
-        q: q(42),
+        q: q(fixture_nonce(42)),
         plan: plan_hash(),
         role: ClientRole::Ng,
         proc: proc(50),
@@ -547,7 +548,7 @@ fn nested_launch_signatures_carry_their_own_tags() {
 
 #[test]
 fn a_nested_host_clock_carries_the_host_clock_tag() {
-    let mut body = aread(guard(GuardPhase::Adopted), None, 2, 5).body;
+    let mut body = aread(guard(GuardPhase::Adopted), None, 2).body;
     let clock = body.host_clock.body.clone();
     body.host_clock = Sig::sign(Tag::Retired, clock, &hk()).unwrap();
     assert_eq!(decode_err(&body), CodecError::Value("nested tag"));
@@ -601,7 +602,7 @@ fn a_nested_witness_and_the_packet_parts_carry_their_tags() {
 fn a_nested_observe_clock_reattach_and_archive_carry_their_tags() {
     let started = guard(GuardPhase::Started);
     let request = ObserveQueryBody {
-        q: q(7),
+        q: q(fixture_nonce(7)),
         plan: plan_hash(),
         kind: ObserveKind::Clock,
         id: None,
@@ -630,7 +631,7 @@ fn a_nested_observe_clock_reattach_and_archive_carry_their_tags() {
     assert_eq!(decode_err(&response), CodecError::Value("nested tag"));
 
     let resume = Resume {
-        q: q(30),
+        q: q(fixture_nonce(30)),
         plan: plan_hash(),
         resource: Resource::Daemon,
         observed: daemon_new(),
@@ -687,7 +688,7 @@ fn nested_trial_signatures_carry_their_tags() {
         assert_eq!(decode_err(&bad), CodecError::Value("nested tag"));
     }
 
-    let status = super::control::status(1);
+    let status = status(StatusChallenge::B);
     let query = TrialQueryBody {
         q: Q {
             x: x(),
@@ -723,7 +724,7 @@ fn a_resume_request_is_the_resume_request_tag() {
     let challenge = ResumeChallengeBody {
         request: h(&request).unwrap(),
         resume: Resume {
-            q: q(30),
+            q: q(fixture_nonce(30)),
             plan: plan_hash(),
             resource: Resource::Authority,
             observed: authority_new(),

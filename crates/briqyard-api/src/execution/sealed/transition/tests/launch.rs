@@ -373,7 +373,7 @@ fn resume(resource: Resource) -> Resume {
         ),
     };
     Resume {
-        q: q(30),
+        q: q(fixture_nonce(30)),
         plan: plan_hash(),
         resource,
         observed,

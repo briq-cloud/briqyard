@@ -275,11 +275,8 @@ pub(super) fn witness_body() -> WitnessBody {
     }
 }
 
-pub(super) fn q(nonce: u8) -> Q {
-    Q {
-        x: x(),
-        nonce: fixture_nonce(nonce),
-    }
+pub(super) fn q(nonce: Nonce) -> Q {
+    Q { x: x(), nonce }
 }
 
 pub(super) fn dims(bytes: u64, fits: bool) -> Dims {
@@ -374,7 +371,7 @@ pub(super) fn host_clock_with(
     Sig::sign(Tag::HostClock, body, &HkSigner::new()).unwrap()
 }
 
-pub(super) fn hread(gate: Gate, nonce: u8) -> HRead {
+pub(super) fn hread(gate: Gate, nonce: Nonce) -> HRead {
     let gate_hash = gate.hash().unwrap();
     let body = HReadBody {
         q: q(nonce),
@@ -397,20 +394,34 @@ pub(super) struct AOpts {
     pub clock_instance: Option<crate::execution::sealed::prim::Ident>,
 }
 
-pub(super) fn aread(guard: Guard, intent: Option<Intent>, water: u64, nonce: u8) -> ARead {
-    aread_with(guard, intent, water, nonce, AOpts::default())
+#[derive(Clone, Copy)]
+pub(super) struct AuthorityChallenge {
+    nonce: Nonce,
+    salt: Nonce,
 }
 
-pub(super) fn aread_with(
+pub(super) fn aread(guard: Guard, intent: Option<Intent>, water: u64) -> ARead {
+    aread_with(
+        guard,
+        intent,
+        water,
+        AuthorityChallenge {
+            nonce: fixture_nonce(5),
+            salt: fixture_nonce(105),
+        },
+        AOpts::default(),
+    )
+}
+
+fn aread_with(
     guard: Guard,
     intent: Option<Intent>,
     water: u64,
-    nonce: u8,
+    AuthorityChallenge { nonce, salt }: AuthorityChallenge,
     opts: AOpts,
 ) -> ARead {
     let guard_hash = guard.hash().unwrap();
     let outer = q(nonce);
-    let salt = fixture_nonce(nonce + 100);
     let past: &[ProjectionAction] = match intent.as_ref().map(|i| i.phase) {
         None => &[],
         Some(IntentPhase::Pending) => &[ProjectionAction::AuthorityIntent],
@@ -480,7 +491,8 @@ pub(super) struct Parts {
     pub bopts: AOpts,
     pub ropts: AOpts,
     pub claim: Nonce,
-    pub nonces: [u8; 4],
+    pub host_nonces: [Nonce; 2],
+    pub authority_challenges: [AuthorityChallenge; 2],
     pub ok_nonce: Nonce,
     pub ok_claim: Nonce,
     pub ok_action: ClaimKind,
@@ -517,7 +529,17 @@ pub(super) fn parts(action: ClaimKind) -> Parts {
         bopts: AOpts::default(),
         ropts: AOpts::default(),
         claim: claim_of(action),
-        nonces: [1, 2, 3, 4],
+        host_nonces: [fixture_nonce(1), fixture_nonce(2)],
+        authority_challenges: [
+            AuthorityChallenge {
+                nonce: fixture_nonce(3),
+                salt: fixture_nonce(103),
+            },
+            AuthorityChallenge {
+                nonce: fixture_nonce(4),
+                salt: fixture_nonce(104),
+            },
+        ],
         ok_nonce: fixture_nonce(13),
         ok_claim: claim_of(action),
         ok_action: action,
@@ -537,9 +559,21 @@ pub(super) fn packet(action: ClaimKind) -> Packet {
 }
 
 pub(super) fn build(action: ClaimKind, p: Parts) -> Packet {
-    let (bh, rh) = (hread(p.bg, p.nonces[0]), hread(p.rg, p.nonces[1]));
-    let ba = aread_with(p.bguard, p.bintent, p.bwater, p.nonces[2], p.bopts);
-    let ra = aread_with(p.rguard, p.rintent, p.rwater, p.nonces[3], p.ropts);
+    let (bh, rh) = (hread(p.bg, p.host_nonces[0]), hread(p.rg, p.host_nonces[1]));
+    let ba = aread_with(
+        p.bguard,
+        p.bintent,
+        p.bwater,
+        p.authority_challenges[0],
+        p.bopts,
+    );
+    let ra = aread_with(
+        p.rguard,
+        p.rintent,
+        p.rwater,
+        p.authority_challenges[1],
+        p.ropts,
+    );
     let ok_body = ROkBody {
         x: x(),
         plan: plan_hash(),
