@@ -209,7 +209,20 @@ impl Journal {
         next.authority_intents.insert(id.into(), intended);
         next.clock_floor = clock.now;
         if let Some(clock) = qualified {
-            self.commit_install(next, clock)?;
+            let ack = next.authority_intents[id]
+                .payload
+                .expected_ack(host_instance)?;
+            let mut reserve = next.clone();
+            reserve
+                .authority_intents
+                .get_mut(id)
+                .ok_or(Error::Binding)?
+                .acknowledgement = Some(ack);
+            reserve.clock_floor = MAX_SAFE_INTEGER;
+            reserve
+                .uncertain_installations
+                .insert(format!("authority:{id}"));
+            self.commit_install(next, clock, reserve)?;
         } else {
             self.commit(next, None)?;
         }

@@ -131,7 +131,18 @@ impl Journal {
         let mut next = State::clone(&self.state);
         next.delegation_intents.insert(intent_id.into(), intended);
         next.clock_floor = clock.now;
-        self.commit_install(next, clock)?;
+        let mut reserve = next.clone();
+        let intent = reserve
+            .delegation_intents
+            .get_mut(intent_id)
+            .ok_or(Error::Binding)?;
+        intent.acknowledgement = Some(intent.expected.clone());
+        intent.operation_policy_ack = intent.operation_policy.clone();
+        reserve.clock_floor = MAX_SAFE_INTEGER;
+        reserve
+            .uncertain_installations
+            .insert(format!("delegation:{intent_id}"));
+        self.commit_install(next, clock, reserve)?;
         Ok(true)
     }
 

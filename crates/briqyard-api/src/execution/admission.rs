@@ -4,7 +4,7 @@
 //! requires the trusted control channel's acknowledgement of this exact new instance.
 use super::*;
 mod active;
-use compaction::{compact_authority, near_capacity, over_capacity, reserve_acknowledgements};
+use compaction::{compact_authority, near_capacity, over_capacity};
 mod compaction;
 pub use active::{ActiveOperation, ActivePhase};
 mod authority_install;
@@ -982,24 +982,24 @@ impl Journal {
         }
     }
     fn commit(&mut self, next: State, clock: Option<Clock>) -> Result<(), Error> {
-        self.commit_inner(next, clock, false)
+        self.commit_inner(next, clock, None)
     }
 
-    fn commit_install(&mut self, next: State, clock: Clock) -> Result<(), Error> {
-        self.commit_inner(next, Some(clock), true)
+    fn commit_install(&mut self, next: State, clock: Clock, reserve: State) -> Result<(), Error> {
+        self.commit_inner(next, Some(clock), Some(reserve))
     }
 
     fn commit_inner(
         &mut self,
         next: State,
         clock: Option<Clock>,
-        reserve: bool,
+        reserve: Option<State>,
     ) -> Result<(), Error> {
         self.ownership()?;
-        let next = if matches!(next.role, Role::Authority(_))
+        if matches!(next.role, Role::Authority(_))
             && (near_capacity(&next)
                 || over_capacity(&next)
-                || (reserve && over_capacity(&reserve_acknowledgements(&next))))
+                || reserve.as_ref().is_some_and(over_capacity))
         {
             let Some(clock) = clock else {
                 return if over_capacity(&next) {
@@ -1011,14 +1011,27 @@ impl Journal {
             self.check(clock)?;
             let (compacted, report) = compact_authority(&next, clock)?;
             debug_assert_eq!(report.retired_versions > 0, report.reclaimed_bytes > 0);
-            if reserve && over_capacity(&reserve_acknowledgements(&compacted)) {
-                return Err(Error::Full);
+            if let Some(mut reserve) = reserve {
+                for (id, original) in &next.delegation_intents {
+                    if !original.request.grant.is_empty()
+                        && compacted.delegation_intents[id].request.grant.is_empty()
+                    {
+                        let reserved = reserve
+                            .delegation_intents
+                            .get_mut(id)
+                            .ok_or(Error::Binding)?;
+                        reserved.request.grant.clear();
+                        reserved.request.allocations.clear();
+                    }
+                }
+                if over_capacity(&reserve) {
+                    return Err(Error::Full);
+                }
             }
             self.persist(compacted)
         } else {
             self.persist(next)
-        };
-        return next;
+        }
     }
 
     fn persist(&mut self, next: State) -> Result<(), Error> {

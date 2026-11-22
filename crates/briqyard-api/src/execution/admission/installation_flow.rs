@@ -1,4 +1,5 @@
 //! One-shot discovery and protection evidence in the issuer's exclusive journal.
+use super::compaction::maximum_discovery_receipt;
 use super::*;
 use crate::execution::channel::{Protect, ProtectionAck};
 use crate::execution::{DiscoveryReceipt, DiscoveryRequest, PublicSeed};
@@ -234,7 +235,18 @@ impl Journal {
         let mut next = State::clone(&self.state);
         next.discovery_intents.insert(id.into(), intended);
         next.clock_floor = clock.now;
-        self.commit_install(next, clock)?;
+        let mut reserve = next.clone();
+        let receipt = maximum_discovery_receipt(&next.discovery_intents[id]);
+        reserve
+            .discovery_intents
+            .get_mut(id)
+            .ok_or(Error::Binding)?
+            .receipt = Some(receipt);
+        reserve.clock_floor = MAX_SAFE_INTEGER;
+        reserve
+            .uncertain_installations
+            .insert(format!("discovery:{id}"));
+        self.commit_install(next, clock, reserve)?;
         Ok(true)
     }
 
@@ -336,7 +348,22 @@ impl Journal {
         let mut next = State::clone(&self.state);
         next.protection_intents.insert(id.into(), intended);
         next.clock_floor = clock.now;
-        self.commit_install(next, clock)?;
+        let mut reserve = next.clone();
+        let intent = reserve
+            .protection_intents
+            .get_mut(id)
+            .ok_or(Error::Binding)?;
+        intent.acknowledgement = Some(ProtectionAck {
+            admission: intent.request.admission.clone(),
+            expires_at_ms: intent.request.expires_at_ms,
+            resources: intent.resources.clone(),
+            revision: intent.revision.clone(),
+        });
+        reserve.clock_floor = MAX_SAFE_INTEGER;
+        reserve
+            .uncertain_installations
+            .insert(format!("protection:{id}"));
+        self.commit_install(next, clock, reserve)?;
         Ok(true)
     }
 

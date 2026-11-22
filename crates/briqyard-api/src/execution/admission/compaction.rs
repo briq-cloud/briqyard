@@ -1,5 +1,4 @@
 use super::*;
-use crate::execution::channel::ProtectionAck;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
 const COMPACTION_PERCENT: usize = 75;
@@ -67,88 +66,69 @@ pub fn compact_authority(state: &State, clock: Clock) -> Result<(State, Compacti
     ))
 }
 
-pub fn reserve_acknowledgements(state: &State) -> State {
-    let mut reserved = State::clone(state);
-    for (id, intent) in &mut reserved.authority_intents {
-        if intent.acknowledgement.is_none() && !intent.instance_confirmed {
-            if let Ok(ack) = intent.payload.expected_ack(&intent.host_instance) {
-                intent.acknowledgement = Some(ack);
-            }
-            intent.instance_confirmed = true;
+pub fn maximum_discovery_receipt(intent: &DiscoveryIntent) -> DiscoveryReceipt {
+    let targets = intent
+        .request
+        .seeds
+        .iter()
+        .map(|seed| Target {
+            host: intent.host.clone(),
+            machine: seed.machine.clone(),
+            namespace: seed.namespace.clone(),
+            run: "x".repeat(128),
+            placement: "x".repeat(128),
+        })
+        .collect::<Vec<_>>();
+    let primary = intent
+        .request
+        .seeds
+        .iter()
+        .position(|seed| seed.id == intent.control.primary_id)
+        .map(|index| targets[index].clone())
+        .unwrap_or_else(|| targets[0].clone());
+    let mut resources = targets.clone();
+    for index in 0.. {
+        if resources.len() == MAX_RESOURCES {
+            break;
         }
-        reserved
-            .uncertain_installations
-            .insert(format!("authority:{id}"));
+        let candidate = Target {
+            host: intent.host.clone(),
+            machine: format!("{index:0>128}"),
+            namespace: "x".repeat(128),
+            run: "x".repeat(128),
+            placement: "x".repeat(128),
+        };
+        if resources
+            .iter()
+            .all(|target| (&target.host, &target.machine) != (&candidate.host, &candidate.machine))
+        {
+            resources.push(candidate);
+        }
     }
-    for (id, intent) in &mut reserved.discovery_intents {
-        if intent.receipt.is_none() {
-            let owner = reserved.authority_intents.values().find_map(|candidate| {
-                let AuthorityPayload::Ownership(owner) = &candidate.payload else {
-                    return None;
-                };
-                (owner.installation == intent.control.installation
-                    && owner.generation == intent.control.generation)
-                    .then_some(owner)
-            });
-            if let Some(owner) = owner {
-                let target = owner
-                    .resource_set
-                    .resources
-                    .iter()
-                    .max_by_key(|target| serde_json::to_vec(target).map_or(0, |v| v.len()))
-                    .unwrap_or(&owner.primary)
-                    .clone();
-                intent.receipt = Some(DiscoveryReceipt {
-                    host_instance: intent.request.host_instance.clone(),
-                    primary: target.clone(),
-                    public_seeds: intent
-                        .request
-                        .seeds
-                        .iter()
-                        .map(|_| target.clone())
-                        .collect(),
-                    public_resources: intent
-                        .request
-                        .seeds
-                        .iter()
-                        .map(|seed| PublicResource {
-                            id: seed.id.clone(),
-                            target: target.clone(),
-                        })
-                        .collect(),
-                    resource_set: owner.resource_set.clone(),
-                });
-            }
-        }
-        reserved
-            .uncertain_installations
-            .insert(format!("discovery:{id}"));
+    resources.sort_by(|a, b| (&a.host, &a.machine).cmp(&(&b.host, &b.machine)));
+    let mut public_resources = intent
+        .request
+        .seeds
+        .iter()
+        .zip(targets.iter())
+        .map(|(seed, target)| PublicResource {
+            id: seed.id.clone(),
+            target: target.clone(),
+        })
+        .collect::<Vec<_>>();
+    public_resources.sort_by(|a, b| {
+        (&a.target.host, &a.target.machine).cmp(&(&b.target.host, &b.target.machine))
+    });
+    DiscoveryReceipt {
+        host_instance: intent.request.host_instance.clone(),
+        primary,
+        public_seeds: targets,
+        public_resources,
+        resource_set: ResourceSet {
+            revision: "x".repeat(128),
+            resources,
+        },
     }
-    for (id, intent) in &mut reserved.protection_intents {
-        if intent.acknowledgement.is_none() {
-            intent.acknowledgement = Some(ProtectionAck {
-                admission: intent.request.admission.clone(),
-                expires_at_ms: intent.request.expires_at_ms,
-                resources: intent.resources.clone(),
-                revision: intent.revision.clone(),
-            });
-        }
-        reserved
-            .uncertain_installations
-            .insert(format!("protection:{id}"));
-    }
-    for (id, intent) in &mut reserved.delegation_intents {
-        if intent.acknowledgement.is_none() {
-            intent.acknowledgement = Some(intent.expected.clone());
-        }
-        if intent.operation_policy_ack.is_none() {
-            intent.operation_policy_ack = intent.operation_policy.clone();
-        }
-        reserved
-            .uncertain_installations
-            .insert(format!("delegation:{id}"));
-    }
-    reserved
 }
 
 fn allocation_expired(token: &str, earliest_ms: u64) -> bool {
@@ -415,6 +395,132 @@ mod tests {
     }
 
     #[test]
+    fn partial_policy_unfinished_operations_and_renewals_stay_protected() {
+        let mut policy_state = state();
+        install(&mut policy_state, "policy", 100, 128);
+        let intent = policy_state.delegation_intents.get_mut("policy").unwrap();
+        intent.operation_policy = Some(HostOperationPolicy {
+            host_instance: "host-run".into(),
+            ownership: "ownership".into(),
+            ownership_generation: 1,
+            delegation: "delegation-policy".into(),
+            delegation_version: 1,
+            grant_digest: intent.expected.grant_digest.clone(),
+            policy_revision: "policy".into(),
+        });
+        policy_state.clock_floor = 200;
+        assert_eq!(
+            compact_authority(&policy_state, at(200))
+                .unwrap()
+                .1
+                .reclaimed_bytes,
+            0
+        );
+
+        for phase in [
+            OperationPhase::Intent,
+            OperationPhase::Reserved,
+            OperationPhase::Prepared,
+            OperationPhase::Dispatched,
+            OperationPhase::Consumed,
+        ] {
+            let mut operation_state = state();
+            install(&mut operation_state, "active", 100, 128);
+            let digest = operation_state.delegation_intents["active"]
+                .expected
+                .grant_digest
+                .clone();
+            let mut operation = finished_operation("op", "active", &digest);
+            operation.phase = phase;
+            operation_state
+                .operation_intents
+                .insert(operation.id.clone(), operation);
+            operation_state.clock_floor = 200;
+            assert_eq!(
+                compact_authority(&operation_state, at(200))
+                    .unwrap()
+                    .1
+                    .reclaimed_bytes,
+                0,
+                "{phase:?}"
+            );
+        }
+
+        let mut renewal_state = state();
+        install(&mut renewal_state, "renewed", 100, 128);
+        let intent = &renewal_state.delegation_intents["renewed"];
+        let operation = finished_operation("op", "renewed", &intent.expected.grant_digest);
+        let binding = ActiveOperationBinding {
+            operation_id: operation.id,
+            admission: "op".into(),
+            grant_digest: intent.expected.grant_digest.clone(),
+            permit_digest: "permit".into(),
+            request_digest: "request".into(),
+            authority: "authority".into(),
+            authority_epoch: "epoch".into(),
+            host_instance: "host-run".into(),
+            ownership: "ownership".into(),
+            ownership_generation: 1,
+            policy_revision: "policy".into(),
+            delegation: intent.request.id.clone(),
+            delegation_version: 1,
+            principal: intent.request.principal.clone(),
+            source: intent.trusted_source.clone().unwrap(),
+            team: "team".into(),
+            subject: "subject".into(),
+            metadata_revision: "metadata".into(),
+            target: Target {
+                host: "host".into(),
+                machine: "machine".into(),
+                namespace: "team".into(),
+                run: "run".into(),
+                placement: "version-1".into(),
+            },
+            resource_set: ResourceSet {
+                revision: "resources".into(),
+                resources: vec![Target {
+                    host: "host".into(),
+                    machine: "machine".into(),
+                    namespace: "team".into(),
+                    run: "run".into(),
+                    placement: "version-1".into(),
+                }],
+            },
+            limits: Limits {
+                execution_mode: None,
+                max_duration_seconds: 20,
+                max_input_bytes: 1024,
+                output_mode: None,
+                max_output_bytes: 4096,
+            },
+            guest_timeout_ms: 60_000,
+            started_at_ms: 1_000,
+            operation_deadline_ms: 2_000,
+        };
+        renewal_state.renewal_attempts.insert(
+            "attempt".into(),
+            RenewalAttempt {
+                id: "attempt".into(),
+                operation_id: "op".into(),
+                previous_sequence: 0,
+                binding,
+                protection_intent: "protection".into(),
+                protection_admission: "admission".into(),
+                protection_expires_at_ms: 2_000,
+                continuation_digest: None,
+            },
+        );
+        renewal_state.clock_floor = 200;
+        assert_eq!(
+            compact_authority(&renewal_state, at(200))
+                .unwrap()
+                .1
+                .reclaimed_bytes,
+            0
+        );
+    }
+
+    #[test]
     fn all_revocation_operation_and_protection_evidence_survives() {
         let mut original = state();
         install(&mut original, "old", 100, 128);
@@ -513,9 +619,18 @@ mod tests {
 
     #[test]
     fn a_434_byte_v1_headroom_fixture_reclaims_and_reopens() {
-        let (directory, mut journal, expected) = boundary_fixture(MAX_BYTES as usize - 434);
-        let before = bytes(&journal.state);
-        assert_eq!(MAX_BYTES as usize - (before - expected), 434);
+        let (directory, mut journal, expected) = boundary_fixture(MAX_BYTES as usize - 812);
+        journal.persist(State::clone(&journal.state)).unwrap();
+        drop(journal);
+        let mut journal = Journal::open(
+            &directory.path().join("authority"),
+            Role::Authority("authority".into()),
+        )
+        .unwrap();
+        let before = std::fs::metadata(directory.path().join("authority/journal.json"))
+            .unwrap()
+            .len();
+        assert_eq!(before as usize, MAX_BYTES as usize - 434);
         journal.prune(at(200)).unwrap();
         let after = std::fs::metadata(directory.path().join("authority/journal.json"))
             .unwrap()
@@ -600,7 +715,7 @@ mod tests {
         assert!(over_capacity(&journal.state));
         let next = State::clone(&journal.state);
         assert!(matches!(
-            journal.commit_install(next, at(200)),
+            journal.commit_install(next.clone(), at(200), next),
             Err(Error::Full)
         ));
         assert!(!journal.state.delegation_intents["old"]
@@ -738,7 +853,7 @@ mod tests {
                 match random % 7 {
                     0 | 1 => {
                         let key = format!("install-{seed}-{step}");
-                        install(&mut reference, &key, 50 + (random % 100), 96 + (step % 9));
+                        install(&mut reference, &key, 50 + (random % 250), 96 + (step % 9));
                         versions.insert(key.clone(), 1);
                         latest.insert(key.clone(), 1);
                         if random % 3 == 0 {
@@ -755,10 +870,17 @@ mod tests {
                     2 if !latest.is_empty() => {
                         let index = random as usize % latest.len();
                         let owner = latest.keys().nth(index).unwrap().clone();
-                        let version = latest[&owner] + 1;
                         let key = format!("renewal-{seed}-{step}");
                         install(&mut reference, &key, 100, 96);
                         let delegation = reference.delegation_intents[&owner].request.id.clone();
+                        let version = reference
+                            .delegation_intents
+                            .values()
+                            .filter(|intent| intent.request.id == delegation)
+                            .map(|intent| intent.request.version)
+                            .max()
+                            .unwrap_or(0)
+                            + 1;
                         let intent = reference.delegation_intents.get_mut(&key).unwrap();
                         intent.request.id = delegation.clone();
                         intent.request.version = version;
@@ -773,12 +895,20 @@ mod tests {
                     3 if !latest.is_empty() => {
                         let owner = latest.keys().nth(random as usize % latest.len()).unwrap();
                         let delegation = reference.delegation_intents[owner].request.id.clone();
+                        let version = reference
+                            .delegation_intents
+                            .values()
+                            .filter(|intent| intent.request.id == delegation)
+                            .map(|intent| intent.request.version)
+                            .max()
+                            .unwrap_or(0)
+                            + 1;
                         bind_control(
                             &mut reference,
                             format!("revoke-{seed}-{step}"),
                             &delegation,
                             "unused",
-                            latest[owner] + 1,
+                            version,
                             random % 2 == 0,
                         );
                     }
@@ -818,7 +948,7 @@ mod tests {
                     }
                     _ => {}
                 }
-                assert_eq!(versions.values().copied().max().unwrap_or(0) <= 32, true);
+                assert!(versions.values().copied().max().unwrap_or(0) <= 32);
             }
             let uncompacted = without_credentials(&reference);
             let (compacted, report) = compact_authority(&reference, at(200)).unwrap();
@@ -942,3 +1072,7 @@ mod tests {
         assert_eq!(bytes(&decoded), bytes(&compacted));
     }
 }
+
+#[cfg(test)]
+#[path = "reserve_cases.rs"]
+mod reserve_cases;

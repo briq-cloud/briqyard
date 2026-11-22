@@ -34,8 +34,12 @@ status, protection and uncertainty records remain untouched. Empty installer cre
 remain invalid. An expired grant does not retire an active continuation or operation ID.
 
 Before transmitting installation work, a projected commit reserves the complete acknowledged
-or uncertain follow-up evidence for each pending installation. If that reserve cannot fit,
-the writer returns `Full` rather than sending work whose acknowledgement cannot be retained.
+or uncertain follow-up evidence for that action. The authority writer turn holds its mutex
+across intent persistence, host calls and final status, so no other action can consume that
+reserve between these steps. Previously pending IDs are status-only and are not replayed,
+so historical records do not create fictitious future reservations. If the current reserve
+cannot fit, the writer returns `Full` rather than sending work whose acknowledgement cannot
+be retained.
 Compaction does not refund allocation units and never restores expired authority.
 
 The existing durability sequence is unchanged, including for a compacted clone: create a
@@ -61,12 +65,16 @@ frontier or exact history outside the bounded journal.
 
 ## Verification
 
-Unit fixtures cover a 434-byte remaining-space case and a projected overflow resulting in
-an exactly-full v1 file. The test generator measured 378 reclaimed bytes on both synthetic
-cap fixtures and 1,734 bytes on the signed historical-reader fixture. Additional checks
-cover full collections, nothing reclaimable, acknowledgement reserves, stale or uncertain
-clocks, repeated sweeps, reopen, and an ambiguous temporary file that preserves the
-original journal and poisons its writer.
+Unit fixtures cover a legal reopened v1 snapshot with 434 bytes free and a separate
+in-memory projected overflow resulting in an exactly-full v1 file. The test generator
+measured 378 reclaimed bytes on both synthetic cap fixtures and 1,734 bytes on the signed
+historical-reader fixture. Additional checks cover full collections, nothing reclaimable,
+maximum discovery receipts, the exact registration ACK/refusal boundary, historical
+controls, partial policy or unfinished operation and renewal dependencies, stale or
+uncertain clocks, repeated sweeps, reopen, and an ambiguous temporary file that preserves
+the original journal and poisons its writer. Injected failures at create, write, file fsync,
+rename and directory fsync prove the corresponding original-file, compacted-file and
+poisoned-writer outcomes.
 
 A deterministic model generates mixed grants, renewals, revocation, invalidation, late
 acknowledgements, execution and status histories and compares all retained records with an
