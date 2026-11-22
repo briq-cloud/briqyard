@@ -538,6 +538,20 @@ fn execveat_keeps_pid_and_maps_the_sealed_digest() {
 }
 
 #[test]
+fn fixture_child_inherits_no_descriptor_another_test_left_inheritable() {
+    let leaked = unsafe { libc::memfd_create(c"synthetic-inheritable".as_ptr(), 0) };
+    assert!(leaked >= 0);
+    let leaked = unsafe { OwnedFd::from_raw_fd(leaked) };
+    assert_eq!(descriptor_flags(leaked.as_raw_fd()).unwrap(), 0);
+    let (output, writer) = UnixStream::pair().unwrap();
+    let mut child = FixtureChild::spawn("exec", Stdio::from(OwnedFd::from(writer)));
+    drop(leaked);
+    drop(child.child.stdin.take());
+    assert!(child.wait().success());
+    drop(output);
+}
+
+#[test]
 fn native_asset_child() {
     let Ok(mode) = std::env::var(FIXTURE_MODE) else {
         return;
@@ -678,6 +692,15 @@ impl FixtureChild {
                 }
                 if libc::getppid() as u32 != parent {
                     return Err(io::Error::from_raw_os_error(libc::ECHILD));
+                }
+                if libc::syscall(
+                    libc::SYS_close_range,
+                    3,
+                    u32::MAX,
+                    libc::CLOSE_RANGE_CLOEXEC,
+                ) < 0
+                {
+                    return Err(io::Error::last_os_error());
                 }
                 Ok(())
             });
