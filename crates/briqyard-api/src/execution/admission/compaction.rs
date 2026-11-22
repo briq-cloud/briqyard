@@ -628,10 +628,16 @@ mod tests {
                 Err(Error::Persistence)
             ));
             assert!(matches!(journal.owned(), Err(Error::Persistence)));
-            assert!(!journal.state.delegation_intents["old"].request.grant.is_empty());
+            assert!(!journal.state.delegation_intents["old"]
+                .request
+                .grant
+                .is_empty());
             let stored = std::fs::read(&file).unwrap();
             if failure == "directory_fsync" {
-                assert_eq!(stored, expected, "post-rename failure lost the compacted file");
+                assert_eq!(
+                    stored, expected,
+                    "post-rename failure lost the compacted file"
+                );
             } else {
                 assert_eq!(stored, original, "{failure} replaced the original journal");
             }

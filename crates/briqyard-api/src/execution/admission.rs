@@ -1038,8 +1038,8 @@ impl Journal {
         if bytes.len() as u64 > MAX_BYTES {
             return Err(Error::Full);
         }
-        let write = || -> std::io::Result<()> {
-            let checkpoint = |stage| -> std::io::Result<()> {
+        let mut write = || -> std::io::Result<()> {
+            let mut checkpoint = |stage| -> std::io::Result<()> {
                 if fail(stage) {
                     Err(std::io::ErrorKind::WriteZero.into())
                 } else {
