@@ -65,6 +65,10 @@ ok 'target asset identity tests'
 step 'native: one private attempt, receipts, versions, handoff lineage, negatives (real uid and /proc)'
 cargo test -p briqyardd --lib local_owner
 ok 'local_owner suite'
+step 'native: a reaped original keeps its stored identity on its own retained pidfd (real kernel, root)'
+BRIQYARD_CUSTODY_TEST_REAL_UID=1 cargo test -p briqyardd --lib -- --ignored --exact \
+  execution_custody::local_owner::tests::review::a_reaped_original_keeps_its_stored_identity_on_its_own_retained_pidfd
+ok 'reaped original identity regression (the one gated test; no other ignored fixture runs)'
 
 step 'ordinary parity: no ordinary-path file differs from the base'
 changed=$(git diff --name-only "$BASE"...HEAD -- crates/briqyardd/src | grep -v '/local_owner/' || true)
