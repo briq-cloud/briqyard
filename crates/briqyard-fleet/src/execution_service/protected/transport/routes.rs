@@ -279,17 +279,25 @@ pub(crate) struct Scope {
 }
 
 impl Scope {
-    pub(crate) fn new(plan: &Plan, plan_hash: HexDigest) -> Self {
+    /// Only for the operation the inventory was verified for: §Plan.x§ is the inputs' X.
+    pub(crate) fn new(
+        plan: &Plan,
+        plan_hash: HexDigest,
+        inventory: &Inventory,
+    ) -> Result<Self, ConfigError> {
+        if plan.x != *inventory.x() {
+            return Err(ConfigError("plan is not the inputs' operation"));
+        }
         let kid =
             |key: &briqyard_api::execution::sealed::prim::KeyBytes| HexDigest::of(key.as_array());
-        Self {
+        Ok(Self {
             x: plan.x.clone(),
             plan: plan_hash,
             hk: kid(&plan.hk),
             ak: kid(&plan.ak),
             bk: kid(&plan.bk),
             rk: kid(&plan.rk),
-        }
+        })
     }
 
     /// The signer key an actor's signed queries must carry.

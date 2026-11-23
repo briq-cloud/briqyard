@@ -26,6 +26,12 @@ Reading the actor columns is a decision, not a quote: v3.1 names signers for rea
 authority crossings by credential (`tr`, `ni`). The table is the single place that maps them
 to enrolled actors; it is the narrowest reading and one line per route to change.
 
+- **Inputs binding (v3.6).** Rows are the §closure.peers§ of the independently verified
+  §native.inputs/v1§ manifest. §Inventory::new§ takes that manifest's X and its §actors§
+  key set and requires the rows to equal it one to one; §Scope::new§ refuses a Plan of
+  another X. The transport opens no path the manifest names (config, TLS, journal, listener
+  or fragment): identities arrive as bytes from the sealed descriptors, listeners as bound
+  sockets, and there is no caller path, environment or current-global token fallback.
 - **Identity.** Each peer row pins a leaf and an SPKI digest for a server and a client
   identity. A leaf is accepted only if its bytes match the pin, then only inside a closed
   X.509 profile: version 3, self-issued (the self-signature is verified, never trusted),

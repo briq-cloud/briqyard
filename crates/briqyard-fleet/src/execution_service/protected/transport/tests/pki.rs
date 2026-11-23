@@ -146,6 +146,13 @@ impl Net {
 
     /// `edit` may replace an actor's issued identities before the inventory pins them.
     pub(crate) fn build(edit: impl Fn(Actor, &mut Peer)) -> Self {
+        Self::for_x(super::harness::x(), edit)
+    }
+
+    pub(crate) fn for_x(
+        x: briqyard_api::execution::sealed::objects::X,
+        edit: impl Fn(Actor, &mut Peer),
+    ) -> Self {
         let mut listeners = HashMap::new();
         let mut peers = HashMap::new();
         let mut rows = Vec::new();
@@ -178,7 +185,10 @@ impl Net {
         rows.sort_by_key(|row| (row.peer.actor.as_str(), row.peer.id.as_str().to_owned()));
         Self {
             peers,
-            inventory: Arc::new(Inventory::new(rows, &[]).unwrap()),
+            inventory: Arc::new({
+                let roster: Vec<PeerId> = rows.iter().map(|row| row.peer.clone()).collect();
+                Inventory::new(x, rows, &roster, &[]).unwrap()
+            }),
             clock: today(),
             listeners: Mutex::new(listeners),
         }

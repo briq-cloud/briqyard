@@ -97,13 +97,14 @@ struct Deployment {
 
 impl Deployment {
     fn new(lose_reply: bool) -> Self {
-        let net = Net::new();
         let mut f = Fixture::new();
+        let net = Net::for_x(f.service.plan.x.clone(), |_, _| ());
         f.service.peers = Arc::new(
             AuthorityPeers::new(&net.local(Actor::A), &net.inventory, net.clock.clone()).unwrap(),
         );
         let f = Arc::new(f);
-        let scope = Scope::new(&f.service.plan, f.service.plan_hash.clone());
+        let scope =
+            Scope::new(&f.service.plan, f.service.plan_hash.clone(), &net.inventory).unwrap();
         let host = Arc::new(PeerHost {
             peer: f.peer.clone(),
             lose_reply: AtomicBool::new(lose_reply),
@@ -388,4 +389,14 @@ async fn the_original_registration_forwards_unchanged_and_a_second_arming_is_imp
     let origin = view.origin().unwrap();
     assert_eq!(done.witness, origin.witness);
     assert_eq!(done.permit, origin.permit);
+}
+
+#[test]
+fn a_plan_of_another_operation_cannot_scope_the_inventory() {
+    let f = Fixture::new();
+    let net = Net::new();
+    assert_ne!(f.service.plan.x, *net.inventory.x());
+    assert!(Scope::new(&f.service.plan, f.service.plan_hash.clone(), &net.inventory).is_err());
+    let own = Net::for_x(f.service.plan.x.clone(), |_, _| ());
+    assert!(Scope::new(&f.service.plan, f.service.plan_hash.clone(), &own.inventory).is_ok());
 }

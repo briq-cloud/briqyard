@@ -38,7 +38,10 @@ pub(crate) use routes::{
 
 use briqyard_api::execution::{
     clock::ClockSource,
-    sealed::prim::{HexDigest, Ident},
+    sealed::{
+        objects::X,
+        prim::{HexDigest, Ident},
+    },
 };
 use cert::Usage;
 use ring::{
@@ -273,19 +276,30 @@ impl PeerRow {
 /// identity distinct from every other and from the reserved key material.
 #[derive(Debug)]
 pub(crate) struct Inventory {
+    x: X,
     rows: Vec<PeerRow>,
 }
 
 impl Inventory {
+    /// `x` is the operation of the independently verified inputs, `roster` their `actors`
+    /// key set in (actor, id) order, which the `closure.peers` rows must equal one to one.
     /// `reserved` holds digests of the ordinary TLS leaf and SPKI, the Hk/Ak/Bk/Rk and
     /// ordinary authority keys and every other identity a private one must not equal.
-    pub(crate) fn new(rows: Vec<PeerRow>, reserved: &[HexDigest]) -> Result<Self, ConfigError> {
+    pub(crate) fn new(
+        x: X,
+        rows: Vec<PeerRow>,
+        roster: &[PeerId],
+        reserved: &[HexDigest],
+    ) -> Result<Self, ConfigError> {
         let key = |row: &PeerRow| (row.peer.actor.as_str(), row.peer.id.as_str().to_owned());
         if rows.is_empty()
             || rows.len() > MAX_PEERS
             || rows.windows(2).any(|pair| key(&pair[0]) >= key(&pair[1]))
         {
             return Err(ConfigError("peer rows"));
+        }
+        if !rows.iter().map(|row| &row.peer).eq(roster.iter()) {
+            return Err(ConfigError("peer rows are not the roster"));
         }
         for actor in [Actor::H, Actor::A, Actor::B, Actor::R] {
             if rows.iter().filter(|row| row.peer.actor == actor).count() != 1 {
@@ -306,7 +320,11 @@ impl Inventory {
                 return Err(ConfigError("endpoint is not unique"));
             }
         }
-        Ok(Self { rows })
+        Ok(Self { x, rows })
+    }
+
+    pub(crate) fn x(&self) -> &X {
+        &self.x
     }
 
     pub(crate) fn rows(&self) -> impl Iterator<Item = &PeerRow> {

@@ -4,6 +4,11 @@ use crate::execution_service::protected::transport::{
 };
 use briqyard_api::execution::sealed::prim::{HexDigest, Ident};
 
+fn build(rows: Vec<PeerRow>, reserved: &[HexDigest]) -> Result<Inventory, ConfigError> {
+    let roster: Vec<PeerId> = rows.iter().map(|row| row.peer.clone()).collect();
+    Inventory::new(super::harness::x(), rows, &roster, reserved)
+}
+
 fn rows(net: &Net) -> Vec<PeerRow> {
     net.inventory.rows().cloned().collect()
 }
@@ -62,20 +67,20 @@ fn the_endpoint_is_an_exact_private_origin_on_the_dedicated_port_of_its_actor() 
 #[test]
 fn the_inventory_is_one_sorted_unique_set_of_distinct_identities() {
     let net = Net::new();
-    assert!(Inventory::new(rows(&net), &[]).is_ok());
+    assert!(build(rows(&net), &[]).is_ok());
 
     let mut reversed = rows(&net);
     reversed.reverse();
-    assert_eq!(reason(Inventory::new(reversed, &[])), "peer rows");
+    assert_eq!(reason(build(reversed, &[])), "peer rows");
     let mut duplicate = rows(&net);
     duplicate.insert(1, duplicate[0].clone());
-    assert_eq!(reason(Inventory::new(duplicate, &[])), "peer rows");
-    assert_eq!(reason(Inventory::new(vec![], &[])), "peer rows");
+    assert_eq!(reason(build(duplicate, &[])), "peer rows");
+    assert_eq!(reason(build(vec![], &[])), "peer rows");
 
     let mut without_host = rows(&net);
     without_host.retain(|row| row.peer.actor != Actor::H);
     assert_eq!(
-        reason(Inventory::new(without_host, &[])),
+        reason(build(without_host, &[])),
         "exactly one H, A, B and R"
     );
     let mut two_hosts = rows(&net);
@@ -87,29 +92,17 @@ fn the_inventory_is_one_sorted_unique_set_of_distinct_identities() {
     second.peer.id = Ident::new("h-2").unwrap();
     two_hosts.push(second);
     two_hosts.sort_by_key(|row| (row.peer.actor.as_str(), row.peer.id.as_str().to_owned()));
-    assert_eq!(
-        reason(Inventory::new(two_hosts, &[])),
-        "exactly one H, A, B and R"
-    );
+    assert_eq!(reason(build(two_hosts, &[])), "exactly one H, A, B and R");
 
     let mut shared = rows(&net);
     shared[1].server = shared[0].server.clone();
-    assert_eq!(
-        reason(Inventory::new(shared, &[])),
-        "identity is not distinct"
-    );
+    assert_eq!(reason(build(shared, &[])), "identity is not distinct");
     let mut mixed = rows(&net);
     mixed[0].client = mixed[0].server.clone();
-    assert_eq!(
-        reason(Inventory::new(mixed, &[])),
-        "identity is not distinct"
-    );
+    assert_eq!(reason(build(mixed, &[])), "identity is not distinct");
     let mut same_origin = rows(&net);
     same_origin[1].endpoint = same_origin[0].endpoint.clone();
-    assert_eq!(
-        reason(Inventory::new(same_origin, &[])),
-        "endpoint is not unique"
-    );
+    assert_eq!(reason(build(same_origin, &[])), "endpoint is not unique");
 }
 
 #[test]
@@ -123,11 +116,11 @@ fn a_private_identity_may_not_equal_ordinary_or_signer_key_material() {
         row.client.spki.clone(),
     ] {
         assert_eq!(
-            reason(Inventory::new(rows(&net), &[reserved])),
+            reason(build(rows(&net), &[reserved])),
             "identity is not distinct"
         );
     }
-    assert!(Inventory::new(rows(&net), &[HexDigest::of(b"unrelated")]).is_ok());
+    assert!(build(rows(&net), &[HexDigest::of(b"unrelated")]).is_ok());
 }
 
 #[test]
@@ -223,4 +216,30 @@ fn the_pinned_server_name_must_be_the_certificates_own_name() {
     )
     .unwrap_err();
     assert_eq!(error.0, "server name");
+}
+
+#[test]
+fn the_rows_are_exactly_the_verified_rosters_actors_for_this_operation() {
+    let net = Net::new();
+    let roster: Vec<PeerId> = rows(&net).iter().map(|row| row.peer.clone()).collect();
+    let make = |roster: &[PeerId]| {
+        Inventory::new(super::harness::x(), rows(&net), roster, &[]).map(|_| ())
+    };
+    assert!(make(&roster).is_ok());
+    let wrong = "peer rows are not the roster";
+    assert_eq!(make(&roster[1..]).unwrap_err().0, wrong);
+    let mut extra = roster.clone();
+    extra.push(PeerId {
+        actor: Actor::Installer,
+        id: Ident::new("i-2").unwrap(),
+    });
+    assert_eq!(make(&extra).unwrap_err().0, wrong);
+    let mut renamed = roster.clone();
+    renamed[2].id = Ident::new("h-9").unwrap();
+    assert_eq!(make(&renamed).unwrap_err().0, wrong);
+    let mut swapped = roster.clone();
+    swapped.swap(0, 1);
+    assert_eq!(make(&swapped).unwrap_err().0, wrong);
+    assert_eq!(make(&[]).unwrap_err().0, wrong);
+    assert_eq!(net.inventory.x(), &super::harness::x());
 }
