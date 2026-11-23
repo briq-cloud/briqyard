@@ -663,6 +663,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   across the host, not continuous physical RAM usage.
   Against a daemon on TLS, the invariants' curl trusts the daemon's certificate with
   `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
+- `hack/owner-qualify.sh` (disposable Linux host, root, `BRIQYARD_DISPOSABLE=1`; [ADR 0149](adr/0149-native-owner-local-state.md), [OWNER-QUALIFICATION.md](OWNER-QUALIFICATION.md)): the shared owner golden, the wire tests (6), the `local_owner` suite (26) and ordinary-path parity. The live joint B/native phase is listed as not run.
 - `hack/chaos.py`: owners keep a machine each and a counter on its disks through writes, stops,
   restarts, forks, snapshots (a restore with memory read again after a cold boot) and backups,
   while racers stop, start, restart, snapshot and back up any machine at once. It fails on a

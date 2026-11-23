@@ -19,9 +19,9 @@ const MAX_FILE: u64 = 64 * 1024;
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Fail {
-    AfterTemporary,
-    AfterFileSync,
-    AfterRename,
+    Temporary,
+    FileSync,
+    Rename,
 }
 
 #[cfg(test)]
@@ -174,14 +174,14 @@ impl Store {
                 .open(&temporary)?;
             file.write_all(&bytes)?;
             #[cfg(test)]
-            if FAIL.get() == Some(Fail::AfterTemporary) {
+            if FAIL.get() == Some(Fail::Temporary) {
                 return Err(std::io::Error::other(
                     "injected failure after the temporary file",
                 ));
             }
             file.sync_all()?;
             #[cfg(test)]
-            if FAIL.get() == Some(Fail::AfterFileSync) {
+            if FAIL.get() == Some(Fail::FileSync) {
                 return Err(std::io::Error::other(
                     "injected failure after the file sync",
                 ));
@@ -198,7 +198,7 @@ impl Store {
         }
         let after_rename = || -> Result<(), std::io::Error> {
             #[cfg(test)]
-            if FAIL.get() == Some(Fail::AfterRename) {
+            if FAIL.get() == Some(Fail::Rename) {
                 return Err(std::io::Error::other("injected failure after the rename"));
             }
             File::open(&self.root)?.sync_all()

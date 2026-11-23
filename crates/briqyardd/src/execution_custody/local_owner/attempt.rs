@@ -866,7 +866,7 @@ impl Attempt {
         }
         let [daemon, authority] = self
             .measure_pair(facts)
-            .or_else(|_| Err(OwnerError::Refused("units changed since the handoff")))?;
+            .map_err(|_| OwnerError::Refused("units changed since the handoff"))?;
         let current = UnitCommit::from(if resource == Resource::Daemon {
             &daemon
         } else {

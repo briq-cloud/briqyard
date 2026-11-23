@@ -17,7 +17,7 @@ impl Drop for Clear {
 
 #[test]
 fn a_failure_before_the_rename_leaves_the_old_attempt_and_no_temporary_file() {
-    for point in [Fail::AfterTemporary, Fail::AfterFileSync] {
+    for point in [Fail::Temporary, Fail::FileSync] {
         let world = World::new();
         world.install().unwrap();
         let before = world.attempt();
@@ -48,7 +48,7 @@ fn a_failure_after_the_rename_is_an_unknown_commit_that_is_never_repeated() {
     let world = World::new();
     world.install().unwrap();
     let _clear = Clear;
-    fail_at(Fail::AfterRename);
+    fail_at(Fail::Rename);
     assert!(matches!(
         world.owner.allocate_lease(Resource::Daemon),
         Err(OwnerError::CommitUnknown)

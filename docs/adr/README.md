@@ -158,3 +158,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 - [0147: A closed, non-authorizing reader for native.inputs/v1](0147-native-inputs-reader.md)
 
 - [0148: Native asset delivery v3, the suffix and typed secret acquisition](0148-native-asset-delivery-v3.md)
+
+- [0149: The target's local owner state and its read-only collector](0149-native-owner-local-state.md)

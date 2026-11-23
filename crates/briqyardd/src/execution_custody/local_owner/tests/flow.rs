@@ -426,10 +426,8 @@ fn the_first_handoff_compares_the_exact_version_and_every_binding_before_anythin
     let version = world.version();
     let retained = &world.retained[DAEMON];
     let attempt = |turn: Turn, grant: &LGrant| world.owner.accept_handoff(grant, &turn, retained);
-    let mutations: Vec<(
-        &str,
-        Box<dyn Fn(&mut briqyard_api::execution::sealed::owner::TurnBody)>,
-    )> = vec![
+    type Mutation = Box<dyn Fn(&mut briqyard_api::execution::sealed::owner::TurnBody)>;
+    let mutations: Vec<(&str, Mutation)> = vec![
         (
             "target version ahead",
             Box::new(|t| {
@@ -571,7 +569,8 @@ fn the_authorized_lineage_is_handoff_then_exit_then_guard_and_only_then_consumes
 #[test]
 fn consumption_refuses_every_break_in_the_lineage_and_changes_nothing() {
     let guard = measured(&guard_proc());
-    let mut cases: Vec<(&str, Box<dyn Fn(&World)>)> = Vec::new();
+    type Case = Box<dyn Fn(&World)>;
+    let mut cases: Vec<(&str, Case)> = Vec::new();
     cases.push(("another guard pid", Box::new(|_| {})));
     cases.push((
         "a replaced unit",
@@ -759,10 +758,10 @@ fn the_retirement_seal_and_launch_a_join_follow_the_targets_own_records() {
         hashed.capture = Some(digest(1));
         hashed
     };
-    assert!(matches!(
-        decode::<briqyard_api::execution::sealed::owner::TurnBody>(&encode(&with_hashes).unwrap()),
-        Err(_)
-    ));
+    assert!(decode::<briqyard_api::execution::sealed::owner::TurnBody>(
+        &encode(&with_hashes).unwrap()
+    )
+    .is_err());
     let seal_turn = world.turn(seal_body.clone(), &Key::bk());
     world.owner.accept_seal(&seal_grant, &seal_turn).unwrap();
     refused(
