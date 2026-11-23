@@ -10,6 +10,7 @@
 
 mod bind;
 mod grammar;
+mod identity;
 mod release;
 mod strict;
 

@@ -79,8 +79,8 @@ impl RetainedProcess for CustodianProcess {
 
 /// The four commitments to one unit's verified effective configuration and its live state.
 /// `reloaded` is that the service manager's loaded unit is the on-disk fragment (no pending
-/// reload). The preimages of `argv`, `sandbox` and `fdstore` are an open design decision
-/// (ADR 0149): the production host does not produce this type.
+/// reload). The preimages of `argv`, `sandbox` and `fdstore` are pinned by owner-layer erratum 2 (`briqyard_api::execution::sealed::preimage`); the
+/// production host still does not produce this type (ADR 0149: no manager query, no installed unit policy).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnitMeasure {
     pub(super) fragment: HexDigest,
@@ -123,7 +123,7 @@ pub trait TargetFacts {
 
 /// The production host. Process facts come from the kernel. The service manager's effective
 /// unit, the guard image path and the final-I/O record are not produced here: the commitments'
-/// preimages and the authority's journal evidence are undecided (ADR 0149), so every call that
+/// manager query, the installed unit policy and the custodian's final-I/O proof have no producer (ADR 0149), so every call that
 /// needs them refuses and the production collector cannot answer.
 pub struct LiveHost(());
 

@@ -5,12 +5,13 @@
 //! **Not an activation path.** Nothing here selects an operation, reads a manifest, signs, or
 //! starts a process. A transition takes measurements from a [`TargetFacts`] and a
 //! [`RetainedProcess`]: the production [`LiveHost`] measures processes and refuses every fact
-//! whose preimage is still undecided, so no production caller can enroll or answer a read yet.
+//! without a producer (ADR 0149), so no production caller can enroll or answer a read yet.
 //! A future sealed startup must attach its source of enrolled operations unconditionally
 //! before it opens a guarded listener; constructing these types is not owner authority.
 
 mod attempt;
 mod facts;
+mod fragment;
 mod store;
 
 #[cfg(test)]
@@ -18,6 +19,7 @@ mod tests;
 
 pub use attempt::{CustodianInput, GuardPins};
 pub use facts::{FinalIo, LiveHost, MeasuredProc, RetainedProcess, TargetFacts, UnitMeasure};
+pub use fragment::read_fragment;
 
 use super::plan_reader::{
     EnrolledTrust, OriginalOwner, OwnerRefusal, OwnerSnapshot, PlanReadOwner, ReadScope,

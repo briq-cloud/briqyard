@@ -1,6 +1,6 @@
 # ADR 0149: The target's local owner state and its read-only collector
 
-Date: 2026-11-23 · Status: accepted for the draft slice; one decision open (below)
+Date: 2026-11-23 · Status: accepted for the draft slice; producers still unprovisioned (below)
 
 ## Context
 
@@ -50,18 +50,43 @@ listener. The ordinary route does not depend on an enrolled owner, and no existi
 changes except two additive re-exports and a constructor on `OriginalOwner` that only this
 module can call.
 
-## Open decision (escalated, not decided here)
+## Unit commitments (owner-layer erratum 2, SHA-256 ec90a9a9fe3d88480802d8f3fd5307179c096ebe4d044ed856dff321c998b84d)
 
-The preimages of the unit commitments `argv`, `sandbox`, `fdstore` and of what
-`fragment` hashes are not defined by the golden or by B's grammar. The production `LiveHost`
-therefore measures processes from `/proc` and returns `OwnerError::Unprovisioned` for every fact
-that needs one of them, final-I/O evidence included. The consequence is deliberate: no production
-caller can enroll or answer a read until the preimages are pinned. Tests use their own fact
-sources inside the crate. The preimages need one decision shared by R, B and native, with the
-source-build versus installed-bootstrap pin question that is already open.
+The preimages that were open are decided by erratum 2 and implemented as pure codecs in
+`briqyard_api::execution::sealed::preimage`:
+
+| Commitment | Preimage |
+|---|---|
+| `fragment` | SHA-256 of the raw installed file, first byte to EOF, 1..=64 KiB, nothing normalized |
+| `argv` | `H(owner.argv/v1)`: the executable and the whole ordered vector, argv[0] included |
+| `sandbox` | `H(owner.sandbox/v1)`: closed typed projection; sets unique and in byte order, binds and environment files in manager order |
+| `fdstore` | `H(owner.fdstore/v1)`: the v3.6 `Listeners` object in qualified delivery order plus preserve and notify policy |
+
+Every expected digest in the tests comes from an independent Python computation, not from the
+code under test. `local_owner::read_fragment` is the byte source for `fragment`: descriptor walk,
+owner and writer checks on every component, no links, one hard link, bounded size, stable while
+read. `Inputs::check_target_asset_identity` checks that guard and candidate are the target
+release asset at distinct paths with the same approved build; `bind` does not call it, because
+the accepted `native.inputs/v1` fixture's guard is not the target asset.
+
+## Still unprovisioned
+
+`LiveHost` measures processes only and refuses everything else. What is missing, and each is a
+producer rather than a codec:
+
+* **Loaded unit facts.** A typed query of the pinned manager (loaded `ExecStart`, the sandbox
+  properties, `FileDescriptorStoreMax`, preserve, notify access, FragmentPath, drop-in paths, reload
+  state) from one coherent cut. No manager client exists in this tree, and adding one is a new
+  dependency and security decision.
+* **The installed `unit_policy`.** The closed per-role preimages and templates the owner compares
+  against have no installed format yet.
+* **Delivery order.** The qualification that the manager's snapshot order is the order it delivers.
+* **Final I/O.** The root custodian's proof (retained pidfd exit, exclusion, read-only validation of
+  the journals and side stores, durability barriers, one-use commit). The scoped-writer profile
+  artifact that names the stores and ranges is not defined in this tree.
 
 ## Consequences
 
-A joint run with B needs that decision first; the qualification procedure is in
-`docs/OWNER-QUALIFICATION.md`. The version bump on main changes no pinned label here: build labels
-come from the plan's pins, and the tests use the synthetic label `fence-3`.
+A joint run needs those producers. The qualification procedure is in
+`docs/OWNER-QUALIFICATION.md`. The version bump on main changes no pinned label here: build
+labels come from the plan's pins, and the tests use the synthetic label `fence-3`.

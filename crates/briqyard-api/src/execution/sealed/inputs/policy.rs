@@ -225,6 +225,50 @@ impl Inputs {
         Ok(())
     }
 
+    /// Erratum 2 §3: for each role the bootstrap guard and the staged candidate are the same
+    /// two bytes of the target release's published asset and carry the same approved build, and
+    /// they are different paths. Equal bytes are not the same process or mount, so the paths
+    /// must differ; a rebuild with other bytes refuses even when its commit and label match.
+    /// This is not called by `bind`: the accepted `native.inputs/v1` fixture's guard is not
+    /// the target asset, and changing that is a shared decision.
+    pub fn check_target_asset_identity(
+        &self,
+        plan: &Plan,
+        target: &VerifiedRelease,
+    ) -> Result<(), CodecError> {
+        if self.target_release != *target.release() {
+            return mismatch("target release");
+        }
+        let roles = [
+            (
+                &self.daemon,
+                &self.target_release.daemon,
+                target.daemon_asset_bytes(),
+                &plan.dbuild,
+            ),
+            (
+                &self.authority,
+                &self.target_release.fleet,
+                target.fleet_asset_bytes(),
+                &plan.abuild,
+            ),
+        ];
+        for (resource, asset, asset_bytes, build) in roles {
+            for program in [&resource.guard, &resource.candidate] {
+                if program.file.sha256 != *asset
+                    || program.file.bytes.get() != asset_bytes
+                    || program.build != *build
+                {
+                    return mismatch("program is not the target release asset");
+                }
+            }
+            if resource.guard.file.path == resource.candidate.file.path {
+                return mismatch("guard and candidate share a path");
+            }
+        }
+        Ok(())
+    }
+
     fn check_topology(&self, policy: &TopologyPolicy) -> Result<(), CodecError> {
         let topology = &self.topology;
         let hosts: usize = topology.regions.iter().map(|r| r.hosts.len()).sum();

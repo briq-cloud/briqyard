@@ -9,5 +9,6 @@
 
 mod fixtures;
 mod flow;
+mod fragment;
 mod golden;
 mod store;
