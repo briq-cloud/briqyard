@@ -319,7 +319,7 @@ impl World {
         )
     }
 
-    pub(super) fn launch(&self, resource: Resource, nonce: u8) -> Launch {
+    pub(super) fn launch(&self, resource: Resource) -> Launch {
         let (old, custodian) = match resource {
             Resource::Daemon => (self.plan.pre_d.clone(), proc(20, 0x44)),
             Resource::Authority => (self.plan.pre_a.clone(), proc(22, 0x44)),
@@ -328,13 +328,13 @@ impl World {
             x: x(),
             plan: HexDigest::of(&self.bytes),
             resource,
-            owner: Nonce::from_array([0x40 + nonce; 32]),
+            owner: crate::execution_custody::plan_reader::fresh_nonce().unwrap(),
             stage: LaunchStage::Captured,
             old,
             custodian,
             successor: None,
             death: None,
-            nonce: Nonce::from_array([0x50 + nonce; 32]),
+            nonce: crate::execution_custody::plan_reader::fresh_nonce().unwrap(),
         }
     }
 
@@ -360,7 +360,7 @@ impl World {
     }
 
     pub(super) fn stage_capture(&self, resource: Resource) -> (Launch, Capture) {
-        let launch = self.launch(resource, if resource == Resource::Daemon { 1 } else { 2 });
+        let launch = self.launch(resource);
         let capture = self.capture(&launch, &Key::rk());
         let retained = &self.retained[if resource == Resource::Daemon {
             DAEMON

@@ -241,7 +241,7 @@ fn a_capture_must_be_the_retained_originals_own_signed_pair_and_comes_once() {
     let world = World::new();
     world.install().unwrap();
     world.owner.allocate_lease(Resource::Daemon).unwrap();
-    let launch = world.launch(Resource::Daemon, 1);
+    let launch = world.launch(Resource::Daemon);
     let retained = &world.retained[DAEMON];
     let forged = world.capture(&launch, &Key::attacker());
     assert!(matches!(
