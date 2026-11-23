@@ -19,9 +19,10 @@ collector's answers from the target's own owner state. The file is read, never r
 
 A byte-for-byte copy of the shared unit-commitment vectors (owner-layer erratum 2 §4):
 `infra/briqyard/execution/__fixtures__/sealed_owner_units_v1.vectors` in the API's repository, at the
-draft commit `26f17421768a809400f4192cbaf836635d9f0679`.
+draft commit `628b9a32a9c562a52336bd22ba8847ae2c7cf6d7` (B draft #896; it supersedes the 57-row file
+`21371a4f…bdf3` and nothing else).
 
-* Whole-file SHA-256: `21371a4fd93da81519f9a58fdd2badede01033c1515ff8bfa5c36cc6e309bdf3`, 35,649 bytes, 57
+* Whole-file SHA-256: `8d317e519e8c0d216c462ddcc47f9e97a7a2694e31d0a03e685ca47452b29b72`, 43,765 bytes, 63
   LF-terminated rows, `name TAB kind TAB input TAB expected`. The input is JSON with sorted keys and no spaces.
 * `expected` is a digest, `a:b:c:d` (four commitments of a unit), `accept`, or `refuse`.
 * All values are public synthetic fixtures. The file is read, never regenerated or edited here; the

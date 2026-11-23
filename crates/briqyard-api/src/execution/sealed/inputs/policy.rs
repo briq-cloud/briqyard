@@ -255,12 +255,13 @@ impl Inputs {
             ),
         ];
         for (resource, asset, asset_bytes, build) in roles {
-            for program in [&resource.guard, &resource.candidate] {
-                if program.file.bytes.get() != asset_bytes {
-                    return mismatch("program is not the target release asset");
-                }
-            }
-            same_target_asset(&resource.guard, &resource.candidate, asset, build)?;
+            same_target_asset(
+                &resource.guard,
+                &resource.candidate,
+                asset,
+                asset_bytes,
+                build,
+            )?;
         }
         Ok(())
     }

@@ -46,6 +46,38 @@ pub enum Field {
 pub enum Token {
     Literal(String),
     Placeholder(Placeholder),
+    OperationDir(OperationDirToken),
+}
+
+/// `{"operation_dir":{"root":R,"leaf":L}}`: the role-rooted operation directory
+/// `R/<op>/<serial>/L`, one argument expanded from the approved transition (erratum 2a §1).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationDirToken {
+    pub operation_dir: OperationDir,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationDir {
+    pub root: String,
+    pub leaf: String,
+}
+
+impl OperationDir {
+    fn expand(&self, x: &Transition) -> Result<String, CodecError> {
+        let root = Path::new(&self.root)?;
+        if self.leaf.contains('/') {
+            return bad("operation directory leaf");
+        }
+        let leaf = Ident::new(&self.leaf)?;
+        Ok(format!(
+            "{}/{}/{}/{leaf}",
+            root.as_str(),
+            x.op,
+            x.serial.get()
+        ))
+    }
 }
 
 /// `{"x":"op"}` or `{"x":"serial"}`: one typed field and nothing else.
@@ -77,7 +109,10 @@ pub fn argv_digest(
     for token in template {
         args.push(match (token, transition) {
             (Token::Literal(text), _) => text.clone(),
-            (Token::Placeholder(_), None) => return bad("placeholder outside a guarded unit"),
+            (Token::Placeholder(_) | Token::OperationDir(_), None) => {
+                return bad("placeholder outside a guarded unit")
+            }
+            (Token::OperationDir(token), Some(x)) => token.operation_dir.expand(x)?,
             (Token::Placeholder(Placeholder { field: Field::Op }), Some(x)) => {
                 x.op.as_str().to_owned()
             }
@@ -310,10 +345,16 @@ impl UnitPolicy {
     /// carries no transition fields; the guarded one is expanded with the approved one.
     pub fn expected(
         &self,
+        role: Resource,
         phase: Phase,
         transition: &Transition,
         listeners: &Listeners,
     ) -> Result<UnitDigests, CodecError> {
+        let guarded = &self.guarded;
+        let guard = guard_argv(role, transition)?;
+        if argv_digest(&guarded.exec, &guarded.args, Some(transition))? != guard.digest()? {
+            return bad("command is not the role's guard command");
+        }
         let before = phase == Phase::Prearm;
         let installed = if before { &self.legacy } else { &self.guarded };
         let loaded_legacy = matches!(phase, Phase::Prearm | Phase::Armed);
@@ -338,11 +379,13 @@ pub fn same_target_asset(
     guard: &Program,
     candidate: &Program,
     target: &HexDigest,
+    target_bytes: u64,
     build: &Build,
 ) -> Result<(), CodecError> {
     let alike = guard.file.sha256 == *target
         && candidate.file.sha256 == *target
-        && guard.file.bytes == candidate.file.bytes
+        && guard.file.bytes.get() == target_bytes
+        && candidate.file.bytes.get() == target_bytes
         && guard.build == *build
         && candidate.build == *build;
     if !alike {

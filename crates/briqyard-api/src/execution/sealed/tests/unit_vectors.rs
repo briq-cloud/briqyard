@@ -4,6 +4,7 @@
 //! or `refuse`. A refusal must come from validation: no row may be repaired into an answer.
 
 use crate::execution::sealed::canonical::{decode, h};
+use crate::execution::sealed::custody::Resource;
 use crate::execution::sealed::inputs::{Listeners, Path, Program};
 use crate::execution::sealed::owner::ArmReceipt;
 use crate::execution::sealed::preimage::Argv;
@@ -15,7 +16,7 @@ const VECTORS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/testdata/owner_v1/sealed_owner_units_v1.vectors"
 ));
-const VECTORS_SHA256: &str = "21371a4fd93da81519f9a58fdd2badede01033c1515ff8bfa5c36cc6e309bdf3";
+const VECTORS_SHA256: &str = "8d317e519e8c0d216c462ddcc47f9e97a7a2694e31d0a03e685ca47452b29b72";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +42,7 @@ struct FdstoreInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UnitInput {
+    role: Resource,
     policy: UnitPolicy,
     phase: Phase,
     x: Transition,
@@ -88,6 +90,7 @@ struct RoleInput {
 #[serde(deny_unknown_fields)]
 struct TargetInput {
     sha256: HexDigest,
+    bytes: u64,
     build: Build,
 }
 
@@ -125,7 +128,9 @@ fn evaluate(
         }
         "unit" => {
             let row: UnitInput = parse(input)?;
-            let unit = row.policy.expected(row.phase, &row.x, &row.listeners)?;
+            let unit = row
+                .policy
+                .expected(row.role, row.phase, &row.x, &row.listeners)?;
             format!(
                 "{}:{}:{}:{}",
                 unit.fragment, unit.argv, unit.sandbox, unit.fdstore
@@ -138,6 +143,7 @@ fn evaluate(
                 &row.role.guard.program(),
                 &row.role.candidate.program(),
                 &row.target.sha256,
+                row.target.bytes,
                 &row.target.build,
             )?;
             "accept".to_owned()
@@ -161,12 +167,12 @@ fn rows() -> Vec<[&'static str; 4]> {
 #[test]
 fn the_mirrored_file_is_exactly_the_shared_source() {
     use sha2::{Digest, Sha256};
-    assert_eq!(VECTORS.len(), 35649);
+    assert_eq!(VECTORS.len(), 43765);
     assert_eq!(
         hex::encode(Sha256::digest(VECTORS.as_bytes())),
         VECTORS_SHA256
     );
-    assert_eq!(rows().len(), 57);
+    assert_eq!(rows().len(), 63);
     assert!(VECTORS.ends_with('\n') && !VECTORS.contains('\r'));
 }
 
@@ -187,7 +193,7 @@ fn every_row_is_reproduced_and_every_refusal_comes_from_validation() {
             }
         }
     }
-    assert_eq!((accepted, refused), (37, 20));
+    assert_eq!((accepted, refused), (39, 24));
 }
 
 #[test]
@@ -261,6 +267,11 @@ fn each_refusal_has_the_reason_its_row_is_about() {
         ("asset/daemon/other-guard-build", asset),
         ("asset/daemon/guard-digest-not-target", asset),
         (
+            "asset/daemon/both-lengths-equal-but-not-the-approved-count",
+            asset,
+        ),
+        ("asset/daemon/guard-length-not-target", asset),
+        (
             "asset/daemon/candidate-at-guard-path",
             Value("guard and candidate share a path"),
         ),
@@ -273,6 +284,10 @@ fn each_refusal_has_the_reason_its_row_is_about() {
         expected.insert(
             format!("argv/{role}/guarded-without-x"),
             Value("placeholder outside a guarded unit"),
+        );
+        expected.insert(
+            format!("unit/{role}/split-flag-guarded-refused"),
+            Value("command is not the role's guard command"),
         );
         expected.insert(
             format!("argv/{role}/argv0-not-exec"),
@@ -323,7 +338,6 @@ fn transition(op: char, serial: u64) -> Transition {
 
 #[test]
 fn the_guard_command_is_the_roles_native_vector_with_one_derived_directory() {
-    use crate::execution::sealed::custody::Resource;
     let x = transition('a', 7);
     assert_eq!(
         guard_argv(Resource::Daemon, &x)
@@ -357,7 +371,6 @@ fn the_guard_command_is_the_roles_native_vector_with_one_derived_directory() {
 
 #[test]
 fn a_split_or_relabeled_guard_command_hashes_but_is_refused_by_policy() {
-    use crate::execution::sealed::custody::Resource;
     let x = transition('a', 7);
     let op = "a".repeat(64);
     let split = Argv::new(
@@ -432,14 +445,30 @@ fn a_split_or_relabeled_guard_command_hashes_but_is_refused_by_policy() {
 }
 
 #[test]
-fn the_shared_file_is_unchanged_until_its_replacement_is_published() {
-    assert_eq!(rows().len(), 57);
-    let split_rows = rows()
+fn split_flag_commands_hash_at_the_codec_and_refuse_at_the_phase_policy() {
+    let split: Vec<_> = rows()
         .into_iter()
-        .filter(|row| row[2].contains("--op") && row[1] == "argv")
-        .count();
+        .filter(|row| row[2].contains("\"--op\""))
+        .map(|row| (row[0], row[1], row[3] == "refuse"))
+        .collect();
     assert_eq!(
-        split_rows, 10,
-        "the split-flag guarded rows await the revised file"
+        split,
+        [
+            ("argv/daemon/split-flags-hash-only", "argv", false),
+            ("unit/daemon/split-flag-guarded-refused", "unit", true),
+            ("argv/authority/split-flags-hash-only", "argv", false),
+            ("unit/authority/split-flag-guarded-refused", "unit", true),
+        ]
     );
+}
+
+#[test]
+fn the_approved_length_is_the_actual_length_not_the_declared_pair() {
+    let by_name: std::collections::BTreeMap<&str, [&str; 4]> =
+        rows().into_iter().map(|row| (row[0], row)).collect();
+    let both_declared = by_name["asset/daemon/both-lengths-equal-but-not-the-approved-count"];
+    assert!(both_declared[2].contains("\"bytes\":4097"));
+    assert!(both_declared[2].contains("\"target\":{\"build\":\"0.2.16\",\"bytes\":4096,"));
+    assert!(evaluate("asset", both_declared[2]).is_err());
+    assert!(evaluate("asset", by_name["asset/daemon/accepted"][2]).is_ok());
 }

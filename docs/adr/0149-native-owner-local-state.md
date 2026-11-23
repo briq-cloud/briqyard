@@ -114,20 +114,34 @@ split `--op`/`--serial` command, another role's root or scope, an alias or a rel
 hashes as an `Argv` and is refused by policy. For op of 64 `a` and serial 7 the daemon hash is
 `c9e8bea4…17ed` and the authority hash `420ef88c…eb93`, as the erratum states.
 
-The shared `sealed_owner_units_v1.vectors` is unchanged (SHA-256 `21371a4f…bdf3`): its guarded
-rows still use the split flags and are replaced when the revised file is published. Native does not
-edit it. The release-identity half (the bind enforcing the target asset's digest, length and build, and
-both custodians as the target bootstrap daemon Program) is not applied yet: it contradicts the
-accepted `native.inputs/v1` positive fixture, and replacing that fixture is a shared change.
+The revised shared file (63 rows, SHA-256 `8d317e51…2b72`, B draft #896 at `628b9a32`) replaced the
+57-row file `21371a4f…bdf3`. Its guarded rows carry the full role command with one typed token,
+`{"operation_dir":{"root":R,"leaf":L}}`, expanded to `R/<op>/<serial>/L` from the approved
+transition, and a `role` on every unit row. `UnitPolicy::expected` takes the role and refuses a
+guarded command that is not `guard_argv` for it, so the two split-flag unit rows hash at the codec
+(the `argv` rows) and refuse at phase policy (the `unit` rows). `same_target_asset` takes the
+independently approved asset length: a pair of equal declared lengths that is not that count
+refuses (declared 4097 against approved 4096). Native does not edit the file.
+
+The release-identity half of the bind (enforcing the target asset's digest, length and build, and
+both custodians as the target bootstrap daemon Program) is still not applied. A prototype that calls
+`check_target_asset_identity` from `Inputs::bind` fails 8 tests built on the accepted
+`native.inputs/v1` positive fixture, whose guard is not the target asset:
+`inputs::tests::a_noop_mutation_binds_like_the_original_control`,
+`inputs::tests::the_complete_fixture_binds_to_its_independent_plan_and_operands`,
+`inputs::tests::identity::the_accepted_fixture_is_not_this_profile_and_bind_is_unchanged` and five
+`inputs::tests::bind::*` (actor identities, closure pins, listener order, closure credential
+commitments, optional closure members). It needs a replacement positive fixture whose guard and
+candidate are the target asset, and is a shared change.
 
 ## Shared unit vectors
 
-The API's `sealed_owner_units_v1.vectors` (57 rows, SHA-256 `21371a4f…bdf3`) is the shared source of
+The API's `sealed_owner_units_v1.vectors` (63 rows, SHA-256 `8d317e51…2b72`) is the shared source of
 the four commitments for R, B and native. `unit_policy` holds the typed policy (`UnitPolicy`:
 legacy and guarded unit with placeholders `op` and `serial`), sorts sets into canonical order, and
 computes what each phase shows (`prearm`: legacy file and legacy loaded unit; `armed`: guarded file,
-legacy loaded unit; `launch`, `seal`, `launch_a`: guarded file and guarded loaded unit). Native reproduces all 57 rows:
-37 digests or accepts, 20 refusals, each with its own reason. No row conflicts with erratum 2.
+legacy loaded unit; `launch`, `seal`, `launch_a`: guarded file and guarded loaded unit). Native reproduces all 63 rows:
+39 digests or accepts, 24 refusals, each with its own reason. No row conflicts with erratum 2 or 2a.
 Native is stricter than the API's reader in places the rows do not exercise: address families must be
 `AF_*` names, state directories one component, environment names variable names, permission bits
 within 07777, the transition's `op` a digest and `serial` positive, and a listener count of zero

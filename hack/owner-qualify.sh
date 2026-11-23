@@ -23,7 +23,7 @@ BASE=${OWNER_BASE:-origin/main}
 GOLDEN=crates/briqyard-api/testdata/owner_v1/sealed_owner_v1.golden
 WANT=3e14f6a769042dae6e17fbea5c83ca8ac99d3c6057c5cd7fd5624a577aae9337
 UNITS=crates/briqyard-api/testdata/owner_v1/sealed_owner_units_v1.vectors
-UNITS_WANT=21371a4fd93da81519f9a58fdd2badede01033c1515ff8bfa5c36cc6e309bdf3
+UNITS_WANT=8d317e519e8c0d216c462ddcc47f9e97a7a2694e31d0a03e685ca47452b29b72
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/owner-qualify.XXXXXX")
 cleanup() { rm -rf -- "$SCRATCH"; }
 trap cleanup EXIT INT TERM HUP
