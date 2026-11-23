@@ -191,10 +191,15 @@ impl TargetFacts for Arc<Host> {
 pub(super) struct Retained {
     pub proc: MeasuredProc,
     pub exit: Arc<AtomicBool>,
+    /// The descriptor cannot say whose process it holds (a real one cannot after the exit).
+    pub unknown: Arc<AtomicBool>,
 }
 
 impl RetainedProcess for Retained {
     fn identity(&self) -> Result<MeasuredProc, OwnerError> {
+        if self.unknown.load(Ordering::SeqCst) {
+            return Err(OwnerError::Refused("the retained identity is unknown"));
+        }
         Ok(self.proc.clone())
     }
     fn has_exited(&self) -> Result<bool, OwnerError> {
@@ -253,6 +258,7 @@ impl World {
         let retained = procs.map(|p| Retained {
             proc: measured(&p),
             exit: Arc::new(AtomicBool::new(false)),
+            unknown: Arc::new(AtomicBool::new(false)),
         });
         Self {
             bytes: encode(&plan).unwrap(),

@@ -219,7 +219,7 @@ impl<F: TargetFacts> LocalOwner<F> {
     ) -> Result<(), OwnerError> {
         self.mutate(|attempt| {
             Ok((
-                attempt.record_retirement(launch, death, writer_profile)?,
+                attempt.record_retirement(launch, death, writer_profile, &self.facts)?,
                 (),
             ))
         })

@@ -336,6 +336,9 @@ pub struct FdStore {
 impl Wire for FdStore {
     fn validate(&self) -> Result<(), CodecError> {
         let empty = HexDigest::of(b"");
+        if self.listeners.count.get() > self.listeners.store_max.get() {
+            return bad("listener count above the store maximum");
+        }
         if (self.listeners.count.get() == 0) != (self.listeners.names == empty) {
             return bad("listener count and names disagree about emptiness");
         }

@@ -633,6 +633,11 @@ impl Attempt {
                         "authority launch needs the sealed receipt and the proved exit",
                     ));
                 }
+                if !retained.identity()?.matches(&record.original) {
+                    return Err(OwnerError::Refused(
+                        "authority original is not the retained exited process",
+                    ));
+                }
             }
         }
         let mut next = self.next()?;
@@ -728,11 +733,7 @@ impl Attempt {
             }
             _ => {}
         }
-        if !retained.has_exited()?
-            || retained
-                .identity()
-                .is_ok_and(|live| !live.matches(&record.original))
-        {
+        if !retained.has_exited()? || !retained.identity()?.matches(&record.original) {
             return Err(OwnerError::Refused(
                 "the retained descriptor does not report this exit",
             ));
@@ -888,13 +889,15 @@ impl Attempt {
     }
 
     /// The daemon custodian's committed retirement: the retired Launch and the Death it names,
-    /// after the consumed launch and the witnessed exit. `profile` is the writer profile the
-    /// validated inputs pin.
+    /// after the consumed launch and the witnessed exit, and only when the custodian's own final
+    /// I/O (`TargetFacts::final_io`) is recorded: a typed Launch and Death agreeing is not it.
+    /// `profile` is the writer profile the validated inputs pin.
     pub(super) fn record_retirement(
         &self,
         launch: &Launch,
         death: &Death,
         profile: &HexDigest,
+        facts: &dyn TargetFacts,
     ) -> Result<Attempt, OwnerError> {
         let record = &self.daemon;
         let captured = record
@@ -918,6 +921,7 @@ impl Attempt {
             ));
         }
         launch.check_death(death)?;
+        let _completed: FinalIo = facts.final_io(Resource::Daemon)?;
         let mut next = self.next()?;
         next.daemon.retirement = Some(DaemonRetirement {
             launch: launch.clone(),

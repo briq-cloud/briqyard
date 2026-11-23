@@ -43,10 +43,33 @@ fn a_failure_before_the_rename_leaves_the_old_attempt_and_no_temporary_file() {
     }
 }
 
+fn raw_attempt(world: &World) -> Attempt {
+    decode(&std::fs::read(world.path().join("active.json")).unwrap()).unwrap()
+}
+
+fn intent(world: &World) -> std::path::PathBuf {
+    world.path().join("commit.intent")
+}
+
+fn reopened(world: &World) -> LocalOwner<std::sync::Arc<Host>> {
+    LocalOwner::rooted_at(
+        &world.path(),
+        unsafe { libc::geteuid() },
+        world.host.clone(),
+    )
+    .unwrap()
+}
+
+fn sha(bytes: &[u8]) -> String {
+    HexDigest::of(bytes).to_string()
+}
+
 #[test]
-fn a_failure_after_the_rename_is_an_unknown_commit_that_is_never_repeated() {
+fn a_failure_after_the_rename_is_an_unknown_commit_that_fences_every_reader_and_is_never_repeated()
+{
     let world = World::new();
     world.install().unwrap();
+    let previous = std::fs::read(world.path().join("active.json")).unwrap();
     let _clear = Clear;
     fail_at(Fail::Rename);
     assert!(matches!(
@@ -54,24 +77,121 @@ fn a_failure_after_the_rename_is_an_unknown_commit_that_is_never_repeated() {
         Err(OwnerError::CommitUnknown)
     ));
     FAIL.set(None);
-    let attempt = world.attempt();
-    assert_eq!(
-        attempt.version.get(),
-        2,
-        "the replaced file is what a reader sees"
-    );
+    let visible = std::fs::read(world.path().join("active.json")).unwrap();
+    let attempt = raw_attempt(&world);
+    assert_eq!(attempt.version.get(), 2, "the replaced file is on disk");
     assert!(attempt.daemon.lease.is_some());
-    let lease = attempt.daemon.lease.clone();
+
+    refused(
+        world.observe(Resource::Daemon, Point::Prearm),
+        "uncertain commit",
+    );
     refused(
         world.owner.allocate_lease(Resource::Daemon),
-        "already allocated",
+        "uncertain commit",
+    );
+    refused(
+        world.owner.allocate_lease(Resource::Authority),
+        "uncertain commit",
+    );
+    refused(
+        world.owner.install_fragment(Resource::Daemon),
+        "uncertain commit",
+    );
+    refused(world.install(), "uncertain commit");
+    assert_eq!(
+        std::fs::read(world.path().join("active.json")).unwrap(),
+        visible,
+        "no later attempt rewrote or blessed the ambiguous bytes"
+    );
+
+    let again = reopened(&world);
+    assert!(again
+        .observe(&world.request(Resource::Daemon, Point::Prearm))
+        .is_err());
+    refused(again.allocate_lease(Resource::Daemon), "uncertain commit");
+    assert_eq!(
+        std::fs::read(world.path().join("active.json")).unwrap(),
+        visible
+    );
+
+    let record = std::fs::read_to_string(intent(&world)).unwrap();
+    assert_eq!(
+        record,
+        format!("previous={}\nnext={}\n", sha(&previous), sha(&visible)),
+        "the marker names the expected and the observed bytes for an operator"
+    );
+}
+
+#[test]
+fn a_marker_left_by_a_crash_between_the_intent_and_the_rename_fences_without_an_error_to_remember()
+{
+    let world = World::new();
+    world.install().unwrap();
+    let bytes = std::fs::read(world.path().join("active.json")).unwrap();
+    std::fs::write(
+        intent(&world),
+        format!("previous={}\nnext={}\n", sha(&bytes), sha(b"never renamed")),
+    )
+    .unwrap();
+    refused(
+        world.observe(Resource::Daemon, Point::Prearm),
+        "uncertain commit",
+    );
+    refused(
+        world.owner.allocate_lease(Resource::Daemon),
+        "uncertain commit",
     );
     assert_eq!(
-        world.attempt().daemon.lease,
-        lease,
-        "the unknown commit was not redone"
+        std::fs::read(world.path().join("active.json")).unwrap(),
+        bytes
     );
-    assert_eq!(world.version(), 2);
+}
+
+#[test]
+fn any_marker_fences_even_one_that_is_not_a_regular_private_file() {
+    let world = World::new();
+    world.install().unwrap();
+    symlink("active.json", intent(&world)).unwrap();
+    refused(
+        world.observe(Resource::Daemon, Point::Prearm),
+        "uncertain commit",
+    );
+    std::fs::remove_file(intent(&world)).unwrap();
+    std::fs::create_dir(intent(&world)).unwrap();
+    refused(
+        world.observe(Resource::Daemon, Point::Prearm),
+        "uncertain commit",
+    );
+}
+
+#[test]
+fn known_commits_and_early_failures_leave_no_marker_and_stay_readable() {
+    let world = World::new();
+    world.install().unwrap();
+    assert!(!intent(&world).exists());
+    world.owner.allocate_lease(Resource::Daemon).unwrap();
+    assert!(
+        !intent(&world).exists(),
+        "a known commit clears its own marker"
+    );
+    for point in [Fail::Temporary, Fail::FileSync] {
+        let _clear = Clear;
+        fail_at(point);
+        assert!(matches!(
+            world.owner.allocate_lease(Resource::Authority),
+            Err(OwnerError::Io { .. })
+        ));
+        FAIL.set(None);
+        assert!(
+            !intent(&world).exists(),
+            "{point:?}: the old attempt stands, no fence"
+        );
+        assert_eq!(world.version(), 2);
+    }
+    world.owner.allocate_lease(Resource::Authority).unwrap();
+    assert_eq!(world.version(), 3);
+    world.observe(Resource::Daemon, Point::Prearm).unwrap();
 }
 
 #[test]

@@ -9,6 +9,7 @@
 //! a host: a measured answer is compared with these expectations, never turned into them.
 
 use super::canonical::CodecError;
+use super::custody::Resource;
 use super::inputs::{Listeners, Path, Program, Text};
 use super::preimage::{
     fragment_digest, Argv, BindReadOnly, EnvAssignment, EnvFile, Families, FamilyMode, FdStore,
@@ -44,10 +45,15 @@ pub enum Field {
 #[serde(untagged)]
 pub enum Token {
     Literal(String),
-    Placeholder {
-        #[serde(rename = "x")]
-        field: Field,
-    },
+    Placeholder(Placeholder),
+}
+
+/// `{"x":"op"}` or `{"x":"serial"}`: one typed field and nothing else.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Placeholder {
+    #[serde(rename = "x")]
+    pub field: Field,
 }
 
 /// `fragment`: the strict unpadded base64url of the raw file, then its SHA-256.
@@ -71,12 +77,14 @@ pub fn argv_digest(
     for token in template {
         args.push(match (token, transition) {
             (Token::Literal(text), _) => text.clone(),
-            (Token::Placeholder { .. }, None) => return bad("placeholder outside a guarded unit"),
-            (Token::Placeholder { field: Field::Op }, Some(x)) => x.op.as_str().to_owned(),
+            (Token::Placeholder(_), None) => return bad("placeholder outside a guarded unit"),
+            (Token::Placeholder(Placeholder { field: Field::Op }), Some(x)) => {
+                x.op.as_str().to_owned()
+            }
             (
-                Token::Placeholder {
+                Token::Placeholder(Placeholder {
                     field: Field::Serial,
-                },
+                }),
                 Some(x),
             ) => x.serial.get().to_string(),
         });
@@ -342,6 +350,56 @@ pub fn same_target_asset(
     }
     if guard.file.path == candidate.file.path {
         return bad("guard and candidate share a path");
+    }
+    Ok(())
+}
+
+/// The guard's canonical command for a role (erratum 2a §1): the whole native vector including
+/// argv[0], with one derived token, the role-rooted operation directory. The root and leaf are
+/// fixed per role; only the validated transition's `op` and its shortest positive decimal
+/// `serial` are expanded into it. This is a policy value, not a parse of whatever a unit says.
+pub fn guard_argv(role: Resource, transition: &Transition) -> Result<Argv, CodecError> {
+    let (exec, middle, root, leaf): (&str, &[&str], &str, &str) = match role {
+        Resource::Daemon => (
+            "/usr/local/bin/briqyardd",
+            &["--config", "/etc/briqyard/config.yaml", "sealed-guard"],
+            "/var/lib/briqyard/sealed-ops",
+            "daemon",
+        ),
+        Resource::Authority => (
+            "/usr/local/bin/briqyard-fleet",
+            &[
+                "--config",
+                "/etc/briq-execution/authority/config.json",
+                "authority",
+                "sealed-guard",
+            ],
+            "/var/lib/briq-execution-authority/sealed-ops",
+            "authority",
+        ),
+    };
+    let directory = format!(
+        "{root}/{}/{}/{leaf}",
+        transition.op,
+        transition.serial.get()
+    );
+    let resource = leaf;
+    let mut args = vec![exec];
+    args.extend_from_slice(middle);
+    args.extend_from_slice(&["--resource", resource, "--operation-dir", &directory]);
+    Argv::new(exec, &args)
+}
+
+/// The policy boundary: a loaded command is the role's guard only when its whole vector is
+/// exactly [`guard_argv`]. A split `--op`/`--serial` command, another role's root or scope, an
+/// alias or a custodian relabeled as a guard hashes fine as an `Argv`, and is refused here.
+pub fn check_guard_argv(
+    role: Resource,
+    loaded: &Argv,
+    transition: &Transition,
+) -> Result<(), CodecError> {
+    if *loaded != guard_argv(role, transition)? {
+        return bad("command is not the role's guard command");
     }
     Ok(())
 }

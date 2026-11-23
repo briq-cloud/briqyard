@@ -3,7 +3,10 @@
 
 use super::attempt::Attempt;
 use super::OwnerError;
-use briqyard_api::execution::sealed::canonical::{decode, encode};
+use briqyard_api::execution::sealed::{
+    canonical::{decode, encode},
+    prim::HexDigest,
+};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -13,6 +16,7 @@ use std::path::{Path, PathBuf};
 pub(super) const ROOT: &str = "/var/lib/briqyard/sealed-owner/v1";
 const ACTIVE: &str = "active.json";
 const TEMPORARY: &str = "active.json.tmp";
+const INTENT: &str = "commit.intent";
 const LOCK: &str = "lock";
 const MAX_FILE: u64 = 64 * 1024;
 
@@ -110,6 +114,14 @@ impl Store {
     }
 
     pub(super) fn load(&self, _guard: &Guard<'_>) -> Result<Option<Attempt>, OwnerError> {
+        match std::fs::symlink_metadata(self.root.join(INTENT)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => {
+                return Err(OwnerError::Refused(
+                    "an uncertain commit fences the active attempt",
+                ))
+            }
+        }
         let mut file = match OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -164,7 +176,33 @@ impl Store {
         }
         let bytes = encode(next)?;
         let temporary = self.root.join(TEMPORARY);
+        let intent = self.root.join(INTENT);
+        let previous = match expected {
+            Some(current) => HexDigest::of(&encode(current)?).to_string(),
+            None => "none".to_owned(),
+        };
+        let record = format!("previous={previous}\nnext={}\n", HexDigest::of(&bytes));
         let _ = std::fs::remove_file(&temporary);
+        let abandon = |error: std::io::Error| {
+            let _ = std::fs::remove_file(&temporary);
+            let _ = std::fs::remove_file(&intent);
+            io("write the active attempt")(error)
+        };
+        let write_intent = || -> Result<(), std::io::Error> {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&intent)?;
+            file.write_all(record.as_bytes())?;
+            file.sync_all()?;
+            File::open(&self.root)?.sync_all()
+        };
+        if let Err(source) = write_intent() {
+            let _ = std::fs::remove_file(&intent);
+            return Err(io("record the commit intent")(source));
+        }
         let before_rename = || -> Result<(), std::io::Error> {
             let mut file = OpenOptions::new()
                 .create_new(true)
@@ -189,12 +227,10 @@ impl Store {
             Ok(())
         };
         if let Err(source) = before_rename() {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(io("write the active attempt")(source));
+            return Err(abandon(source));
         }
         if let Err(source) = std::fs::rename(&temporary, self.root.join(ACTIVE)) {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(io("replace the active attempt")(source));
+            return Err(abandon(source));
         }
         let after_rename = || -> Result<(), std::io::Error> {
             #[cfg(test)]
@@ -206,9 +242,24 @@ impl Store {
         if after_rename().is_err() {
             return Err(OwnerError::CommitUnknown);
         }
-        match self.load(guard) {
-            Ok(Some(read)) if read == *next => Ok(()),
-            _ => Err(OwnerError::CommitUnknown),
+        let read_back = {
+            let mut file = File::open(self.root.join(ACTIVE));
+            let mut read = Vec::new();
+            match file.as_mut() {
+                Ok(file) => file.read_to_end(&mut read).ok().map(|_| read),
+                Err(_) => None,
+            }
+        };
+        if read_back.as_deref() != Some(bytes.as_slice()) {
+            return Err(OwnerError::CommitUnknown);
         }
+        let clear = || -> Result<(), std::io::Error> {
+            std::fs::remove_file(&intent)?;
+            File::open(&self.root)?.sync_all()
+        };
+        if clear().is_err() {
+            return Err(OwnerError::CommitUnknown);
+        }
+        Ok(())
     }
 }

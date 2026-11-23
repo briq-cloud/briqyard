@@ -21,11 +21,11 @@ records.
 record decodes through the existing canonical codec and re-encodes to the golden's bytes;
 `owner.turn` hashes are all-or-none for launches and both null for a seal.
 
-**One private attempt, replaced by version compare-and-set.** `/var/lib/briqyard/sealed-owner/v1`
+**One private attempt, replaced by version compare-and-set, with a durable fence.** `/var/lib/briqyard/sealed-owner/v1`
 is root-owned and private; `active.json` is written to a temporary file, fsynced, renamed and the
 directory fsynced, under an exclusive advisory lock. A failure before the rename leaves the old
 attempt and no temporary file. A failure after the rename is an *unknown commit*: it is reported,
-never repeated, and the next reader sees whichever file is on disk. Every mutation bumps the
+never repeated, and fences the attempt (below). Every mutation bumps the
 version by exactly one; a rewrite at the same version, a skipped version or a stale expectation
 refuses. The file must be private, canonical, at most 64 KiB and valid, or it is not read.
 
@@ -68,6 +68,57 @@ owner and writer checks on every component, no links, one hard link, bounded siz
 read. `Inputs::check_target_asset_identity` checks that guard and candidate are the target
 release asset at distinct paths with the same approved build; `bind` does not call it, because
 the accepted `native.inputs/v1` fixture's guard is not the target asset.
+
+## Uncertain commits fence the attempt
+
+A failure after the rename (directory sync, read-back, or clearing the marker) used to leave the
+new bytes visible, so the next load treated them as known and could project receipts from them.
+Now every commit first writes `commit.intent`, durably (file and directory synced), holding
+`previous=<sha256 of the old canonical attempt, or none>` and `next=<sha256 of the new one>`.
+It removes the marker only after the rename, the directory sync and a byte-for-byte read-back
+all succeeded. A failure before the rename removes the temporary file and the marker, so the old
+attempt stands and nothing is fenced.
+
+`load` refuses while any entry named `commit.intent` exists, whatever it is: a regular file, a
+link, a directory, or something that cannot be examined. That one check covers observation,
+`PlanReadOwner` capture, every mutation and an install, in this process and after a restart or a
+crash between the marker and the rename. A later commit never reinterprets the ambiguous bytes.
+
+Recovery is an explicit operator act and is not automatic: compare `sha256(active.json)` with
+`previous` (the rename did not happen, the old attempt stands) and `next` (the commit landed
+but was not confirmed); any other value stays fenced. Only then is the marker removed by hand.
+Equal hashes show which write won; they do not make the operation's uncertain effect known, which
+a human decides. There is no timer, retry or compare-and-set path that clears it. The store stays
+local and private; no R or B wire changes. A failure to clear the marker after a confirmed commit
+also fences, which is conservative and visible.
+
+Rejected: a flag stored inside `active.json`. Writing it needs the same rename that is uncertain,
+so the failure it records could lose it.
+
+## Review fixes at 4fb97cb
+
+* An exit needs the enrolled original's retained identity, not only a readable descriptor: an
+  unknown or failing identity refuses, for the daemon exit and the authority exit and handoff.
+  No post-exit evidence is invented; a real descriptor that cannot say refuses.
+* The daemon's retirement also needs the custodian's own final I/O through `TargetFacts`. A typed
+  Launch and Death agreeing is not that record; the production host still refuses it.
+* A placeholder token is exactly `{"x":"op"}` or `{"x":"serial"}`.
+* An `owner.fdstore/v1` listener count above `store_max` refuses, like the v3.6 object.
+
+## Erratum 2a (guard command and asset binding)
+
+Erratum 2a (SHA-256 `6d98b6dfb5bb39d9176c0e857a32b66456e2401c2b797fbfe70e8d15693c2477`) fixes the
+guard command as the role's whole native vector with one derived token, the role-rooted operation
+directory. `unit_policy::guard_argv` builds it and `check_guard_argv` is the policy boundary: a
+split `--op`/`--serial` command, another role's root or scope, an alias or a relabeled custodian
+hashes as an `Argv` and is refused by policy. For op of 64 `a` and serial 7 the daemon hash is
+`c9e8bea4…17ed` and the authority hash `420ef88c…eb93`, as the erratum states.
+
+The shared `sealed_owner_units_v1.vectors` is unchanged (SHA-256 `21371a4f…bdf3`): its guarded
+rows still use the split flags and are replaced when the revised file is published. Native does not
+edit it. The release-identity half (the bind enforcing the target asset's digest, length and build, and
+both custodians as the target bootstrap daemon Program) is not applied yet: it contradicts the
+accepted `native.inputs/v1` positive fixture, and replacing that fixture is a shared change.
 
 ## Shared unit vectors
 

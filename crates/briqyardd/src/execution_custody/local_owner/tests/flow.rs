@@ -13,11 +13,11 @@ use briqyard_api::execution::sealed::{
 };
 use std::sync::atomic::Ordering;
 
-fn guard_proc() -> Proc {
+pub(super) fn guard_proc() -> Proc {
     proc(30, 0x71)
 }
 
-fn exit_original(world: &World, resource: Resource) {
+pub(super) fn exit_original(world: &World, resource: Resource) {
     let (retained, pid) = match resource {
         Resource::Daemon => (&world.retained[DAEMON], 10),
         Resource::Authority => (&world.retained[AUTHORITY], 12),
@@ -26,13 +26,13 @@ fn exit_original(world: &World, resource: Resource) {
     world.host.0.lock().unwrap().procs.remove(&pid);
 }
 
-fn start_guard(world: &World, resource: Resource, guard: &Proc) {
+pub(super) fn start_guard(world: &World, resource: Resource, guard: &Proc) {
     let index = if resource == Resource::Daemon { 0 } else { 1 };
     world.host.0.lock().unwrap().unit_procs[index] = Some(measured(guard));
 }
 
 /// Enroll, then take the launch_d handoff at the current version.
-fn handed_off() -> (World, Launch, Capture, LGrant) {
+pub(super) fn handed_off() -> (World, Launch, Capture, LGrant) {
     let world = World::new();
     let (launch, capture) = world.enroll();
     let grant = world.grant(&launch, LKind::LaunchD, launch.old.clone(), &Key::bk());
@@ -45,7 +45,7 @@ fn handed_off() -> (World, Launch, Capture, LGrant) {
 }
 
 /// The daemon's authorized lineage: handoff, the original's exit, the enrolled guard's start.
-fn daemon_at_guard() -> (World, Launch, Capture) {
+pub(super) fn daemon_at_guard() -> (World, Launch, Capture) {
     let (world, launch, capture, _) = handed_off();
     exit_original(&world, Resource::Daemon);
     world
@@ -671,7 +671,7 @@ fn the_exit_and_the_guard_must_be_the_enrolled_ones_and_in_order() {
     );
 }
 
-fn retired_daemon(world: &World, launch: &Launch) -> (Launch, Death, HexDigest) {
+pub(super) fn retired_daemon(world: &World, launch: &Launch) -> (Launch, Death, HexDigest) {
     let profile = digest(0x90);
     let death = Death {
         x: x(),
@@ -721,6 +721,7 @@ fn the_retirement_seal_and_launch_a_join_follow_the_targets_own_records() {
         .owner
         .record_retirement(&wrong_owner, &death, &profile)
         .is_err());
+    world.host.0.lock().unwrap().final_io[0] = true;
     world
         .owner
         .record_retirement(&retired, &death, &profile)

@@ -6,6 +6,7 @@
 use crate::execution::sealed::canonical::{decode, h};
 use crate::execution::sealed::inputs::{Listeners, Path, Program};
 use crate::execution::sealed::owner::ArmReceipt;
+use crate::execution::sealed::preimage::Argv;
 use crate::execution::sealed::prim::{Build, HexDigest};
 use crate::execution::sealed::unit_policy::*;
 use serde::Deserialize;
@@ -286,4 +287,159 @@ fn each_refusal_has_the_reason_its_row_is_about() {
     for [name, kind, input, _] in refusals {
         assert_eq!(evaluate(kind, input).unwrap_err(), expected[name], "{name}");
     }
+}
+
+#[test]
+fn a_placeholder_token_is_exactly_one_typed_field() {
+    use crate::execution::sealed::canonical::CodecError::Schema;
+    let argv = |token: &str| {
+        format!(
+            "{{\"args\":[\"/usr/local/bin/briqyardd\",{token}],\"exec\":\"/usr/local/bin/briqyardd\",\"x\":{{\"op\":\"{}\",\"serial\":7}}}}",
+            "a".repeat(64)
+        )
+    };
+    assert!(evaluate("argv", &argv("{\"x\":\"op\"}")).is_ok());
+    for token in [
+        "{\"x\":\"op\",\"extra\":true}",
+        "{\"x\":\"other\"}",
+        "{\"extra\":\"op\"}",
+        "{}",
+    ] {
+        assert_eq!(
+            evaluate("argv", &argv(token)).unwrap_err(),
+            Schema,
+            "{token}"
+        );
+    }
+}
+
+fn transition(op: char, serial: u64) -> Transition {
+    serde_json::from_str(&format!(
+        "{{\"op\":\"{}\",\"serial\":{serial}}}",
+        op.to_string().repeat(64)
+    ))
+    .unwrap()
+}
+
+#[test]
+fn the_guard_command_is_the_roles_native_vector_with_one_derived_directory() {
+    use crate::execution::sealed::custody::Resource;
+    let x = transition('a', 7);
+    assert_eq!(
+        guard_argv(Resource::Daemon, &x)
+            .unwrap()
+            .digest()
+            .unwrap()
+            .to_string(),
+        "c9e8bea4551fa70dbc5e4b59473c276f637f05c370214c7855bc84561eb017ed"
+    );
+    assert_eq!(
+        guard_argv(Resource::Authority, &x)
+            .unwrap()
+            .digest()
+            .unwrap()
+            .to_string(),
+        "420ef88c1b21979a0911c890b1115e181d2ad559582eee0e743ee69a0326eb93"
+    );
+    let daemon = guard_argv(Resource::Daemon, &x).unwrap();
+    assert_eq!(daemon.args.len(), 8);
+    assert_eq!(
+        daemon.args[7].as_str(),
+        format!("/var/lib/briqyard/sealed-ops/{}/7/daemon", "a".repeat(64))
+    );
+    let other_op = guard_argv(Resource::Daemon, &transition('b', 7)).unwrap();
+    let other_serial = guard_argv(Resource::Daemon, &transition('a', 12)).unwrap();
+    assert_ne!(other_op.digest().unwrap(), daemon.digest().unwrap());
+    assert!(other_serial.args[7].as_str().ends_with("/12/daemon"));
+    assert!(check_guard_argv(Resource::Daemon, &daemon, &x).is_ok());
+    assert!(check_guard_argv(Resource::Daemon, &other_serial, &x).is_err());
+}
+
+#[test]
+fn a_split_or_relabeled_guard_command_hashes_but_is_refused_by_policy() {
+    use crate::execution::sealed::custody::Resource;
+    let x = transition('a', 7);
+    let op = "a".repeat(64);
+    let split = Argv::new(
+        "/usr/local/bin/briqyardd",
+        &[
+            "/usr/local/bin/briqyardd",
+            "--config",
+            "/etc/briqyard/config.yaml",
+            "sealed-guard",
+            "--resource",
+            "daemon",
+            "--op",
+            &op,
+            "--serial",
+            "7",
+        ],
+    )
+    .unwrap();
+    assert!(
+        split.digest().is_ok(),
+        "the codec hashes any well-formed vector"
+    );
+    assert!(check_guard_argv(Resource::Daemon, &split, &x).is_err());
+
+    let wrong = |args: &[&str]| Argv::new(args[0], args).unwrap();
+    let daemon_dir = format!("/var/lib/briqyard/sealed-ops/{op}/7/daemon");
+    let authority_dir = format!("/var/lib/briq-execution-authority/sealed-ops/{op}/7/authority");
+    let guard_for = |sub: &str| {
+        wrong(&[
+            "/usr/local/bin/briqyardd",
+            "--config",
+            "/etc/briqyard/config.yaml",
+            sub,
+            "--resource",
+            "daemon",
+            "--operation-dir",
+            &daemon_dir,
+        ])
+    };
+    assert!(check_guard_argv(Resource::Daemon, &guard_for("sealed-guard"), &x).is_ok());
+    assert!(
+        check_guard_argv(Resource::Daemon, &guard_for("sealed-custodian"), &x).is_err(),
+        "a custodian relabeled as a guard"
+    );
+    let authority_command = guard_argv(Resource::Authority, &x).unwrap();
+    assert!(check_guard_argv(Resource::Daemon, &authority_command, &x).is_err());
+    let daemon_scope_for_authority = guard_argv(Resource::Daemon, &x).unwrap();
+    assert!(check_guard_argv(Resource::Authority, &daemon_scope_for_authority, &x).is_err());
+    let authority = guard_argv(Resource::Authority, &x).unwrap();
+    assert!(authority.args[8].as_str() == authority_dir);
+    for tail in [
+        format!("{daemon_dir}/"),
+        format!("/var/lib/briqyard/sealed-ops/{op}/7/../7/daemon"),
+        format!("/var/lib/briqyard/sealed-ops/{op}/07/daemon"),
+        format!("/var/lib/briqyard/sealed-ops/{}/7/daemon", "b".repeat(64)),
+        "/var/lib/briqyard/sealed-ops/other/7/daemon".to_owned(),
+    ] {
+        let mut args: Vec<String> = guard_argv(Resource::Daemon, &x)
+            .unwrap()
+            .args
+            .iter()
+            .map(|a| a.as_str().to_owned())
+            .collect();
+        args[7] = tail.clone();
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let alias = Argv::new(refs[0], &refs).unwrap();
+        assert!(
+            check_guard_argv(Resource::Daemon, &alias, &x).is_err(),
+            "{tail}"
+        );
+    }
+}
+
+#[test]
+fn the_shared_file_is_unchanged_until_its_replacement_is_published() {
+    assert_eq!(rows().len(), 57);
+    let split_rows = rows()
+        .into_iter()
+        .filter(|row| row[2].contains("--op") && row[1] == "argv")
+        .count();
+    assert_eq!(
+        split_rows, 10,
+        "the split-flag guarded rows await the revised file"
+    );
 }

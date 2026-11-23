@@ -5,6 +5,7 @@
 #
 #   BRIQYARD_DISPOSABLE=1                 required: this host is thrown away after the run
 #   OWNER_B_GOLDEN=/path/sealed_owner_v1.golden   B's copy of the golden (optional, compared)
+#   OWNER_B_UNITS=/path/sealed_owner_units_v1.vectors   B's copy of the unit vectors (optional, compared)
 #   OWNER_BASE=origin/main                base the parity check compares against
 #
 # The live joint phase (R and B reading a running target over their separate SSH identities) is
@@ -21,6 +22,8 @@ cd "$HERE"
 BASE=${OWNER_BASE:-origin/main}
 GOLDEN=crates/briqyard-api/testdata/owner_v1/sealed_owner_v1.golden
 WANT=3e14f6a769042dae6e17fbea5c83ca8ac99d3c6057c5cd7fd5624a577aae9337
+UNITS=crates/briqyard-api/testdata/owner_v1/sealed_owner_units_v1.vectors
+UNITS_WANT=21371a4fd93da81519f9a58fdd2badede01033c1515ff8bfa5c36cc6e309bdf3
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/owner-qualify.XXXXXX")
 cleanup() { rm -rf -- "$SCRATCH"; }
 trap cleanup EXIT INT TERM HUP
@@ -39,10 +42,25 @@ if [ -n "${OWNER_B_GOLDEN:-}" ]; then
 else
   echo 'skipped: OWNER_B_GOLDEN not set (B-side bytes not compared)'
 fi
+[ "$(sha256sum "$UNITS" | cut -d' ' -f1)" = "$UNITS_WANT" ] || fail 'native unit vectors differ from the agreed hash'
+ok "native unit vectors are $UNITS_WANT"
+if [ -n "${OWNER_B_UNITS:-}" ]; then
+  cmp -s "$UNITS" "$OWNER_B_UNITS" || fail "B's unit vectors differ byte for byte"
+  [ "$(sha256sum "$OWNER_B_UNITS" | cut -d' ' -f1)" = "$UNITS_WANT" ] || fail "B's unit vectors are not the agreed hash"
+  ok "B's unit vectors are the same bytes"
+else
+  echo 'skipped: OWNER_B_UNITS not set (B-side unit vectors not compared)'
+fi
 
 step 'wire: records decode, re-encode, verify'
 cargo test -p briqyard-api --features execution-admission --lib sealed::tests::owner
 ok 'api owner tests'
+cargo test -p briqyard-api --features execution-admission --lib sealed::tests::preimage
+ok 'commitment preimage tests'
+cargo test -p briqyard-api --features execution-admission --lib sealed::tests::unit_vectors
+ok 'shared unit vector rows'
+cargo test -p briqyard-api --features execution-admission --lib inputs::tests::identity
+ok 'target asset identity tests'
 
 step 'native: one private attempt, receipts, versions, handoff lineage, negatives (real uid and /proc)'
 cargo test -p briqyardd --lib local_owner

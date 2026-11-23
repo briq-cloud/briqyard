@@ -528,3 +528,24 @@ fn arm_receipts_built_from_the_preimages_hash_to_the_independent_values() {
         "the same listeners in another order is a changed receipt"
     );
 }
+
+#[test]
+fn more_listeners_than_the_store_can_hold_is_refused_like_the_v36_object() {
+    use crate::execution::sealed::inputs::Listeners;
+    use crate::execution::sealed::preimage::listener_names_digest;
+    assert!(FdStore::new(&["api"], 0, Preserve::No, NotifyAccess::None).is_err());
+    assert!(FdStore::new(&["api", "ingress"], 1, Preserve::No, NotifyAccess::None).is_err());
+    assert!(FdStore::new(&["api"], 1, Preserve::No, NotifyAccess::None).is_ok());
+    let inner = Listeners {
+        count: Uint::new(1).unwrap(),
+        names: listener_names_digest(&["api"]).unwrap(),
+        store_max: Uint::new(0).unwrap(),
+    };
+    let store = FdStore::from_parts(inner, Preserve::No, NotifyAccess::None);
+    assert!(
+        store.digest().is_err(),
+        "an approval's own object is checked too"
+    );
+    let bytes = encode(&store).unwrap();
+    assert!(decode::<FdStore>(&bytes).is_err());
+}
