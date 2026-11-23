@@ -26,9 +26,9 @@ Reading the actor columns is a decision, not a quote: v3.1 names signers for rea
 authority crossings by credential (`tr`, `ni`). The table is the single place that maps them
 to enrolled actors; it is the narrowest reading and one line per route to change.
 
-- **Inputs binding (v3.6).** Rows are the §closure.peers§ of the independently verified
-  §native.inputs/v1§ manifest. §Inventory::new§ takes that manifest's X and its §actors§
-  key set and requires the rows to equal it one to one; §Scope::new§ refuses a Plan of
+- **Inputs binding (v3.6).** Rows are the `closure.peers` of the independently verified
+  `native.inputs/v1` manifest. `Inventory::new` takes that manifest's X and its `actors`
+  key set and requires the rows to equal it one to one; `Scope::new` refuses a Plan of
   another X. The transport opens no path the manifest names (config, TLS, journal, listener
   or fragment): identities arrive as bytes from the sealed descriptors, listeners as bound
   sockets, and there is no caller path, environment or current-global token fallback.
@@ -46,7 +46,9 @@ to enrolled actors; it is the narrowest reading and one line per route to change
   7441, 7442, 3003, 80 and 443 are refused. A client resolves a DNS endpoint once and
   uses its first address; the pin, not DNS, authenticates it. A listener's actual socket
   address must be the row's IP and port, or, for a DNS row, the explicit address the
-  dedicated owner provisions (no lookup); a wildcard or other address is refused.
+  dedicated owner provisions (no lookup). v3.1 reserves loopback for the local H and A
+  listeners, so that address must be loopback: a wildcard, a non-loopback or any other
+  address is refused, a matching one included.
 - **HTTP.** One request per connection, no keep-alive. Checks before any handler: POST,
   origin-form path, exact `Host`, `Content-Type`, one `Content-Length`, no chunked,
   compressed, upgrade, expect, trailer, proxy or forwarding headers, a route and caller ACL
@@ -54,9 +56,14 @@ to enrolled actors; it is the narrowest reading and one line per route to change
   wrapper only). A success head has one fixed shape: no header name repeats and none of
   transfer-encoding, content-encoding, content-language, content-location, content-range,
   trailer, upgrade, location or refresh appears. A 200 has exactly one
-  §application/json§ type and one canonical length equal to its nonempty body; a 204 has
-  neither type nor length and no body. Anything else, a redirect, a retry or a truncated
-  reply is unavailable and never counts as a mutation success. Only 400/401/403/409/507
+  `application/json` type and one canonical length equal to its nonempty body; a 204 has
+  neither type nor length and no body. The reply also needs the end of the whole
+  one-response stream: Hyper stops at a 204 or a declared length whatever follows, so the
+  client keeps the connection driver (`without_shutdown`), requires no byte left in its read
+  buffer, then a clean TLS close with nothing further, all under the freshness deadline.
+  A late byte, an early close or one without `close_notify` is unavailable. Anything
+  else, a redirect, a retry or a truncated reply is unavailable and never counts as a
+  mutation success. Only 400/401/403/409/507
   count as a definite refusal.
 - **Binding.** The signed query must carry the signer key of the caller's actor, this
   operation's X and Plan digest, and its own tag; a packet must carry the API and receiver

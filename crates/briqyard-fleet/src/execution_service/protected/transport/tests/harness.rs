@@ -29,6 +29,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Notify,
     task::JoinHandle,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -260,7 +261,19 @@ impl Drop for Canned {
     }
 }
 
+/// What a canned server does on the connection after it has read one request.
+pub(crate) enum Step {
+    Write(Vec<u8>),
+    Gate(Arc<Notify>),
+    Shutdown,
+    Drop,
+}
+
 pub(crate) async fn canned(net: &Net, response: Vec<u8>, alpn: bool) -> Canned {
+    scripted(net, vec![Step::Write(response), Step::Shutdown], alpn).await
+}
+
+pub(crate) async fn scripted(net: &Net, steps: Vec<Step>, alpn: bool) -> Canned {
     let local = net.local(Actor::H);
     let mut config =
         (*server_config(&local, &net.inventory, &[Actor::A], net.clock.clone()).unwrap()).clone();
@@ -301,8 +314,19 @@ pub(crate) async fn canned(net: &Net, response: Vec<u8>, alpn: bool) -> Canned {
                     break;
                 }
             }
-            let _ = tls.write_all(&response).await;
-            let _ = tls.shutdown().await;
+            for step in &steps {
+                match step {
+                    Step::Write(bytes) => {
+                        let _ = tls.write_all(bytes).await;
+                        let _ = tls.flush().await;
+                    }
+                    Step::Gate(gate) => gate.notified().await,
+                    Step::Shutdown => {
+                        let _ = tls.shutdown().await;
+                    }
+                    Step::Drop => break,
+                }
+            }
         }
     });
     Canned { count, task }

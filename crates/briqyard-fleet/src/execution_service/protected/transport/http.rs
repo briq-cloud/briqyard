@@ -7,7 +7,7 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use http::{header, HeaderMap, Method, StatusCode, Version};
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::{body::Incoming, service::service_fn, Request, Response};
+use hyper::{body::Incoming, client::conn::http1::Parts, service::service_fn, Request, Response};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use rustls::{ClientConfig, ServerConfig};
 use std::{
@@ -18,12 +18,13 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
+    io::AsyncReadExt,
     net::{lookup_host, TcpListener, TcpStream},
     sync::Semaphore,
     task::{JoinHandle, JoinSet},
     time::{timeout, timeout_at},
 };
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_rustls::{client, TlsAcceptor, TlsConnector};
 
 pub(super) use super::super::FRESH as DEADLINE;
 
@@ -76,9 +77,9 @@ pub(super) enum Failure {
     Unavailable,
 }
 
-struct AbortOnDrop(JoinHandle<()>);
+struct AbortOnDrop<T>(JoinHandle<T>);
 
-impl Drop for AbortOnDrop {
+impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
         self.0.abort();
     }
@@ -149,9 +150,7 @@ impl Link {
         let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
             .await
             .map_err(|_| Failure::Unavailable)?;
-        let _driver = AbortOnDrop(tokio::spawn(async move {
-            let _ = connection.await;
-        }));
+        let driver = AbortOnDrop(tokio::spawn(connection.without_shutdown()));
         let request = Request::builder()
             .method(Method::POST)
             .uri(path)
@@ -174,13 +173,42 @@ impl Link {
             .map_err(|_| Failure::Unavailable)?
             .to_bytes();
         match head.status {
-            StatusCode::OK => success(&head.headers, Some(&collected)),
-            StatusCode::NO_CONTENT => success(&head.headers, None).map(|_| Reply::NoContent),
+            StatusCode::OK => {
+                let reply = success(&head.headers, Some(&collected))?;
+                ended(driver).await?;
+                Ok(reply)
+            }
+            StatusCode::NO_CONTENT => {
+                success(&head.headers, None)?;
+                ended(driver).await?;
+                Ok(Reply::NoContent)
+            }
             status if matches!(status.as_u16(), 400 | 401 | 403 | 409 | 507) => {
                 Err(Failure::Status(status.as_u16()))
             }
             _ => Err(Failure::Unavailable),
         }
+    }
+}
+
+/// The whole one-response stream ended. Hyper stops at the end of a 204 or at a declared 200
+/// length, so a parsed head and body prove nothing about what follows. The connection
+/// driver must finish on the request's Connection: close without a read byte left behind,
+/// and the peer must then close the TLS session cleanly with nothing further. A late byte,
+/// an early or abrupt close is unavailable. The caller's deadline bounds the wait.
+async fn ended(
+    mut driver: AbortOnDrop<Result<Parts<TokioIo<client::TlsStream<TcpStream>>>, hyper::Error>>,
+) -> Result<(), Failure> {
+    let parts = (&mut driver.0)
+        .await
+        .map_err(|_| Failure::Unavailable)?
+        .map_err(|_| Failure::Unavailable)?;
+    if !parts.read_buf.is_empty() {
+        return Err(Failure::Unavailable);
+    }
+    match parts.io.into_inner().read(&mut [0u8; 1]).await {
+        Ok(0) => Ok(()),
+        _ => Err(Failure::Unavailable),
     }
 }
 

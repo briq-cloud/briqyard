@@ -19,11 +19,12 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
+    sync::Notify,
     task::JoinHandle,
 };
 use tokio_rustls::TlsAcceptor;
@@ -412,4 +413,117 @@ async fn a_success_head_is_one_fixed_shape_without_duplicates_or_representation_
         assert_eq!(outcome, Err(Failure::Unavailable), "{name}");
         assert_eq!(count, 1, "{name}");
     }
+}
+
+/// The post's outcome, its connection count and whether it was still waiting (not yet
+/// returned) when the server had written only the reply and then held the connection.
+async fn held_then_released(
+    net: &Net,
+    reply: Vec<u8>,
+    release: Vec<Step>,
+) -> (Result<Reply, Failure>, usize, bool) {
+    let gate = Arc::new(Notify::new());
+    let mut steps = vec![Step::Write(reply), Step::Gate(gate.clone())];
+    steps.extend(release);
+    let server = scripted(net, steps, true).await;
+    let link = link(net);
+    let mut call = tokio::spawn(async move {
+        link.post(
+            Route::HostClock.path(),
+            b"{}".to_vec(),
+            64,
+            Instant::now() + DEADLINE,
+        )
+        .await
+    });
+    let (outcome, waiting) = match tokio::time::timeout(Duration::from_millis(300), &mut call).await
+    {
+        Ok(early) => (early.unwrap(), false),
+        Err(_) => {
+            gate.notify_one();
+            (call.await.unwrap(), true)
+        }
+    };
+    (outcome, server.count.load(Ordering::SeqCst), waiting)
+}
+
+fn with_excess(mut reply: Vec<u8>) -> Vec<u8> {
+    reply.extend_from_slice(b"HTTP/1.1 200 OK\r\n\r\n");
+    reply
+}
+
+#[tokio::test]
+async fn bytes_after_a_success_reply_refuse_it_whether_buffered_or_late() {
+    let mut wrong = Vec::new();
+    for (name, whole) in [("204", bare_204()), ("200", json_200(&[]))] {
+        let net = Net::new();
+        let (outcome, count) = post(&net, with_excess(whole.clone()), 64).await;
+        if outcome != Err(Failure::Unavailable) || count != 1 {
+            wrong.push(format!("{name} excess in the same write: {outcome:?}"));
+        }
+
+        let net = Net::new();
+        let server = scripted(
+            &net,
+            vec![
+                Step::Write(whole.clone()),
+                Step::Write(b"X".to_vec()),
+                Step::Shutdown,
+            ],
+            true,
+        )
+        .await;
+        let outcome = link(&net)
+            .post(
+                Route::HostClock.path(),
+                b"{}".to_vec(),
+                64,
+                Instant::now() + DEADLINE,
+            )
+            .await;
+        if outcome != Err(Failure::Unavailable) || server.count.load(Ordering::SeqCst) != 1 {
+            wrong.push(format!("{name} excess in a following write: {outcome:?}"));
+        }
+
+        let net = Net::new();
+        let (outcome, count, waiting) = held_then_released(
+            &net,
+            whole,
+            vec![Step::Write(b"{}".to_vec()), Step::Shutdown],
+        )
+        .await;
+        if outcome != Err(Failure::Unavailable) || count != 1 || !waiting {
+            wrong.push(format!(
+                "{name} excess after a held connection: {outcome:?}, waiting {waiting}"
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_success_reply_waits_for_the_graceful_end_of_the_connection() {
+    let mut wrong = Vec::new();
+    for (name, whole, expected) in [
+        ("204", bare_204(), Reply::NoContent),
+        ("200", json_200(&[]), Reply::Body(b"{}".to_vec())),
+    ] {
+        let net = Net::new();
+        let (outcome, count, waiting) =
+            held_then_released(&net, whole.clone(), vec![Step::Shutdown]).await;
+        if outcome != Ok(expected) || count != 1 || !waiting {
+            wrong.push(format!(
+                "{name} graceful end: {outcome:?}, waiting {waiting}"
+            ));
+        }
+
+        let net = Net::new();
+        let (outcome, count, waiting) = held_then_released(&net, whole, vec![Step::Drop]).await;
+        if outcome != Err(Failure::Unavailable) || count != 1 || !waiting {
+            wrong.push(format!(
+                "{name} close without close_notify: {outcome:?}, waiting {waiting}"
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
 }

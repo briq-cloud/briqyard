@@ -462,3 +462,66 @@ async fn a_dns_row_needs_the_explicit_provisioned_socket_address_and_never_resol
     );
     assert!(start_on(&net, at("127.0.0.1"), Some(socket("127.0.0.1"))).is_ok());
 }
+
+fn local_non_loopback() -> std::net::IpAddr {
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    probe.connect("192.0.2.1:9").unwrap();
+    let ip = probe.local_addr().unwrap().ip();
+    assert!(
+        !ip.is_loopback() && !ip.is_unspecified(),
+        "the test host has no non-loopback address to bind"
+    );
+    ip
+}
+
+#[tokio::test]
+async fn a_local_mount_is_loopback_even_when_the_enrolled_address_matches() {
+    let other = local_non_loopback();
+    let net = Net::build(|actor, peer| {
+        if actor == Actor::H {
+            peer.ip = other;
+            peer.server = issue(&Name::Ip(other), Usage::Server);
+        }
+    });
+    let port = net.row(Actor::H).endpoint.port();
+    drop(net.listener(Actor::H));
+    let at = |ip: std::net::IpAddr| std::net::TcpListener::bind((ip, port)).unwrap();
+    let socket = |ip: std::net::IpAddr| std::net::SocketAddr::new(ip, port);
+    assert!(
+        start_on(&net, at(other), None).is_err(),
+        "a non-loopback IP row that matches its listener"
+    );
+    assert!(
+        start_on(&net, at(other), Some(socket(other))).is_err(),
+        "the same with the address provisioned explicitly"
+    );
+}
+
+#[tokio::test]
+async fn a_dns_mount_provisioned_address_is_loopback_too() {
+    let other = local_non_loopback();
+    let name = Name::dns("h.private.test").unwrap();
+    let net = Net::build(|actor, peer| {
+        if actor == Actor::H {
+            peer.dns = Some("h.private.test".into());
+            peer.server = issue(&name, Usage::Server);
+        }
+    });
+    let port = net.row(Actor::H).endpoint.port();
+    drop(net.listener(Actor::H));
+    let at = |ip: std::net::IpAddr| std::net::TcpListener::bind((ip, port)).unwrap();
+    assert!(
+        start_on(&net, at(other), Some(socket_at(other, port))).is_err(),
+        "a DNS row provisioned with a non-loopback address"
+    );
+    assert!(start_on(
+        &net,
+        at("127.0.0.2".parse().unwrap()),
+        Some(socket_at("127.0.0.2".parse().unwrap(), port))
+    )
+    .is_ok());
+}
+
+fn socket_at(ip: std::net::IpAddr, port: u16) -> std::net::SocketAddr {
+    std::net::SocketAddr::new(ip, port)
+}

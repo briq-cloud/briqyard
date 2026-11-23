@@ -469,8 +469,9 @@ impl PrivateServer {
     /// `listener` is the owner's already-bound dedicated socket. Its actual address and port
     /// must be the enrolled listener policy exactly: the row's IP literal and port, or, for a
     /// DNS row, the explicit `provisioned` socket address the dedicated owner supplies (this
-    /// never resolves a name, and an IP row accepts no other address). A wildcard or any other
-    /// address on the right port is refused. The TLS layer admits only the enrolled clients of
+    /// never resolves a name, and an IP row accepts no other address). The address is a
+    /// loopback one (v3.1 reserves loopback for the local H and A listeners); a wildcard, a
+    /// non-loopback or any other address on the right port is refused. The TLS layer admits only the enrolled clients of
     /// the actors some route of this mount lists.
     pub(crate) fn start(
         local: &LocalIdentity,
@@ -493,8 +494,7 @@ impl PrivateServer {
         };
         if local.peer().actor != mount.actor()
             || expected.port() != row.endpoint.port()
-            || expected.ip().is_unspecified()
-            || expected.ip().is_multicast()
+            || !expected.ip().is_loopback()
             || actual.ip() != expected.ip()
             || actual.port() != expected.port()
         {
