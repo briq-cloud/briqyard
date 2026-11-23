@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.2.16 — 2026-11-23
+
+### Upgrade notes
+
+- The authority now compacts fully acknowledged, expired raw credentials on qualified writes, which keeps journal headroom (#274). The on-disk journal stays format v1, and its read-only projection is `authority journal-project`. 0.2.14 and 0.2.15 binaries still read a compacted journal, but they don't maintain headroom.
+- Cold-born loaded-policy admission for hostname allowlists (#272) is available only where the deployment opts into gateway policy; otherwise behavior is unchanged.
+- Guest-init source, dependencies and toolchain are unchanged. Confirm the candidate init checksum against 0.2.15 before reusing existing seeds.
+- No wire format change. Roll the fleet and every host in the usual order.
+
+### Features
+
+- cold-born loaded-policy admission for hostname allowlists (#272) ([caec5d3e](https://github.com/briq-cloud/briqyard/commit/caec5d3e852a8b163c173b827b88091ffcec76e8))
+
+- compact expired authority credentials (#274) ([e7e39ab9](https://github.com/briq-cloud/briqyard/commit/e7e39ab9ca7fd37954867c36a1e8de8df26ed27b))
+
+
+### Fixes
+
+- qualify candidate seals before restoring source authority (#269) ([ee3a1900](https://github.com/briq-cloud/briqyard/commit/ee3a19007078c0ffb3d2b913068e40acf3fbc4c4))
+
+
+### Maintenance
+
+- qualify requests during fleet-first native upgrades (#262) ([13ec930b](https://github.com/briq-cloud/briqyard/commit/13ec930b5fa5be8c1799aed8ecaf0cba75fa0a7f))
+
+- cover single-host mixed-version traffic and admission (#263) ([2d481037](https://github.com/briq-cloud/briqyard/commit/2d4810372d9a7e7e8c69df491d3ac3115e393439))
+
+- qualify two-host fleet-first mixed routing (#264) ([64d69178](https://github.com/briq-cloud/briqyard/commit/64d69178f36509738047ef991139b5934e6e6682))
+
+- qualify nested guests in exact-artifact mixed upgrades (#265) ([ee39f0ac](https://github.com/briq-cloud/briqyard/commit/ee39f0acce22669c1dad4e927cec561bf16c6f8e))
+
+- qualify independent mixed-version admission charges (#266) ([19993b90](https://github.com/briq-cloud/briqyard/commit/19993b909b5cb332bc51f7f26be6e6dbaa7d4b56))
+
+- qualify physical admission in mixed-version upgrades (#268) ([3baf0398](https://github.com/briq-cloud/briqyard/commit/3baf03986c39720cc05e403ddf0e957f4b9974c4))
+
+- qualify mixed-version standalone authority (#267) ([6c47105d](https://github.com/briq-cloud/briqyard/commit/6c47105d46a8276a2b80c3fe72434f2f636fbb97))
+
+- verify mixed admission dispatch resources (#270) ([713eadd7](https://github.com/briq-cloud/briqyard/commit/713eadd7525fe31d1876c39c6b224ee00a72382c))
+
+- select a subset of suites on dispatch (#273) ([91cafe8f](https://github.com/briq-cloud/briqyard/commit/91cafe8fa0498fbffd124f950e0ef84e134812de))
+
 ## 0.2.15 — 2026-11-16
 
 ### Upgrade notes
