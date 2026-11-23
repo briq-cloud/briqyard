@@ -15,7 +15,15 @@ use briqyard_api::execution::{
     Trust, VerificationKey,
 };
 use ring::signature::{Ed25519KeyPair, KeyPair};
-use std::time::Duration;
+use std::{
+    fs::DirBuilder,
+    io::{Read, Write},
+    os::{
+        fd::AsRawFd,
+        unix::{fs::DirBuilderExt, process::CommandExt},
+    },
+    time::Duration,
+};
 use tokio::sync::Barrier;
 
 const CLOCK: Clock = Clock {
@@ -334,6 +342,51 @@ fn reserve(
     (owner, lease)
 }
 
+/// A restart reads the durable journal bytes under a lock nobody has held. Reopening the
+/// dropped journal's own directory is not a barrier: a process another test thread forks
+/// meanwhile holds a copy of the old lock until it execs.
+fn restart_from_durable_image(path: &std::path::Path) -> (tempfile::TempDir, Journal) {
+    let image = tempfile::tempdir().unwrap();
+    let root = image.path().join("journal");
+    DirBuilder::new().mode(0o700).create(&root).unwrap();
+    std::fs::copy(path.join("journal.json"), root.join("journal.json")).unwrap();
+    let journal = Journal::open(&root, Role::Host(HOST.into())).unwrap();
+    (image, journal)
+}
+
+#[test]
+fn restart_image_opens_while_a_forked_child_still_holds_the_old_journal_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal");
+    let journal = Journal::open(&path, Role::Host(HOST.into())).unwrap();
+    let (mut forked, forked_write) = std::io::pipe().unwrap();
+    let (release_read, release) = std::io::pipe().unwrap();
+    let release_fd = release.as_raw_fd();
+    let child = std::thread::spawn(move || {
+        let mut command = std::process::Command::new("true");
+        unsafe {
+            command.pre_exec(move || {
+                libc::close(release_fd);
+                (&forked_write).write_all(&[1])?;
+                (&release_read).read(&mut [0]).map(drop)
+            });
+        }
+        command.status().unwrap()
+    });
+    forked.read_exact(&mut [0]).unwrap();
+    drop(journal);
+    assert!(matches!(
+        Journal::open(&path, Role::Host(HOST.into())),
+        Err(briqyard_api::execution::admission::Error::Ownership)
+    ));
+    let (_image, restarted) = restart_from_durable_image(&path);
+    assert_eq!(restarted.role(), &Role::Host(HOST.into()));
+    drop(release);
+    assert!(child.join().unwrap().success());
+    drop(restarted);
+    Journal::open(&path, Role::Host(HOST.into())).unwrap();
+}
+
 #[tokio::test]
 async fn unenrolled_channel_opens_without_registration_but_sealed_context_never_falls_back() {
     let dir = tempfile::tempdir().unwrap();
@@ -558,7 +611,7 @@ async fn retired_owner_can_fsync_only_its_collected_intent_and_cancel_cannot_fin
         assert_eq!(ledger.status(&admission).unwrap(), Some(status));
         drop(turns);
         drop(ledger);
-        let reopened = Journal::open(&path, Role::Host(HOST.into())).unwrap();
+        let (_image, reopened) = restart_from_durable_image(&path);
         let phase = if cancel {
             ActivePhase::Recovered
         } else {
