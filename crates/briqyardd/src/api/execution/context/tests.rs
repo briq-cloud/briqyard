@@ -1,7 +1,7 @@
 use super::*;
 use crate::guestc::{
     active_lease::ActiveLease,
-    active_operations::{ActiveOperationGuard, ActiveOperations, OriginalIntent},
+    guarded_operations::{ActiveOperationGuard, GuardedOperations, OriginalIntent},
 };
 use briqyard_api::execution::admission::{
     ActiveOperation, ActivePhase, HostOwnership, PreparedAdmission, Status,
@@ -78,7 +78,7 @@ fn cohort(registration: &HostRegistration, successor: bool) -> Arc<VerifiedCohor
 }
 
 pub(crate) fn reserve(
-    registry: &Arc<ActiveOperations>,
+    registry: &Arc<GuardedOperations>,
     request: RequestIdentity,
     dispatched: PreparedAdmission,
     permit: Permit,
@@ -203,7 +203,7 @@ async fn queued_discovery_cannot_read_successor_ownership_or_touch_a_retired_lea
         .unwrap()
         .with_sealed_contexts(gate.clone());
     let journal = Mutex::new(journal);
-    let registry = Arc::new(ActiveOperations::default());
+    let registry = Arc::new(GuardedOperations::default());
     let effect = turns
         .capture(RequestRole::Execution, EXECUTION, b"")
         .unwrap();
@@ -293,7 +293,7 @@ async fn retired_owner_can_fsync_only_its_collected_intent_and_cancel_cannot_fin
             .unwrap()
             .with_sealed_contexts(gate.clone());
         let journal = Mutex::new(journal);
-        let registry = Arc::new(ActiveOperations::default());
+        let registry = Arc::new(GuardedOperations::default());
         let request = turns
             .capture(RequestRole::Execution, EXECUTION, b"")
             .unwrap();
@@ -313,7 +313,7 @@ async fn retired_owner_can_fsync_only_its_collected_intent_and_cancel_cannot_fin
         }
         lease.collect_for_test(&sample()).await.unwrap();
         {
-            let crossed = Arc::new(ActiveOperations::default());
+            let crossed = Arc::new(GuardedOperations::default());
             let mut wrong = intent;
             wrong.request_digest.push('x');
             let (wrong_owner, wrong_lease) =
@@ -399,7 +399,7 @@ async fn current_installer_revocation_ends_the_retired_owners_effect() {
         .unwrap()
         .with_sealed_contexts(gate.clone());
     let mut journal = Mutex::new(journal);
-    let registry = Arc::new(ActiveOperations::default());
+    let registry = Arc::new(GuardedOperations::default());
     let effect = turns
         .capture(RequestRole::Execution, EXECUTION, b"")
         .unwrap();

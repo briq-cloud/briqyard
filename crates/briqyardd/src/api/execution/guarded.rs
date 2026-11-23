@@ -85,7 +85,7 @@ pub struct GuardedHostExecutionChannel {
     manager: GuardedManager,
     journal: Mutex<Journal>,
     admission: AdmissionTurns,
-    active: Arc<crate::guestc::active_operations::ActiveOperations>,
+    active: Arc<crate::guestc::guarded_operations::GuardedOperations>,
     installer_token: String,
     execution_token: String,
     keys: Vec<VerificationKey>,
@@ -124,7 +124,7 @@ impl GuardedHostExecutionChannel {
             manager,
             journal: Mutex::new(journal),
             admission,
-            active: Arc::new(crate::guestc::active_operations::ActiveOperations::default()),
+            active: Arc::new(crate::guestc::guarded_operations::GuardedOperations::default()),
             installer_token,
             execution_token,
             keys,
@@ -290,7 +290,7 @@ async fn register(
 
 fn register_host(
     journal: &mut Journal,
-    active: &crate::guestc::active_operations::ActiveOperations,
+    active: &crate::guestc::guarded_operations::GuardedOperations,
     record: &HostRegistration,
     clock: Clock,
 ) -> Result<(), StatusCode> {
@@ -937,7 +937,7 @@ async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::guestc::{active_lease::ActiveLease, active_operations::ActiveOperations};
+    use crate::guestc::{active_lease::ActiveLease, guarded_operations::GuardedOperations};
     use briqyard_api::execution::{
         admission::{ActiveOperation, Role},
         clock::ClockSample,
@@ -971,7 +971,7 @@ mod tests {
             host_instance: journal.instance().into(),
             generation: 2,
         };
-        let active = Arc::new(ActiveOperations::default());
+        let active = Arc::new(GuardedOperations::default());
         register_host(&mut journal, &active, &current, clock).unwrap();
 
         let lease = ActiveLease::from_committed(evidence.clone(), &sample).unwrap();
@@ -1040,7 +1040,7 @@ mod tests {
             host_instance: journal.instance().into(),
             generation: 2,
         };
-        let active = Arc::new(ActiveOperations::default());
+        let active = Arc::new(GuardedOperations::default());
         register_host(&mut journal, &active, &current, clock).unwrap();
 
         let lease = ActiveLease::from_committed(evidence.clone(), &sample).unwrap();

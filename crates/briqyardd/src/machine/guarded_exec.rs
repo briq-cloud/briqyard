@@ -20,7 +20,7 @@ impl std::ops::Deref for GuardedManager {
 
 use crate::{
     api::execution::context::{AdmissionTurns, RequestIdentity},
-    guestc::active_operations::{ActiveOperations, OriginalIntent},
+    guestc::guarded_operations::{GuardedOperations, OriginalIntent},
 };
 use api::execution::{
     self as access,
@@ -63,13 +63,13 @@ pub struct ScopedExecutionContext<'a> {
 #[cfg(test)]
 pub struct RenewableDispatch<'a> {
     pub guard: tokio::sync::RwLockReadGuard<'a, ()>,
-    pub registry: Arc<crate::guestc::active_operations::ActiveOperations>,
+    pub registry: Arc<crate::guestc::guarded_operations::GuardedOperations>,
     pub policy: access::admission::HostOperationPolicy,
 }
 
 pub struct ChannelDispatch<'a> {
     pub guard: tokio::sync::RwLockReadGuard<'a, ()>,
-    pub registry: Arc<ActiveOperations>,
+    pub registry: Arc<GuardedOperations>,
     pub policy: Option<HostOperationPolicy>,
     pub admission: &'a AdmissionTurns,
     pub request: RequestIdentity,
@@ -78,7 +78,7 @@ pub struct ChannelDispatch<'a> {
 
 struct DispatchControl<'a> {
     guard: Option<tokio::sync::RwLockReadGuard<'a, ()>>,
-    registry: Arc<ActiveOperations>,
+    registry: Arc<GuardedOperations>,
     policy: Option<HostOperationPolicy>,
     original: Option<(&'a AdmissionTurns, RequestIdentity, PreparedAdmission)>,
 }
@@ -891,7 +891,7 @@ impl GuardedManager {
         if renewable {
             drop(control.as_mut().and_then(|c| c.guard.take()));
         }
-        let mut conn = guestc::active_operations::GuardedConnection {
+        let mut conn = guestc::guarded_operations::GuardedConnection {
             conn,
             lease: active_lease.clone(),
         };

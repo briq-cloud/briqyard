@@ -14,6 +14,7 @@ pub mod active_operations;
 #[cfg(test)]
 mod capture_tests;
 mod deadline;
+pub mod guarded_operations;
 pub use deadline::CommandDeadline;
 use deadline::ExpiringConnection;
 
