@@ -53,7 +53,6 @@ use std::{collections::HashSet, net::IpAddr};
 use zeroize::Zeroizing;
 
 const MAX_PEERS: usize = 64;
-const MAX_NAME: usize = 253;
 const HOST_PORT: u16 = 7541;
 const AUTHORITY_PORT: u16 = 7542;
 const FORBIDDEN_PORTS: [u16; 5] = [80, 443, 3003, 7441, 7442];
@@ -114,37 +113,16 @@ pub(crate) struct PeerId {
     pub id: Ident,
 }
 
-/// `Pair`: SHA-256 of the leaf DER and of its DER SubjectPublicKeyInfo.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct Pair {
-    pub leaf: HexDigest,
-    pub spki: HexDigest,
+pub(crate) use briqyard_api::execution::private_cert::{Name, Pair};
+
+/// Parsing and rustls conversion stay with the transport; the name type itself is shared.
+pub(crate) trait NameExt: Sized {
+    fn parse(text: &str) -> Result<Self, ConfigError>;
+    fn server_name(&self) -> ServerName<'static>;
 }
 
-/// A certificate name: lowercase LDH DNS text without wildcard or trailing dot, or a
-/// canonical IP literal.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Name {
-    Dns(String),
-    Ip(IpAddr),
-}
-
-impl Name {
-    pub(crate) fn dns(text: &str) -> Option<Self> {
-        let label = |label: &str| {
-            (1..=63).contains(&label.len())
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        };
-        let numeric = text.bytes().all(|b| b.is_ascii_digit() || b == b'.');
-        (text.len() <= MAX_NAME && !numeric && text.split('.').all(label))
-            .then(|| Self::Dns(text.to_owned()))
-    }
-
-    pub(crate) fn parse(text: &str) -> Result<Self, ConfigError> {
+impl NameExt for Name {
+    fn parse(text: &str) -> Result<Self, ConfigError> {
         match text.parse::<IpAddr>() {
             Ok(ip) if ip.to_string() == text => Ok(Self::Ip(ip)),
             Ok(_) => Err(ConfigError("non-canonical address literal")),

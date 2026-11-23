@@ -4,6 +4,9 @@
 
 use super::artifacts::{BoundAssets, Class, Descriptor, FrozenArtifact, Member as AssetMember};
 use super::{CustodyError, StageDeadline};
+
+mod suffix;
+pub use suffix::SuffixPins;
 use briqyard_api::execution::ordinary_key::OrdinaryAuthorityKey;
 use briqyard_api::execution::sealed::{
     custody::{Capture, LoadBody, Resource},
@@ -109,9 +112,12 @@ impl SealedInput {
             return Err(CustodyError::Protocol("startup operation directory scope"));
         }
         let resource = directory.resource;
+        if assets.requirements().resource() != resource {
+            return Err(CustodyError::Protocol("startup resource requirements"));
+        }
         assets
             .offer()
-            .check_plan_pins(resource, &plan)
+            .check_plan_pins(assets.requirements(), &plan)
             .map_err(|_| CustodyError::Protocol("startup asset plan pins"))?;
         let launch: Launch = decode(&read(Class::Launch)?)
             .map_err(|_| CustodyError::Protocol("invalid startup launch record"))?;
@@ -211,6 +217,7 @@ impl SealedInput {
         if resource == Resource::Authority {
             input.ordinary_authority_key()?;
         }
+        input.check_suffix_bindings(deadline)?;
         deadline.check()?;
         Ok(input)
     }

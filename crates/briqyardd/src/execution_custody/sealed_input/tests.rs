@@ -1,7 +1,8 @@
 use super::*;
 use crate::execution_custody::artifacts::{
+    tests::fixtures::{self, identities, spki},
     AssetOffer, Class, Descriptor, FrozenArtifact, ListenerEnv, Member as AssetMember,
-    ReceivedAssetFds, Signer as AssetSigner,
+    PoolKeyId, ReceivedAssetFds, Requirements, Signer as AssetSigner,
 };
 use briqyard_api::execution::sealed::{
     custody::{CaptureBody, CustodyWire, Slot},
@@ -131,6 +132,7 @@ fn directory_path(resource: Resource, x: &X) -> PathBuf {
 
 struct Fixture {
     resource: Resource,
+    requirements: Requirements,
     rk: FixtureSigner,
     bk: FixtureSigner,
     plan: Plan,
@@ -145,11 +147,17 @@ impl Fixture {
         Self::with_predecessor_key(resource, 5)
     }
 
+    fn with_requirements(requirements: Requirements) -> Self {
+        let mut fixture = Self::new(requirements.resource());
+        fixture.requirements = requirements;
+        fixture
+    }
+
     fn with_predecessor_key(resource: Resource, vector: usize) -> Self {
         let rk = FixtureSigner::from_test_vector(1);
         let bk = FixtureSigner::from_test_vector(2);
-        let ak = FixtureSigner::from_test_vector(3).key();
-        let hk = FixtureSigner::from_test_vector(4).key();
+        let ak = fixtures::evidence_public(AssetSigner::Ak);
+        let hk = fixtures::evidence_public(AssetSigner::Hk);
         let ordinary_key = FixtureSigner::from_test_vector(5).key();
         let id = |value| Ident::new(value).unwrap();
         let x = X {
@@ -229,6 +237,7 @@ impl Fixture {
         };
         Self {
             resource,
+            requirements: fixtures::requirements(resource),
             rk,
             bk,
             plan,
@@ -342,19 +351,19 @@ impl Fixture {
             };
             assets.push((descriptor, bytes));
         }
-        let (role, public) = if self.resource == Resource::Daemon {
-            (AssetSigner::Hk, self.plan.hk)
+        let role = if self.resource == Resource::Daemon {
+            AssetSigner::Hk
         } else {
-            (AssetSigner::Ak, self.plan.ak)
+            AssetSigner::Ak
         };
-        let signer = b"synthetic opaque signer handle";
+        let seed = fixtures::evidence_seed(role);
         assets.push((
             Descriptor::Signer {
-                bytes: Uint::new(signer.len() as u64).unwrap(),
+                bytes: Uint::new(seed.len() as u64).unwrap(),
                 role,
-                public,
+                public: fixtures::evidence_public(role),
             },
-            signer.to_vec(),
+            seed.to_vec(),
         ));
         for (class, data) in [(Class::TlsCert, CERT), (Class::TlsKey, TLS_KEY)] {
             let bytes = Uint::new(data.len() as u64).unwrap();
@@ -375,6 +384,38 @@ impl Fixture {
                 ordinary_profile(5),
             ));
         }
+        let registry = fixtures::registry_json((
+            self.plan.pre_record.key_id.as_str(),
+            self.plan.pre_record.authority.as_str(),
+            self.plan.pre_record.public_key,
+        ));
+        let identities = identities();
+        for class in self.requirements.classes().into_iter().skip(assets.len()) {
+            let bytes = match class {
+                Class::VerificationRegistry => registry.clone(),
+                other => fixtures::payload(other, 0),
+            };
+            let length = Uint::new(bytes.len() as u64).unwrap();
+            let digest = HexDigest::of(&bytes);
+            let descriptor = match class {
+                Class::VerificationRegistry => Descriptor::VerificationRegistry { bytes: length, digest },
+                Class::TransitionServerCert => Descriptor::TransitionServerCert { bytes: length, digest },
+                Class::TransitionClientCert => Descriptor::TransitionClientCert { bytes: length, digest },
+                Class::ContinuationBearer => Descriptor::ContinuationBearer { bytes: length, digest },
+                Class::DaemonApiCert => Descriptor::DaemonApiCert { bytes: length, digest },
+                Class::BackupS3Pair => Descriptor::BackupS3Pair { bytes: length, digest },
+                Class::TransitionServerKey => Descriptor::TransitionServerKey { bytes: length, spki: spki(&bytes) },
+                Class::TransitionClientKey => Descriptor::TransitionClientKey { bytes: length, spki: spki(&bytes) },
+                Class::DaemonApiKey => Descriptor::DaemonApiKey { bytes: length, spki: spki(&bytes) },
+                Class::LocalPoolKey => Descriptor::LocalPoolKey {
+                    bytes: length,
+                    key_id: PoolKeyId::new(briqyard_api::poolkey::id(fixtures::POOL_KEY).unwrap()).unwrap(),
+                },
+                _ => unreachable!("every remaining class is a suffix class"),
+            };
+            assets.push((descriptor, bytes));
+        }
+        let _ = identities;
         tweak(&mut assets);
         let mut fds = Vec::new();
         let descriptors = assets
@@ -382,6 +423,22 @@ impl Fixture {
             .map(|(descriptor, bytes)| {
                 if descriptor.class() == Class::OrdinaryAuthorityKey {
                     fds.push(sealed_key_fd(&bytes));
+                    return descriptor;
+                }
+                if matches!(
+                    descriptor.class(),
+                    Class::Signer(_)
+                        | Class::TransitionServerKey
+                        | Class::TransitionClientKey
+                        | Class::DaemonApiKey
+                        | Class::LocalPoolKey
+                ) {
+                    fds.push(
+                        fixtures::stage(descriptor.class(), &bytes)
+                            .as_fd()
+                            .try_clone_to_owned()
+                            .unwrap(),
+                    );
                     return descriptor;
                 }
                 let mut source = tempfile::NamedTempFile::new().unwrap();
@@ -400,11 +457,11 @@ impl Fixture {
                 descriptor
             })
             .collect();
-        let packet = AssetOffer::encode(self.resource, descriptors).unwrap();
-        let offer = AssetOffer::decode(self.resource, &packet).unwrap();
+        let packet = AssetOffer::encode(self.requirements, descriptors).unwrap();
+        let offer = AssetOffer::decode(self.requirements, &packet).unwrap();
         let listeners = ListenerEnv::verify(&std::process::id().to_string(), "0", "", &[]).unwrap();
         BoundAssets::bind(
-            self.resource,
+            self.requirements,
             offer,
             ReceivedAssetFds {
                 fds,
@@ -477,7 +534,14 @@ fn decode_with_key(
     let assets = fixture.bind(
         &fixture.grant(),
         &fixture.capture_load(),
-        |assets| change(assets.last_mut().unwrap()),
+        |assets| {
+            change(
+                assets
+                    .iter_mut()
+                    .find(|(descriptor, _)| descriptor.class() == Class::OrdinaryAuthorityKey)
+                    .unwrap(),
+            )
+        },
         deadline,
     );
     SealedInput::decode(
@@ -699,9 +763,12 @@ fn candidate_signer_and_member_offer_metadata_are_checked_against_the_decoded_pl
                 *digest = HexDigest::of(payload);
             }
         },
-        |(entry, _): &mut (Descriptor, Vec<u8>)| {
-            if let Descriptor::Signer { public, .. } = entry {
-                *public = FixtureSigner::from_test_vector(3).key();
+        |(entry, payload): &mut (Descriptor, Vec<u8>)| {
+            if let Descriptor::Signer { public, bytes, .. } = entry {
+                let other = [0x99; 32];
+                *payload = other.to_vec();
+                *bytes = Uint::new(32).unwrap();
+                *public = fixtures::public_of(&other);
             }
         },
         |(entry, _): &mut (Descriptor, Vec<u8>)| {

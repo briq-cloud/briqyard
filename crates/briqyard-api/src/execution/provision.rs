@@ -135,6 +135,24 @@ struct Key {
     authority: Option<String>,
     public_key: [u8; 32],
 }
+/// The retained public verification registry: a strict JSON array of one to 32 exact
+/// `{kid,role,issuer,authority,public_key}` objects. The one parser for every consumer.
+pub fn registry(bytes: &[u8]) -> Result<Vec<VerificationKey>, &'static str> {
+    let keys: Vec<Key> = serde_json::from_slice(bytes).map_err(|_| "invalid execution keys")?;
+    if keys.is_empty() || keys.len() > 32 {
+        return Err("invalid execution keys");
+    }
+    Ok(keys
+        .into_iter()
+        .map(|k| VerificationKey {
+            kid: k.kid,
+            role: k.role,
+            issuer: k.issuer,
+            authority: k.authority,
+            public_key: k.public_key,
+        })
+        .collect())
+}
 pub fn read(path: &Path, secret: bool, limit: u64) -> Result<Vec<u8>, &'static str> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let file = std::fs::OpenOptions::new()
@@ -194,22 +212,7 @@ impl Config {
             serde_json::from_slice(&read(&self.credentials, true, 32 * 1024)?)
                 .map_err(|_| "invalid execution credentials")?;
         credentials.validate()?;
-        let keys: Vec<Key> =
-            serde_json::from_slice(&read(&self.verification_keys, false, 64 * 1024)?)
-                .map_err(|_| "invalid execution keys")?;
-        if keys.is_empty() || keys.len() > 32 {
-            return Err("invalid execution keys");
-        }
-        let keys = keys
-            .into_iter()
-            .map(|k| VerificationKey {
-                kid: k.kid,
-                role: k.role,
-                issuer: k.issuer,
-                authority: k.authority,
-                public_key: k.public_key,
-            })
-            .collect();
+        let keys = registry(&read(&self.verification_keys, false, 64 * 1024)?)?;
         let tls = crate::tls::server_config(
             &read(&self.cert, false, 256 * 1024)?,
             &read(&self.key, true, 64 * 1024)?,

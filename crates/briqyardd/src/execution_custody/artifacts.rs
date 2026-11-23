@@ -3,7 +3,7 @@
 
 use super::fd::open_descriptors;
 use super::{io_error, CustodyError, DescriptorFloor, StageDeadline};
-use briqyard_api::execution::sealed::{custody::Resource, prim::HexDigest};
+use briqyard_api::execution::{private_cert, sealed::prim::HexDigest};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::convert::Infallible;
@@ -20,9 +20,16 @@ const LISTENER_START: RawFd = 3;
 
 mod frozen;
 mod protocol;
+mod secret;
 
 pub use frozen::FrozenArtifact;
-pub use protocol::{check_prepare, prepare_packet, AssetOffer, Class, Descriptor, Member, Signer};
+pub use protocol::{
+    check_prepare, prepare_packet, AssetOffer, Class, Descriptor, Member, PoolKeyId, Requirements,
+    Signer, MAX_ASSET_RIGHTS,
+};
+pub use secret::{
+    BackupS3Credentials, ContinuationBearer, EvidenceSigner, PoolFileKey, TlsPrivateKey,
+};
 
 fn check_length(class: Class, bytes: u64) -> Result<(), CustodyError> {
     if !class.accepts(bytes) {
@@ -55,7 +62,7 @@ fn hash_exact(
     deadline: StageDeadline,
     mut consume: impl FnMut(&[u8]) -> Result<(), CustodyError>,
 ) -> Result<[u8; 32], CustodyError> {
-    let mut buffer = [0; 64 * 1024];
+    let mut buffer = zeroize::Zeroizing::new([0; 64 * 1024]);
     let mut hash = Sha256::new();
     let mut offset = 0;
     loop {
@@ -80,6 +87,16 @@ fn hash_exact(
         consume(chunk)?;
         offset += read as u64;
     }
+}
+
+/// Exact bytes of a public, non-secret descriptor.
+fn read_exact(file: &File, bytes: u64, deadline: StageDeadline) -> Result<Vec<u8>, CustodyError> {
+    let mut out = Vec::with_capacity(bytes as usize);
+    hash_exact(file, bytes, deadline, |chunk| {
+        out.extend_from_slice(chunk);
+        Ok(())
+    })?;
+    Ok(out)
 }
 
 fn check_syscall(result: i32, operation: &'static str) -> Result<i32, CustodyError> {
@@ -116,20 +133,21 @@ pub struct ReceivedAssetFds {
 
 pub struct BoundAssets {
     base: RawFd,
+    requirements: Requirements,
     offer: AssetOffer,
     artifacts: Vec<FrozenArtifact>,
 }
 
 impl BoundAssets {
     pub fn bind(
-        resource: Resource,
+        requirements: Requirements,
         offer: AssetOffer,
         received: ReceivedAssetFds,
         listeners: &ListenerEnv,
         deadline: StageDeadline,
     ) -> Result<Self, CustodyError> {
         offer
-            .check_resource(resource)
+            .check_resource(requirements)
             .map_err(|_| CustodyError::Protocol("native asset order or role"))?;
         if received.truncated
             || received.unexpected_control
@@ -142,10 +160,11 @@ impl BoundAssets {
         }
         listeners.check_open()?;
         let floor = DescriptorFloor::for_artifacts(listeners.names.len(), offer.assets.len())?;
-        Self::relocate(offer, received.fds, floor, deadline)
+        Self::relocate(requirements, offer, received.fds, floor, deadline)
     }
 
     fn relocate(
+        requirements: Requirements,
         offer: AssetOffer,
         received: Vec<OwnedFd>,
         floor: DescriptorFloor,
@@ -181,20 +200,64 @@ impl BoundAssets {
                 ));
             }
             artifact.check_content(digest, deadline)?;
+            artifact.check_profile(Some(descriptor), deadline)?;
             artifacts.push(artifact);
             next = duplicate
                 .checked_add(1)
                 .ok_or(CustodyError::Protocol("native descriptor range exhausted"))?;
         }
-        Ok(Self {
+        let bound = Self {
             base: floor.minimum(),
+            requirements,
             offer,
             artifacts,
-        })
+        };
+        bound.check_identities(deadline)?;
+        Ok(bound)
+    }
+
+    /// Each private transition certificate belongs to the key that follows it, and the server
+    /// and client identities are distinct keys. The full profile is the transport's own
+    /// parser; pins, names and validity are the caller's, against the closure.
+    fn check_identities(&self, deadline: StageDeadline) -> Result<(), CustodyError> {
+        let leaf = |cert, usage| -> Result<_, CustodyError> {
+            let artifact = self
+                .artifact(cert)
+                .ok_or(CustodyError::Protocol("missing transition certificate"))?;
+            private_cert::parse(&read_exact(&artifact.file, artifact.bytes, deadline)?, usage)
+                .map(|leaf| leaf.spki_digest())
+                .map_err(|_| CustodyError::Protocol("invalid transition certificate"))
+        };
+        let key = |class| {
+            self.offer.descriptors().iter().find_map(|d| match d {
+                Descriptor::TransitionServerKey { spki, .. }
+                | Descriptor::TransitionClientKey { spki, .. }
+                    if d.class() == class =>
+                {
+                    Some(spki.clone())
+                }
+                _ => None,
+            })
+        };
+        let server = leaf(Class::TransitionServerCert, private_cert::Usage::Server)?;
+        let client = leaf(Class::TransitionClientCert, private_cert::Usage::Client)?;
+        if key(Class::TransitionServerKey) != Some(server.clone())
+            || key(Class::TransitionClientKey) != Some(client.clone())
+            || server == client
+        {
+            return Err(CustodyError::Protocol(
+                "transition certificate and key do not form distinct identities",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn offer(&self) -> &AssetOffer {
         &self.offer
+    }
+
+    pub fn requirements(&self) -> Requirements {
+        self.requirements
     }
 
     pub fn artifact(&self, class: Class) -> Option<&FrozenArtifact> {
@@ -420,4 +483,4 @@ pub fn mapped_image_digest(deadline: StageDeadline) -> Result<[u8; 32], CustodyE
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::execution_custody) mod tests;

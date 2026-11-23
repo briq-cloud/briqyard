@@ -37,9 +37,17 @@ impl FrozenArtifact {
         digest: &HexDigest,
         deadline: StageDeadline,
     ) -> Result<Self, CustodyError> {
-        if class == Class::OrdinaryAuthorityKey {
+        if matches!(
+            class,
+            Class::OrdinaryAuthorityKey
+                | Class::Signer(_)
+                | Class::TransitionServerKey
+                | Class::TransitionClientKey
+                | Class::DaemonApiKey
+                | Class::LocalPoolKey
+        ) {
             return Err(CustodyError::Protocol(
-                "the ordinary authority key is staged from memory, never from a file",
+                "private keys are staged from memory, never from a file",
             ));
         }
         check_length(class, bytes)?;
@@ -82,6 +90,7 @@ impl FrozenArtifact {
         };
         frozen.check_metadata()?;
         frozen.check_content(Some(digest), deadline)?;
+        frozen.check_profile(None, deadline)?;
         Ok(frozen)
     }
 
@@ -143,9 +152,9 @@ impl FrozenArtifact {
     }
 
     pub fn read_small(&self, deadline: StageDeadline) -> Result<Vec<u8>, CustodyError> {
-        if self.class == Class::OrdinaryAuthorityKey {
+        if self.class.is_secret() {
             return Err(CustodyError::Protocol(
-                "private key bytes are not a readable artifact",
+                "secret bytes are not a readable artifact",
             ));
         }
         if self.bytes > MAX_MESSAGE_BYTES as u64 {
@@ -174,7 +183,7 @@ impl FrozenArtifact {
         if !metadata.is_file()
             || metadata.nlink() != 0
             || metadata.len() != self.bytes
-            || (self.class == Class::Candidate && metadata.mode() & 0o7777 != self.class.mode())
+            || metadata.mode() & 0o7777 != self.class.mode()
             || access_flags(fd)? & (libc::O_ACCMODE | libc::O_PATH) != libc::O_RDONLY
         {
             return Err(CustodyError::Protocol(

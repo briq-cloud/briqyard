@@ -9,8 +9,42 @@ use briqyard_api::execution::{
         CodecError, Wire,
     },
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
+
+mod layout;
+pub use layout::{Requirements, MAX_ASSET_RIGHTS};
+
+const MAX_CERTIFICATE: u64 = 4096;
+const MAX_TLS_KEY: u64 = 512;
+pub(super) const MAX_BEARER: u64 = 4096;
+pub(super) const SEED_BYTES: u64 = 32;
+pub(super) const POOL_KEY_BYTES: u64 = 64;
+
+/// A pool key's identifier: exactly 32 lowercase hexadecimal characters, as
+/// `briqyard_api::poolkey::id` produces. It identifies a key and is never the key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PoolKeyId(String);
+
+impl PoolKeyId {
+    pub fn new(text: impl Into<String>) -> Result<Self, CodecError> {
+        let text = text.into();
+        if text.len() != 32 || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(CodecError::Value("pool key id"));
+        }
+        Ok(Self(text))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PoolKeyId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -43,6 +77,16 @@ pub enum Class {
     TlsCert,
     TlsKey,
     OrdinaryAuthorityKey,
+    VerificationRegistry,
+    TransitionServerCert,
+    TransitionServerKey,
+    TransitionClientCert,
+    TransitionClientKey,
+    ContinuationBearer,
+    DaemonApiCert,
+    DaemonApiKey,
+    BackupS3Pair,
+    LocalPoolKey,
 }
 
 impl Class {
@@ -65,13 +109,48 @@ impl Class {
             Self::TlsCert => "BRIQ_SEALED_TLS_CERT_FD",
             Self::TlsKey => "BRIQ_SEALED_TLS_KEY_FD",
             Self::OrdinaryAuthorityKey => ordinary_key::FD_ENV,
+            Self::VerificationRegistry => "BRIQ_SEALED_VERIFICATION_REGISTRY_FD",
+            Self::TransitionServerCert => "BRIQ_SEALED_TRANSITION_SERVER_CERT_FD",
+            Self::TransitionServerKey => "BRIQ_SEALED_TRANSITION_SERVER_KEY_FD",
+            Self::TransitionClientCert => "BRIQ_SEALED_TRANSITION_CLIENT_CERT_FD",
+            Self::TransitionClientKey => "BRIQ_SEALED_TRANSITION_CLIENT_KEY_FD",
+            Self::ContinuationBearer => "BRIQ_SEALED_CONTINUATION_BEARER_FD",
+            Self::DaemonApiCert => "BRIQ_SEALED_DAEMON_API_CERT_FD",
+            Self::DaemonApiKey => "BRIQ_SEALED_DAEMON_API_KEY_FD",
+            Self::BackupS3Pair => "BRIQ_SEALED_BACKUP_S3_PAIR_FD",
+            Self::LocalPoolKey => "BRIQ_SEALED_LOCAL_POOL_KEY_FD",
         }
+    }
+
+    /// Payloads that only a typed, narrowly validating accessor may read. The generic
+    /// bounded read refuses them, so no raw buffer of a secret ever leaves a descriptor.
+    pub(super) fn is_secret(self) -> bool {
+        matches!(
+            self,
+            Self::OrdinaryAuthorityKey
+                | Self::Signer(_)
+                | Self::TransitionServerKey
+                | Self::TransitionClientKey
+                | Self::DaemonApiKey
+                | Self::ContinuationBearer
+                | Self::BackupS3Pair
+                | Self::LocalPoolKey
+        )
     }
 
     pub(super) fn accepts(self, bytes: u64) -> bool {
         match self {
             Self::Candidate => (1..=IMAGE_LIMIT).contains(&bytes),
             Self::OrdinaryAuthorityKey => bytes == ordinary_key::PKCS8_BYTES as u64,
+            Self::Signer(_) => bytes == SEED_BYTES,
+            Self::LocalPoolKey => bytes == POOL_KEY_BYTES,
+            Self::ContinuationBearer => (1..=MAX_BEARER).contains(&bytes),
+            Self::TransitionServerCert | Self::TransitionClientCert => {
+                (1..=MAX_CERTIFICATE).contains(&bytes)
+            }
+            Self::TransitionServerKey | Self::TransitionClientKey | Self::DaemonApiKey => {
+                (1..=MAX_TLS_KEY).contains(&bytes)
+            }
             _ => (1..=MAX_MESSAGE_BYTES as u64).contains(&bytes),
         }
     }
@@ -139,6 +218,46 @@ pub enum Descriptor {
         bytes: Uint,
         public: KeyBytes,
     },
+    VerificationRegistry {
+        bytes: Uint,
+        digest: HexDigest,
+    },
+    TransitionServerCert {
+        bytes: Uint,
+        digest: HexDigest,
+    },
+    TransitionServerKey {
+        bytes: Uint,
+        spki: HexDigest,
+    },
+    TransitionClientCert {
+        bytes: Uint,
+        digest: HexDigest,
+    },
+    TransitionClientKey {
+        bytes: Uint,
+        spki: HexDigest,
+    },
+    ContinuationBearer {
+        bytes: Uint,
+        digest: HexDigest,
+    },
+    DaemonApiCert {
+        bytes: Uint,
+        digest: HexDigest,
+    },
+    DaemonApiKey {
+        bytes: Uint,
+        spki: HexDigest,
+    },
+    BackupS3Pair {
+        bytes: Uint,
+        digest: HexDigest,
+    },
+    LocalPoolKey {
+        bytes: Uint,
+        key_id: PoolKeyId,
+    },
 }
 
 impl Descriptor {
@@ -156,6 +275,16 @@ impl Descriptor {
             Self::TlsCert { .. } => Class::TlsCert,
             Self::TlsKey { .. } => Class::TlsKey,
             Self::OrdinaryAuthorityKey { .. } => Class::OrdinaryAuthorityKey,
+            Self::VerificationRegistry { .. } => Class::VerificationRegistry,
+            Self::TransitionServerCert { .. } => Class::TransitionServerCert,
+            Self::TransitionServerKey { .. } => Class::TransitionServerKey,
+            Self::TransitionClientCert { .. } => Class::TransitionClientCert,
+            Self::TransitionClientKey { .. } => Class::TransitionClientKey,
+            Self::ContinuationBearer { .. } => Class::ContinuationBearer,
+            Self::DaemonApiCert { .. } => Class::DaemonApiCert,
+            Self::DaemonApiKey { .. } => Class::DaemonApiKey,
+            Self::BackupS3Pair { .. } => Class::BackupS3Pair,
+            Self::LocalPoolKey { .. } => Class::LocalPoolKey,
         }
     }
 
@@ -170,19 +299,28 @@ impl Descriptor {
             | Self::CaptureLoad { bytes, digest }
             | Self::Member { bytes, digest, .. }
             | Self::TlsCert { bytes, digest }
-            | Self::TlsKey { bytes, digest } => (bytes.get(), Some(digest)),
-            Self::Signer { bytes, .. } | Self::OrdinaryAuthorityKey { bytes, .. } => {
-                (bytes.get(), None)
-            }
+            | Self::TlsKey { bytes, digest }
+            | Self::VerificationRegistry { bytes, digest }
+            | Self::TransitionServerCert { bytes, digest }
+            | Self::TransitionClientCert { bytes, digest }
+            | Self::ContinuationBearer { bytes, digest }
+            | Self::DaemonApiCert { bytes, digest }
+            | Self::BackupS3Pair { bytes, digest } => (bytes.get(), Some(digest)),
+            Self::Signer { bytes, .. }
+            | Self::OrdinaryAuthorityKey { bytes, .. }
+            | Self::TransitionServerKey { bytes, .. }
+            | Self::TransitionClientKey { bytes, .. }
+            | Self::DaemonApiKey { bytes, .. }
+            | Self::LocalPoolKey { bytes, .. } => (bytes.get(), None),
         }
     }
 }
 
 #[derive(Deserialize, Serialize)]
 enum Format {
-    #[serde(rename = "native.prepare/v1")]
+    #[serde(rename = "native.prepare/v3")]
     Prepare,
-    #[serde(rename = "native.assets/v1")]
+    #[serde(rename = "native.assets/v3")]
     Assets,
 }
 
@@ -202,7 +340,7 @@ impl Wire for Prepare {
 }
 
 pub fn prepare_packet() -> &'static [u8] {
-    br#"{"format":"native.prepare/v1"}"#
+    br#"{"format":"native.prepare/v3"}"#
 }
 
 pub fn check_prepare(bytes: &[u8]) -> Result<(), CodecError> {
@@ -221,10 +359,11 @@ impl Wire for AssetOffer {
         if !matches!(self.format, Format::Assets) {
             return Err(CodecError::Value("native assets format"));
         }
-        if self
-            .assets
-            .iter()
-            .any(|asset| !asset.class().accepts(asset.integrity().0))
+        if self.assets.len() > MAX_ASSET_RIGHTS
+            || self
+                .assets
+                .iter()
+                .any(|asset| !asset.class().accepts(asset.integrity().0))
         {
             return Err(CodecError::Value("native asset length"));
         }
@@ -233,19 +372,22 @@ impl Wire for AssetOffer {
 }
 
 impl AssetOffer {
-    pub fn decode(resource: Resource, bytes: &[u8]) -> Result<Self, CodecError> {
+    pub fn decode(requirements: Requirements, bytes: &[u8]) -> Result<Self, CodecError> {
         let offer: Self = briqyard_api::execution::sealed::decode(bytes)?;
-        offer.check_resource(resource)?;
+        offer.check_resource(requirements)?;
         Ok(offer)
     }
 
-    pub fn encode(resource: Resource, assets: Vec<Descriptor>) -> Result<Vec<u8>, CodecError> {
+    pub fn encode(
+        requirements: Requirements,
+        assets: Vec<Descriptor>,
+    ) -> Result<Vec<u8>, CodecError> {
         let offer = Self {
             format: Format::Assets,
             assets,
         };
         offer.validate()?;
-        offer.check_resource(resource)?;
+        offer.check_resource(requirements)?;
         briqyard_api::execution::sealed::encode(&offer)
     }
 
@@ -253,37 +395,14 @@ impl AssetOffer {
         &self.assets
     }
 
-    pub(super) fn check_resource(&self, resource: Resource) -> Result<(), CodecError> {
-        let common = [
-            Class::Plan,
-            Class::Launch,
-            Class::Grant,
-            Class::Inputs,
-            Class::Candidate,
-            Class::Config,
-            Class::CaptureLoad,
-            Class::Member(Member::Hi),
-            Class::Member(Member::He),
-        ];
-        let (members, signer) = match resource {
-            Resource::Daemon => (&[][..], Signer::Hk),
-            Resource::Authority => (
-                &[Class::Member(Member::Ni), Class::Member(Member::Ng)][..],
-                Signer::Ak,
-            ),
-        };
-        let tail = [
-            Class::Member(Member::Tr),
-            Class::Signer(signer),
-            Class::TlsCert,
-            Class::TlsKey,
-        ];
-        let ordinary = (resource == Resource::Authority).then_some(Class::OrdinaryAuthorityKey);
-        if !self.assets.iter().map(Descriptor::class).eq(common
-            .into_iter()
-            .chain(members.iter().copied())
-            .chain(tail)
-            .chain(ordinary))
+    /// The exact class sequence of the resource and the caller's typed requirements; there is
+    /// no negotiation, omission or extra right.
+    pub(super) fn check_resource(&self, requirements: Requirements) -> Result<(), CodecError> {
+        if !self
+            .assets
+            .iter()
+            .map(Descriptor::class)
+            .eq(requirements.classes())
         {
             return Err(CodecError::Value("native asset class order or role"));
         }
@@ -292,8 +411,12 @@ impl AssetOffer {
 
     /// Compare metadata with an independently validated plan; this does not validate the plan,
     /// member envelopes/values, signer handle or either launch-grant signature.
-    pub fn check_plan_pins(&self, resource: Resource, plan: &Plan) -> Result<(), CodecError> {
-        self.check_resource(resource)?;
+    pub fn check_plan_pins(
+        &self,
+        requirements: Requirements,
+        plan: &Plan,
+    ) -> Result<(), CodecError> {
+        self.check_resource(requirements)?;
         let plan_digest = briqyard_api::execution::sealed::h(plan)?;
         let members = &plan.new;
         let transition = members
@@ -314,7 +437,7 @@ impl AssetOffer {
         {
             return Err(CodecError::Value("duplicate native member pin"));
         }
-        let image = match resource {
+        let image = match requirements.resource() {
             Resource::Daemon => &plan.next_d,
             Resource::Authority => &plan.next_a,
         };

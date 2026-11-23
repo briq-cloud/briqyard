@@ -2,7 +2,7 @@
 //! No pooling, retry, redirect, proxy, compression, chunked request, upgrade or caller
 //! chosen header ever reaches a route; every wait is bounded by the freshness deadline.
 
-use super::{Name, PeerId, PeerRow};
+use super::{Name, NameExt, PeerId, PeerRow};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use http::{header, HeaderMap, Method, StatusCode, Version};
