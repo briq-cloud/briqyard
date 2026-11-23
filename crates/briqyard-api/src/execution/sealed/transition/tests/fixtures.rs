@@ -177,6 +177,20 @@ pub(super) fn daemon_death() -> Death {
     }
 }
 
+/// `h(C({"wire": death}))`: the digest of the wrapper a transport might put around a Death.
+/// It is never the commitment: Cut and Launch consume `H(Death) = h(C(Death))` only.
+pub(super) fn wrapped_death_hash(death: &Death) -> HexDigest {
+    let wrapper = serde_json::json!({ "wire": death });
+    crate::execution::sealed::canonical::h(&wrapper).unwrap()
+}
+
+/// `SHA-256(C(death))` computed outside the code under test's own `h`.
+pub(super) fn independent_death_hash(death: &Death) -> HexDigest {
+    use sha2::{Digest, Sha256};
+    let bytes = crate::execution::sealed::canonical::encode(death).unwrap();
+    HexDigest::from_raw(Sha256::digest(bytes).into())
+}
+
 pub(super) fn cut() -> Cut {
     Cut {
         x: x(),

@@ -173,6 +173,17 @@ fn cut_commits_to_the_exact_daemon_death() {
 }
 
 #[test]
+fn cut_custody_is_the_death_hash_and_never_a_wrapper_around_it() {
+    let death = daemon_death();
+    assert_eq!(cut().custody, independent_death_hash(&death));
+    let wrapped = wrapped_death_hash(&death);
+    assert_ne!(wrapped, death.hash().unwrap());
+    let mut wrapped_cut = cut();
+    wrapped_cut.custody = wrapped;
+    assert!(wrapped_cut.check_death(&death).is_err());
+}
+
+#[test]
 fn receipt_is_signed_by_hk_only_and_closes_exactly_host_scoped_writes() {
     let r = receipt();
     verify_receipt(&r, &HkSigner::new().pinned()).unwrap();

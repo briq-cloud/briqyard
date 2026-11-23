@@ -1,0 +1,12 @@
+{
+  "release": "0.2.15",
+  "commit": "892fa23be717e63c6523a12c425e24856b3d09f8",
+  "releaseId": 447394990,
+  "sha256": {
+    "SHA256SUMS-x86_64": "4e966c173eae42e338f621bbb82659cf3d92fa2a1f6a2c518ef20b5143454a7e",
+    "briqyard-fleet-linux-x86_64": "d73c752471740c2f00a5888bf1d4a3a93ec28ba36d63dfe0c83bafc311ba016f",
+    "briqyard-linux-x86_64": "ae4a10c69ac2e9b1f4ae3526d3d610c9e7ce324e568d30846e1e4cf22c4a4278",
+    "briqyardd-linux-x86_64": "430530e6a4e947e0b99e9809c28aaab56cdbbd88adb6dde883129440576e13cd"
+  },
+  "source": "https://github.com/briq-cloud/briqyard/releases/tag/v0.2.15"
+}

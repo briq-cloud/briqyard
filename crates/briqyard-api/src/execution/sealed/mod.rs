@@ -10,6 +10,7 @@
 //! * [`prim`]: the scalar vocabulary (`U`, `P`, `I`, `D`, `N`/`K`/`S`, UUIDs, literals).
 //! * [`sig`]: `Sig(tag, T)`, signer roles, strict Ed25519 verification.
 //! * [`objects`]: `X`, `Proc`, `Q`, `Reg`/`Ack`/`Ctx`, `Members`, `Plan`, capacity and clock objects.
+//! * [`inputs`]: the closed v3.6 base manifest and v3.3 closure reader, with no I/O or approval.
 //! * [`plan_pin`]: the two prior Plan commitments, the root custody read and its trust record.
 //! * [`trial`]: the single sealed-trial ABI and its native command/result commitments.
 //! * [`custody`]: the custody frame ABI's wire and signed bodies.
@@ -18,6 +19,7 @@
 
 pub mod canonical;
 pub mod custody;
+pub mod inputs;
 pub mod objects;
 pub mod plan_pin;
 pub mod prim;

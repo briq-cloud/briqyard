@@ -174,6 +174,18 @@ fn the_launch_death_link_names_the_same_owner_processes_and_hash() {
 }
 
 #[test]
+fn the_launch_commits_to_the_death_hash_and_never_to_a_wrapper_around_it() {
+    let death = authority_death();
+    assert_eq!(death.hash().unwrap(), independent_death_hash(&death));
+    let wrapped = wrapped_death_hash(&death);
+    assert_ne!(wrapped, death.hash().unwrap());
+    let mut retired = launch(LaunchStage::Retired);
+    retired.check_death(&death).unwrap();
+    retired.death = Some(wrapped);
+    assert!(retired.check_death(&death).is_err());
+}
+
+#[test]
 fn death_is_true_exited_zero_writers_durable_and_its_challenge_is_the_wire_challenge() {
     let death = authority_death();
     round_trip(&death);
