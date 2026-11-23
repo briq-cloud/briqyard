@@ -517,6 +517,22 @@ pub(super) fn fixture_suffix_close() {
                 Box::new(move |p| p[first_suffix + 1].fd = p[first_suffix].fd.try_clone().unwrap()),
             ),
         ];
+        let identities = identities();
+        let mut swapped = parts(requirements);
+        for (class, bytes) in [
+            (Class::TransitionServerKey, &identities.client.key),
+            (Class::TransitionClientKey, &identities.server.key),
+        ] {
+            let part = at(&mut swapped, class);
+            part.descriptor = descriptor_value(class, bytes);
+            part.fd = stage(class, bytes).file.into();
+        }
+        assert!(bind(requirements, swapped).is_err());
+        assert_eq!(
+            open_descriptors().unwrap().len(),
+            before,
+            "identity refusal {requirements:?}"
+        );
         for (name, mutate) in mutations {
             let mut delivered = parts(requirements);
             let wire = envelope(

@@ -33,7 +33,8 @@ to enrolled actors; it is the narrowest reading and one line per route to change
   or fragment): identities arrive as bytes from the sealed descriptors, listeners as bound
   sockets, and there is no caller path, environment or current-global token fallback.
 - **Identity.** Each peer row pins a leaf and an SPKI digest for a server and a client
-  identity. A leaf is accepted only if its bytes match the pin, then only inside a closed
+  identity. The profile below is `briqyard_api::execution::private_cert`, shared with the host's
+  sealed-asset checks (ADR 0148). A leaf is accepted only if its bytes match the pin, then only inside a closed
   X.509 profile: version 3, self-issued (the self-signature is verified, never trusted),
   P-256, one non-wildcard SAN, exactly one EKU (serverAuth or clientAuth), no CA, qualified
   validity of the whole clock interval. The client leaf's SAN form is not named by v3.3; one
