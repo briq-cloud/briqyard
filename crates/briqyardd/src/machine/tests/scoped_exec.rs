@@ -7,6 +7,7 @@ use api::execution::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use ring::signature::{Ed25519KeyPair, KeyPair};
+use std::future::Future;
 
 #[tokio::test]
 async fn internal_execution_route_requires_its_installer_credential_on_loopback() {
@@ -163,6 +164,10 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
 }
 
 #[tokio::test(start_paused = true)]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "requires Linux kernel process identity"
+)]
 async fn scoped_command_finishes_after_collection_despite_expired_contended_final_lock() {
     scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay_inner(true).await;
 }
@@ -622,11 +627,24 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay_in
                 _ = barrier.reached.notified(), if !reached => {
                     reached = true;
                     let held = journal.lock().await;
-                    tokio::time::advance(Duration::from_secs(60)).await;
+                    barrier.resume.notify_one();
+                    std::future::poll_fn(|cx| {
+                        match execute.as_mut().poll(cx) {
+                            std::task::Poll::Pending => {}
+                            std::task::Poll::Ready(Err(error)) => {
+                                panic!("dispatcher failed before final journal completion: {error:?}")
+                            }
+                            std::task::Poll::Ready(Ok(_)) => {
+                                panic!("dispatcher acquired the final journal lock while it was held")
+                            }
+                        }
+                        std::task::Poll::Ready(())
+                    })
+                    .await;
                     assert_eq!(held.status(&permit.admission).unwrap(), Some(Status::Consumed));
                     let consumed = std::fs::read(path.join("journal.json")).unwrap();
-                    barrier.resume.notify_one();
-                    tokio::task::yield_now().await;
+                    tokio::time::advance(Duration::from_secs(60)).await;
+                    assert_eq!(held.status(&permit.admission).unwrap(), Some(Status::Consumed));
                     assert_eq!(std::fs::read(path.join("journal.json")).unwrap(), consumed);
                     drop(held);
                 }

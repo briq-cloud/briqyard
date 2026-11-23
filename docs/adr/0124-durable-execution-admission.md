@@ -76,6 +76,12 @@ old dispatch host's fencing acknowledgement, or wait for every old permit's expi
 clock uncertainty, before capacity can be reassigned. Installation is an administrative
 trust boundary, not a public gateway operation.
 
+Ordinary installation retains the ordinary fence commit followed by its separate
+registration and invalidation commit. Guarded registration instead uses one atomic commit
+for the fence, registration, retired epochs, active revocations and invalidations. Capacity
+refusal changes neither persistent bytes nor the published reader view. It cannot strand
+live leases across a durably retired epoch, or leave that view behind a partial fence.
+
 The runtime run ID hashes actual host boot ID, VMM PID, kernel start ticks and the current
 host journal instance. Even restoration of an older journal before an admission changes
 this run ID. Old grants and permits cannot dispatch into the restored service instance.

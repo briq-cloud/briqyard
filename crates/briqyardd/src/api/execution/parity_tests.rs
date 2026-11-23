@@ -136,6 +136,10 @@ async fn ordinary_revocation_after_ownership_failure_ends_live_lease() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "requires Linux qualified execution clock"
+)]
 async fn ordinary_queued_registration_reads_state_after_its_turn() {
     use axum::{
         body::Body,

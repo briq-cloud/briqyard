@@ -72,7 +72,8 @@ impl GuardedOperations {
         })
     }
 
-    pub fn register(
+    #[cfg(test)]
+    pub(crate) fn register(
         self: &Arc<Self>,
         admission: &str,
         lease: ActiveLease,
@@ -82,7 +83,8 @@ impl GuardedOperations {
         Ok(guard)
     }
 
-    pub fn get(&self, admission: &str) -> Option<ActiveLease> {
+    #[cfg(test)]
+    pub(crate) fn get(&self, admission: &str) -> Option<ActiveLease> {
         self.0.lock().unwrap().get(admission)?.lease()
     }
 
@@ -105,14 +107,10 @@ impl GuardedOperations {
         Ok(Some(owner.clone()))
     }
 
-    pub fn revoke_where(&self, mut evidence: impl FnMut(&str) -> Option<ActiveOperation>) {
+    pub(crate) fn revoke_where(&self, mut evidence: impl FnMut(&str) -> Option<ActiveOperation>) {
         for (admission, owner) in self.0.lock().unwrap().iter() {
             if let (Some(lease), Some(record)) = (owner.lease(), evidence(admission)) {
-                if owner.intent.is_some() {
-                    let _ = lease.revoke_committed(&record);
-                } else if record.phase == briqyard_api::execution::admission::ActivePhase::Revoked {
-                    lease.end();
-                }
+                let _ = lease.revoke_committed(&record);
             }
         }
     }
@@ -197,5 +195,90 @@ impl AsyncRead for GuardedConnection {
             lease.check_io()?;
         }
         Pin::new(&mut self.conn).poll_read(cx, buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use briqyard_api::execution::{admission::ActiveOperation, clock::ClockSample};
+    use std::time::Duration;
+    fn evidence() -> ActiveOperation {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../briqyard-api/tests/fixtures/execution-continuation-v1.json"
+        ))
+        .unwrap();
+        serde_json::from_value(fixture["active"].clone()).unwrap()
+    }
+    #[tokio::test]
+    async fn exact_registry_evidence_is_live_until_owner_exits_and_cannot_reappear_from_status() {
+        let evidence = evidence();
+        let sample = ClockSample {
+            wall: Duration::from_secs(1035),
+            monotonic: std::time::Instant::now(),
+            uncertainty: Duration::from_secs(1),
+        };
+        let registry = Arc::new(GuardedOperations::default());
+        assert!(registry.get(&evidence.binding.admission).is_none());
+        let lease = ActiveLease::from_committed(evidence.clone(), &sample).unwrap();
+        let owner = registry
+            .register(&evidence.binding.admission, lease.clone())
+            .unwrap();
+        registry
+            .get(&evidence.binding.admission)
+            .unwrap()
+            .observe(&evidence, &sample)
+            .unwrap();
+        assert!(registry
+            .register(&evidence.binding.admission, lease.clone())
+            .is_err());
+        let mut crossed = evidence.clone();
+        crossed.binding.request_digest.push('x');
+        assert!(lease.observe(&crossed, &sample).is_err());
+        drop(owner);
+        assert!(registry.get(&evidence.binding.admission).is_none());
+        assert!(lease.observe(&evidence, &sample).is_err());
+    }
+    #[tokio::test]
+    async fn terminal_owner_remains_distinct_from_abandoned_until_finish_fsync() {
+        let evidence = evidence();
+        let sample = ClockSample {
+            wall: Duration::from_secs(1035),
+            monotonic: std::time::Instant::now(),
+            uncertainty: Duration::from_secs(1),
+        };
+        let registry = Arc::new(GuardedOperations::default());
+        let lease = ActiveLease::from_committed(evidence.clone(), &sample).unwrap();
+        let owner = registry
+            .register(&evidence.binding.admission, lease.clone())
+            .unwrap();
+        lease.end(); // Terminal output observed; manager has not obtained journal yet.
+        assert!(registry.get(&evidence.binding.admission).is_some());
+        assert!(lease.observe(&evidence, &sample).is_err());
+        drop(owner); // Completion persistence or manager cancellation releases ownership.
+        assert!(registry.get(&evidence.binding.admission).is_none());
+    }
+
+    #[tokio::test]
+    async fn retained_revocation_ends_the_exact_live_connection_before_ack() {
+        let mut evidence = evidence();
+        let sample = ClockSample {
+            wall: Duration::from_secs(1035),
+            monotonic: std::time::Instant::now(),
+            uncertainty: Duration::from_secs(1),
+        };
+        let registry = Arc::new(GuardedOperations::default());
+        let lease = ActiveLease::from_committed(evidence.clone(), &sample).unwrap();
+        let _owner = registry
+            .register(&evidence.binding.admission, lease.clone())
+            .unwrap();
+        let mut crossed = evidence.clone();
+        crossed.phase = briqyard_api::execution::admission::ActivePhase::Revoked;
+        crossed.binding.request_digest.push('x');
+        registry.revoke_where(|id| (id == crossed.binding.admission).then(|| crossed.clone()));
+        lease.observe(&evidence, &sample).unwrap();
+        evidence.phase = briqyard_api::execution::admission::ActivePhase::Revoked;
+        registry.revoke_where(|id| (id == evidence.binding.admission).then(|| evidence.clone()));
+        assert!(lease.observe(&evidence, &sample).is_err());
     }
 }

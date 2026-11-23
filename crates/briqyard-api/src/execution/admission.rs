@@ -372,6 +372,56 @@ impl Journal {
         self.commit(next, Some(clock))
     }
 
+    /// Atomically fence, register, revoke and invalidate for the guarded execution router.
+    pub fn register_guarded_host(
+        &mut self,
+        record: HostRegistration,
+        clock: Clock,
+    ) -> Result<(), Error> {
+        if let Some(next) = self.registered_state(record, clock)? {
+            self.commit(next, Some(clock))?;
+        }
+        Ok(())
+    }
+
+    fn registered_state(
+        &self,
+        record: HostRegistration,
+        clock: Clock,
+    ) -> Result<Option<State>, Error> {
+        self.check(clock)?;
+        if !matches!(self.role(), Role::Host(_))
+            || record.host_instance != self.instance()
+            || !valid_id(&record.authority)
+            || !valid_id(&record.epoch)
+            || !valid_id(&record.key_id)
+            || record.generation == 0
+        {
+            return Err(Error::Binding);
+        }
+        if self.state.registration.as_ref() == Some(&record) {
+            return Ok(None);
+        }
+        if record.generation <= self.state.registration_highwater {
+            return Err(Error::Binding);
+        }
+        let mut next =
+            self.fenced_state(&record.authority, &record.epoch, &record.host_instance)?;
+        next.registration_highwater = record.generation;
+        next.registration = Some(record);
+        for operation in next.active_operations.values_mut() {
+            if matches!(operation.phase, ActivePhase::Consumed | ActivePhase::Active) {
+                operation.phase = ActivePhase::Revoked;
+            }
+        }
+        next.ownership.clear();
+        next.delegations.clear();
+        next.prepared.clear();
+        next.protections.clear();
+        next.clock_floor = clock.now;
+        Ok(Some(next))
+    }
+
     pub fn installed_ownership(&self, installation: &str) -> Result<Option<&HostOwnership>, Error> {
         self.ownership()?;
         Ok(self.state.ownership.get(installation))
