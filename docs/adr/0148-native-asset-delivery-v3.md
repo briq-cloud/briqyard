@@ -1,7 +1,8 @@
 # ADR 0148: Native asset delivery v3, the suffix and typed secret acquisition
 
 Date: 2026-11-23 · Status: guard-side primitive implemented; no startup caller, no closure
-reader and no production provisioning yet
+reader, no projection of `native.inputs` onto the requirements and pins, and no production
+provisioning yet
 
 ## Context
 
@@ -23,13 +24,13 @@ ancillary buffer from the same constant.
 | Index | H | A | Descriptor beyond `class,bytes` | Payload and the check that owns it |
 | --- | --- | --- | --- | --- |
 | 0..=12 | prefix | 0..=14 (+ ordinary key at 15) | unchanged | unchanged; the Hk and Ak seed is now exactly 32 octets |
-| next | `verification-registry` | same | `digest` | exact public bytes, common registry parser, closed profile |
+| next | `verification-registry` | same | `digest` | exact public bytes, the sealed registry grammar, closed profile |
 | | `transition-server-cert` | same | `digest` | one DER leaf, the transport's closed profile for a server |
 | | `transition-server-key` | same | `spki` | unencrypted PKCS#8 P-256; SPKI derived from the parsed key |
 | | `transition-client-cert` | same | `digest` | as the server leaf, client role |
 | | `transition-client-key` | same | `spki` | as the server key |
 | | | `continuation-bearer` | `digest` | 1..=4096 bytes 0x21..=0x7e |
-| | `daemon-api-cert`, `daemon-api-key` iff admin TLS | | `digest`, `spki` | key as above; leaf bytes only (ordinary profile is open) |
+| | `daemon-api-cert`, `daemon-api-key` iff admin TLS | | `digest`, `spki` | key as above; the leaf is one complete ordinary DER object whose SPKI is the key's and neither transition identity's (no transition SAN or EKU) |
 | | `backup-s3-pair` iff S3 | | `digest` | `C({access,secret})`, each strict unpadded base64url of 1..=4096 graphic bytes |
 | | `local-pool-key` iff file key | | `key_id` | 64 lowercase hex; id from `briqyard_api::poolkey::id` |
 
@@ -39,9 +40,11 @@ never shift a prefix index or the ordinary key.
 **The caller states the optional rights.** `Requirements::Daemon{admin_tls, backup_s3, file_key}`
 or `Requirements::Authority` is an input to `AssetOffer::decode`, `BoundAssets::bind` and the
 suffix pins. It must come from the validated closure and the effective frozen config; a missing
-file or credential is never evidence that a feature is off. `native.inputs` does not exist
-yet, so no code derives it. `SuffixPins` mirrors the closure fields one to one and is the
-single place `native.inputs` will fill; its option presence must equal the requirements.
+file or credential is never evidence that a feature is off. The `native.inputs` reader exists
+(ADR 0147) and is independently reviewed, but nothing projects its validated `Inputs` onto the
+requirements and the pins, so the caller supplies both. `SuffixPins` mirrors the closure
+fields one to one and is the single place that projection will fill; its option presence must
+equal the requirements.
 
 **Private payloads have typed readers only.** `read_small` refuses the ordinary key, both signer
 seeds, the three suffix TLS keys, the bearer, the S3 pair and the pool key. Each has one
@@ -58,20 +61,39 @@ must equal the offer's and the Plan pin, itself a strict Ed25519 point through
 descriptor holds a digest of public or digest-pinned bytes only; no private byte is hashed
 for the descriptor (`spki` and `key_id` derive from public values).
 
+**No descriptor leaves the crate.** `BoundAssets::artifact`, `descriptor_env` and the
+`AsFd` of a `FrozenArtifact` are `pub(crate)`: only the transfer and exec code of this crate
+sees a raw descriptor, and every public consumer gets a typed value or public bytes. Four
+`compile_fail` doctests name the old getters and a positive doctest per type shows the same
+imports compile. This is an API boundary, not isolation from malicious code in the same process.
+
 **One validator per format.**
 
 | Shared | Where | Change |
 | --- | --- | --- |
 | X.509 profile, `Name`, `Pair` | `briqyard_api::execution::private_cert` | relocated verbatim from the fleet transport, which re-exports it; its tests still run against it |
 | `key_spki_digest` | same | new: the transport's own `ring` PKCS#8 parse, then the SPKI of the derived point |
-| registry JSON | `briqyard_api::execution::provision::registry` | the parse inside `Config::load`, extracted unchanged |
+| registry JSON, ordinary file | `briqyard_api::execution::provision::registry` | the parse inside `Config::load`, extracted unchanged and still tolerant (a missing `authority` is none; a positional row is accepted) |
+| registry JSON, sealed | `provision::sealed_registry` | a dedicated grammar: an array of one to 32 objects of exactly `kid`, `role`, `issuer`, `authority`, `public_key`; `authority` explicit (a missing field is not a null), no positional row, no unknown or duplicate field. Same `VerificationKey`; the closed profile stays in `secret.rs` |
+| DER readers | `private_cert` | every temporary or nested reader (extension list, SAN, EKU, basic constraints) now has to be exhausted at both levels; `leaf_spki_digest` reads one complete ordinary leaf |
 | pool key id | `briqyard_api::poolkey::id` | used as is, after the exact lowercase check |
 
 **Where pins are compared.** Bind (receipt) checks length, metadata, digest and profile, that each
-transition leaf and key form one identity, and that the two are distinct. `SealedInput::decode`
-adds the Plan pins, the Hk/Ak derivation and that the registry's one authority entry is the
-registered predecessor. `check_suffix_pins` compares the closure's digests, pairs, server name
-and optional rights.
+transition leaf and key form one identity, that the two are distinct, and, with admin TLS, that
+the daemon API leaf's SPKI is the actual private key's and equals neither transition SPKI.
+`SealedInput::decode` then requires `Plan.ordinary_key == Plan.pre_record.public_key` for both
+resources before any other artifact is read, adds the Plan pins and the Hk/Ak derivation, and
+requires that the registry's one authority entry is the registered predecessor and that no
+central key equals the Plan's Hk, Ak, Bk or Rk. `check_suffix_pins` compares the closure's
+digests, pairs, server name and optional rights.
+
+**One stage deadline.** `BoundAssets::bind`, `SealedInput::decode` and `check_suffix_pins`
+take the caller's single `StageDeadline`; none opens a fresh frame, and each checks it again
+after its last parse. The refusal under an already expired deadline is a deterministic test;
+that the final check refuses a deadline expiring between the last read and the return is time
+dependent and has no deterministic test. `freeze_signer` and `freeze_tls_key` read the key
+back from the sealed descriptor and compare it with the advertised field, as the ordinary key
+already did.
 
 ## Not decided or not done here
 
@@ -79,8 +101,16 @@ and optional rights.
   has `freeze_signer`, `freeze_tls_key` and `freeze_pool_key` taking the advertised field; the
   caller passes the Plan pin.
 - Certificate validity needs the qualified clock and is checked where the identity is consumed
-  (`LocalIdentity`). The daemon API leaf is not parsed, so its leaf/key agreement is left to
-  the existing TLS constructor.
+  (`LocalIdentity`). The daemon API leaf is checked for structure and key agreement only; its
+  name, validity and trust belong to the ordinary TLS constructor.
+- The central issuer and the central key set are not bound to anything. The Plan has no
+  issuer field and no enrolled central inventory exists here, so only the grammar, the closed
+  profile, uniqueness and the non-collision with the Plan's own keys are checked. That the
+  registry's central set is the independently enrolled one remains the owner's proof; a digest
+  of the bytes is not that proof.
+- The local checks establish that the bytes agree with the descriptors, the Plan and the
+  pins handed in. An independent check of those pins' content against the enrolled closure is
+  a later owner's step and is not claimed.
 - The prefix TLS key (index 12) keeps its generic digest-pinned read.
 - Clearing is best effort. `ring`, the JSON decoder and the OS keep copies this code cannot
   erase; nothing here claims the bytes are gone from memory.

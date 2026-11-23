@@ -30,6 +30,14 @@ fn deadline() -> StageDeadline {
     StageDeadline::frame("suffix test")
 }
 
+fn expired() -> StageDeadline {
+    StageDeadline::new("expired suffix test", std::time::Duration::ZERO)
+}
+
+fn is_deadline<T>(result: Result<T, CustodyError>) -> bool {
+    matches!(result, Err(CustodyError::Deadline { .. }))
+}
+
 fn body(fixture: &Fixture) -> HostClockBody {
     use briqyard_api::execution::sealed::prim::Uint;
     HostClockBody {
@@ -117,7 +125,9 @@ fn every_profile_decodes_and_hands_out_the_material_its_requirements_name() {
             input.transition_client_key(deadline()).unwrap().spki(),
             &spki(&identities.client.key)
         );
-        input.check_suffix_pins(&pins(&fixture)).unwrap();
+        input
+            .check_suffix_pins(&pins(&fixture), deadline())
+            .unwrap();
         match requirements {
             Requirements::Authority => {
                 assert_eq!(
@@ -257,12 +267,45 @@ fn the_registry_authority_entry_is_exactly_the_registered_predecessor() {
 }
 
 #[test]
+fn a_central_key_may_not_be_any_key_the_plan_already_names() {
+    let fixture = Fixture::new(Resource::Daemon);
+    assert!(with_registry(|_| {}).is_ok(), "positive control");
+    let plan = &fixture.plan;
+    for (name, key) in [
+        ("hk", plan.hk),
+        ("ak", plan.ak),
+        ("bk", plan.bk),
+        ("rk", plan.rk),
+    ] {
+        rejected(
+            with_registry(|entries| entries[0]["public_key"] = key.as_array().to_vec().into()),
+            "startup registry central key reuses a plan key",
+        );
+        let _ = name;
+    }
+}
+
+#[test]
+fn the_ordinary_key_is_the_registered_predecessor_for_both_resources_before_any_other_read() {
+    for resource in [Resource::Daemon, Resource::Authority] {
+        let mut fixture = Fixture::new(resource);
+        fixture.verify().expect("positive control");
+        fixture.plan.pre_record.public_key = *fixtures::public_of(&[0x77; 32]).as_array();
+        fixture.plan.pre = fixture.plan.pre_record.ctx(&fixture.plan.x.host);
+        rejected(fixture.verify(), "startup ordinary key public binding");
+    }
+    let mut fixture = Fixture::new(Resource::Daemon);
+    fixture.plan.ordinary_key = fixtures::public_of(&[0x78; 32]);
+    rejected(fixture.verify(), "startup ordinary key public binding");
+}
+
+#[test]
 fn the_closure_pins_must_each_match_the_actual_bound_bytes() {
     for requirements in profiles() {
         let fixture = Fixture::with_requirements(requirements);
         let input = fixture.verify().unwrap();
         let good = pins(&fixture);
-        input.check_suffix_pins(&good).unwrap();
+        input.check_suffix_pins(&good, deadline()).unwrap();
         let other = HexDigest::of(b"another pin");
         let mut cases: Vec<(&str, SuffixPins)> = Vec::new();
         let mut add = |name, edit: &dyn Fn(&mut SuffixPins)| {
@@ -337,10 +380,53 @@ fn the_closure_pins_must_each_match_the_actual_bound_bytes() {
         }
         for (name, pins) in cases {
             assert!(
-                input.check_suffix_pins(&pins).is_err(),
+                input.check_suffix_pins(&pins, deadline()).is_err(),
                 "{requirements:?}: {name}"
             );
         }
+    }
+}
+
+#[test]
+fn nothing_succeeds_under_the_callers_expired_stage_deadline() {
+    for requirements in profiles() {
+        let fixture = Fixture::with_requirements(requirements);
+        let input = fixture.verify().unwrap();
+        let pins = pins(&fixture);
+        input
+            .check_suffix_pins(&pins, deadline())
+            .expect("positive control");
+        assert!(is_deadline(input.check_suffix_pins(&pins, expired())));
+        assert!(is_deadline(input.evidence_signer(expired())));
+        assert!(is_deadline(input.verification_registry(expired())));
+        assert!(is_deadline(input.transition_server_key(expired())));
+        assert!(is_deadline(input.transition_client_key(expired())));
+        match requirements {
+            Requirements::Authority => {
+                assert!(is_deadline(input.continuation_bearer(expired())))
+            }
+            Requirements::Daemon {
+                admin_tls,
+                backup_s3,
+                file_key,
+            } => {
+                assert!(!admin_tls || is_deadline(input.daemon_api_key(expired())));
+                assert!(!backup_s3 || is_deadline(input.backup_s3(expired())));
+                assert!(!file_key || is_deadline(input.pool_file_key(expired())));
+            }
+        }
+        let assets = fixture.bind(
+            &fixture.grant(),
+            &fixture.capture_load(),
+            |_| {},
+            deadline(),
+        );
+        assert!(is_deadline(SealedInput::decode(
+            assets,
+            &fixture.directory(),
+            &h(&fixture.plan).unwrap(),
+            expired()
+        )));
     }
 }
 

@@ -488,6 +488,58 @@ fn the_registry_is_the_common_parser_plus_the_one_authority_closed_profile() {
 }
 
 #[test]
+fn the_registry_grammar_is_five_named_fields_with_authority_explicit() {
+    let good = default_registry();
+    from_file(Class::VerificationRegistry, &good).expect("positive control");
+    let text = String::from_utf8(good.clone()).unwrap();
+    assert!(text.contains(r#""kid":"central-1""#) && text.contains(r#""authority":null"#));
+    let missing_authority = registry_with(|e| {
+        e[0].as_object_mut().unwrap().remove("authority");
+    });
+    let positional = registry_with(|e| {
+        let row = e[0].as_object().unwrap().clone();
+        e[0] = serde_json::Value::Array(
+            ["kid", "role", "issuer", "authority", "public_key"]
+                .iter()
+                .map(|name| row[*name].clone())
+                .collect(),
+        );
+    });
+    let duplicate_field = text
+        .replacen(
+            r#""kid":"central-1""#,
+            r#""kid":"central-1","kid":"central-1""#,
+            1,
+        )
+        .into_bytes();
+    let duplicate_authority = text
+        .replacen(
+            r#""authority":null"#,
+            r#""authority":null,"authority":null"#,
+            1,
+        )
+        .into_bytes();
+    let central_reuses_authority_key =
+        registry_with(|e| e[0]["public_key"] = e[2]["public_key"].clone());
+    for (name, bytes) in [
+        ("authority missing, not null", missing_authority),
+        ("positional row", positional),
+        ("duplicate kid", duplicate_field),
+        ("duplicate authority", duplicate_authority),
+        (
+            "central key equal to the authority key",
+            central_reuses_authority_key,
+        ),
+    ] {
+        assert_eq!(
+            protocol(from_file(Class::VerificationRegistry, &bytes)),
+            "invalid verification registry",
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn the_continuation_bearer_is_one_to_4096_printable_ascii_bytes() {
     let accepted = |bytes: &[u8]| from_file(Class::ContinuationBearer, bytes).is_ok();
     assert!(accepted(b"x") && accepted(&[b'~'; 4096]) && accepted(&[b'!'; 4096]));

@@ -10,7 +10,7 @@ use std::convert::Infallible;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileExt;
 
 const IMAGE_LIMIT: u64 = 256 * 1024 * 1024;
@@ -131,6 +131,34 @@ pub struct ReceivedAssetFds {
     pub queued_packet: bool,
 }
 
+/// The descriptors bound to one verified offer. A raw descriptor, its number or its
+/// environment slot is never public: consumers get typed values from the validating reader,
+/// and only this crate's transfer and exec code touches a descriptor.
+///
+/// ```compile_fail
+/// use briqyardd::execution_custody::artifacts::{BoundAssets, Class};
+/// fn raw(bound: &BoundAssets) {
+///     let _ = bound.artifact(Class::OrdinaryAuthorityKey);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use briqyardd::execution_custody::artifacts::BoundAssets;
+/// fn raw(bound: &BoundAssets) {
+///     let _ = bound.descriptor_env().count();
+/// }
+/// ```
+///
+/// The same imports and a public accessor do compile, so the two refusals above are about
+/// those getters alone:
+///
+/// ```
+/// use briqyardd::execution_custody::artifacts::{BoundAssets, Class};
+/// fn typed(bound: &BoundAssets) {
+///     let _ = bound.requirements();
+///     let _ = Class::Plan;
+/// }
+/// ```
 pub struct BoundAssets {
     base: RawFd,
     requirements: Requirements,
@@ -218,7 +246,9 @@ impl BoundAssets {
 
     /// Each private transition certificate belongs to the key that follows it, and the server
     /// and client identities are distinct keys. The full profile is the transport's own
-    /// parser; pins, names and validity are the caller's, against the closure.
+    /// parser; pins, names and validity are the caller's, against the closure. A daemon admin
+    /// certificate is one complete ordinary DER leaf whose SPKI is the one of its actual
+    /// private key and of neither transition identity; no transition profile applies to it.
     fn check_identities(&self, deadline: StageDeadline) -> Result<(), CustodyError> {
         let leaf = |cert, usage| -> Result<_, CustodyError> {
             let artifact = self
@@ -252,7 +282,29 @@ impl BoundAssets {
                 "transition certificate and key do not form distinct identities",
             ));
         }
-        Ok(())
+        if matches!(
+            self.requirements,
+            Requirements::Daemon {
+                admin_tls: true,
+                ..
+            }
+        ) {
+            let invalid = || CustodyError::Protocol("invalid daemon API identity");
+            let cert = self.artifact(Class::DaemonApiCert).ok_or_else(invalid)?;
+            let admin =
+                private_cert::leaf_spki_digest(&read_exact(&cert.file, cert.bytes, deadline)?)
+                    .map_err(|_| invalid())?;
+            let key = self
+                .artifact(Class::DaemonApiKey)
+                .ok_or_else(invalid)?
+                .tls_private_key(deadline)?;
+            if admin != *key.spki() || admin == server || admin == client {
+                return Err(CustodyError::Protocol(
+                    "daemon API certificate and key do not form one distinct identity",
+                ));
+            }
+        }
+        deadline.check()
     }
 
     pub(super) fn offer(&self) -> &AssetOffer {
@@ -263,13 +315,13 @@ impl BoundAssets {
         self.requirements
     }
 
-    pub fn artifact(&self, class: Class) -> Option<&FrozenArtifact> {
+    pub(crate) fn artifact(&self, class: Class) -> Option<&FrozenArtifact> {
         self.artifacts
             .iter()
             .find(|artifact| artifact.class == class)
     }
 
-    pub fn descriptor_env(&self) -> impl Iterator<Item = (&'static str, RawFd)> + '_ {
+    pub(crate) fn descriptor_env(&self) -> impl Iterator<Item = (&'static str, RawFd)> + '_ {
         std::iter::once(("BRIQ_SEALED_DESCRIPTOR_BASE", self.base)).chain(
             self.artifacts
                 .iter()

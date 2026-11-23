@@ -14,19 +14,34 @@ use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 
+/// One sealed immutable descriptor. Its descriptor is not exposed: no `AsFd`, no raw number.
+///
+/// ```compile_fail
+/// use briqyardd::execution_custody::artifacts::FrozenArtifact;
+/// use std::os::fd::AsFd;
+/// fn raw(frozen: &FrozenArtifact) {
+///     let _ = frozen.as_fd();
+/// }
+/// ```
+///
+/// ```
+/// use briqyardd::execution_custody::artifacts::FrozenArtifact;
+/// use std::os::fd::AsFd;
+/// fn typed(frozen: &FrozenArtifact) {
+///     let _ = frozen.ordinary_key();
+/// }
+/// ```
 pub struct FrozenArtifact {
     pub(super) file: File,
     pub(super) class: Class,
     pub(super) bytes: u64,
 }
 
-impl AsFd for FrozenArtifact {
-    fn as_fd(&self) -> BorrowedFd<'_> {
+impl FrozenArtifact {
+    pub(crate) fn as_fd(&self) -> BorrowedFd<'_> {
         self.file.as_fd()
     }
-}
 
-impl FrozenArtifact {
     /// The caller supplies the file already opened through its validated source locator and the
     /// independently pinned owner, length and digest. No path is selected or reopened here.
     pub fn freeze(

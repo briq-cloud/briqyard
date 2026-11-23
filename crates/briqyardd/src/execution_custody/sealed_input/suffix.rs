@@ -87,8 +87,10 @@ impl SealedInput {
         Ok(signer)
     }
 
-    /// The public registry through the common parser and closed profile, whose only authority
-    /// entry is exactly the registered predecessor of the Plan.
+    /// The public registry through the sealed grammar and closed profile, whose only authority
+    /// entry is exactly the registered predecessor of the Plan and whose central keys are none
+    /// of the Plan's own Hk, Ak, Bk or Rk. That the central set is the independently enrolled
+    /// issuer set is the owner's proof, not something the Plan or these bytes can show.
     pub fn verification_registry(
         &self,
         deadline: StageDeadline,
@@ -105,6 +107,12 @@ impl SealedInput {
         });
         if !bound {
             return Err(refuse("startup registry predecessor binding"));
+        }
+        let own = [self.plan.hk, self.plan.ak, self.plan.bk, self.plan.rk];
+        if keys.iter().any(|key| {
+            key.role == KeyRole::Central && own.iter().any(|own| *own.as_array() == key.public_key)
+        }) {
+            return Err(refuse("startup registry central key reuses a plan key"));
         }
         Ok(keys)
     }
@@ -176,9 +184,14 @@ impl SealedInput {
         Ok(())
     }
 
-    /// Compare the bound bytes with the closure's pins. Certificate validity needs the
-    /// qualified clock and is checked where the identity is consumed.
-    pub fn check_suffix_pins(&self, pins: &SuffixPins) -> Result<(), CustodyError> {
+    /// Compare the bound bytes with the closure's pins, within the caller's one stage
+    /// deadline. Certificate validity needs the qualified clock and is checked where the
+    /// identity is consumed.
+    pub fn check_suffix_pins(
+        &self,
+        pins: &SuffixPins,
+        deadline: StageDeadline,
+    ) -> Result<(), CustodyError> {
         let (admin_tls, backup_s3, file_key) = match self.assets.requirements() {
             Requirements::Daemon {
                 admin_tls,
@@ -217,7 +230,7 @@ impl SealedInput {
         }
         let identity = |cert, key, pair: &Pair, usage| -> Result<_, CustodyError> {
             let artifact = self.suffix(cert)?;
-            let der = artifact.read_small(StageDeadline::frame("startup identity pins"))?;
+            let der = artifact.read_small(deadline)?;
             let leaf = private_cert::verify(&der, pair, usage)
                 .map_err(|_| refuse("startup transition identity pin"))?;
             match self.descriptor(key)? {
@@ -252,6 +265,6 @@ impl SealedInput {
                 _ => return Err(refuse("startup suffix pin")),
             }
         }
-        Ok(())
+        deadline.check()
     }
 }

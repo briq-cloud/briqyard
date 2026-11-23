@@ -177,13 +177,35 @@ pub fn key_spki_digest(pkcs8: &[u8]) -> Result<HexDigest, CertError> {
     Ok(HexDigest::of(&spki))
 }
 
+/// The SPKI digest of one complete DER certificate of any profile: exactly one object, every
+/// element well formed, no trailing byte. Neither names, usages nor the signature are
+/// interpreted; the caller compares this digest with the key it expects and pins the bytes.
+pub fn leaf_spki_digest(der: &[u8]) -> Result<HexDigest, CertError> {
+    let mut cert = sequence(der)?;
+    let mut tbs = sequence(cert.take_raw(SEQUENCE)?)?;
+    cert.take(SEQUENCE)?;
+    cert.take(BIT_STRING)?;
+    cert.end()?;
+    if tbs.peek() == Some(VERSION) {
+        tbs.take(VERSION)?;
+    }
+    tbs.take(INTEGER)?;
+    tbs.take(SEQUENCE)?;
+    tbs.take(SEQUENCE)?;
+    tbs.take(SEQUENCE)?;
+    tbs.take(SEQUENCE)?;
+    let spki = tbs.take_raw(SEQUENCE)?;
+    while !tbs.0.is_empty() {
+        tbs.take_any()?;
+    }
+    Ok(HexDigest::of(spki))
+}
+
 pub fn parse(der: &[u8], usage: Usage) -> Result<Leaf, CertError> {
     if der.len() > MAX_CERT {
         return Err(CertError::Encoding);
     }
-    let mut outer = Reader(der);
-    let mut cert = Reader(outer.take(SEQUENCE)?);
-    outer.end()?;
+    let mut cert = sequence(der)?;
     let tbs_whole = cert.take_raw(SEQUENCE)?;
     let tbs_raw = Reader(tbs_whole).take(SEQUENCE)?;
     let signature_algorithm = cert.take(SEQUENCE)?;
@@ -232,7 +254,7 @@ pub fn parse(der: &[u8], usage: Usage) -> Result<Leaf, CertError> {
     UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, &spki[SPKI_PREFIX.len() - 1..])
         .verify(tbs_whole, &signature[1..])
         .map_err(|_| CertError::Profile)?;
-    let mut extensions = Reader(Reader(tbs.take(EXTENSIONS)?).take(SEQUENCE)?);
+    let mut extensions = sequence(tbs.take(EXTENSIONS)?)?;
     tbs.end()?;
 
     let (mut name, mut eku, mut seen) = (None, false, Vec::new());
@@ -285,7 +307,7 @@ fn algorithm(body: &[u8]) -> Result<(), CertError> {
 }
 
 fn subject_name(value: &[u8]) -> Result<Name, CertError> {
-    let mut names = Reader(Reader(value).take(SEQUENCE)?);
+    let mut names = sequence(value)?;
     let entry = names.take_any()?;
     names.end()?;
     match entry {
@@ -303,7 +325,7 @@ fn subject_name(value: &[u8]) -> Result<Name, CertError> {
 }
 
 fn extended_usage(value: &[u8], usage: Usage) -> Result<(), CertError> {
-    let mut usages = Reader(Reader(value).take(SEQUENCE)?);
+    let mut usages = sequence(value)?;
     let only = usages.take(OID)?;
     usages.end()?;
     let wanted = match usage {
@@ -333,8 +355,7 @@ fn key_usage(value: &[u8]) -> Result<(), CertError> {
 }
 
 fn basic_constraints(value: &[u8]) -> Result<(), CertError> {
-    let reader = Reader(Reader(value).take(SEQUENCE)?);
-    reader.end().map_err(|_| CertError::Profile)
+    sequence(value)?.end().map_err(|_| CertError::Profile)
 }
 
 /// UTCTime before 2050 and GeneralizedTime from 2050, whole seconds, `Z` only.
@@ -395,6 +416,14 @@ fn days_from_civil(year: u64, month: u64, day: u64) -> u64 {
     let day_of_year = (153 * shifted + 2) / 5 + day - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
+}
+
+/// The content of `bytes` as exactly one SEQUENCE: nothing may follow it.
+fn sequence(bytes: &[u8]) -> Result<Reader<'_>, CertError> {
+    let mut outer = Reader(bytes);
+    let inner = Reader(outer.take(SEQUENCE)?);
+    outer.end()?;
+    Ok(inner)
 }
 
 /// A cursor over definite-length DER with single-byte tags and minimal lengths.
@@ -467,3 +496,6 @@ fn split(bytes: &[u8]) -> Result<(u8, &[u8], &[u8]), CertError> {
     }
     Ok((*tag, &rest[..length], &rest[length..]))
 }
+
+#[cfg(test)]
+mod tests;

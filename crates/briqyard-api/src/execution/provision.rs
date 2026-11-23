@@ -135,21 +135,85 @@ struct Key {
     authority: Option<String>,
     public_key: [u8; 32],
 }
-/// The retained public verification registry: a strict JSON array of one to 32 exact
-/// `{kid,role,issuer,authority,public_key}` objects. The one parser for every consumer.
+impl From<Key> for VerificationKey {
+    fn from(key: Key) -> Self {
+        Self {
+            kid: key.kid,
+            role: key.role,
+            issuer: key.issuer,
+            authority: key.authority,
+            public_key: key.public_key,
+        }
+    }
+}
+/// The retained public verification registry: a JSON array of one to 32 `{kid,role,issuer,
+/// authority,public_key}` objects. Missing `authority` means none, and serde also accepts a
+/// positional row, so this is the tolerant parse of the ordinary configuration file; a sealed
+/// startup uses [`sealed_registry`].
 pub fn registry(bytes: &[u8]) -> Result<Vec<VerificationKey>, &'static str> {
     let keys: Vec<Key> = serde_json::from_slice(bytes).map_err(|_| "invalid execution keys")?;
     if keys.is_empty() || keys.len() > 32 {
         return Err("invalid execution keys");
     }
-    Ok(keys
+    Ok(keys.into_iter().map(Into::into).collect())
+}
+
+/// One row of the sealed registry: exactly the five named fields, `authority` always present
+/// (a string, or an explicit `null` for a central key). Unlike [`Key`], a missing field is not
+/// a null, and the row is only ever an object.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SealedKey {
+    kid: String,
+    role: KeyRole,
+    issuer: String,
+    #[serde(deserialize_with = "super::sealed::prim::nullable")]
+    authority: Option<String>,
+    public_key: [u8; 32],
+}
+
+struct SealedRow(SealedKey);
+
+impl<'de> Deserialize<'de> for SealedRow {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Row;
+        impl<'de> serde::de::Visitor<'de> for Row {
+            type Value = SealedRow;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a registry key object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<SealedRow, A::Error> {
+                SealedKey::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(SealedRow)
+            }
+        }
+        deserializer.deserialize_map(Row)
+    }
+}
+
+/// The registry grammar of a sealed startup (v3.3 §2): a JSON array of one to 32 objects with
+/// exactly the five named fields, `authority` explicit, no positional row and no unknown or
+/// duplicate field. It yields the same [`VerificationKey`] as [`registry`]; its closed
+/// profile (roles, issuers, uniqueness) is the sealed reader's.
+pub fn sealed_registry(bytes: &[u8]) -> Result<Vec<VerificationKey>, &'static str> {
+    let rows: Vec<SealedRow> =
+        serde_json::from_slice(bytes).map_err(|_| "invalid execution keys")?;
+    if rows.is_empty() || rows.len() > 32 {
+        return Err("invalid execution keys");
+    }
+    Ok(rows
         .into_iter()
-        .map(|k| VerificationKey {
-            kid: k.kid,
-            role: k.role,
-            issuer: k.issuer,
-            authority: k.authority,
-            public_key: k.public_key,
+        .map(|SealedRow(key)| VerificationKey {
+            kid: key.kid,
+            role: key.role,
+            issuer: key.issuer,
+            authority: key.authority,
+            public_key: key.public_key,
         })
         .collect())
 }
@@ -224,6 +288,54 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const KEY: &str = r#"{"kid":"k","role":"authority","issuer":"i","authority":"a","public_key":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]}"#;
+    const CENTRAL: &str = r#"{"kid":"c","role":"central","issuer":"i","authority":null,"public_key":[32,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1]}"#;
+
+    #[test]
+    fn the_sealed_registry_needs_five_named_fields_with_authority_explicit() {
+        let both = format!("[{CENTRAL},{KEY}]");
+        let keys = sealed_registry(both.as_bytes()).unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys[0].authority.is_none());
+        assert_eq!(keys[1].authority.as_deref(), Some("a"));
+        assert_eq!(
+            registry(both.as_bytes()).unwrap().len(),
+            2,
+            "the ordinary parse is the same on the same bytes"
+        );
+        let missing = CENTRAL.replace(r#","authority":null"#, "");
+        let positional = r#"["c","central","i",null,[32,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1]]"#;
+        let duplicate = CENTRAL.replace(r#""kid":"c""#, r#""kid":"c","kid":"d""#);
+        let unknown = CENTRAL.replace(r#""kid":"c""#, r#""kid":"c","extra":1"#);
+        let missing_field = CENTRAL.replace(r#""kid":"c","#, "");
+        for (case, row) in [
+            ("missing authority", missing.as_str()),
+            ("positional row", positional),
+            ("duplicate field", duplicate.as_str()),
+            ("unknown field", unknown.as_str()),
+            ("missing kid", missing_field.as_str()),
+            ("a bare string", "\"c\""),
+        ] {
+            let json = format!("[{row},{KEY}]");
+            assert!(sealed_registry(json.as_bytes()).is_err(), "{case}");
+        }
+        assert!(sealed_registry(b"[]").is_err());
+        assert!(sealed_registry(CENTRAL.as_bytes()).is_err(), "not an array");
+        let many = format!("[{}]", vec![KEY; 33].join(","));
+        assert!(sealed_registry(many.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn the_ordinary_registry_parse_keeps_its_tolerant_grammar() {
+        let missing = CENTRAL.replace(r#","authority":null"#, "");
+        let positional = r#"["c","central","i",null,[32,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1]]"#;
+        for row in [missing.as_str(), positional] {
+            let json = format!("[{row},{KEY}]");
+            let keys = registry(json.as_bytes()).unwrap();
+            assert!(keys[0].authority.is_none());
+        }
+    }
+
     #[test]
     fn explicit_tls_paths_and_dedicated_port_are_required() {
         let c = Config {

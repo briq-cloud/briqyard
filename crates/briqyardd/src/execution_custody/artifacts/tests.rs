@@ -11,6 +11,7 @@ use fixtures::*;
 use native_image::native_image;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::fd::AsFd;
 use std::os::unix::{
     fs::{MetadataExt, PermissionsExt},
     net::UnixStream,

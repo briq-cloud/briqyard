@@ -2,7 +2,7 @@
 //! establish the durable grant consumption, peer and kernel custody, process profile, and
 //! manifest policy before acting. Record fields alone do not prove a live process or readiness.
 
-use super::artifacts::{BoundAssets, Class, Descriptor, FrozenArtifact, Member as AssetMember};
+use super::artifacts::{BoundAssets, Class, Descriptor, Member as AssetMember};
 use super::{CustodyError, StageDeadline};
 
 mod suffix;
@@ -77,6 +77,21 @@ pub struct ConfigTlsPins {
     pub key: HexDigest,
 }
 
+/// Startup evidence with typed accessors only; the bound descriptors are not reachable.
+///
+/// ```compile_fail
+/// use briqyardd::execution_custody::{artifacts::Class, sealed_input::SealedInput};
+/// fn raw(input: &SealedInput) {
+///     let _ = input.artifact(Class::OrdinaryAuthorityKey);
+/// }
+/// ```
+///
+/// ```
+/// use briqyardd::execution_custody::sealed_input::SealedInput;
+/// fn typed(input: &SealedInput) {
+///     let _ = input.inputs_bytes();
+/// }
+/// ```
 pub struct SealedInput {
     assets: BoundAssets,
     plan: Plan,
@@ -107,6 +122,11 @@ impl SealedInput {
         let plan_hash = HexDigest::of(&plan_bytes);
         if plan_hash != *expected_plan_hash {
             return Err(CustodyError::Protocol("startup plan commitment"));
+        }
+        if plan.ordinary_key.as_array() != &plan.pre_record.public_key {
+            return Err(CustodyError::Protocol(
+                "startup ordinary key public binding",
+            ));
         }
         if directory.op != plan.x.op || directory.serial != plan.x.serial {
             return Err(CustodyError::Protocol("startup operation directory scope"));
@@ -281,7 +301,8 @@ impl SealedInput {
         &self.inputs
     }
 
-    pub fn artifact(&self, class: Class) -> Option<&FrozenArtifact> {
+    #[cfg(test)]
+    pub(crate) fn artifact(&self, class: Class) -> Option<&super::artifacts::FrozenArtifact> {
         self.assets.artifact(class)
     }
 

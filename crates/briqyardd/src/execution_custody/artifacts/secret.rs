@@ -242,12 +242,12 @@ fn tls_key(bytes: &[u8]) -> Result<TlsPrivateKey, CustodyError> {
     })
 }
 
-/// The closed profile of the retained public registry on top of the common parser: one
+/// The closed profile of the retained public registry on top of the sealed grammar: one
 /// authority entry, one or more central entries of one issuer, every kid and key unique and
 /// every key a strict Ed25519 point.
 fn registry(bytes: &[u8]) -> Result<Vec<VerificationKey>, CustodyError> {
     let invalid = || refuse("invalid verification registry");
-    let keys = provision::registry(bytes).map_err(|_| invalid())?;
+    let keys = provision::sealed_registry(bytes).map_err(|_| invalid())?;
     let mut kids = HashSet::new();
     let mut publics = HashSet::new();
     let (mut authority, mut central_issuer, mut central) = (0, None, 0);
@@ -320,6 +320,9 @@ impl FrozenArtifact {
             return Err(refuse("evidence signer differs from its advertised key"));
         }
         let frozen = Self::stage_secret(seed, Class::Signer(role))?;
+        if frozen.evidence_signer(deadline)?.public_key() != *public.as_array() {
+            return Err(refuse("sealed evidence signer changed"));
+        }
         deadline.check()?;
         Ok(frozen)
     }
@@ -342,6 +345,9 @@ impl FrozenArtifact {
             return Err(refuse("TLS key differs from its advertised SPKI"));
         }
         let frozen = Self::stage_secret(pkcs8, class)?;
+        if frozen.tls_private_key(deadline)?.spki != *spki {
+            return Err(refuse("sealed TLS key changed"));
+        }
         deadline.check()?;
         Ok(frozen)
     }

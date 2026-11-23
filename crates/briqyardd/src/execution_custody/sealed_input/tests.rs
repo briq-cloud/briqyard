@@ -13,9 +13,7 @@ use briqyard_api::execution::sealed::{
     transition::{Bearer, LDecision, LKind, LaunchStage, Member, Secrets},
 };
 use ring::signature::{Ed25519KeyPair, KeyPair};
-use std::{
-    fs::File, io::Write, os::fd::AsFd, os::fd::OwnedFd, os::unix::fs::MetadataExt, path::PathBuf,
-};
+use std::{fs::File, io::Write, os::fd::OwnedFd, os::unix::fs::MetadataExt, path::PathBuf};
 
 mod suffix;
 
@@ -631,7 +629,7 @@ fn the_actual_key_must_derive_the_advertised_and_independently_pinned_public_key
     let predecessor = Fixture::with_predecessor_key(Resource::Authority, 4);
     rejected(
         decode_with_key(&predecessor, |_| {}),
-        "startup asset plan pins",
+        "startup ordinary key public binding",
     );
 }
 

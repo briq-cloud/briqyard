@@ -60,6 +60,14 @@ fn parts(requirements: Requirements) -> Vec<Part> {
 }
 
 fn bind(requirements: Requirements, parts: Vec<Part>) -> Result<BoundAssets, CustodyError> {
+    bind_within(requirements, parts, StageDeadline::frame("suffix delivery"))
+}
+
+fn bind_within(
+    requirements: Requirements,
+    parts: Vec<Part>,
+    deadline: StageDeadline,
+) -> Result<BoundAssets, CustodyError> {
     let wire = envelope(parts.iter().map(|part| part.descriptor.clone()).collect());
     let offer = AssetOffer::decode(requirements, &wire).unwrap();
     BoundAssets::bind(
@@ -72,7 +80,7 @@ fn bind(requirements: Requirements, parts: Vec<Part>) -> Result<BoundAssets, Cus
             queued_packet: false,
         },
         &no_listeners(),
-        StageDeadline::frame("suffix delivery"),
+        deadline,
     )
 }
 
@@ -242,6 +250,79 @@ fn certificates_and_keys_must_pair_into_two_distinct_identities() {
         refusal(bind(all_daemon(), swapped)),
         "transition certificate and key do not form distinct identities"
     );
+}
+
+fn with_admin(cert: &[u8], key: &[u8]) -> Vec<Part> {
+    let mut parts = parts(all_daemon());
+    for (class, bytes) in [(Class::DaemonApiCert, cert), (Class::DaemonApiKey, key)] {
+        let part = at(&mut parts, class);
+        part.descriptor = descriptor_value(class, bytes);
+        part.fd = stage(class, bytes).file.into();
+    }
+    parts
+}
+
+#[test]
+fn binding_every_profile_refuses_under_the_callers_expired_deadline() {
+    let expired = || StageDeadline::new("expired delivery test", std::time::Duration::ZERO);
+    for requirements in everything() {
+        bind(requirements, parts(requirements)).expect("positive control");
+        assert!(
+            matches!(
+                bind_within(requirements, parts(requirements), expired()),
+                Err(CustodyError::Deadline { .. })
+            ),
+            "{requirements:?}"
+        );
+    }
+}
+
+#[test]
+fn the_daemon_admin_certificate_must_be_one_complete_leaf_of_its_actual_key() {
+    const DISTINCT: &str = "daemon API certificate and key do not form one distinct identity";
+    const INVALID: &str = "invalid daemon API identity";
+    let identities = identities();
+    let admin = &identities.daemon_api;
+    bind(all_daemon(), with_admin(&admin.cert, &admin.key)).expect("positive control");
+
+    let other = issue(&Name::dns("other.host.test").unwrap(), None);
+    assert_ne!(spki(&other.key), spki(&admin.key));
+    assert_eq!(
+        refusal(bind(all_daemon(), with_admin(&admin.cert, &other.key))),
+        DISTINCT,
+        "K1 leaf, K2 key, digest of the K1 leaf and the SPKI of K2 all advertised consistently"
+    );
+    assert_eq!(
+        refusal(bind(all_daemon(), with_admin(&other.cert, &admin.key))),
+        DISTINCT
+    );
+
+    for (case, cert) in [
+        ("trailing byte", [admin.cert.as_slice(), &[0]].concat()),
+        (
+            "two certificates",
+            [admin.cert.as_slice(), &admin.cert].concat(),
+        ),
+        ("not DER", b"-----BEGIN CERTIFICATE-----".to_vec()),
+        ("truncated", admin.cert[..admin.cert.len() - 1].to_vec()),
+    ] {
+        assert_eq!(
+            refusal(bind(all_daemon(), with_admin(&cert, &admin.key))),
+            INVALID,
+            "{case}"
+        );
+    }
+
+    for (case, shared) in [
+        ("transition server", &identities.server),
+        ("transition client", &identities.client),
+    ] {
+        assert_eq!(
+            refusal(bind(all_daemon(), with_admin(&shared.cert, &shared.key))),
+            DISTINCT,
+            "admin identity equal to the {case} identity"
+        );
+    }
 }
 
 fn raw_secret_fd(bytes: &[u8], mode: u32, seals: libc::c_int, readonly: bool) -> OwnedFd {
