@@ -119,8 +119,8 @@ pub struct ClosurePolicy {
 pub struct DeploymentPolicy<'a> {
     pub source_release: &'a VerifiedRelease,
     pub target_release: &'a VerifiedRelease,
-    /// The independently approved build of the source daemon binary. Both resource
-    /// custodians run that binary, and it is the build of `Plan.pre_d`.
+    /// The independently approved build of the source daemon original, the build of
+    /// `Plan.pre_d`. It does not describe the custodians: both run the target bootstrap daemon.
     pub source_daemon_build: Build,
     pub topology: TopologyPolicy,
     pub actors: Vec<ActorObservation>,
@@ -176,7 +176,7 @@ impl Inputs {
         inputs.check_releases(plan, policy)?;
         inputs.check_topology(&policy.topology)?;
         inputs.check_actors(&policy.actors)?;
-        let custodian = (&inputs.source_release.daemon, &policy.source_daemon_build);
+        let custodian = (&inputs.target_release.daemon, &plan.dbuild);
         check_resource(
             &inputs.daemon,
             &policy.daemon,
@@ -189,6 +189,7 @@ impl Inputs {
             policy.target_release.fleet_asset_bytes(),
             custodian,
         )?;
+        inputs.check_target_asset_identity(plan, policy.target_release)?;
         inputs.check_closure(plan, &policy.closure)?;
         Ok(BoundInputs {
             inputs,
@@ -230,8 +231,8 @@ impl Inputs {
     /// two bytes of the target release's published asset and carry the same approved build, and
     /// they are different paths. Equal bytes are not the same process or mount, so the paths
     /// must differ; a rebuild with other bytes refuses even when its commit and label match.
-    /// This is not called by `bind`: the accepted `native.inputs/v1` fixture's guard is not
-    /// the target asset, and changing that is a shared decision.
+    /// `bind` calls this for both roles, with the length of the independently verified target
+    /// asset, never one the manifest declares for itself.
     pub fn check_target_asset_identity(
         &self,
         plan: &Plan,

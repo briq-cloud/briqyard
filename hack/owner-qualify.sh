@@ -59,8 +59,8 @@ cargo test -p briqyard-api --features execution-admission --lib sealed::tests::p
 ok 'commitment preimage tests'
 cargo test -p briqyard-api --features execution-admission --lib sealed::tests::unit_vectors
 ok 'shared unit vector rows'
-cargo test -p briqyard-api --features execution-admission --lib inputs::tests::identity
-ok 'target asset identity tests'
+cargo test -p briqyard-api --features execution-admission --lib inputs::tests
+ok 'bind, target asset identity and the published positive profiles'
 
 step 'native: one private attempt, receipts, versions, handoff lineage, negatives (real uid and /proc)'
 cargo test -p briqyardd --lib local_owner

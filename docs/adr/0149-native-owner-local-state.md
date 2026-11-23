@@ -161,16 +161,38 @@ guarded command that is not `guard_argv` for it, so the two split-flag unit rows
 independently approved asset length: a pair of equal declared lengths that is not that count
 refuses (declared 4097 against approved 4096). Native does not edit the file.
 
-The release-identity half of the bind (enforcing the target asset's digest, length and build, and
-both custodians as the target bootstrap daemon Program) is still not applied. A prototype that calls
-`check_target_asset_identity` from `Inputs::bind` fails 8 tests built on the accepted
-`native.inputs/v1` positive fixture, whose guard is not the target asset:
-`inputs::tests::a_noop_mutation_binds_like_the_original_control`,
-`inputs::tests::the_complete_fixture_binds_to_its_independent_plan_and_operands`,
-`inputs::tests::identity::the_accepted_fixture_is_not_this_profile_and_bind_is_unchanged` and five
-`inputs::tests::bind::*` (actor identities, closure pins, listener order, closure credential
-commitments, optional closure members). It needs a replacement positive fixture whose guard and
-candidate are the target asset, and is a shared change.
+## Release identity in the bind (erratum 2a)
+
+`Inputs::bind` now calls `check_target_asset_identity` for both roles. The guard and the staged
+candidate are the target release's asset: the same digest, the actual length of the independently
+verified asset (never the length the manifest declares for itself), the Plan's approved build
+(`dbuild`, `abuild`) and distinct paths. Both resource custodians are the target bootstrap
+daemon: their image is `target_release.daemon` and their build is `Plan.dbuild`. The originals
+keep their source pins: `pre.exe` is the source release's, and `DeploymentPolicy::source_daemon_build`
+is compared with `Plan.pre_d.build`; its doc no longer says the custodians run the source binary.
+A source and a target release with different daemons is the ordinary upgrade, not a release error.
+
+The positive profiles are B's published `sealed.owner.inputs.positive/v2` companions, mirrored byte
+for byte under `crates/briqyard-api/testdata/owner_v1/` (B draft #896; sizes and digests in the
+README there):
+
+* `sealed_owner_inputs_v1.positive.json`, commit `09325ad3`: source and target share one daemon,
+  so it cannot tell a custodian chosen from the source release from one chosen from the target.
+* `sealed_owner_inputs_v1.positive-daemon-upgrade.json`, commit `df4d6a88`: source daemon build
+  0.2.15, target 0.2.16, a different source daemon. Only the pair discriminates. It binds under the
+  target rule; it is refused with `custodian image` under the earlier source rule, and one or both
+  custodians on the source daemon and build are refused under the target rule.
+
+Every raw operand in the `native` block (32 per file) is checked against its declared length and
+SHA-256 before use, and the Releases verify from their raw pin, sums and assets. B's `expected`
+values stay cross-checks computed by native producers: the 18 unit commitments per file from
+`UnitPolicy::expected`, the campaign release, topology and order digests, the registry, the
+custodian processes and the target asset. The `native.inputs/v1` fixture remains a codec fixture;
+it is refused by `bind` (`custodian image`) and is no longer a positive profile. The eight tests
+named in review, and the custodian, per-role, TLS and ownership tests that need a valid base, now
+run on the standard companion with unchanged refusal reasons. Two expected values were adapted
+where the companion's pinned value equalled the mutation (the authority control gid and journal
+uid).
 
 ## Shared unit vectors
 

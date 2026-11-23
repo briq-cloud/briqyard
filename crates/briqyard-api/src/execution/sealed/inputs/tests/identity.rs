@@ -24,13 +24,19 @@ fn the_same_asset_and_build_at_distinct_paths_is_accepted() {
 }
 
 #[test]
-fn the_accepted_fixture_is_not_this_profile_and_bind_is_unchanged() {
+fn the_accepted_fixture_is_not_this_profile_and_bind_now_refuses_it() {
     let inputs: Inputs = decode(INPUTS).unwrap();
     assert_eq!(
         check(&inputs, &plan(d(INPUTS)), &releases()).unwrap_err(),
         value_err("program is not the target release asset")
     );
-    bound(|_| {}, |_| {}, |_| {}).unwrap();
+    // Erratum 2a: bind enforces the target asset identity and the target bootstrap daemon as
+    // both custodians. The native.inputs/v1 fixture predates both, so it stays a codec-only
+    // fixture and no longer binds; the positive profile is the published companion.
+    assert_eq!(
+        bound(|_| {}, |_| {}, |_| {}).unwrap_err(),
+        value_err("custodian image")
+    );
 }
 
 #[test]

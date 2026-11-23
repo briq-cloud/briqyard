@@ -28,3 +28,20 @@ draft commit `628b9a32a9c562a52336bd22ba8847ae2c7cf6d7` (B draft #896; it supers
 * All values are public synthetic fixtures. The file is read, never regenerated or edited here; the
   native test reproduces every row and checks each refusal's reason
   (`sealed::tests::unit_vectors`).
+
+## sealed_owner_inputs_v1.positive.json and sealed_owner_inputs_v1.positive-daemon-upgrade.json
+
+Byte-for-byte copies of B's positive `Inputs` profiles (format `sealed.owner.inputs.positive/v2`),
+from `infra/briqyard/execution/__fixtures__/` in the API's repository (draft #896). Each holds a
+Plan and its canonical bytes, the canonical `native.inputs/v1` manifest, B-private policy values,
+the raw operand bytes native's `DeploymentPolicy` compares (base64url with a declared length and
+SHA-256), and B's expected digests, which are cross-checks only.
+
+| File | Commit | Size | SHA-256 |
+|---|---|---|---|
+| `sealed_owner_inputs_v1.positive.json` | `09325ad317421f22f079738cbe9bb5100d4c254f` | 61,223 | `df13edca8dd6632f47662c157a3b2085dff45b79daf4541e4095fe6c664d3a8a` |
+| `sealed_owner_inputs_v1.positive-daemon-upgrade.json` | `df4d6a88cbb6afc0f517e6915334f98e4bced5ea` | 61,178 | `014eeee72ab22bc8c21d931fb20b47fded709d28cdff0d3111d588c788aeacee` |
+
+The first supersedes `0fa80799…` (shape-incompatible, never mirrored). Both are synthetic and
+public, never edited here, and read only through `include_bytes!` in
+`inputs::tests::companion`, which checks length and hash first.

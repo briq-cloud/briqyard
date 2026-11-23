@@ -9,6 +9,7 @@
 //! a real release, a real source owner, a real host or a native qualification.
 
 mod bind;
+mod companion;
 mod grammar;
 mod identity;
 mod release;
@@ -385,16 +386,16 @@ fn the_complete_fixture_is_canonical_and_matches_the_reference_hash() {
 
 #[test]
 fn the_complete_fixture_binds_to_its_independent_plan_and_operands() {
-    let releases = releases();
-    let plan = plan(d(INPUTS));
-    let bound = Inputs::bind(INPUTS, &plan, &policy(&releases)).unwrap();
-    assert_eq!(bound.bytes(), INPUTS);
+    let releases = companion::releases();
+    let plan = companion::plan(d(&companion::bytes()));
+    let bound = Inputs::bind(&companion::bytes(), &plan, &companion::policy(&releases)).unwrap();
+    assert_eq!(bound.bytes(), companion::bytes());
     assert_eq!(bound.inputs().x, plan.x);
     assert_eq!(bound.inputs().registered, plan.registered);
 }
 
 #[test]
 fn a_noop_mutation_binds_like_the_original_control() {
-    bound(|_| {}, |_| {}, |_| {}).unwrap();
+    companion::bound(|_| {}, |_| {}, |_| {}).unwrap();
     mutated(|_| {}).unwrap();
 }
