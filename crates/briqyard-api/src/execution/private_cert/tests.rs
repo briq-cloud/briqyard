@@ -32,6 +32,11 @@ struct Tails {
     basic_outer: &'static [u8],
     basic_inner: &'static [u8],
     empty_validity: bool,
+    no_extensions: bool,
+    empty_extensions: bool,
+    empty_issuer_rdn: bool,
+    empty_subject_rdn: bool,
+    explicit_default_critical: bool,
 }
 
 struct Built {
@@ -70,20 +75,51 @@ fn build(usage: Usage, tails: Tails, with_basic: bool) -> Built {
         Usage::Client => CLIENT_AUTH,
     };
     let eku = element(tails.eku_inner, tails.eku_outer, &der(OID, oid));
-    let mut extensions = cat(&[&extension(SAN, &san), &extension(EKU, &eku)]);
+    let san_extension = if tails.explicit_default_critical {
+        der(
+            SEQUENCE,
+            &cat(&[
+                &der(OID, SAN),
+                &der(BOOLEAN, &[0x00]),
+                &der(OCTET_STRING, &san),
+            ]),
+        )
+    } else {
+        extension(SAN, &san)
+    };
+    let mut extensions = cat(&[&san_extension, &extension(EKU, &eku)]);
     if with_basic {
         extensions.extend(extension(
             BASIC,
             &element(tails.basic_inner, tails.basic_outer, &[]),
         ));
     }
+    let name = |empty_rdn: bool| {
+        der(
+            SEQUENCE,
+            &if empty_rdn { der(SET, &[]) } else { Vec::new() },
+        )
+    };
+    let extensions_field = if tails.no_extensions {
+        Vec::new()
+    } else if tails.empty_extensions {
+        der(EXTENSIONS, &der(SEQUENCE, &[]))
+    } else {
+        der(
+            EXTENSIONS,
+            &cat(&[
+                &der(SEQUENCE, &cat(&[&extensions, tails.extensions_inner])),
+                tails.wrapper_outer,
+            ]),
+        )
+    };
     let tbs = der(
         SEQUENCE,
         &cat(&[
             &der(VERSION, &[0x02, 0x01, 0x02]),
             &der(INTEGER, &[0x01]),
             &algorithm,
-            &der(SEQUENCE, &[]),
+            &name(tails.empty_issuer_rdn),
             &if tails.empty_validity {
                 der(SEQUENCE, &[])
             } else {
@@ -95,15 +131,9 @@ fn build(usage: Usage, tails: Tails, with_basic: bool) -> Built {
                     ]),
                 )
             },
-            &der(SEQUENCE, &[]),
+            &name(tails.empty_subject_rdn),
             &spki,
-            &der(
-                EXTENSIONS,
-                &cat(&[
-                    &der(SEQUENCE, &cat(&[&extensions, tails.extensions_inner])),
-                    tails.wrapper_outer,
-                ]),
-            ),
+            &extensions_field,
         ]),
     );
     let signature = key.sign(&rng, &tbs).unwrap();
@@ -117,6 +147,8 @@ fn build(usage: Usage, tails: Tails, with_basic: bool) -> Built {
     );
     Built { der, pkcs8 }
 }
+
+const SET: u8 = 0x31;
 
 const TRAILING: [&[u8]; 2] = [&[0x00], &[0x30, 0x00]];
 
@@ -265,4 +297,64 @@ fn a_validly_signed_leaf_with_an_empty_validity_is_not_a_certificate_at_all() {
         key_spki_digest(&control.pkcs8).unwrap(),
         "the same builder without the defect is accepted and carries its key"
     );
+}
+
+#[test]
+fn the_ordinary_decode_is_canonical_and_refuses_structurally_empty_elements() {
+    let reference = |tails: Tails| {
+        let built = build(Usage::Server, tails, true);
+        (
+            leaf_spki_digest(&built.der),
+            key_spki_digest(&built.pkcs8).unwrap(),
+        )
+    };
+    for (case, tails) in [
+        ("extensions and empty names", Tails::default()),
+        (
+            "no extensions at all",
+            Tails {
+                no_extensions: true,
+                ..Tails::default()
+            },
+        ),
+    ] {
+        let (digest, expected) = reference(tails);
+        assert_eq!(digest, Ok(expected), "{case}");
+    }
+    let mut accepted = Vec::new();
+    for (case, tails) in [
+        (
+            "an extension list present but empty",
+            Tails {
+                empty_extensions: true,
+                ..Tails::default()
+            },
+        ),
+        (
+            "an issuer RDN set with no attribute",
+            Tails {
+                empty_issuer_rdn: true,
+                ..Tails::default()
+            },
+        ),
+        (
+            "a subject RDN set with no attribute",
+            Tails {
+                empty_subject_rdn: true,
+                ..Tails::default()
+            },
+        ),
+        (
+            "a default critical FALSE encoded",
+            Tails {
+                explicit_default_critical: true,
+                ..Tails::default()
+            },
+        ),
+    ] {
+        if reference(tails).0 != Err(CertError::Encoding) {
+            accepted.push(case);
+        }
+    }
+    assert!(accepted.is_empty(), "not refused: {accepted:#?}");
 }

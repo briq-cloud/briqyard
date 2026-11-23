@@ -178,15 +178,29 @@ pub fn key_spki_digest(pkcs8: &[u8]) -> Result<HexDigest, CertError> {
 }
 
 /// The SPKI digest of one complete DER X.509 certificate of any profile, from the typed
-/// schema decode of `x509-cert`: exactly one object, every field of its structure present and
-/// well formed (a validity has both times, for one), no trailing byte. Neither names, usages,
-/// validity, trust nor the signature are interpreted; the caller compares this digest with the
-/// key it expects and pins the bytes. The profile parser below stays the transition one.
+/// schema decode of `x509-cert`: exactly one object whose every field is present and well
+/// formed (a validity has both times, a present extension list or name part is not empty) and
+/// whose canonical re-encoding is the input byte for byte, which also refuses an encoded
+/// default or a trailing byte. Names, usages, validity, trust, chain and signature are not
+/// interpreted; the caller compares this digest with the key it expects and pins the bytes.
+/// The profile parser below stays the transition one.
 pub fn leaf_spki_digest(der: &[u8]) -> Result<HexDigest, CertError> {
     use x509_cert::der::{Decode, Encode};
     let cert = x509_cert::Certificate::from_der(der).map_err(|_| CertError::Encoding)?;
-    let spki = cert
-        .tbs_certificate()
+    let tbs = cert.tbs_certificate();
+    if tbs
+        .extensions()
+        .is_some_and(|extensions| extensions.is_empty())
+        || tbs
+            .issuer()
+            .iter_rdn()
+            .chain(tbs.subject().iter_rdn())
+            .any(|rdn| rdn.is_empty())
+        || cert.to_der().map_err(|_| CertError::Encoding)? != der
+    {
+        return Err(CertError::Encoding);
+    }
+    let spki = tbs
         .subject_public_key_info()
         .to_der()
         .map_err(|_| CertError::Encoding)?;
