@@ -1,13 +1,11 @@
-//! Scoped execution never uses the administrator route or wakes a machine.
+//! Scoped execution never takes the administrator route or wakes a machine. The
+//! caller supplies an installed trusted ownership snapshot and the regional key set.
+//! No HTTP route calls this boundary until authenticated snapshot installation exists.
 use super::execution_resources::ExecutionResourceScope;
 use super::*;
-use crate::{
-    api::execution::context::{AdmissionTurns, RequestIdentity},
-    guestc::active_operations::{ActiveOperations, OriginalIntent},
-};
 use api::execution::{
     self as access,
-    admission::{HostOperationPolicy, HostOwnership, Journal, PreparedAdmission, Status},
+    admission::{HostOwnership, Journal},
     DispatchContext, Operation, Target, Trust,
 };
 
@@ -43,27 +41,12 @@ pub struct ScopedExecutionContext<'a> {
     pub scope: ExecutionResourceScope<'a>,
 }
 
-#[cfg(test)]
+/// The authenticated handler transfers its exact initial admission fence. It is
+/// released only after guest acceptance, durable active ACK and registry publication.
 pub struct RenewableDispatch<'a> {
     pub guard: tokio::sync::RwLockReadGuard<'a, ()>,
     pub registry: Arc<crate::guestc::active_operations::ActiveOperations>,
     pub policy: access::admission::HostOperationPolicy,
-}
-
-pub(crate) struct ChannelDispatch<'a> {
-    pub guard: tokio::sync::RwLockReadGuard<'a, ()>,
-    pub registry: Arc<ActiveOperations>,
-    pub policy: Option<HostOperationPolicy>,
-    pub admission: &'a AdmissionTurns,
-    pub request: RequestIdentity,
-    pub prepared: PreparedAdmission,
-}
-
-struct DispatchControl<'a> {
-    guard: Option<tokio::sync::RwLockReadGuard<'a, ()>>,
-    registry: Arc<ActiveOperations>,
-    policy: Option<HostOperationPolicy>,
-    original: Option<(&'a AdmissionTurns, RequestIdentity, PreparedAdmission)>,
 }
 
 impl Manager {
@@ -80,7 +63,6 @@ impl Manager {
             let record = {
                 let _turn = e.lock.lock().await;
                 let ledger = journal.lock().await;
-                self.scoped_journal(&ledger)?;
                 if self.scoped_target(&e, ledger.instance())? != *target {
                     return Err(MError::Conflict("execution closure member changed".into()));
                 }
@@ -168,7 +150,6 @@ impl Manager {
             let e = self.entry(&public.target.machine)?;
             let _turn = e.lock.lock().await;
             let ledger = journal.lock().await;
-            self.scoped_journal(&ledger)?;
             if self.scoped_target(&e, ledger.instance())? != public.target {
                 return Err(MError::Conflict("public execution run changed".into()));
             }
@@ -376,9 +357,6 @@ impl Manager {
     }
 
     pub(super) fn scoped_journal(&self, journal: &Journal) -> Result<(), MError> {
-        journal
-            .owned()
-            .map_err(|_| invalid("execution journal unavailable"))?;
         if journal.role() != &access::admission::Role::Host(self.inner.host_id.clone()) {
             return Err(invalid("execution journal belongs to another host"));
         }
@@ -433,7 +411,6 @@ impl Manager {
     /// The ownership snapshot must be from the authenticated metadata installer, never
     /// assembled by copying the submitted grant. The caller retains its revision fence
     /// through this call. The host checks every frozen local run itself before dispatch.
-    #[cfg(test)]
     pub async fn scoped_exec(
         &self,
         request: api::ExecRequest,
@@ -456,7 +433,6 @@ impl Manager {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[cfg(test)]
     pub async fn renewable_scoped_exec(
         &self,
         request: api::ExecRequest,
@@ -474,40 +450,7 @@ impl Manager {
             installed,
             journal,
             clock_uncertainty_seconds,
-            Some(DispatchControl {
-                guard: Some(renewable.guard),
-                registry: renewable.registry,
-                policy: Some(renewable.policy),
-                original: None,
-            }),
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn channel_scoped_exec(
-        &self,
-        request: api::ExecRequest,
-        credentials: ScopedCredentials<'_>,
-        trust: &Trust<'_>,
-        installed: ScopedExecutionContext<'_>,
-        journal: &tokio::sync::Mutex<Journal>,
-        clock_uncertainty_seconds: u64,
-        channel: ChannelDispatch<'_>,
-    ) -> Result<api::ExecResult, MError> {
-        self.scoped_exec_inner(
-            request,
-            credentials,
-            trust,
-            installed,
-            journal,
-            clock_uncertainty_seconds,
-            Some(DispatchControl {
-                guard: Some(channel.guard),
-                registry: channel.registry,
-                policy: channel.policy,
-                original: Some((channel.admission, channel.request, channel.prepared)),
-            }),
+            Some(renewable),
         )
         .await
     }
@@ -521,7 +464,7 @@ impl Manager {
         installed: ScopedExecutionContext<'_>,
         journal: &tokio::sync::Mutex<Journal>,
         clock_uncertainty_seconds: u64,
-        mut control: Option<DispatchControl<'_>>,
+        renewable: Option<RenewableDispatch<'_>>,
     ) -> Result<api::ExecResult, MError> {
         let ScopedExecutionContext {
             binding: context,
@@ -560,23 +503,6 @@ impl Manager {
             .map_err(|_| MError::Conflict("execution resources remain busy".into()))?;
         let mut ledger = journal.lock().await;
         self.scoped_journal(&ledger)?;
-        let original = control.as_ref().and_then(|c| c.original.as_ref());
-        let check_original = |ledger: &Journal| -> Result<(), MError> {
-            if let Some((admission, request, prepared)) = original {
-                admission
-                    .current(request, ledger)
-                    .map_err(|_| invalid("execution request context changed"))?;
-                if ledger
-                    .prepared(&prepared.admission)
-                    .map_err(|_| invalid("original dispatch unavailable"))?
-                    != Some(prepared)
-                {
-                    return Err(invalid("original dispatch changed"));
-                }
-            }
-            Ok(())
-        };
-        check_original(&ledger)?;
         for (resource, e) in resources.iter().zip(&entries) {
             if self.scoped_target(e, ledger.instance())? != **resource {
                 return Err(MError::Conflict("execution target changed".into()));
@@ -604,30 +530,18 @@ impl Manager {
             context,
         )
         .map_err(|_| invalid("execution credentials refused"))?;
-        if let Some((_, request, prepared)) = original {
-            if !request.execution()
-                || !prepared.dispatched
-                || prepared.admission != bundle.permit().admission
-                || prepared.permit_digest != access::token_digest(credentials.permit)
-            {
-                return Err(invalid("execution credentials changed after dispatch"));
-            }
-        }
-        let policy = control.as_ref().and_then(|c| c.policy.as_ref());
-        let renewable = policy.is_some();
-        if bundle.permit().limits.execution_mode.is_some() != renewable {
+        if bundle.permit().limits.execution_mode.is_some() != renewable.is_some() {
             return Err(invalid(
                 "scoped execution mode requires its exact dispatch path",
             ));
         }
-        if renewable {
+        if renewable.is_some() {
             let instance = ledger.instance().to_owned();
             drop(ledger);
             self.require_renewable_guest(entry, context.target, &instance)
                 .await?;
             ledger = journal.lock().await;
             self.scoped_journal(&ledger)?;
-            check_original(&ledger)?;
             if ledger.instance() != instance {
                 return Err(invalid("execution journal instance changed"));
             }
@@ -675,7 +589,9 @@ impl Manager {
                 "execution namespace generation or protection changed".into(),
             ));
         }
-        let initial_active = if let Some(policy) = policy {
+        // This fsync is the final no-replay boundary. Every subsequent failure is an
+        // uncertain consumed outcome, including cancellation before any guest frame.
+        let initial_active = if let Some(control) = &renewable {
             let sample = access::clock::ClockSample::read()
                 .ok_or_else(|| invalid("qualified execution clock unavailable"))?;
             let started_at_ms: u64 = sample
@@ -683,6 +599,7 @@ impl Manager {
                 .as_millis()
                 .try_into()
                 .map_err(|_| invalid("execution clock range"))?;
+            let policy = &control.policy;
             if ledger
                 .operation_policy(&bundle.permit().grant_digest)
                 .map_err(|_| invalid("operation policy unavailable"))?
@@ -745,20 +662,6 @@ impl Manager {
         } else {
             None
         };
-        let active_owner = control
-            .as_ref()
-            .map(|control| {
-                control.registry.reserve(
-                    &bundle.permit().admission,
-                    original.map(|(_, request, prepared)| OriginalIntent {
-                        request: request.clone(),
-                        dispatched: prepared.clone(),
-                        permit: bundle.permit().clone(),
-                    }),
-                )
-            })
-            .transpose()
-            .map_err(not_running_if_unreachable)?;
         ledger
             .consume(&bundle, execution_clock(clock_uncertainty_seconds)?)
             .map_err(|_| MError::Conflict("execution admission refused; query status".into()))?;
@@ -797,7 +700,7 @@ impl Manager {
             return Err(invalid("execution authority expired"));
         }
         let greq = guest::Request {
-            op: if renewable {
+            op: if renewable.is_some() {
                 "exec_renewable_v1"
             } else {
                 "exec"
@@ -807,7 +710,7 @@ impl Manager {
             env: request.env,
             cwd: request.cwd,
             stdin: request.stdin.into_bytes(),
-            timeout_ms: if renewable {
+            timeout_ms: if renewable.is_some() {
                 request.timeout_ms
             } else {
                 request.timeout_ms.min(remaining_ms)
@@ -817,10 +720,8 @@ impl Manager {
         let handshake_deadline = deadline
             .instant
             .min(tokio::time::Instant::now() + Duration::from_secs(10));
-        check_original(&ledger)?;
-        drop(ledger);
-        let conn = tokio::time::timeout_at(handshake_deadline, async {
-            if renewable {
+        let mut conn = tokio::time::timeout_at(handshake_deadline, async {
+            if renewable.is_some() {
                 self.inner
                     .guest
                     .renewable_session(&live.vsock, greq, deadline.clone())
@@ -835,17 +736,10 @@ impl Manager {
         .await
         .map_err(|_| MError::NotRunning("scoped command dispatch unresolved".into()))?
         .map_err(not_running_if_unreachable)?;
+        let mut active_owner = None;
         let mut active_lease = None;
         let mut terminal_deadline = deadline.instant;
-        if renewable {
-            let mut ledger = journal.lock().await;
-            self.scoped_journal(&ledger)?;
-            check_original(&ledger)?;
-            for (resource, e) in resources.iter().zip(&entries) {
-                if self.scoped_target(e, ledger.instance())? != **resource {
-                    return Err(MError::Conflict("execution target changed".into()));
-                }
-            }
+        if let Some(control) = renewable {
             let evidence = ledger
                 .acknowledge_active_operation(
                     &bundle.permit().admission,
@@ -861,23 +755,26 @@ impl Manager {
                 operation_deadline.ok_or_else(|| invalid("operation deadline missing"))?,
             )
             .map_err(not_running_if_unreachable)?;
-            active_owner
-                .as_ref()
-                .ok_or_else(|| invalid("execution effect owner missing"))?
-                .activate(lease.clone())
-                .map_err(not_running_if_unreachable)?;
+            active_owner = Some(
+                control
+                    .registry
+                    .register(&bundle.permit().admission, lease.clone())
+                    .map_err(not_running_if_unreachable)?,
+            );
             terminal_deadline =
                 tokio::time::Instant::now() + Duration::from_millis(request.timeout_ms + 10_000);
+            conn = Box::new(guestc::active_operations::ActiveConnection {
+                conn,
+                lease: lease.clone(),
+            });
             active_lease = Some(lease);
+            // Every initial-generation check, first guest ACK, durable ACK and live
+            // publication preceded this release. Control changes may now progress.
+            drop(control.guard);
         }
+        // The allocation and lifecycle fences covered the initial guest frame.
+        drop(ledger);
         drop(turns);
-        if renewable {
-            drop(control.as_mut().and_then(|c| c.guard.take()));
-        }
-        let mut conn = guestc::active_operations::ActiveConnection {
-            conn,
-            lease: active_lease.clone(),
-        };
         let collect = async {
             let limits = &bundle.permit().limits;
             match limits.output_mode {
@@ -900,51 +797,17 @@ impl Manager {
                 MError::NotRunning("execution deadline expired; outcome unresolved".into())
             })?
             .map_err(not_running_if_unreachable)?;
+        // Drop the guest connection at the authorization deadline on all error paths.
+        // Cleanup of detached work is not inferred from closing this connection.
         drop(conn);
-        let original = control.as_ref().and_then(|c| c.original.as_ref());
-        let finish = async {
-            let _admission = match (renewable, original) {
-                (true, Some((admission, _, _))) => Some(admission.terminal_turn().await),
-                _ => None,
-            };
-            let _turns = local_turns(&locks).await;
-            let mut ledger = journal.lock().await;
-            self.scoped_journal(&ledger)?;
-            if !renewable {
-                deadline.refresh().map_err(not_running_if_unreachable)?;
-            }
-            if let Some((admission, _, _)) = original {
-                let sample = access::clock::ClockSample::read()
-                    .ok_or_else(|| invalid("qualified execution clock unavailable"))?;
-                active_owner
-                    .as_ref()
-                    .ok_or_else(|| invalid("execution effect owner missing"))?
-                    .finish(admission, &mut ledger, &sample)
-                    .map_err(|_| {
-                        MError::Conflict("execution completion persistence unresolved".into())
-                    })?;
-            } else {
-                if ledger.status(&bundle.permit().admission).ok().flatten()
-                    != Some(Status::Consumed)
-                {
-                    return Err(invalid("execution admission changed"));
-                }
-                ledger
-                    .finish(bundle.permit(), execution_clock(clock_uncertainty_seconds)?)
-                    .map_err(|_| {
-                        MError::Conflict("execution completion persistence unresolved".into())
-                    })?;
-            }
-            Ok(())
-        };
-        tokio::time::timeout_at(terminal_deadline, finish)
-            .await
-            .map_err(|_| {
-                MError::NotRunning(
-                    "execution completion deadline elapsed; outcome unresolved".into(),
-                )
-            })??;
         drop(in_use);
+        #[cfg(test)]
+        crate::machine::tests::after_collected_frame().await;
+        journal
+            .lock()
+            .await
+            .finish(bundle.permit(), execution_clock(clock_uncertainty_seconds)?)
+            .map_err(|_| MError::Conflict("execution completion persistence unresolved".into()))?;
         drop(active_owner);
         Ok(api::ExecResult {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -960,7 +823,8 @@ fn execution_clock(_uncertainty: u64) -> Result<access::Clock, MError> {
         .ok_or_else(|| invalid("qualified execution clock unavailable"))
 }
 
-// Never retain a subset while waiting for another resource's lifecycle turn.
+// Other lifecycle operations may hold a machine while starting its gateway. Never
+// wait for a second resource while retaining a subset, even in stable ID order.
 pub(super) async fn local_turns(
     locks: &[Arc<tokio::sync::Mutex<()>>],
 ) -> Vec<tokio::sync::OwnedMutexGuard<()>> {

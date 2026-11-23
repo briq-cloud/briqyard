@@ -13,7 +13,7 @@ use std::{
     sync::{Arc, Mutex},
     task::{Context, Poll},
 };
-use tokio::io::{AsyncRead, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[derive(Default)]
 pub struct ActiveOperations(Mutex<BTreeMap<String, Arc<EffectOwner>>>);
@@ -35,7 +35,7 @@ impl EffectOwner {
     }
 }
 
-pub(crate) struct ActiveOperationGuard {
+pub struct ActiveOperationGuard {
     registry: Arc<ActiveOperations>,
     admission: String,
     owner: Arc<EffectOwner>,
@@ -72,8 +72,7 @@ impl ActiveOperations {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn register(
+    pub fn register(
         self: &Arc<Self>,
         admission: &str,
         lease: ActiveLease,
@@ -83,8 +82,7 @@ impl ActiveOperations {
         Ok(guard)
     }
 
-    #[cfg(test)]
-    pub(crate) fn get(&self, admission: &str) -> Option<ActiveLease> {
+    pub fn get(&self, admission: &str) -> Option<ActiveLease> {
         self.0.lock().unwrap().get(admission)?.lease()
     }
 
@@ -107,10 +105,14 @@ impl ActiveOperations {
         Ok(Some(owner.clone()))
     }
 
-    pub(crate) fn revoke_where(&self, mut evidence: impl FnMut(&str) -> Option<ActiveOperation>) {
+    pub fn revoke_where(&self, mut evidence: impl FnMut(&str) -> Option<ActiveOperation>) {
         for (admission, owner) in self.0.lock().unwrap().iter() {
             if let (Some(lease), Some(record)) = (owner.lease(), evidence(admission)) {
-                let _ = lease.revoke_committed(&record);
+                if owner.intent.is_some() {
+                    let _ = lease.revoke_committed(&record);
+                } else if record.phase == briqyard_api::execution::admission::ActivePhase::Revoked {
+                    lease.end();
+                }
             }
         }
     }
@@ -181,11 +183,11 @@ impl Drop for ActiveOperationGuard {
 
 /// Every renewable output read samples qualified time. The outer live guard also
 /// owns an independent timer so a quiet socket cannot conceal expiry or revocation.
-pub(crate) struct ActiveConnection {
+pub(crate) struct GuardedConnection {
     pub(crate) conn: Box<dyn Conn>,
     pub(crate) lease: Option<ActiveLease>,
 }
-impl AsyncRead for ActiveConnection {
+impl AsyncRead for GuardedConnection {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -195,6 +197,39 @@ impl AsyncRead for ActiveConnection {
             lease.check_io()?;
         }
         Pin::new(&mut self.conn).poll_read(cx, buf)
+    }
+}
+
+pub struct ActiveConnection {
+    pub conn: Box<dyn Conn>,
+    pub lease: ActiveLease,
+}
+impl AsyncRead for ActiveConnection {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.lease.check_io()?;
+        Pin::new(&mut self.conn).poll_read(cx, buf)
+    }
+}
+impl AsyncWrite for ActiveConnection {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        self.lease.check_io()?;
+        Pin::new(&mut self.conn).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.lease.check_io()?;
+        Pin::new(&mut self.conn).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.lease.check_io()?;
+        Pin::new(&mut self.conn).poll_shutdown(cx)
     }
 }
 

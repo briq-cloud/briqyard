@@ -168,7 +168,7 @@ fn host(path: &Path, fixture: &Fixture) -> Journal {
 }
 
 #[test]
-fn refused_registration_leaves_the_original_fence_and_exact_bytes() {
+fn registration_near_capacity_fences_before_refusing_the_second_commit() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("host");
     let mut journal = Journal::open(&path, Role::Host("host-1".into())).unwrap();
@@ -228,13 +228,15 @@ fn refused_registration_leaves_the_original_fence_and_exact_bytes() {
         journal.register_host(refused, clock()),
         Err(Error::Full)
     ));
-    assert!(
-        std::fs::read(path.join("journal.json")).unwrap() == before,
-        "refusal changed the durable journal"
+    let state = read_state(&path.join("journal.json")).unwrap().unwrap();
+    assert!(std::fs::read(path.join("journal.json")).unwrap() != before);
+    assert_eq!(state.registration, Some(original.clone()));
+    assert_eq!(state.fences[&original.authority], "epoch-2");
+    assert_eq!(
+        state.retired[&original.authority],
+        vec!["epoch-1".to_owned()]
     );
     assert_eq!(journal.registration().unwrap(), Some(&original));
-    assert_eq!(journal.state.fences[&original.authority], original.epoch);
-    assert!(!journal.state.retired.contains_key(&original.authority));
 }
 
 #[test]
@@ -251,10 +253,17 @@ fn registration_with_ambiguous_durability_never_reads_as_ready() {
         host_instance: journal.instance().into(),
         generation: 1,
     };
-    let next = journal
-        .registered_state(record.clone(), clock())
-        .unwrap()
+    journal
+        .fence(
+            &record.authority,
+            &record.epoch,
+            &record.host_instance,
+            clock(),
+        )
         .unwrap();
+    let mut next = State::clone(&journal.state);
+    next.registration_highwater = record.generation;
+    next.registration = Some(record.clone());
     assert!(reader.view().registration().unwrap().is_none());
     assert!(matches!(
         journal.persist_inner(next, &mut |stage| stage == "directory_fsync"),

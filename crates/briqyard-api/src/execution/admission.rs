@@ -334,17 +334,6 @@ impl Journal {
     }
 
     pub fn register_host(&mut self, record: HostRegistration, clock: Clock) -> Result<(), Error> {
-        if let Some(next) = self.registered_state(record, clock)? {
-            self.commit(next, Some(clock))?;
-        }
-        Ok(())
-    }
-
-    fn registered_state(
-        &self,
-        record: HostRegistration,
-        clock: Clock,
-    ) -> Result<Option<State>, Error> {
         self.check(clock)?;
         if !matches!(self.role(), Role::Host(_))
             || record.host_instance != self.instance()
@@ -356,13 +345,18 @@ impl Journal {
             return Err(Error::Binding);
         }
         if self.state.registration.as_ref() == Some(&record) {
-            return Ok(None);
+            return Ok(());
         }
         if record.generation <= self.state.registration_highwater {
             return Err(Error::Binding);
         }
-        let mut next =
-            self.fenced_state(&record.authority, &record.epoch, &record.host_instance)?;
+        self.fence(
+            &record.authority,
+            &record.epoch,
+            &record.host_instance,
+            clock,
+        )?;
+        let mut next = State::clone(&self.state);
         next.registration_highwater = record.generation;
         next.registration = Some(record);
         for operation in next.active_operations.values_mut() {
@@ -375,7 +369,7 @@ impl Journal {
         next.prepared.clear();
         next.protections.clear();
         next.clock_floor = clock.now;
-        Ok(Some(next))
+        self.commit(next, Some(clock))
     }
 
     pub fn installed_ownership(&self, installation: &str) -> Result<Option<&HostOwnership>, Error> {

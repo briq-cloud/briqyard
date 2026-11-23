@@ -159,6 +159,17 @@ fn sign(body: &impl Serialize, typ: &str, seed: u8, kid: &str) -> String {
     ignore = "requires Linux kernel process identity"
 )]
 async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() {
+    scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay_inner(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn scoped_command_finishes_after_collection_despite_expired_contended_final_lock() {
+    scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay_inner(true).await;
+}
+
+async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay_inner(
+    contend_after_collection: bool,
+) {
     let h = harness("10.64.0.0/22", 4096).await;
     let gateway = h.with_gateway().await;
     let mut gateway_spec = gateway_spec(3128);
@@ -584,7 +595,46 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
         permit: &permit_token,
         allocations: &tokens,
     };
-    let out =
+    let out = if contend_after_collection {
+        let barrier = Arc::new(CollectedFrameBarrier {
+            reached: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        });
+        let execute = COLLECTED_FRAME_BARRIER.scope(
+            barrier.clone(),
+            h.m.scoped_exec(
+                request.clone(),
+                call(),
+                &trust,
+                ScopedExecutionContext {
+                    binding: &context,
+                    scope,
+                },
+                &journal,
+                0,
+            ),
+        );
+        tokio::pin!(execute);
+        let mut reached = false;
+        let out = loop {
+            tokio::select! {
+                out = &mut execute => break out,
+                _ = barrier.reached.notified(), if !reached => {
+                    reached = true;
+                    let held = journal.lock().await;
+                    tokio::time::advance(Duration::from_secs(60)).await;
+                    assert_eq!(held.status(&permit.admission).unwrap(), Some(Status::Consumed));
+                    let consumed = std::fs::read(path.join("journal.json")).unwrap();
+                    barrier.resume.notify_one();
+                    tokio::task::yield_now().await;
+                    assert_eq!(std::fs::read(path.join("journal.json")).unwrap(), consumed);
+                    drop(held);
+                }
+            }
+        };
+        assert!(reached);
+        out
+    } else {
         h.m.scoped_exec(
             request.clone(),
             call(),
@@ -597,7 +647,8 @@ async fn scoped_command_consumes_once_and_old_journal_snapshots_cannot_replay() 
             0,
         )
         .await
-        .unwrap();
+    }
+    .unwrap();
     assert_eq!(out.exit_code, 0);
     assert_eq!(
         journal.lock().await.status(&permit.admission).unwrap(),

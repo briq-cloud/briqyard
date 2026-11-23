@@ -55,11 +55,8 @@ mod observe;
 mod scoped_exec;
 pub use execution_resources::ExecutionResourceScope;
 use memory::host_memory;
-pub(crate) use scoped_exec::ChannelDispatch;
-#[cfg(test)]
-use scoped_exec::RenewableDispatch;
 pub use scoped_exec::{
-    ExecutionProtectionReceipt, ExecutionProtectionRequest, ScopedCredentials,
+    ExecutionProtectionReceipt, ExecutionProtectionRequest, RenewableDispatch, ScopedCredentials,
     ScopedExecutionContext,
 };
 mod persist;
@@ -72,7 +69,7 @@ mod startup;
 mod stopped_update;
 mod templates;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod tick;
 mod update;
 mod views;
@@ -1033,3 +1030,6 @@ where
         Err(err) => Err(MError::Other(anyhow!("transition task: {err}"))),
     }
 }
+
+/// Guarded execution coordinator. It is not part of the ordinary host HTTP dispatch path.
+pub mod guarded_exec;

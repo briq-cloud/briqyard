@@ -15,7 +15,7 @@ use std::{
 use tokio::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequestRole {
@@ -107,7 +107,7 @@ impl JournalIdentity {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct RequestIdentity {
+pub struct RequestIdentity {
     journal: Arc<JournalIdentity>,
     cohort: Option<Arc<VerifiedCohort>>,
     role: RequestRole,
@@ -131,7 +131,7 @@ impl RequestIdentity {
     }
 }
 
-pub(crate) struct AdmissionTurns {
+pub struct AdmissionTurns {
     turn: RwLock<()>,
     journal: JournalReader,
     identity: Publication<Arc<JournalIdentity>>,
@@ -269,7 +269,7 @@ impl AdmissionTurns {
         Ok(turn)
     }
 
-    pub(super) async fn write(
+    pub(crate) async fn write(
         &self,
         request: &RequestIdentity,
         journal: &Mutex<Journal>,

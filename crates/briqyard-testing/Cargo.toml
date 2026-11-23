@@ -29,6 +29,7 @@ required-features = ["scoped-native"]
 [[bin]]
 name = "execution-custody-child"
 path = "src/execution_custody_child.rs"
+required-features = ["scoped-native"]
 
 [dev-dependencies]
 tempfile = "3"
