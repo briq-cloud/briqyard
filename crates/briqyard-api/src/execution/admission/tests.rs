@@ -228,13 +228,20 @@ fn registration_near_capacity_fences_before_refusing_the_second_commit() {
         journal.register_host(refused, clock()),
         Err(Error::Full)
     ));
-    let state = read_state(&path.join("journal.json")).unwrap().unwrap();
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(path.join("journal.json")).unwrap()).unwrap();
     assert!(std::fs::read(path.join("journal.json")).unwrap() != before);
-    assert_eq!(state.registration, Some(original.clone()));
-    assert_eq!(state.fences[&original.authority], "epoch-2");
     assert_eq!(
-        state.retired[&original.authority],
-        vec!["epoch-1".to_owned()]
+        state["registration"],
+        serde_json::to_value(&original).unwrap()
+    );
+    assert_eq!(
+        state["fences"][&original.authority].as_str(),
+        Some("epoch-2")
+    );
+    assert_eq!(
+        state["retired"][&original.authority],
+        serde_json::json!(["epoch-1"])
     );
     assert_eq!(journal.registration().unwrap(), Some(&original));
 }

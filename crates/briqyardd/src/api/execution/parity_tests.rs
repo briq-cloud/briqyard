@@ -156,7 +156,7 @@ async fn ordinary_queued_registration_reads_state_after_its_turn() {
         generation: 2,
         ..fixture.registration.clone()
     };
-    let turn = channel.admission.write().await;
+    let turn = channel.hold_ordinary_admission_for_test().await;
     let request = router(channel.clone()).oneshot(
         Request::builder()
             .method(Method::POST)

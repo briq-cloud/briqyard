@@ -69,6 +69,11 @@ pub struct HostExecutionChannel {
 }
 
 impl HostExecutionChannel {
+    #[cfg(test)]
+    async fn hold_ordinary_admission_for_test(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+        self.admission.write().await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         manager: Manager,
