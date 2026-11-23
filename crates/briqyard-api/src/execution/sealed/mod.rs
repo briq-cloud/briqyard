@@ -11,6 +11,7 @@
 //! * [`sig`]: `Sig(tag, T)`, signer roles, strict Ed25519 verification.
 //! * [`objects`]: `X`, `Proc`, `Q`, `Reg`/`Ack`/`Ctx`, `Members`, `Plan`, capacity and clock objects.
 //! * [`inputs`]: the closed v3.6 base manifest and v3.3 closure reader, with no I/O or approval.
+//! * [`owner`]: the owner layer's target-side collector, arm receipt, enrollment and `owner.turn` wire.
 //! * [`plan_pin`]: the two prior Plan commitments, the root custody read and its trust record.
 //! * [`trial`]: the single sealed-trial ABI and its native command/result commitments.
 //! * [`custody`]: the custody frame ABI's wire and signed bodies.
@@ -21,6 +22,7 @@ pub mod canonical;
 pub mod custody;
 pub mod inputs;
 pub mod objects;
+pub mod owner;
 pub mod plan_pin;
 pub mod prim;
 pub mod sig;

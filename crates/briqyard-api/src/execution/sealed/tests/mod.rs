@@ -6,6 +6,7 @@
 mod custody;
 mod negative;
 mod objects;
+mod owner;
 mod trial;
 mod vectors;
 
