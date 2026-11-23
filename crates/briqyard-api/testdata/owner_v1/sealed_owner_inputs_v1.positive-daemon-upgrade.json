@@ -1,0 +1,1239 @@
+{
+  "expected": {
+    "campaign": {
+      "order": [
+        "h_10-42-1-19",
+        "h_10-42-1-21",
+        "h_10-42-0-17",
+        "h_10-42-0-15"
+      ],
+      "releases": {
+        "source": "a22d3dc9d3e86a375b16ca9bd273a00157f04eb94aebde6b16ede27718446f60",
+        "target": "3b17f7bae8d51061f2048de847ce4948e108827c5b9ece6af7cf26186083a64d"
+      },
+      "topology": "6a1577329abd2c7849cf0e6a049eb78e071671a83883296930d5d4e51228f7f0"
+    },
+    "custodians": {
+      "authority": {
+        "boot": "00000000-0000-4000-8000-000000000004",
+        "build": "0.2.16",
+        "exe": "76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708",
+        "pid": 4301,
+        "start": 5301
+      },
+      "daemon": {
+        "boot": "00000000-0000-4000-8000-000000000004",
+        "build": "0.2.16",
+        "exe": "76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708",
+        "pid": 4300,
+        "start": 5300
+      }
+    },
+    "registry": "W3sia2lkIjoic3RhZ2luZy1uYS12MSIsInJvbGUiOiJhdXRob3JpdHkiLCJpc3N1ZXIiOiJicmlxLXN0YWdpbmctbmEiLCJhdXRob3JpdHkiOiJicmlxLXN0YWdpbmctbmEiLCJwdWJsaWNfa2V5IjpbMTEwLDEyMiwyOCwyMjEsNDEsMTc2LDE4MywxNDMsMjA5LDU4LDI0NCwxOTcsODksMTQzLDIzOSwyNDQsMjM5LDQyLDE1MSwyMiwxMTAsNjAsMTY2LDI0MiwyMjgsMjUxLDI1MiwyMDUsMTI4LDgwLDkxLDI0MV19LHsia2lkIjoiY2VudHJhbC12MSIsInJvbGUiOiJjZW50cmFsIiwiaXNzdWVyIjoiYnJpcS1zdGFnaW5nLWNlbnRyYWwiLCJhdXRob3JpdHkiOm51bGwsInB1YmxpY19rZXkiOlsxMzgsMTM1LDk1LDI1NSwzMCwxNzksMTMyLDgxLDg3LDEyMiwyMDUsOTAsMjU0LDIyOCw1LDY5LDEwMSwxMDQsMjIxLDEyNCwxMzcsMjI0LDE0NCwxMzQsNTgsNSw4NywxODgsMTIyLDI0NCwxNTksMjNdfV0",
+    "units": {
+      "authority": {
+        "armed": {
+          "argv": "f9b4a78ed5be92da4ce05e8adc3c9e5db39f5c05d131b20274547d27b5794422",
+          "fdstore": "7dd9dc800b8883c01c9b0ca29a065c0063fcd51dc1141be4d8e78fe0b5a99108",
+          "fragment": "3e9abfe3fdbcacf74d3c709e97bd29c0a89d7e476555f3d450afbcce3a133a43",
+          "sandbox": "3c7d7294bdacfc4dbd951f53f2cb27d639d916049810b2a03e70b611761e5ebf"
+        },
+        "launch": {
+          "argv": "2b765bfdb784f6c553a7cd0c2cc1279d1d0b331e7da551e06c709418c1d818a8",
+          "fdstore": "7dd9dc800b8883c01c9b0ca29a065c0063fcd51dc1141be4d8e78fe0b5a99108",
+          "fragment": "3e9abfe3fdbcacf74d3c709e97bd29c0a89d7e476555f3d450afbcce3a133a43",
+          "sandbox": "6390245f08dccd5654116e017b7bdedc8f8a7d76224dd3f57018667b310801f9"
+        },
+        "prearm": {
+          "argv": "f9b4a78ed5be92da4ce05e8adc3c9e5db39f5c05d131b20274547d27b5794422",
+          "fdstore": "7dd9dc800b8883c01c9b0ca29a065c0063fcd51dc1141be4d8e78fe0b5a99108",
+          "fragment": "f17f695dec07c0510c09c3cc0c5131ee5c73623875d02dbcdb83c2a48554de8d",
+          "sandbox": "3c7d7294bdacfc4dbd951f53f2cb27d639d916049810b2a03e70b611761e5ebf"
+        }
+      },
+      "daemon": {
+        "armed": {
+          "argv": "698acbe2afc479cd04d96685efb2e8e534c5d51cd34c1819c22beb2e13a1d2ba",
+          "fdstore": "3efdc9b4cc64ea0b012976db00ab0ef12e479a9124e719ce6abf3c95c5ea2adc",
+          "fragment": "da7bebfad9eedca99308794922b900dc232f5c02894db4946b65973d576e49e7",
+          "sandbox": "20e9342b5df44573b821363d1ad332aef5cb99112db50fd01ebcee05e8d650f4"
+        },
+        "launch": {
+          "argv": "d376b95d72c4e09f69c78d48164a752688434ed78332be72f3624cba509a0f3c",
+          "fdstore": "3efdc9b4cc64ea0b012976db00ab0ef12e479a9124e719ce6abf3c95c5ea2adc",
+          "fragment": "da7bebfad9eedca99308794922b900dc232f5c02894db4946b65973d576e49e7",
+          "sandbox": "5096e5d7b27354f6ef28adfcbff99a06ce0d0ca1318608c179a1bd15f50f5266"
+        },
+        "prearm": {
+          "argv": "698acbe2afc479cd04d96685efb2e8e534c5d51cd34c1819c22beb2e13a1d2ba",
+          "fdstore": "3efdc9b4cc64ea0b012976db00ab0ef12e479a9124e719ce6abf3c95c5ea2adc",
+          "fragment": "3cc413812b1fb6433be62f03745adfb82e831b125a0f0203e74e95ddcf4019cf",
+          "sandbox": "20e9342b5df44573b821363d1ad332aef5cb99112db50fd01ebcee05e8d650f4"
+        }
+      }
+    }
+  },
+  "format": "sealed.owner.inputs.positive/v2",
+  "inputs": {
+    "actors": [
+      {
+        "actor": "A",
+        "id": "authority",
+        "proc": null
+      },
+      {
+        "actor": "B",
+        "id": "api",
+        "proc": null
+      },
+      {
+        "actor": "H",
+        "id": "host",
+        "proc": null
+      },
+      {
+        "actor": "R",
+        "id": "receiver",
+        "proc": null
+      },
+      {
+        "actor": "gateway",
+        "id": "gateway",
+        "proc": {
+          "boot": "11111111-2222-3333-4444-666666666666",
+          "build": "gateway-v1",
+          "exe": "adc2d6aa04c8a7d1cdf5f58d601677db2dc14740024e90743102f5390f8d00ef",
+          "pid": 50,
+          "start": 150
+        }
+      },
+      {
+        "actor": "installer",
+        "id": "installer",
+        "proc": {
+          "boot": "11111111-2222-3333-4444-666666666666",
+          "build": "installer-v1",
+          "exe": "7d3cba94a251bd40e764dfa2b47a6e5944373e5367cc607b0628888c44de568a",
+          "pid": 60,
+          "start": 160
+        }
+      }
+    ],
+    "assets_abi": 3,
+    "authority": {
+      "candidate": {
+        "build": "0.2.16",
+        "file": {
+          "bytes": 61,
+          "path": "L3Zhci9saWIvYnJpcS1zZWFsZWQvY2FuZGlkYXRlcy9hdXRob3JpdHk",
+          "sha256": "9101f07e9686ade8405920186a49195243bd936366776fdea21b8e371b5ea222"
+        }
+      },
+      "config": {
+        "bytes": 27,
+        "path": "L2V0Yy9icmlxLWV4ZWN1dGlvbi9hdXRob3JpdHkvY29uZmlnLmpzb24",
+        "sha256": "843e6c8322335d97f499fccbbe0913c5110c15c338bc78f08387d7a8b16343ec"
+      },
+      "control": {
+        "gid": 1001,
+        "mode": 432,
+        "path": "L3J1bi9icmlxeWFyZC1zZWFsZWQvYXV0aG9yaXR5L2NvbnRyb2w",
+        "uid": 0
+      },
+      "custodian": {
+        "boot": "00000000-0000-4000-8000-000000000004",
+        "build": "0.2.16",
+        "exe": "76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708",
+        "pid": 4301,
+        "start": 5301
+      },
+      "fragment": "L2V0Yy9zeXN0ZW1kL3N5c3RlbS9icmlxeWFyZC1mbGVldC5zZXJ2aWNl",
+      "guard": {
+        "build": "0.2.16",
+        "file": {
+          "bytes": 61,
+          "path": "L3Vzci9sb2NhbC9iaW4vYnJpcXlhcmQtZmxlZXQ",
+          "sha256": "9101f07e9686ade8405920186a49195243bd936366776fdea21b8e371b5ea222"
+        }
+      },
+      "guarded_fragment": "3e9abfe3fdbcacf74d3c709e97bd29c0a89d7e476555f3d450afbcce3a133a43",
+      "journal": {
+        "gid": 1001,
+        "mode": 448,
+        "path": "L3Zhci9saWIvYnJpcS1leGVjdXRpb24tYXV0aG9yaXR5L2pvdXJuYWw",
+        "uid": 0
+      },
+      "legacy_fragment": "f17f695dec07c0510c09c3cc0c5131ee5c73623875d02dbcdb83c2a48554de8d",
+      "listeners": {
+        "count": 1,
+        "names": "14c2529eb4498c5d1ffd6915d05bf58a91bdda796af59f41d480d11c099d0479",
+        "store_max": 1
+      },
+      "pre": {
+        "boot": "00000000-0000-4000-8000-000000000004",
+        "build": "legacy",
+        "exe": "6296800b3ed581939f79084226669b33298fe24a75290ef272365e1386df302a",
+        "pid": 124,
+        "start": 456
+      },
+      "tls_cert": {
+        "bytes": 217,
+        "sha256": "1aa89d6ac9deb5627e1956c46614350d3f4f6e1d9cd948df51afc8fc442a0ba1"
+      },
+      "tls_key": {
+        "bytes": 60,
+        "sha256": "84a3e32ce8e6e79f3927a021e6d6a894da66187db249470cdbebc6e9e38bb974"
+      },
+      "writer_profile": "1ce6c565be9b35dcbef2d4bc047e9ab64c089a31b4646dcd7914170f7d8530b4"
+    },
+    "closure": {
+      "admin_fleet": "ef036aefb6d98005d89648b7ccf63a36a37195225e1c44b3425ce5b6e4508061",
+      "admin_host": "7ffc83d43e40f10ca2d6221cacbf3f5b1f23f57c0175722702fa2c5f6b28392e",
+      "admin_tls": null,
+      "backup_s3": null,
+      "continuation": {
+        "bearer": "485ba51ef909ab4a8ab6c079482b8b49daddbf6f2754ff9f994dfc7bac67885a",
+        "roots": [
+          "c3ludGhldGljIHRydXN0IGFuY2hvciB0d28",
+          "c3ludGhldGljIHRydXN0IGFuY2hvciBvbmU"
+        ],
+        "server_name": "YXBpLmV4YW1wbGUudGVzdA",
+        "url": "aHR0cHM6Ly9hcGkuZXhhbXBsZS50ZXN0L2ludGVybmFsL2V4ZWN1dGlvbi92MS9jb250aW51ZQ"
+      },
+      "file_key": null,
+      "format": "native.closure/v1",
+      "peers": [
+        {
+          "actor": "A",
+          "client": {
+            "leaf": "4b6254e7b27c2f8d02d14bd97799889c9e90e34a48b1b32985a064e04848bccb",
+            "spki": "83f05c2ca578e1b4e4cb603aabe1f6ee139c3694d6d19c35c49696b1cd122c0a"
+          },
+          "endpoint": "aHR0cHM6Ly9hLmV4YW1wbGUudGVzdDo3NTQy",
+          "id": "authority",
+          "server": {
+            "leaf": "7b46fb62eb248f122e090f9e2409cc436c7cac60e213e87c4c5d5858a4955e13",
+            "spki": "f62c161ebb8d8c6a8de4724b840582a5471a538dff1765a7e370aeebddf09c6a"
+          },
+          "server_name": "YS5leGFtcGxlLnRlc3Q"
+        },
+        {
+          "actor": "B",
+          "client": {
+            "leaf": "8c8544e41fc6f9c19d14054f34232afec67a7b7110c61ce2c47862cbfe364f94",
+            "spki": "87bb72b7e1fd141934138c04fb5bc754560aeec7bcc8deeea871dc5b14812624"
+          },
+          "endpoint": "aHR0cHM6Ly9iLmV4YW1wbGUudGVzdDo5MDAw",
+          "id": "api",
+          "server": {
+            "leaf": "be1f6c696333c8a59f775e06b7d3a4a397334cb76e38cd023e0530db34b2f103",
+            "spki": "b4b559bf10b654fe4393d6e275be3a9b687014af5626380d3840faf7db8aaed8"
+          },
+          "server_name": "Yi5leGFtcGxlLnRlc3Q"
+        },
+        {
+          "actor": "H",
+          "client": {
+            "leaf": "d28e6bc629bdf07e9dc95be83968895fdffe8b0fe0e98cb500ae78b99dd841af",
+            "spki": "88ff479994f2cd3c2f40a6cce1c9c2cbdf54de2b5dbc66fa7fe9044011f52dd0"
+          },
+          "endpoint": "aHR0cHM6Ly9oLmV4YW1wbGUudGVzdDo3NTQx",
+          "id": "host",
+          "server": {
+            "leaf": "c76b6d2f4d90fc5dec009f17528e0e12965344d2448ec5b622b0cbc4836d378f",
+            "spki": "8afe277bb66298f123cf34d9d1514ebf64aea15d309b136e8e5f5e73cba8e5ff"
+          },
+          "server_name": "aC5leGFtcGxlLnRlc3Q"
+        },
+        {
+          "actor": "R",
+          "client": {
+            "leaf": "dd0909f1dc01a987249c479228542e5156135fc8859f14f5084bfddf9dec75d8",
+            "spki": "8e37adca2b744aca3f6c12b471d65ca39f4cfb07aacc5b311e672caf9e54c4d1"
+          },
+          "endpoint": "aHR0cHM6Ly9yLmV4YW1wbGUudGVzdDo5MDAx",
+          "id": "receiver",
+          "server": {
+            "leaf": "a5f966b627c0c2fde27fe14d5890734378d04244fe63a39df52e6decbf6d2463",
+            "spki": "3166b991490a131a4e74f63878ac7ff7961110a5d49f059ac100bc9b80a457ee"
+          },
+          "server_name": "ci5leGFtcGxlLnRlc3Q"
+        },
+        {
+          "actor": "gateway",
+          "client": {
+            "leaf": "d0e0cf14973569f1f6bd829e87910c9f12a396507c8e0d31d94fd68830eab3f9",
+            "spki": "c310453a7d028b9fc3a368f1545f6bbec617ce080285baf98101367b6f834560"
+          },
+          "endpoint": "aHR0cHM6Ly9nYXRld2F5LmV4YW1wbGUudGVzdDo5MDAy",
+          "id": "gateway",
+          "server": {
+            "leaf": "26e69e42fbe569d2b5e132cb85450a71f49517b7c08ab0ed376b7fa1e2cb7279",
+            "spki": "1dcf9a2408f27678ab2aefbc0b8fc10a7a879feaac6dce998ee7cd5b0545c31d"
+          },
+          "server_name": "Z2F0ZXdheS5leGFtcGxlLnRlc3Q"
+        },
+        {
+          "actor": "installer",
+          "client": {
+            "leaf": "8ab26fda0614837d92f3d997af93a0df645c6ddecac2bf33bf0ae989d0616366",
+            "spki": "64593b50381f999fc0c75d6192c69f39ba348a83dbd299a40340e90a2e168e28"
+          },
+          "endpoint": "aHR0cHM6Ly9pbnN0YWxsZXIuZXhhbXBsZS50ZXN0OjkwMDM",
+          "id": "installer",
+          "server": {
+            "leaf": "80c25c538326fb26d075e99354c46ff758dbb26018f67c61789b6846d236b975",
+            "spki": "65563db853750eac12e49e698a8fa421b95ffbef44d704b189945e655d93bca3"
+          },
+          "server_name": "aW5zdGFsbGVyLmV4YW1wbGUudGVzdA"
+        }
+      ],
+      "registry": "5d4b4c02bd5baa8f884702850054ad999dd47056b1e1eade30850452b36a68db",
+      "support": {
+        "boot_id": "00000000-0000-4000-8000-000000000004",
+        "image_root": "fe95d9b317f449ba0fe679a1eb7e64968f3e51c4120a1c4687216348d80421ff",
+        "profile": "e92b19b32a82d968a4939ce613d8189f8b2d26e67877faeebd8cc090820b072c",
+        "release_policy": "de23630b1249a22e168d7956ebdaaa4334ab86d249a3a8245eae92e3cba4b981"
+      },
+      "x": {
+        "aud": "staging",
+        "host": "h_227b9590e4e7",
+        "op": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "serial": 1
+      }
+    },
+    "daemon": {
+      "candidate": {
+        "build": "0.2.16",
+        "file": {
+          "bytes": 56,
+          "path": "L3Zhci9saWIvYnJpcS1zZWFsZWQvY2FuZGlkYXRlcy9kYWVtb24",
+          "sha256": "76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708"
+        }
+      },
+      "config": {
+        "bytes": 24,
+        "path": "L2V0Yy9icmlxeWFyZC9jb25maWcueWFtbA",
+        "sha256": "978468f1e03b2b19f82590d6e484586f20b5529809e727ee5bb9cc26c0bf0b04"
+      },
+      "control": {
+        "gid": 0,
+        "mode": 384,
+        "path": "L3J1bi9icmlxeWFyZC1zZWFsZWQvZGFlbW9uL2NvbnRyb2w",
+        "uid": 0
+      },
+      "custodian": {
+        "boot": "00000000-0000-4000-8000-000000000004",
+        "build": "0.2.16",
+        "exe": "76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708",
+        "pid": 4300,
+        "start": 5300
+      },
+      "fragment": "L2V0Yy9zeXN0ZW1kL3N5c3RlbS9icmlxeWFyZC5zZXJ2aWNl",
+      "guard": {
+        "build": "0.2.16",
+        "file": {
+          "bytes": 56,
+          "path": "L3Vzci9sb2NhbC9iaW4vYnJpcXlhcmRk",
+          "sha256": "76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708"
+        }
+      },
+      "guarded_fragment": "da7bebfad9eedca99308794922b900dc232f5c02894db4946b65973d576e49e7",
+      "journal": {
+        "gid": 0,
+        "mode": 448,
+        "path": "L3Zhci9saWIvYnJpcXlhcmQvam91cm5hbA",
+        "uid": 0
+      },
+      "legacy_fragment": "3cc413812b1fb6433be62f03745adfb82e831b125a0f0203e74e95ddcf4019cf",
+      "listeners": {
+        "count": 2,
+        "names": "12a718508021f504b16b51f978df259cd503ada6304cd12cc94d0047fc72824f",
+        "store_max": 2770
+      },
+      "pre": {
+        "boot": "00000000-0000-4000-8000-000000000004",
+        "build": "0.2.15",
+        "exe": "1bb2ca54c4fef551b84469116a2b6c1390517258e82bd41df4d1e1e40845d3f9",
+        "pid": 123,
+        "start": 456
+      },
+      "tls_cert": {
+        "bytes": 217,
+        "sha256": "9a58a2116a850f67ee3b4b91759ad4371ac54bca66a01aa8b694c4ff8b492c41"
+      },
+      "tls_key": {
+        "bytes": 57,
+        "sha256": "3482907cb09c8a9159451cc67c3bcf2f6a206f8e54588107206162132653381d"
+      },
+      "writer_profile": "0cf4e782481341e193236267e1036ddacbedb80364cd99f0a30f66e0af4a15a3"
+    },
+    "format": "native.inputs/v1",
+    "registered": "h_10-42-0-15",
+    "source_release": {
+      "cli": "70f7d5e71f2be5e2ea7afb794efacaec96b90a88108d7c5f7f3c2b0f3cac89a8",
+      "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "daemon": "1bb2ca54c4fef551b84469116a2b6c1390517258e82bd41df4d1e1e40845d3f9",
+      "fleet": "6296800b3ed581939f79084226669b33298fe24a75290ef272365e1386df302a",
+      "pin_file": "39ee759b34c464ed054b4229055aea5d288f985ff3e6570159b8000a5c8fbf6f",
+      "release_id": 1015,
+      "sums": "cb2524882f9ac80bf2dc59c5fd8513b9e7697f89e6ea2237c0bcf66c4858d65f",
+      "version": "0.2.15"
+    },
+    "target_release": {
+      "cli": "9d698c123ffc2ee48417aebb40dff42068a335d73f8753d25b2678cc3f736129",
+      "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "daemon": "76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708",
+      "fleet": "9101f07e9686ade8405920186a49195243bd936366776fdea21b8e371b5ea222",
+      "pin_file": "5bac903c58bfd8225de8b951af60c5b5a62baef373891c95452d74e01853e23e",
+      "release_id": 1016,
+      "sums": "159a1ba094f0aa299ef4a03b62039213611f70054bd2cdff8f7e481332a64212",
+      "version": "0.2.16"
+    },
+    "topology": {
+      "order": [
+        "h_10-42-1-19",
+        "h_10-42-1-21",
+        "h_10-42-0-17",
+        "h_10-42-0-15"
+      ],
+      "policy_inventory": "abf7711a9babc27bf7a84acf12ce80f8e9df4caa2743e2ae4c908f651736ca4d",
+      "regions": [
+        {
+          "hosts": [
+            {
+              "intrinsic": "h_3a1b5c7d9e0f",
+              "reader_floor": "cffac0448c71a82122e6082dcf189e19354b56bc5b887d59f5d72cb862dfff95",
+              "registered": "h_10-42-1-19"
+            },
+            {
+              "intrinsic": "h_4b2c6d8e0f1a",
+              "reader_floor": "86f4982f756647c7933d3bf4f2976eeea620cf1e9df0c5399760826a4c6c317a",
+              "registered": "h_10-42-1-21"
+            }
+          ],
+          "id": "eu",
+          "minimum_accepting": 1
+        },
+        {
+          "hosts": [
+            {
+              "intrinsic": "h_227b9590e4e7",
+              "reader_floor": "ab1fc6372fd7d9ac65b8ab566fdc7ffb0f07313ded07e9642f0c1a9d19663956",
+              "registered": "h_10-42-0-15"
+            },
+            {
+              "intrinsic": "h_5c3d7e9f1a2b",
+              "reader_floor": "b0f1d09e81a8e2efb20f92a0f364a65b268fb699e9c116095a080246070e2815",
+              "registered": "h_10-42-0-17"
+            }
+          ],
+          "id": "na",
+          "minimum_accepting": 1
+        }
+      ]
+    },
+    "x": {
+      "aud": "staging",
+      "host": "h_227b9590e4e7",
+      "op": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "serial": 1
+    }
+  },
+  "inputs_canonical": "{\"actors\":[{\"actor\":\"A\",\"id\":\"authority\",\"proc\":null},{\"actor\":\"B\",\"id\":\"api\",\"proc\":null},{\"actor\":\"H\",\"id\":\"host\",\"proc\":null},{\"actor\":\"R\",\"id\":\"receiver\",\"proc\":null},{\"actor\":\"gateway\",\"id\":\"gateway\",\"proc\":{\"boot\":\"11111111-2222-3333-4444-666666666666\",\"build\":\"gateway-v1\",\"exe\":\"adc2d6aa04c8a7d1cdf5f58d601677db2dc14740024e90743102f5390f8d00ef\",\"pid\":50,\"start\":150}},{\"actor\":\"installer\",\"id\":\"installer\",\"proc\":{\"boot\":\"11111111-2222-3333-4444-666666666666\",\"build\":\"installer-v1\",\"exe\":\"7d3cba94a251bd40e764dfa2b47a6e5944373e5367cc607b0628888c44de568a\",\"pid\":60,\"start\":160}}],\"assets_abi\":3,\"authority\":{\"candidate\":{\"build\":\"0.2.16\",\"file\":{\"bytes\":61,\"path\":\"L3Zhci9saWIvYnJpcS1zZWFsZWQvY2FuZGlkYXRlcy9hdXRob3JpdHk\",\"sha256\":\"9101f07e9686ade8405920186a49195243bd936366776fdea21b8e371b5ea222\"}},\"config\":{\"bytes\":27,\"path\":\"L2V0Yy9icmlxLWV4ZWN1dGlvbi9hdXRob3JpdHkvY29uZmlnLmpzb24\",\"sha256\":\"843e6c8322335d97f499fccbbe0913c5110c15c338bc78f08387d7a8b16343ec\"},\"control\":{\"gid\":1001,\"mode\":432,\"path\":\"L3J1bi9icmlxeWFyZC1zZWFsZWQvYXV0aG9yaXR5L2NvbnRyb2w\",\"uid\":0},\"custodian\":{\"boot\":\"00000000-0000-4000-8000-000000000004\",\"build\":\"0.2.16\",\"exe\":\"76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708\",\"pid\":4301,\"start\":5301},\"fragment\":\"L2V0Yy9zeXN0ZW1kL3N5c3RlbS9icmlxeWFyZC1mbGVldC5zZXJ2aWNl\",\"guard\":{\"build\":\"0.2.16\",\"file\":{\"bytes\":61,\"path\":\"L3Vzci9sb2NhbC9iaW4vYnJpcXlhcmQtZmxlZXQ\",\"sha256\":\"9101f07e9686ade8405920186a49195243bd936366776fdea21b8e371b5ea222\"}},\"guarded_fragment\":\"3e9abfe3fdbcacf74d3c709e97bd29c0a89d7e476555f3d450afbcce3a133a43\",\"journal\":{\"gid\":1001,\"mode\":448,\"path\":\"L3Zhci9saWIvYnJpcS1leGVjdXRpb24tYXV0aG9yaXR5L2pvdXJuYWw\",\"uid\":0},\"legacy_fragment\":\"f17f695dec07c0510c09c3cc0c5131ee5c73623875d02dbcdb83c2a48554de8d\",\"listeners\":{\"count\":1,\"names\":\"14c2529eb4498c5d1ffd6915d05bf58a91bdda796af59f41d480d11c099d0479\",\"store_max\":1},\"pre\":{\"boot\":\"00000000-0000-4000-8000-000000000004\",\"build\":\"legacy\",\"exe\":\"6296800b3ed581939f79084226669b33298fe24a75290ef272365e1386df302a\",\"pid\":124,\"start\":456},\"tls_cert\":{\"bytes\":217,\"sha256\":\"1aa89d6ac9deb5627e1956c46614350d3f4f6e1d9cd948df51afc8fc442a0ba1\"},\"tls_key\":{\"bytes\":60,\"sha256\":\"84a3e32ce8e6e79f3927a021e6d6a894da66187db249470cdbebc6e9e38bb974\"},\"writer_profile\":\"1ce6c565be9b35dcbef2d4bc047e9ab64c089a31b4646dcd7914170f7d8530b4\"},\"closure\":{\"admin_fleet\":\"ef036aefb6d98005d89648b7ccf63a36a37195225e1c44b3425ce5b6e4508061\",\"admin_host\":\"7ffc83d43e40f10ca2d6221cacbf3f5b1f23f57c0175722702fa2c5f6b28392e\",\"admin_tls\":null,\"backup_s3\":null,\"continuation\":{\"bearer\":\"485ba51ef909ab4a8ab6c079482b8b49daddbf6f2754ff9f994dfc7bac67885a\",\"roots\":[\"c3ludGhldGljIHRydXN0IGFuY2hvciB0d28\",\"c3ludGhldGljIHRydXN0IGFuY2hvciBvbmU\"],\"server_name\":\"YXBpLmV4YW1wbGUudGVzdA\",\"url\":\"aHR0cHM6Ly9hcGkuZXhhbXBsZS50ZXN0L2ludGVybmFsL2V4ZWN1dGlvbi92MS9jb250aW51ZQ\"},\"file_key\":null,\"format\":\"native.closure/v1\",\"peers\":[{\"actor\":\"A\",\"client\":{\"leaf\":\"4b6254e7b27c2f8d02d14bd97799889c9e90e34a48b1b32985a064e04848bccb\",\"spki\":\"83f05c2ca578e1b4e4cb603aabe1f6ee139c3694d6d19c35c49696b1cd122c0a\"},\"endpoint\":\"aHR0cHM6Ly9hLmV4YW1wbGUudGVzdDo3NTQy\",\"id\":\"authority\",\"server\":{\"leaf\":\"7b46fb62eb248f122e090f9e2409cc436c7cac60e213e87c4c5d5858a4955e13\",\"spki\":\"f62c161ebb8d8c6a8de4724b840582a5471a538dff1765a7e370aeebddf09c6a\"},\"server_name\":\"YS5leGFtcGxlLnRlc3Q\"},{\"actor\":\"B\",\"client\":{\"leaf\":\"8c8544e41fc6f9c19d14054f34232afec67a7b7110c61ce2c47862cbfe364f94\",\"spki\":\"87bb72b7e1fd141934138c04fb5bc754560aeec7bcc8deeea871dc5b14812624\"},\"endpoint\":\"aHR0cHM6Ly9iLmV4YW1wbGUudGVzdDo5MDAw\",\"id\":\"api\",\"server\":{\"leaf\":\"be1f6c696333c8a59f775e06b7d3a4a397334cb76e38cd023e0530db34b2f103\",\"spki\":\"b4b559bf10b654fe4393d6e275be3a9b687014af5626380d3840faf7db8aaed8\"},\"server_name\":\"Yi5leGFtcGxlLnRlc3Q\"},{\"actor\":\"H\",\"client\":{\"leaf\":\"d28e6bc629bdf07e9dc95be83968895fdffe8b0fe0e98cb500ae78b99dd841af\",\"spki\":\"88ff479994f2cd3c2f40a6cce1c9c2cbdf54de2b5dbc66fa7fe9044011f52dd0\"},\"endpoint\":\"aHR0cHM6Ly9oLmV4YW1wbGUudGVzdDo3NTQx\",\"id\":\"host\",\"server\":{\"leaf\":\"c76b6d2f4d90fc5dec009f17528e0e12965344d2448ec5b622b0cbc4836d378f\",\"spki\":\"8afe277bb66298f123cf34d9d1514ebf64aea15d309b136e8e5f5e73cba8e5ff\"},\"server_name\":\"aC5leGFtcGxlLnRlc3Q\"},{\"actor\":\"R\",\"client\":{\"leaf\":\"dd0909f1dc01a987249c479228542e5156135fc8859f14f5084bfddf9dec75d8\",\"spki\":\"8e37adca2b744aca3f6c12b471d65ca39f4cfb07aacc5b311e672caf9e54c4d1\"},\"endpoint\":\"aHR0cHM6Ly9yLmV4YW1wbGUudGVzdDo5MDAx\",\"id\":\"receiver\",\"server\":{\"leaf\":\"a5f966b627c0c2fde27fe14d5890734378d04244fe63a39df52e6decbf6d2463\",\"spki\":\"3166b991490a131a4e74f63878ac7ff7961110a5d49f059ac100bc9b80a457ee\"},\"server_name\":\"ci5leGFtcGxlLnRlc3Q\"},{\"actor\":\"gateway\",\"client\":{\"leaf\":\"d0e0cf14973569f1f6bd829e87910c9f12a396507c8e0d31d94fd68830eab3f9\",\"spki\":\"c310453a7d028b9fc3a368f1545f6bbec617ce080285baf98101367b6f834560\"},\"endpoint\":\"aHR0cHM6Ly9nYXRld2F5LmV4YW1wbGUudGVzdDo5MDAy\",\"id\":\"gateway\",\"server\":{\"leaf\":\"26e69e42fbe569d2b5e132cb85450a71f49517b7c08ab0ed376b7fa1e2cb7279\",\"spki\":\"1dcf9a2408f27678ab2aefbc0b8fc10a7a879feaac6dce998ee7cd5b0545c31d\"},\"server_name\":\"Z2F0ZXdheS5leGFtcGxlLnRlc3Q\"},{\"actor\":\"installer\",\"client\":{\"leaf\":\"8ab26fda0614837d92f3d997af93a0df645c6ddecac2bf33bf0ae989d0616366\",\"spki\":\"64593b50381f999fc0c75d6192c69f39ba348a83dbd299a40340e90a2e168e28\"},\"endpoint\":\"aHR0cHM6Ly9pbnN0YWxsZXIuZXhhbXBsZS50ZXN0OjkwMDM\",\"id\":\"installer\",\"server\":{\"leaf\":\"80c25c538326fb26d075e99354c46ff758dbb26018f67c61789b6846d236b975\",\"spki\":\"65563db853750eac12e49e698a8fa421b95ffbef44d704b189945e655d93bca3\"},\"server_name\":\"aW5zdGFsbGVyLmV4YW1wbGUudGVzdA\"}],\"registry\":\"5d4b4c02bd5baa8f884702850054ad999dd47056b1e1eade30850452b36a68db\",\"support\":{\"boot_id\":\"00000000-0000-4000-8000-000000000004\",\"image_root\":\"fe95d9b317f449ba0fe679a1eb7e64968f3e51c4120a1c4687216348d80421ff\",\"profile\":\"e92b19b32a82d968a4939ce613d8189f8b2d26e67877faeebd8cc090820b072c\",\"release_policy\":\"de23630b1249a22e168d7956ebdaaa4334ab86d249a3a8245eae92e3cba4b981\"},\"x\":{\"aud\":\"staging\",\"host\":\"h_227b9590e4e7\",\"op\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"serial\":1}},\"daemon\":{\"candidate\":{\"build\":\"0.2.16\",\"file\":{\"bytes\":56,\"path\":\"L3Zhci9saWIvYnJpcS1zZWFsZWQvY2FuZGlkYXRlcy9kYWVtb24\",\"sha256\":\"76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708\"}},\"config\":{\"bytes\":24,\"path\":\"L2V0Yy9icmlxeWFyZC9jb25maWcueWFtbA\",\"sha256\":\"978468f1e03b2b19f82590d6e484586f20b5529809e727ee5bb9cc26c0bf0b04\"},\"control\":{\"gid\":0,\"mode\":384,\"path\":\"L3J1bi9icmlxeWFyZC1zZWFsZWQvZGFlbW9uL2NvbnRyb2w\",\"uid\":0},\"custodian\":{\"boot\":\"00000000-0000-4000-8000-000000000004\",\"build\":\"0.2.16\",\"exe\":\"76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708\",\"pid\":4300,\"start\":5300},\"fragment\":\"L2V0Yy9zeXN0ZW1kL3N5c3RlbS9icmlxeWFyZC5zZXJ2aWNl\",\"guard\":{\"build\":\"0.2.16\",\"file\":{\"bytes\":56,\"path\":\"L3Vzci9sb2NhbC9iaW4vYnJpcXlhcmRk\",\"sha256\":\"76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708\"}},\"guarded_fragment\":\"da7bebfad9eedca99308794922b900dc232f5c02894db4946b65973d576e49e7\",\"journal\":{\"gid\":0,\"mode\":448,\"path\":\"L3Zhci9saWIvYnJpcXlhcmQvam91cm5hbA\",\"uid\":0},\"legacy_fragment\":\"3cc413812b1fb6433be62f03745adfb82e831b125a0f0203e74e95ddcf4019cf\",\"listeners\":{\"count\":2,\"names\":\"12a718508021f504b16b51f978df259cd503ada6304cd12cc94d0047fc72824f\",\"store_max\":2770},\"pre\":{\"boot\":\"00000000-0000-4000-8000-000000000004\",\"build\":\"0.2.15\",\"exe\":\"1bb2ca54c4fef551b84469116a2b6c1390517258e82bd41df4d1e1e40845d3f9\",\"pid\":123,\"start\":456},\"tls_cert\":{\"bytes\":217,\"sha256\":\"9a58a2116a850f67ee3b4b91759ad4371ac54bca66a01aa8b694c4ff8b492c41\"},\"tls_key\":{\"bytes\":57,\"sha256\":\"3482907cb09c8a9159451cc67c3bcf2f6a206f8e54588107206162132653381d\"},\"writer_profile\":\"0cf4e782481341e193236267e1036ddacbedb80364cd99f0a30f66e0af4a15a3\"},\"format\":\"native.inputs/v1\",\"registered\":\"h_10-42-0-15\",\"source_release\":{\"cli\":\"70f7d5e71f2be5e2ea7afb794efacaec96b90a88108d7c5f7f3c2b0f3cac89a8\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"daemon\":\"1bb2ca54c4fef551b84469116a2b6c1390517258e82bd41df4d1e1e40845d3f9\",\"fleet\":\"6296800b3ed581939f79084226669b33298fe24a75290ef272365e1386df302a\",\"pin_file\":\"39ee759b34c464ed054b4229055aea5d288f985ff3e6570159b8000a5c8fbf6f\",\"release_id\":1015,\"sums\":\"cb2524882f9ac80bf2dc59c5fd8513b9e7697f89e6ea2237c0bcf66c4858d65f\",\"version\":\"0.2.15\"},\"target_release\":{\"cli\":\"9d698c123ffc2ee48417aebb40dff42068a335d73f8753d25b2678cc3f736129\",\"commit\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"daemon\":\"76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708\",\"fleet\":\"9101f07e9686ade8405920186a49195243bd936366776fdea21b8e371b5ea222\",\"pin_file\":\"5bac903c58bfd8225de8b951af60c5b5a62baef373891c95452d74e01853e23e\",\"release_id\":1016,\"sums\":\"159a1ba094f0aa299ef4a03b62039213611f70054bd2cdff8f7e481332a64212\",\"version\":\"0.2.16\"},\"topology\":{\"order\":[\"h_10-42-1-19\",\"h_10-42-1-21\",\"h_10-42-0-17\",\"h_10-42-0-15\"],\"policy_inventory\":\"abf7711a9babc27bf7a84acf12ce80f8e9df4caa2743e2ae4c908f651736ca4d\",\"regions\":[{\"hosts\":[{\"intrinsic\":\"h_3a1b5c7d9e0f\",\"reader_floor\":\"cffac0448c71a82122e6082dcf189e19354b56bc5b887d59f5d72cb862dfff95\",\"registered\":\"h_10-42-1-19\"},{\"intrinsic\":\"h_4b2c6d8e0f1a\",\"reader_floor\":\"86f4982f756647c7933d3bf4f2976eeea620cf1e9df0c5399760826a4c6c317a\",\"registered\":\"h_10-42-1-21\"}],\"id\":\"eu\",\"minimum_accepting\":1},{\"hosts\":[{\"intrinsic\":\"h_227b9590e4e7\",\"reader_floor\":\"ab1fc6372fd7d9ac65b8ab566fdc7ffb0f07313ded07e9642f0c1a9d19663956\",\"registered\":\"h_10-42-0-15\"},{\"intrinsic\":\"h_5c3d7e9f1a2b\",\"reader_floor\":\"b0f1d09e81a8e2efb20f92a0f364a65b268fb699e9c116095a080246070e2815\",\"registered\":\"h_10-42-0-17\"}],\"id\":\"na\",\"minimum_accepting\":1}]},\"x\":{\"aud\":\"staging\",\"host\":\"h_227b9590e4e7\",\"op\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"serial\":1}}",
+  "inputs_sha256": "371477a36839d6177873c5720dd9648c9c0c07611a1b7287bae78330c81b85a5",
+  "native": {
+    "actors": [
+      {
+        "actor": "A",
+        "id": "authority",
+        "identity": "service"
+      },
+      {
+        "actor": "B",
+        "id": "api",
+        "identity": "service"
+      },
+      {
+        "actor": "H",
+        "id": "host",
+        "identity": "service"
+      },
+      {
+        "actor": "R",
+        "id": "receiver",
+        "identity": "service"
+      },
+      {
+        "actor": "gateway",
+        "id": "gateway",
+        "identity": {
+          "boot": "11111111-2222-3333-4444-666666666666",
+          "build": "gateway-v1",
+          "exe": "adc2d6aa04c8a7d1cdf5f58d601677db2dc14740024e90743102f5390f8d00ef",
+          "pid": 50,
+          "start": 150
+        }
+      },
+      {
+        "actor": "installer",
+        "id": "installer",
+        "identity": {
+          "boot": "11111111-2222-3333-4444-666666666666",
+          "build": "installer-v1",
+          "exe": "7d3cba94a251bd40e764dfa2b47a6e5944373e5367cc607b0628888c44de568a",
+          "pid": 60,
+          "start": 160
+        }
+      }
+    ],
+    "authority": {
+      "candidate_path": "/var/lib/briq-sealed/candidates/authority",
+      "config": {
+        "base64url": "c3ludGhldGljIGF1dGhvcml0eSBjb25maWcK",
+        "bytes": 27,
+        "sha256": "843e6c8322335d97f499fccbbe0913c5110c15c338bc78f08387d7a8b16343ec"
+      },
+      "config_path": "/etc/briq-execution/authority/config.json",
+      "control_gid": 1001,
+      "custodian": {
+        "boot": "00000000-0000-4000-8000-000000000004",
+        "build": "0.2.16",
+        "exe": "76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708",
+        "pid": 4301,
+        "start": 5301
+      },
+      "custodian_owner": {
+        "gid": 0,
+        "uid": 0
+      },
+      "fragment": "/etc/systemd/system/briqyard-fleet.service",
+      "guard": {
+        "base64url": "c3ludGhldGljIGJyaXF5YXJkLWZsZWV0IHJlbGVhc2UgYXNzZXQgb2YgdGhlIHRhcmdldCByZWxlYXNlCg",
+        "bytes": 61,
+        "sha256": "9101f07e9686ade8405920186a49195243bd936366776fdea21b8e371b5ea222"
+      },
+      "guard_build": "0.2.16",
+      "guarded_fragment": {
+        "base64url": "W1NlcnZpY2VdCkV4ZWNTdGFydD0vdXNyL2xvY2FsL2Jpbi9icmlxeWFyZC1mbGVldCBzZWFsZWQtZ3VhcmQK",
+        "bytes": 63,
+        "sha256": "3e9abfe3fdbcacf74d3c709e97bd29c0a89d7e476555f3d450afbcce3a133a43"
+      },
+      "journal": {
+        "gid": 1001,
+        "mode": 448,
+        "path": "/var/lib/briq-execution-authority/journal",
+        "uid": 0
+      },
+      "legacy_fragment": {
+        "base64url": "W1NlcnZpY2VdCkV4ZWNTdGFydD0vdXNyL2xvY2FsL2Jpbi9icmlxeWFyZC1mbGVldCBzZXJ2ZQo",
+        "bytes": 56,
+        "sha256": "f17f695dec07c0510c09c3cc0c5131ee5c73623875d02dbcdb83c2a48554de8d"
+      },
+      "listener_names": [
+        "api"
+      ],
+      "store_max": 1,
+      "tls_cert": {
+        "base64url": "MIIA1TCCAIegAwIBAgIBATAFBgMrZXAwFDESMBAGA1UEAwwJZXhlY3V0aW9uMB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowFDESMBAGA1UEAwwJZXhlY3V0aW9uMCowBQYDK2VwAyEAE5j2LG0aRXxRumpLXz29L2n8qTIWIY3ImX5Ba9F9k8owBQYDK2VwA0EANAnm34_SVvBh46kvT7BJ5wivjGz873cgFcwTos-VVQhKCAZeXsPfGjmI21azAmpG4bRpvehIzZyrobBYCN70Aw",
+        "bytes": 217,
+        "sha256": "1aa89d6ac9deb5627e1956c46614350d3f4f6e1d9cd948df51afc8fc442a0ba1"
+      },
+      "tls_key": {
+        "base64url": "c3ludGhldGljIGF1dGhvcml0eSBvcmRpbmFyeSBUTFMga2V5IHBsYWNlaG9sZGVyLCBub3QgYSBrZXkK",
+        "bytes": 60,
+        "sha256": "84a3e32ce8e6e79f3927a021e6d6a894da66187db249470cdbebc6e9e38bb974"
+      },
+      "writer_profile": {
+        "base64url": "c3ludGhldGljIGF1dGhvcml0eSB3cml0ZXIgcHJvZmlsZQo",
+        "bytes": 35,
+        "sha256": "1ce6c565be9b35dcbef2d4bc047e9ab64c089a31b4646dcd7914170f7d8530b4"
+      }
+    },
+    "closure": {
+      "admin_fleet": "ef036aefb6d98005d89648b7ccf63a36a37195225e1c44b3425ce5b6e4508061",
+      "admin_host": "7ffc83d43e40f10ca2d6221cacbf3f5b1f23f57c0175722702fa2c5f6b28392e",
+      "admin_tls": null,
+      "backup_s3": null,
+      "continuation": {
+        "bearer": "485ba51ef909ab4a8ab6c079482b8b49daddbf6f2754ff9f994dfc7bac67885a",
+        "roots": [
+          "c3ludGhldGljIHRydXN0IGFuY2hvciB0d28",
+          "c3ludGhldGljIHRydXN0IGFuY2hvciBvbmU"
+        ],
+        "server_name": "YXBpLmV4YW1wbGUudGVzdA",
+        "url": "aHR0cHM6Ly9hcGkuZXhhbXBsZS50ZXN0L2ludGVybmFsL2V4ZWN1dGlvbi92MS9jb250aW51ZQ"
+      },
+      "file_key": null,
+      "peers": [
+        {
+          "actor": "A",
+          "client": {
+            "leaf": "4b6254e7b27c2f8d02d14bd97799889c9e90e34a48b1b32985a064e04848bccb",
+            "spki": "83f05c2ca578e1b4e4cb603aabe1f6ee139c3694d6d19c35c49696b1cd122c0a"
+          },
+          "endpoint": "aHR0cHM6Ly9hLmV4YW1wbGUudGVzdDo3NTQy",
+          "id": "authority",
+          "server": {
+            "leaf": "7b46fb62eb248f122e090f9e2409cc436c7cac60e213e87c4c5d5858a4955e13",
+            "spki": "f62c161ebb8d8c6a8de4724b840582a5471a538dff1765a7e370aeebddf09c6a"
+          },
+          "server_name": "YS5leGFtcGxlLnRlc3Q"
+        },
+        {
+          "actor": "B",
+          "client": {
+            "leaf": "8c8544e41fc6f9c19d14054f34232afec67a7b7110c61ce2c47862cbfe364f94",
+            "spki": "87bb72b7e1fd141934138c04fb5bc754560aeec7bcc8deeea871dc5b14812624"
+          },
+          "endpoint": "aHR0cHM6Ly9iLmV4YW1wbGUudGVzdDo5MDAw",
+          "id": "api",
+          "server": {
+            "leaf": "be1f6c696333c8a59f775e06b7d3a4a397334cb76e38cd023e0530db34b2f103",
+            "spki": "b4b559bf10b654fe4393d6e275be3a9b687014af5626380d3840faf7db8aaed8"
+          },
+          "server_name": "Yi5leGFtcGxlLnRlc3Q"
+        },
+        {
+          "actor": "H",
+          "client": {
+            "leaf": "d28e6bc629bdf07e9dc95be83968895fdffe8b0fe0e98cb500ae78b99dd841af",
+            "spki": "88ff479994f2cd3c2f40a6cce1c9c2cbdf54de2b5dbc66fa7fe9044011f52dd0"
+          },
+          "endpoint": "aHR0cHM6Ly9oLmV4YW1wbGUudGVzdDo3NTQx",
+          "id": "host",
+          "server": {
+            "leaf": "c76b6d2f4d90fc5dec009f17528e0e12965344d2448ec5b622b0cbc4836d378f",
+            "spki": "8afe277bb66298f123cf34d9d1514ebf64aea15d309b136e8e5f5e73cba8e5ff"
+          },
+          "server_name": "aC5leGFtcGxlLnRlc3Q"
+        },
+        {
+          "actor": "R",
+          "client": {
+            "leaf": "dd0909f1dc01a987249c479228542e5156135fc8859f14f5084bfddf9dec75d8",
+            "spki": "8e37adca2b744aca3f6c12b471d65ca39f4cfb07aacc5b311e672caf9e54c4d1"
+          },
+          "endpoint": "aHR0cHM6Ly9yLmV4YW1wbGUudGVzdDo5MDAx",
+          "id": "receiver",
+          "server": {
+            "leaf": "a5f966b627c0c2fde27fe14d5890734378d04244fe63a39df52e6decbf6d2463",
+            "spki": "3166b991490a131a4e74f63878ac7ff7961110a5d49f059ac100bc9b80a457ee"
+          },
+          "server_name": "ci5leGFtcGxlLnRlc3Q"
+        },
+        {
+          "actor": "gateway",
+          "client": {
+            "leaf": "d0e0cf14973569f1f6bd829e87910c9f12a396507c8e0d31d94fd68830eab3f9",
+            "spki": "c310453a7d028b9fc3a368f1545f6bbec617ce080285baf98101367b6f834560"
+          },
+          "endpoint": "aHR0cHM6Ly9nYXRld2F5LmV4YW1wbGUudGVzdDo5MDAy",
+          "id": "gateway",
+          "server": {
+            "leaf": "26e69e42fbe569d2b5e132cb85450a71f49517b7c08ab0ed376b7fa1e2cb7279",
+            "spki": "1dcf9a2408f27678ab2aefbc0b8fc10a7a879feaac6dce998ee7cd5b0545c31d"
+          },
+          "server_name": "Z2F0ZXdheS5leGFtcGxlLnRlc3Q"
+        },
+        {
+          "actor": "installer",
+          "client": {
+            "leaf": "8ab26fda0614837d92f3d997af93a0df645c6ddecac2bf33bf0ae989d0616366",
+            "spki": "64593b50381f999fc0c75d6192c69f39ba348a83dbd299a40340e90a2e168e28"
+          },
+          "endpoint": "aHR0cHM6Ly9pbnN0YWxsZXIuZXhhbXBsZS50ZXN0OjkwMDM",
+          "id": "installer",
+          "server": {
+            "leaf": "80c25c538326fb26d075e99354c46ff758dbb26018f67c61789b6846d236b975",
+            "spki": "65563db853750eac12e49e698a8fa421b95ffbef44d704b189945e655d93bca3"
+          },
+          "server_name": "aW5zdGFsbGVyLmV4YW1wbGUudGVzdA"
+        }
+      ],
+      "registry": {
+        "base64url": "W3sia2lkIjoic3RhZ2luZy1uYS12MSIsInJvbGUiOiJhdXRob3JpdHkiLCJpc3N1ZXIiOiJicmlxLXN0YWdpbmctbmEiLCJhdXRob3JpdHkiOiJicmlxLXN0YWdpbmctbmEiLCJwdWJsaWNfa2V5IjpbMTEwLDEyMiwyOCwyMjEsNDEsMTc2LDE4MywxNDMsMjA5LDU4LDI0NCwxOTcsODksMTQzLDIzOSwyNDQsMjM5LDQyLDE1MSwyMiwxMTAsNjAsMTY2LDI0MiwyMjgsMjUxLDI1MiwyMDUsMTI4LDgwLDkxLDI0MV19LHsia2lkIjoiY2VudHJhbC12MSIsInJvbGUiOiJjZW50cmFsIiwiaXNzdWVyIjoiYnJpcS1zdGFnaW5nLWNlbnRyYWwiLCJhdXRob3JpdHkiOm51bGwsInB1YmxpY19rZXkiOlsxMzgsMTM1LDk1LDI1NSwzMCwxNzksMTMyLDgxLDg3LDEyMiwyMDUsOTAsMjU0LDIyOCw1LDY5LDEwMSwxMDQsMjIxLDEyNCwxMzcsMjI0LDE0NCwxMzQsNTgsNSw4NywxODgsMTIyLDI0NCwxNTksMjNdfV0",
+        "bytes": 452,
+        "sha256": "5d4b4c02bd5baa8f884702850054ad999dd47056b1e1eade30850452b36a68db"
+      },
+      "support": {
+        "boot_id": "00000000-0000-4000-8000-000000000004",
+        "image_root": "fe95d9b317f449ba0fe679a1eb7e64968f3e51c4120a1c4687216348d80421ff",
+        "profile": {
+          "base64url": "c3ludGhldGljIGRlcGxveW1lbnQgcHJvZmlsZQo",
+          "bytes": 29,
+          "sha256": "e92b19b32a82d968a4939ce613d8189f8b2d26e67877faeebd8cc090820b072c"
+        },
+        "release_policy": {
+          "base64url": "c3ludGhldGljIHJlbGVhc2UgcG9saWN5Cg",
+          "bytes": 25,
+          "sha256": "de23630b1249a22e168d7956ebdaaa4334ab86d249a3a8245eae92e3cba4b981"
+        }
+      }
+    },
+    "daemon": {
+      "candidate_path": "/var/lib/briq-sealed/candidates/daemon",
+      "config": {
+        "base64url": "c3ludGhldGljIGRhZW1vbiBjb25maWcK",
+        "bytes": 24,
+        "sha256": "978468f1e03b2b19f82590d6e484586f20b5529809e727ee5bb9cc26c0bf0b04"
+      },
+      "config_path": "/etc/briqyard/config.yaml",
+      "control_gid": 0,
+      "custodian": {
+        "boot": "00000000-0000-4000-8000-000000000004",
+        "build": "0.2.16",
+        "exe": "76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708",
+        "pid": 4300,
+        "start": 5300
+      },
+      "custodian_owner": {
+        "gid": 0,
+        "uid": 0
+      },
+      "fragment": "/etc/systemd/system/briqyard.service",
+      "guard": {
+        "base64url": "c3ludGhldGljIGJyaXF5YXJkZCByZWxlYXNlIGFzc2V0IG9mIHRoZSB0YXJnZXQgcmVsZWFzZQo",
+        "bytes": 56,
+        "sha256": "76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708"
+      },
+      "guard_build": "0.2.16",
+      "guarded_fragment": {
+        "base64url": "W1NlcnZpY2VdCkV4ZWNTdGFydD0vdXNyL2xvY2FsL2Jpbi9icmlxeWFyZGQgc2VhbGVkLWd1YXJkCg",
+        "bytes": 58,
+        "sha256": "da7bebfad9eedca99308794922b900dc232f5c02894db4946b65973d576e49e7"
+      },
+      "journal": {
+        "gid": 0,
+        "mode": 448,
+        "path": "/var/lib/briqyard/journal",
+        "uid": 0
+      },
+      "legacy_fragment": {
+        "base64url": "W1NlcnZpY2VdCkV4ZWNTdGFydD0vdXNyL2xvY2FsL2Jpbi9icmlxeWFyZGQgc2VydmUK",
+        "bytes": 51,
+        "sha256": "3cc413812b1fb6433be62f03745adfb82e831b125a0f0203e74e95ddcf4019cf"
+      },
+      "listener_names": [
+        "api",
+        "metrics"
+      ],
+      "store_max": 2770,
+      "tls_cert": {
+        "base64url": "MIIA1TCCAIegAwIBAgIBATAFBgMrZXAwFDESMBAGA1UEAwwJZXhlY3V0aW9uMB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowFDESMBAGA1UEAwwJZXhlY3V0aW9uMCowBQYDK2VwAyEA6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iwwBQYDK2VwA0EAzNhYvLTBIp30S-FzK8xN5sCeXBFBgkUnZFhGEOXYPPWQ-_4oFqkMTSt2t_l5ZEedTfhmZ4ZIadrHm2E3nPnGDA",
+        "bytes": 217,
+        "sha256": "9a58a2116a850f67ee3b4b91759ad4371ac54bca66a01aa8b694c4ff8b492c41"
+      },
+      "tls_key": {
+        "base64url": "c3ludGhldGljIGRhZW1vbiBvcmRpbmFyeSBUTFMga2V5IHBsYWNlaG9sZGVyLCBub3QgYSBrZXkK",
+        "bytes": 57,
+        "sha256": "3482907cb09c8a9159451cc67c3bcf2f6a206f8e54588107206162132653381d"
+      },
+      "writer_profile": {
+        "base64url": "c3ludGhldGljIGRhZW1vbiB3cml0ZXIgcHJvZmlsZQo",
+        "bytes": 32,
+        "sha256": "0cf4e782481341e193236267e1036ddacbedb80364cd99f0a30f66e0af4a15a3"
+      }
+    },
+    "source_daemon_build": "0.2.15",
+    "source_release": {
+      "cli": {
+        "base64url": "c3ludGhldGljIGJyaXF5YXJkIGNsaSByZWxlYXNlIGFzc2V0IG9mIHRoZSBzb3VyY2UgcmVsZWFzZQo",
+        "bytes": 59,
+        "sha256": "70f7d5e71f2be5e2ea7afb794efacaec96b90a88108d7c5f7f3c2b0f3cac89a8"
+      },
+      "daemon": {
+        "base64url": "c3ludGhldGljIGJyaXF5YXJkZCByZWxlYXNlIGFzc2V0IG9mIHRoZSBzb3VyY2UgcmVsZWFzZQo",
+        "bytes": 56,
+        "sha256": "1bb2ca54c4fef551b84469116a2b6c1390517258e82bd41df4d1e1e40845d3f9"
+      },
+      "fleet": {
+        "base64url": "c3ludGhldGljIGJyaXF5YXJkLWZsZWV0IHJlbGVhc2UgYXNzZXQgb2YgdGhlIHNvdXJjZSByZWxlYXNlCg",
+        "bytes": 61,
+        "sha256": "6296800b3ed581939f79084226669b33298fe24a75290ef272365e1386df302a"
+      },
+      "pin_file": {
+        "base64url": "ewogICJjb21taXQiOiAiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsCiAgInJlbGVhc2UiOiAiMC4yLjE1IiwKICAicmVsZWFzZUlkIjogMTAxNSwKICAic2hhMjU2IjogewogICAgIlNIQTI1NlNVTVMteDg2XzY0IjogImNiMjUyNDg4MmY5YWM4MGJmMmRjNTljNWZkODUxM2I5ZTc2OTdmODllNmVhMjIzN2MwYmNmNjZjNDg1OGQ2NWYiLAogICAgImJyaXF5YXJkLWZsZWV0LWxpbnV4LXg4Nl82NCI6ICI2Mjk2ODAwYjNlZDU4MTkzOWY3OTA4NDIyNjY2OWIzMzI5OGZlMjRhNzUyOTBlZjI3MjM2NWUxMzg2ZGYzMDJhIiwKICAgICJicmlxeWFyZC1saW51eC14ODZfNjQiOiAiNzBmN2Q1ZTcxZjJiZTVlMmVhN2FmYjc5NGVmYWNhZWM5NmI5MGE4ODEwOGQ3YzVmN2YzYzJiMGYzY2FjODlhOCIsCiAgICAiYnJpcXlhcmRkLWxpbnV4LXg4Nl82NCI6ICIxYmIyY2E1NGM0ZmVmNTUxYjg0NDY5MTE2YTJiNmMxMzkwNTE3MjU4ZTgyYmQ0MWRmNGQxZTFlNDA4NDVkM2Y5IgogIH0sCiAgInNvdXJjZSI6ICJodHRwczovL2dpdGh1Yi5jb20vYnJpcS1jbG91ZC9icmlxeWFyZC9yZWxlYXNlcy90YWcvdjAuMi4xNSIKfQo",
+        "bytes": 587,
+        "sha256": "39ee759b34c464ed054b4229055aea5d288f985ff3e6570159b8000a5c8fbf6f"
+      },
+      "sums": {
+        "base64url": "MWJiMmNhNTRjNGZlZjU1MWI4NDQ2OTExNmEyYjZjMTM5MDUxNzI1OGU4MmJkNDFkZjRkMWUxZTQwODQ1ZDNmOSAgYnJpcXlhcmRkLWxpbnV4LXg4Nl82NAowMGI1NTZjYWJlOTI4MjA3MmE2ZmJkNDczNzBhZGMzNjJlMDA4NGIzMjc3MDQ3MTFlZTM4MDNmODExYzExNTBmICBvdGhlci1wdWJsaWMtYXNzZXQKNjI5NjgwMGIzZWQ1ODE5MzlmNzkwODQyMjY2NjliMzMyOThmZTI0YTc1MjkwZWYyNzIzNjVlMTM4NmRmMzAyYSAgYnJpcXlhcmQtZmxlZXQtbGludXgteDg2XzY0CjcwZjdkNWU3MWYyYmU1ZTJlYTdhZmI3OTRlZmFjYWVjOTZiOTBhODgxMDhkN2M1ZjdmM2MyYjBmM2NhYzg5YTggIGJyaXF5YXJkLWxpbnV4LXg4Nl82NAo",
+        "bytes": 356,
+        "sha256": "cb2524882f9ac80bf2dc59c5fd8513b9e7697f89e6ea2237c0bcf66c4858d65f"
+      }
+    },
+    "target_release": {
+      "cli": {
+        "base64url": "c3ludGhldGljIGJyaXF5YXJkIGNsaSByZWxlYXNlIGFzc2V0IG9mIHRoZSB0YXJnZXQgcmVsZWFzZQo",
+        "bytes": 59,
+        "sha256": "9d698c123ffc2ee48417aebb40dff42068a335d73f8753d25b2678cc3f736129"
+      },
+      "daemon": {
+        "base64url": "c3ludGhldGljIGJyaXF5YXJkZCByZWxlYXNlIGFzc2V0IG9mIHRoZSB0YXJnZXQgcmVsZWFzZQo",
+        "bytes": 56,
+        "sha256": "76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708"
+      },
+      "fleet": {
+        "base64url": "c3ludGhldGljIGJyaXF5YXJkLWZsZWV0IHJlbGVhc2UgYXNzZXQgb2YgdGhlIHRhcmdldCByZWxlYXNlCg",
+        "bytes": 61,
+        "sha256": "9101f07e9686ade8405920186a49195243bd936366776fdea21b8e371b5ea222"
+      },
+      "pin_file": {
+        "base64url": "ewogICJjb21taXQiOiAiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsCiAgInJlbGVhc2UiOiAiMC4yLjE2IiwKICAicmVsZWFzZUlkIjogMTAxNiwKICAic2hhMjU2IjogewogICAgIlNIQTI1NlNVTVMteDg2XzY0IjogIjE1OWExYmEwOTRmMGFhMjk5ZWY0YTAzYjYyMDM5MjEzNjExZjcwMDU0YmQyY2RmZjhmN2U0ODEzMzJhNjQyMTIiLAogICAgImJyaXF5YXJkLWZsZWV0LWxpbnV4LXg4Nl82NCI6ICI5MTAxZjA3ZTk2ODZhZGU4NDA1OTIwMTg2YTQ5MTk1MjQzYmQ5MzYzNjY3NzZmZGVhMjFiOGUzNzFiNWVhMjIyIiwKICAgICJicmlxeWFyZC1saW51eC14ODZfNjQiOiAiOWQ2OThjMTIzZmZjMmVlNDg0MTdhZWJiNDBkZmY0MjA2OGEzMzVkNzNmODc1M2QyNWIyNjc4Y2MzZjczNjEyOSIsCiAgICAiYnJpcXlhcmRkLWxpbnV4LXg4Nl82NCI6ICI3NjQ4OGZiNjYyZmJlYmNkNDEzZjlmNjk4ZmMwYzM0NWIzZTgxMmE1ZWFiYmU2ODYyMDc1ZjJlZjY1ODZlNzA4IgogIH0sCiAgInNvdXJjZSI6ICJodHRwczovL2dpdGh1Yi5jb20vYnJpcS1jbG91ZC9icmlxeWFyZC9yZWxlYXNlcy90YWcvdjAuMi4xNiIKfQo",
+        "bytes": 587,
+        "sha256": "5bac903c58bfd8225de8b951af60c5b5a62baef373891c95452d74e01853e23e"
+      },
+      "sums": {
+        "base64url": "NzY0ODhmYjY2MmZiZWJjZDQxM2Y5ZjY5OGZjMGMzNDViM2U4MTJhNWVhYmJlNjg2MjA3NWYyZWY2NTg2ZTcwOCAgYnJpcXlhcmRkLWxpbnV4LXg4Nl82NAowMGI1NTZjYWJlOTI4MjA3MmE2ZmJkNDczNzBhZGMzNjJlMDA4NGIzMjc3MDQ3MTFlZTM4MDNmODExYzExNTBmICBvdGhlci1wdWJsaWMtYXNzZXQKOTEwMWYwN2U5Njg2YWRlODQwNTkyMDE4NmE0OTE5NTI0M2JkOTM2MzY2Nzc2ZmRlYTIxYjhlMzcxYjVlYTIyMiAgYnJpcXlhcmQtZmxlZXQtbGludXgteDg2XzY0CjlkNjk4YzEyM2ZmYzJlZTQ4NDE3YWViYjQwZGZmNDIwNjhhMzM1ZDczZjg3NTNkMjViMjY3OGNjM2Y3MzYxMjkgIGJyaXF5YXJkLWxpbnV4LXg4Nl82NAo",
+        "bytes": 356,
+        "sha256": "159a1ba094f0aa299ef4a03b62039213611f70054bd2cdff8f7e481332a64212"
+      }
+    },
+    "topology": {
+      "floors": [
+        {
+          "id": "eu",
+          "minimum_accepting": 1
+        },
+        {
+          "id": "na",
+          "minimum_accepting": 1
+        }
+      ],
+      "inventory": {
+        "base64url": "c3ludGhldGljIHRvcG9sb2d5IGludmVudG9yeQo",
+        "bytes": 29,
+        "sha256": "abf7711a9babc27bf7a84acf12ce80f8e9df4caa2743e2ae4c908f651736ca4d"
+      },
+      "order": [
+        "h_10-42-1-19",
+        "h_10-42-1-21",
+        "h_10-42-0-17",
+        "h_10-42-0-15"
+      ],
+      "reader_floors": [
+        {
+          "base64url": "c3ludGhldGljIHJlYWRlciBmbG9vciBoXzEwLTQyLTEtMTkK",
+          "bytes": 36,
+          "registered": "h_10-42-1-19",
+          "sha256": "cffac0448c71a82122e6082dcf189e19354b56bc5b887d59f5d72cb862dfff95"
+        },
+        {
+          "base64url": "c3ludGhldGljIHJlYWRlciBmbG9vciBoXzEwLTQyLTEtMjEK",
+          "bytes": 36,
+          "registered": "h_10-42-1-21",
+          "sha256": "86f4982f756647c7933d3bf4f2976eeea620cf1e9df0c5399760826a4c6c317a"
+        },
+        {
+          "base64url": "c3ludGhldGljIHJlYWRlciBmbG9vciBoXzEwLTQyLTAtMTUK",
+          "bytes": 36,
+          "registered": "h_10-42-0-15",
+          "sha256": "ab1fc6372fd7d9ac65b8ab566fdc7ffb0f07313ded07e9642f0c1a9d19663956"
+        },
+        {
+          "base64url": "c3ludGhldGljIHJlYWRlciBmbG9vciBoXzEwLTQyLTAtMTcK",
+          "bytes": 36,
+          "registered": "h_10-42-0-17",
+          "sha256": "b0f1d09e81a8e2efb20f92a0f364a65b268fb699e9c116095a080246070e2815"
+        }
+      ]
+    }
+  },
+  "plan": {
+    "abuild": "0.2.16",
+    "ak": "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q",
+    "bk": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E",
+    "dbuild": "0.2.16",
+    "exception": "9b162bb06a33e169586fedfd3b3c799d47a4855444c6648321a9461d4f1af195",
+    "hk": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+    "inputs": "371477a36839d6177873c5720dd9648c9c0c07611a1b7287bae78330c81b85a5",
+    "new": {
+      "he": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      "hi": "0909090909090909090909090909090909090909090909090909090909090909",
+      "ng": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+      "ni": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "tr": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+    },
+    "next_a": "9101f07e9686ade8405920186a49195243bd936366776fdea21b8e371b5ea222",
+    "next_d": "76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708",
+    "old": {
+      "he": "0505050505050505050505050505050505050505050505050505050505050505",
+      "hi": "0404040404040404040404040404040404040404040404040404040404040404",
+      "ng": "0707070707070707070707070707070707070707070707070707070707070707",
+      "ni": "0606060606060606060606060606060606060606060606060606060606060606",
+      "tr": "0808080808080808080808080808080808080808080808080808080808080808"
+    },
+    "ordinary_key": "bnoc3Smwt4_ROvTFWY_v9O8qlxZuPKby5Pv8zYBQW_E",
+    "pre": {
+      "authority": "briq-staging-na",
+      "epoch": "old-epoch",
+      "generation": 4,
+      "host": "h_227b9590e4e7",
+      "instance": "old-instance",
+      "reg_hash": "2931be2413287d1d847fba407f4d07f0daa7ac69108dc2a91fc8dde5d4471a35"
+    },
+    "pre_a": {
+      "boot": "00000000-0000-4000-8000-000000000004",
+      "build": "legacy",
+      "exe": "6296800b3ed581939f79084226669b33298fe24a75290ef272365e1386df302a",
+      "pid": 124,
+      "start": 456
+    },
+    "pre_d": {
+      "boot": "00000000-0000-4000-8000-000000000004",
+      "build": "0.2.15",
+      "exe": "1bb2ca54c4fef551b84469116a2b6c1390517258e82bd41df4d1e1e40845d3f9",
+      "pid": 123,
+      "start": 456
+    },
+    "pre_intent": "register:old",
+    "pre_record": {
+      "authority": "briq-staging-na",
+      "epoch": "old-epoch",
+      "generation": 4,
+      "host_instance": "old-instance",
+      "key_id": "staging-na-v1",
+      "public_key": [
+        110,
+        122,
+        28,
+        221,
+        41,
+        176,
+        183,
+        143,
+        209,
+        58,
+        244,
+        197,
+        89,
+        143,
+        239,
+        244,
+        239,
+        42,
+        151,
+        22,
+        110,
+        60,
+        166,
+        242,
+        228,
+        251,
+        252,
+        205,
+        128,
+        80,
+        91,
+        241
+      ]
+    },
+    "registered": "h_10-42-0-15",
+    "rk": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw",
+    "x": {
+      "aud": "staging",
+      "host": "h_227b9590e4e7",
+      "op": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "serial": 1
+    }
+  },
+  "plan_canonical": "{\"abuild\":\"0.2.16\",\"ak\":\"gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q\",\"bk\":\"7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E\",\"dbuild\":\"0.2.16\",\"exception\":\"9b162bb06a33e169586fedfd3b3c799d47a4855444c6648321a9461d4f1af195\",\"hk\":\"iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w\",\"inputs\":\"371477a36839d6177873c5720dd9648c9c0c07611a1b7287bae78330c81b85a5\",\"new\":{\"he\":\"0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a\",\"hi\":\"0909090909090909090909090909090909090909090909090909090909090909\",\"ng\":\"0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c\",\"ni\":\"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b\",\"tr\":\"0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d\"},\"next_a\":\"9101f07e9686ade8405920186a49195243bd936366776fdea21b8e371b5ea222\",\"next_d\":\"76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708\",\"old\":{\"he\":\"0505050505050505050505050505050505050505050505050505050505050505\",\"hi\":\"0404040404040404040404040404040404040404040404040404040404040404\",\"ng\":\"0707070707070707070707070707070707070707070707070707070707070707\",\"ni\":\"0606060606060606060606060606060606060606060606060606060606060606\",\"tr\":\"0808080808080808080808080808080808080808080808080808080808080808\"},\"ordinary_key\":\"bnoc3Smwt4_ROvTFWY_v9O8qlxZuPKby5Pv8zYBQW_E\",\"pre\":{\"authority\":\"briq-staging-na\",\"epoch\":\"old-epoch\",\"generation\":4,\"host\":\"h_227b9590e4e7\",\"instance\":\"old-instance\",\"reg_hash\":\"2931be2413287d1d847fba407f4d07f0daa7ac69108dc2a91fc8dde5d4471a35\"},\"pre_a\":{\"boot\":\"00000000-0000-4000-8000-000000000004\",\"build\":\"legacy\",\"exe\":\"6296800b3ed581939f79084226669b33298fe24a75290ef272365e1386df302a\",\"pid\":124,\"start\":456},\"pre_d\":{\"boot\":\"00000000-0000-4000-8000-000000000004\",\"build\":\"0.2.15\",\"exe\":\"1bb2ca54c4fef551b84469116a2b6c1390517258e82bd41df4d1e1e40845d3f9\",\"pid\":123,\"start\":456},\"pre_intent\":\"register:old\",\"pre_record\":{\"authority\":\"briq-staging-na\",\"epoch\":\"old-epoch\",\"generation\":4,\"host_instance\":\"old-instance\",\"key_id\":\"staging-na-v1\",\"public_key\":[110,122,28,221,41,176,183,143,209,58,244,197,89,143,239,244,239,42,151,22,110,60,166,242,228,251,252,205,128,80,91,241]},\"registered\":\"h_10-42-0-15\",\"rk\":\"ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw\",\"x\":{\"aud\":\"staging\",\"host\":\"h_227b9590e4e7\",\"op\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"serial\":1}}",
+  "plan_digest": "62dcf4d76312dda3adddf9ba5c7ffd9437d3fb7775e8fc7e81c71ba26d46f02a",
+  "policy": {
+    "authority_gid": 1001,
+    "inputs": {
+      "authority": "c730d613146f1cff6c00032e66c29dbb5816c4c28709e75ed99e5bc0f89b405c",
+      "closure": "899524200fa336b5392700cd5cf570bdf78929eccc4a373305e30817b303cf5d",
+      "daemon": "3297c16c0ae38912e3c8efbea9c4b56b8c1b0a5cc6166e9c37d9bf0dfc8f0ac5",
+      "support": {
+        "image_root": "fe95d9b317f449ba0fe679a1eb7e64968f3e51c4120a1c4687216348d80421ff",
+        "profile": "e92b19b32a82d968a4939ce613d8189f8b2d26e67877faeebd8cc090820b072c",
+        "release_policy": "de23630b1249a22e168d7956ebdaaa4334ab86d249a3a8245eae92e3cba4b981"
+      }
+    },
+    "releases": {
+      "bootstrap": {
+        "authority": {
+          "build": "0.2.16",
+          "bytes": 61,
+          "sha256": "9101f07e9686ade8405920186a49195243bd936366776fdea21b8e371b5ea222"
+        },
+        "daemon": {
+          "build": "0.2.16",
+          "bytes": 56,
+          "sha256": "76488fb662fbebcd413f9f698fc0c345b3e812a5eabbe6862075f2ef6586e708"
+        },
+        "id": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "support": {
+        "id": "5555555555555555555555555555555555555555555555555555555555555555"
+      }
+    },
+    "tls": {
+      "authority": "53a22076c4068801d73ad442e177080369499a7d82fe8d98b8178fa9b8c38ddf",
+      "daemon": "a0c17c3c652876b36dd82f54eb64af915e636d6a8b4be99cffd9f98ad3cd2471"
+    },
+    "units": {
+      "authority": {
+        "guarded": {
+          "args": [
+            "/usr/local/bin/briqyard-fleet",
+            "--config",
+            "/etc/briq-execution/authority/config.json",
+            "authority",
+            "sealed-guard",
+            "--resource",
+            "authority",
+            "--operation-dir",
+            {
+              "operation_dir": {
+                "leaf": "authority",
+                "root": "/var/lib/briq-execution-authority/sealed-ops"
+              }
+            }
+          ],
+          "exec": "/usr/local/bin/briqyard-fleet",
+          "fragment": "W1NlcnZpY2VdCkV4ZWNTdGFydD0vdXNyL2xvY2FsL2Jpbi9icmlxeWFyZC1mbGVldCBzZWFsZWQtZ3VhcmQK",
+          "sandbox": {
+            "bind_read_only": [
+              {
+                "dest": "/usr/local/bin/briqyard-fleet",
+                "recursive": false,
+                "source": "/opt/briq/authority-target"
+              }
+            ],
+            "dynamic_user": false,
+            "env_files": [
+              {
+                "optional": false,
+                "path": "/etc/briq/authority.env"
+              }
+            ],
+            "families": {
+              "mode": "allow",
+              "names": [
+                "AF_INET",
+                "AF_INET6",
+                "AF_UNIX"
+              ]
+            },
+            "gid": 1001,
+            "inaccessible": [],
+            "no_new_privileges": true,
+            "private_devices": true,
+            "private_tmp": true,
+            "protect_home": "yes",
+            "protect_system": "strict",
+            "public_env": [
+              {
+                "name": "RUST_LOG",
+                "value": "info"
+              }
+            ],
+            "read_only": [],
+            "read_write": [
+              "/var/lib/briq/authority"
+            ],
+            "state_dir_mode": 448,
+            "state_dirs": [
+              "briq"
+            ],
+            "supplementary_gids": [],
+            "uid": 0,
+            "umask": 18
+          },
+          "store": {
+            "notify_access": "none",
+            "preserve": "no"
+          }
+        },
+        "legacy": {
+          "args": [
+            "/usr/local/bin/briqyard-fleet",
+            "serve"
+          ],
+          "exec": "/usr/local/bin/briqyard-fleet",
+          "fragment": "W1NlcnZpY2VdCkV4ZWNTdGFydD0vdXNyL2xvY2FsL2Jpbi9icmlxeWFyZC1mbGVldCBzZXJ2ZQo",
+          "sandbox": {
+            "bind_read_only": [],
+            "dynamic_user": false,
+            "env_files": [
+              {
+                "optional": false,
+                "path": "/etc/briq/authority.env"
+              }
+            ],
+            "families": {
+              "mode": "allow",
+              "names": [
+                "AF_INET",
+                "AF_INET6",
+                "AF_UNIX"
+              ]
+            },
+            "gid": 1001,
+            "inaccessible": [],
+            "no_new_privileges": true,
+            "private_devices": true,
+            "private_tmp": true,
+            "protect_home": "yes",
+            "protect_system": "strict",
+            "public_env": [
+              {
+                "name": "RUST_LOG",
+                "value": "info"
+              }
+            ],
+            "read_only": [],
+            "read_write": [
+              "/var/lib/briq/authority"
+            ],
+            "state_dir_mode": 448,
+            "state_dirs": [
+              "briq"
+            ],
+            "supplementary_gids": [],
+            "uid": 0,
+            "umask": 18
+          },
+          "store": {
+            "notify_access": "none",
+            "preserve": "no"
+          }
+        }
+      },
+      "daemon": {
+        "guarded": {
+          "args": [
+            "/usr/local/bin/briqyardd",
+            "--config",
+            "/etc/briqyard/config.yaml",
+            "sealed-guard",
+            "--resource",
+            "daemon",
+            "--operation-dir",
+            {
+              "operation_dir": {
+                "leaf": "daemon",
+                "root": "/var/lib/briqyard/sealed-ops"
+              }
+            }
+          ],
+          "exec": "/usr/local/bin/briqyardd",
+          "fragment": "W1NlcnZpY2VdCkV4ZWNTdGFydD0vdXNyL2xvY2FsL2Jpbi9icmlxeWFyZGQgc2VhbGVkLWd1YXJkCg",
+          "sandbox": {
+            "bind_read_only": [
+              {
+                "dest": "/usr/local/bin/briqyardd",
+                "recursive": false,
+                "source": "/opt/briq/daemon-target"
+              }
+            ],
+            "dynamic_user": false,
+            "env_files": [
+              {
+                "optional": false,
+                "path": "/etc/briq/daemon.env"
+              }
+            ],
+            "families": {
+              "mode": "allow",
+              "names": [
+                "AF_INET",
+                "AF_INET6",
+                "AF_UNIX"
+              ]
+            },
+            "gid": 0,
+            "inaccessible": [],
+            "no_new_privileges": true,
+            "private_devices": true,
+            "private_tmp": true,
+            "protect_home": "yes",
+            "protect_system": "strict",
+            "public_env": [
+              {
+                "name": "RUST_LOG",
+                "value": "info"
+              }
+            ],
+            "read_only": [],
+            "read_write": [
+              "/var/lib/briq/daemon"
+            ],
+            "state_dir_mode": 448,
+            "state_dirs": [
+              "briq"
+            ],
+            "supplementary_gids": [],
+            "uid": 0,
+            "umask": 18
+          },
+          "store": {
+            "notify_access": "main",
+            "preserve": "restart"
+          }
+        },
+        "legacy": {
+          "args": [
+            "/usr/local/bin/briqyardd",
+            "serve"
+          ],
+          "exec": "/usr/local/bin/briqyardd",
+          "fragment": "W1NlcnZpY2VdCkV4ZWNTdGFydD0vdXNyL2xvY2FsL2Jpbi9icmlxeWFyZGQgc2VydmUK",
+          "sandbox": {
+            "bind_read_only": [],
+            "dynamic_user": false,
+            "env_files": [
+              {
+                "optional": false,
+                "path": "/etc/briq/daemon.env"
+              }
+            ],
+            "families": {
+              "mode": "allow",
+              "names": [
+                "AF_INET",
+                "AF_INET6",
+                "AF_UNIX"
+              ]
+            },
+            "gid": 0,
+            "inaccessible": [],
+            "no_new_privileges": true,
+            "private_devices": true,
+            "private_tmp": true,
+            "protect_home": "yes",
+            "protect_system": "strict",
+            "public_env": [
+              {
+                "name": "RUST_LOG",
+                "value": "info"
+              }
+            ],
+            "read_only": [],
+            "read_write": [
+              "/var/lib/briq/daemon"
+            ],
+            "state_dir_mode": 448,
+            "state_dirs": [
+              "briq"
+            ],
+            "supplementary_gids": [],
+            "uid": 0,
+            "umask": 18
+          },
+          "store": {
+            "notify_access": "main",
+            "preserve": "restart"
+          }
+        }
+      }
+    }
+  },
+  "tls_certificates": {
+    "authority": "MIIA1TCCAIegAwIBAgIBATAFBgMrZXAwFDESMBAGA1UEAwwJZXhlY3V0aW9uMB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowFDESMBAGA1UEAwwJZXhlY3V0aW9uMCowBQYDK2VwAyEAE5j2LG0aRXxRumpLXz29L2n8qTIWIY3ImX5Ba9F9k8owBQYDK2VwA0EANAnm34_SVvBh46kvT7BJ5wivjGz873cgFcwTos-VVQhKCAZeXsPfGjmI21azAmpG4bRpvehIzZyrobBYCN70Aw",
+    "daemon": "MIIA1TCCAIegAwIBAgIBATAFBgMrZXAwFDESMBAGA1UEAwwJZXhlY3V0aW9uMB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowFDESMBAGA1UEAwwJZXhlY3V0aW9uMCowBQYDK2VwAyEA6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iwwBQYDK2VwA0EAzNhYvLTBIp30S-FzK8xN5sCeXBFBgkUnZFhGEOXYPPWQ-_4oFqkMTSt2t_l5ZEedTfhmZ4ZIadrHm2E3nPnGDA"
+  }
+}

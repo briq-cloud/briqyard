@@ -12,8 +12,7 @@
 //! * [`wire`]: the fixed local socket and its one framed exchange.
 //! * [`verify`]: the pair check against the trust record and the local Plan.
 //! * [`owner`]: the capture, out-of-lock read and compare-and-set join an operation owner
-//!   implements. No concrete root owner exists at this boundary yet; the integration owner
-//!   attaches one by implementing [`PlanReadOwner`]. Nothing here invents one.
+//!   implements; the target's `local_owner` implements it over its active attempt.
 
 mod owner;
 mod trust;
@@ -23,10 +22,13 @@ mod wire;
 #[cfg(test)]
 mod tests;
 
+pub(in crate::execution_custody) use owner::fresh_nonce;
 pub use owner::{
     OriginalOwner, OwnerRefusal, OwnerSnapshot, PlanReadOwner, PlanReader, ReadScope,
     RejoinedObservation, VerifiedPlanObservation,
 };
+#[cfg(test)]
+pub(in crate::execution_custody) use trust::Ownership;
 pub use trust::{EnrolledTrust, TrustLoader};
 pub use wire::{EnrolledHelper, ReaderEndpoint, SOCKET_PATH};
 

@@ -5,6 +5,7 @@ mod process;
 mod transport;
 
 pub mod artifacts;
+pub mod local_owner;
 pub mod plan_reader;
 pub mod sealed_input;
 

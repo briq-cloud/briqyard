@@ -16,6 +16,19 @@ fn refused(
     );
 }
 
+/// `refused` on the published positive profile: the control binds, each case changes one side.
+fn refused_c(
+    why: &'static str,
+    on_value: impl FnOnce(&mut Value),
+    on_plan: impl FnOnce(&mut Plan),
+    on_policy: impl FnOnce(&mut DeploymentPolicy<'_>),
+) {
+    assert_eq!(
+        companion::bound(on_value, on_plan, on_policy).unwrap_err(),
+        value_err(why)
+    );
+}
+
 #[test]
 fn the_plan_inputs_digest_is_the_hash_of_the_exact_manifest_bytes() {
     refused(
@@ -278,7 +291,7 @@ fn topology_facts_come_from_the_receiver_owner() {
 
 #[test]
 fn actor_identities_come_from_independent_observation() {
-    refused(
+    refused_c(
         "actor roster",
         |_| {},
         |_| {},
@@ -286,7 +299,7 @@ fn actor_identities_come_from_independent_observation() {
             p.actors.pop();
         },
     );
-    refused(
+    refused_c(
         "actor process identity",
         |_| {},
         |_| {},
@@ -294,7 +307,7 @@ fn actor_identities_come_from_independent_observation() {
             p.actors[2].identity = p.actors[4].identity.clone();
         },
     );
-    refused(
+    refused_c(
         "actor process identity",
         |_| {},
         |_| {},
@@ -302,7 +315,7 @@ fn actor_identities_come_from_independent_observation() {
             p.actors[4].identity = ProcessIdentity::Service;
         },
     );
-    refused(
+    refused_c(
         "actor process identity",
         |_| {},
         |_| {},
@@ -312,24 +325,24 @@ fn actor_identities_come_from_independent_observation() {
             }
         },
     );
-    refused(
+    refused_c(
         "actor process identity",
         |_| {},
         |_| {},
         |p| p.actors[3].id = id("receiver-2"),
     );
-    refused(
+    refused_c(
         "actor process identity",
         |_| {},
         |_| {},
         |p| p.actors[0].actor = ActorKind::Host,
     );
     // A process-scoped B is acceptable only when both sides say so.
-    let proc = match &policy(&releases()).actors[4].identity {
+    let proc = match &companion::policy(&companion::releases()).actors[4].identity {
         ProcessIdentity::Process(p) => p.clone(),
         ProcessIdentity::Service => unreachable!(),
     };
-    refused(
+    refused_c(
         "actor process identity",
         |_| {},
         |_| {},
@@ -337,7 +350,7 @@ fn actor_identities_come_from_independent_observation() {
             p.actors[1].identity = ProcessIdentity::Process(proc.clone());
         },
     );
-    bound(
+    companion::bound(
         |v| v["actors"][1]["proc"] = v["actors"][4]["proc"].clone(),
         |_| {},
         |p| p.actors[1].identity = ProcessIdentity::Process(proc.clone()),
@@ -354,49 +367,49 @@ fn swap_roles(p: &mut DeploymentPolicy<'_>, f: impl Fn(&mut ResourcePolicy) -> &
 
 #[test]
 fn per_role_facts_do_not_survive_a_swap_between_daemon_and_authority() {
-    refused(
+    refused_c(
         "config or TLS pins",
         |_| {},
         |_| {},
         |p| swap_roles(p, |r| &mut r.config),
     );
-    refused(
+    refused_c(
         "config or TLS pins",
         |_| {},
         |_| {},
         |p| swap_roles(p, |r| &mut r.tls_cert),
     );
-    refused(
+    refused_c(
         "config or TLS pins",
         |_| {},
         |_| {},
         |p| swap_roles(p, |r| &mut r.tls_key),
     );
-    refused(
+    refused_c(
         "unit fragment",
         |_| {},
         |_| {},
         |p| swap_roles(p, |r| &mut r.legacy_fragment),
     );
-    refused(
+    refused_c(
         "unit fragment",
         |_| {},
         |_| {},
         |p| swap_roles(p, |r| &mut r.guarded_fragment),
     );
-    refused(
+    refused_c(
         "writer profile",
         |_| {},
         |_| {},
         |p| swap_roles(p, |r| &mut r.writer_profile),
     );
-    refused(
+    refused_c(
         "guard program",
         |_| {},
         |_| {},
         |p| swap_roles(p, |r| &mut r.guard_bytes),
     );
-    refused(
+    refused_c(
         "custodian process",
         |_| {},
         |_| {},
@@ -406,7 +419,7 @@ fn per_role_facts_do_not_survive_a_swap_between_daemon_and_authority() {
 
 #[test]
 fn tls_blobs_config_fragments_and_writer_profile_are_each_pinned_in_place() {
-    refused(
+    refused_c(
         "config or TLS pins",
         |_| {},
         |_| {},
@@ -414,25 +427,25 @@ fn tls_blobs_config_fragments_and_writer_profile_are_each_pinned_in_place() {
             std::mem::swap(&mut p.daemon.tls_cert, &mut p.daemon.tls_key);
         },
     );
-    refused(
+    refused_c(
         "config or TLS pins",
         |_| {},
         |_| {},
         |p| p.daemon.config.push(b' '),
     );
-    refused(
+    refused_c(
         "config or TLS pins",
         |_| {},
         |_| {},
         |p| p.authority.config_path = path("/etc/briqyard/config.yaml"),
     );
-    refused(
+    refused_c(
         "config or TLS pins",
         |v| v["daemon"]["tls_cert"]["bytes"] = json!(1),
         |_| {},
         |_| {},
     );
-    refused(
+    refused_c(
         "unit fragment",
         |_| {},
         |_| {},
@@ -443,83 +456,83 @@ fn tls_blobs_config_fragments_and_writer_profile_are_each_pinned_in_place() {
             );
         },
     );
-    refused(
+    refused_c(
         "unit fragment",
         |_| {},
         |_| {},
         |p| p.daemon.fragment = path("/etc/systemd/system/other.service"),
     );
-    refused(
+    refused_c(
         "writer profile",
         |_| {},
         |_| {},
         |p| p.daemon.writer_profile = p.authority.writer_profile.clone(),
     );
-    refused(
+    refused_c(
         "writer profile",
         |v| v["daemon"]["writer_profile"] = json!("0".repeat(64)),
         |_| {},
         |_| {},
     );
-    refused(
+    refused_c(
         "guard program",
         |_| {},
         |_| {},
         |p| p.daemon.guard_build = Build::new("guard-v2").unwrap(),
     );
-    refused(
+    refused_c(
         "candidate locator",
         |_| {},
         |_| {},
         |p| p.daemon.candidate_path = path("/var/lib/briq-sealed/candidates/other"),
     );
-    refused(
+    refused_c(
         "candidate locator",
         |v| v["daemon"]["candidate"]["file"]["bytes"] = json!(1),
         |_| {},
         |_| {},
     );
-    refused(
+    refused_c(
         "control or journal ownership",
         |_| {},
         |_| {},
-        |p| p.authority.control_gid = Uint::new(1001).unwrap(),
+        |p| p.authority.control_gid = Uint::new(1000).unwrap(),
     );
-    refused(
+    refused_c(
         "control or journal ownership",
         |_| {},
         |_| {},
         |p| p.daemon.journal.mode = Uint::new(0o755).unwrap(),
     );
-    refused(
+    refused_c(
         "control or journal ownership",
         |_| {},
         |_| {},
-        |p| p.authority.journal.uid = Uint::new(0).unwrap(),
+        |p| p.authority.journal.uid = Uint::new(1000).unwrap(),
     );
 }
 
 #[test]
 fn a_stale_custodian_or_changed_process_is_refused() {
-    refused(
+    refused_c(
         "custodian process",
         |_| {},
         |_| {},
         |p| p.daemon.custodian.pid = PosInt::new(31).unwrap(),
     );
-    refused(
+    refused_c(
         "custodian process",
         |_| {},
         |_| {},
         |p| p.authority.custodian.start = PosInt::new(1).unwrap(),
     );
-    refused(
+    refused_c(
         "custodian process",
         |_| {},
         |_| {},
         |p| p.daemon.custodian.exe = d(b"stale image"),
     );
-    refused(
+    refused_c(
         "custodian process",
         |_| {},
         |_| {},
@@ -528,23 +541,23 @@ fn a_stale_custodian_or_changed_process_is_refused() {
 }
 
 #[test]
-fn both_custodians_run_the_source_daemon_binary_even_when_manifest_and_policy_agree_otherwise() {
+fn both_custodians_run_the_target_bootstrap_daemon_even_when_manifest_and_policy_agree_otherwise() {
     for role in ["daemon", "authority"] {
         let other = d(b"self-consistent but wrong image");
-        refused(
+        refused_c(
             "custodian image",
             |v| v[role]["custodian"]["exe"] = json!(other.as_str()),
             |_| {},
             |p| resource_mut(p, role).custodian.exe = other.clone(),
         );
-        let fleet = d(&assets(0)[1]);
-        refused(
+        let fleet = companion::releases().source.release().fleet.clone();
+        refused_c(
             "custodian image",
             |v| v[role]["custodian"]["exe"] = json!(fleet.as_str()),
             |_| {},
             |p| resource_mut(p, role).custodian.exe = fleet.clone(),
         );
-        refused(
+        refused_c(
             "custodian build",
             |v| v[role]["custodian"]["build"] = json!("custodian-v1"),
             |_| {},
@@ -588,14 +601,14 @@ fn custodian_ownership_is_a_measured_root_observation_and_never_assumed() {
     };
     for role in ["daemon", "authority"] {
         for (uid, gid) in [(1000, 0), (0, 1000), (1000, 1000), (1, 1)] {
-            refused(
+            refused_c(
                 "custodian owner",
                 |_| {},
                 |_| {},
                 |p| resource_mut(p, role).custodian_owner = measured(uid, gid),
             );
         }
-        refused(
+        refused_c(
             "custodian owner",
             |_| {},
             |_| {},
@@ -639,7 +652,7 @@ fn no_old_or_new_member_equals_a_closure_credential_commitment() {
     let bearer = d(b"synthetic continuation commitment");
     for target in [&admin_host, &admin_fleet, &bearer] {
         for slot in 0..10 {
-            refused(
+            refused_c(
                 "closure credential reuse",
                 |_| {},
                 |p| *plan_members(p)[slot] = target.clone(),
@@ -647,13 +660,13 @@ fn no_old_or_new_member_equals_a_closure_credential_commitment() {
             );
         }
     }
-    refused(
+    refused_c(
         "closure credential reuse",
         |_| {},
         |p| p.old.hi = admin_host.clone(),
         |_| {},
     );
-    refused(
+    refused_c(
         "closure credential reuse",
         |_| {},
         |p| p.new.hi = bearer.clone(),
@@ -670,62 +683,62 @@ fn resource_mut<'a>(policy: &'a mut DeploymentPolicy<'_>, role: &str) -> &'a mut
 
 #[test]
 fn listener_count_order_and_names_are_compared_in_delivery_order() {
-    refused(
+    refused_c(
         "listener table",
         |_| {},
         |_| {},
         |p| p.daemon.listener_names.reverse(),
     );
-    refused(
+    refused_c(
         "listener table",
         |_| {},
         |_| {},
         |p| p.daemon.listener_names.push("extra".into()),
     );
-    refused(
+    refused_c(
         "listener table",
         |_| {},
         |_| {},
         |p| p.daemon.listener_names[0] = "api:metrics".into(),
     );
-    refused(
+    refused_c(
         "listener table",
         |_| {},
         |_| {},
         |p| p.daemon.listener_names[1] = String::new(),
     );
-    refused(
+    refused_c(
         "listener table",
         |_| {},
         |_| {},
         |p| p.daemon.listener_names[1] = "met rics\n".into(),
     );
-    refused(
+    refused_c(
         "listener table",
         |_| {},
         |_| {},
         |p| p.daemon.store_max = Uint::new(2771).unwrap(),
     );
-    refused(
+    refused_c(
         "listener table",
         |v| v["daemon"]["listeners"]["count"] = json!(1),
         |_| {},
         |_| {},
     );
-    refused(
+    refused_c(
         "listener table",
         |v| v["authority"]["listeners"]["names"] = json!("0".repeat(64)),
         |_| {},
         |_| {},
     );
-    refused(
+    refused_c(
         "listener table",
         |_| {},
         |_| {},
         |p| p.authority.listener_names.clear(),
     );
     // An explicitly empty table hashes zero bytes and has count zero on both sides.
-    bound(
+    companion::bound(
         |v| {
             v["authority"]["listeners"]["count"] = json!(0);
             v["authority"]["listeners"]["names"] = json!(d(b"").as_str());
@@ -738,43 +751,43 @@ fn listener_count_order_and_names_are_compared_in_delivery_order() {
 
 #[test]
 fn closure_pins_are_compared_with_their_independent_owners() {
-    refused(
+    refused_c(
         "closure policy",
         |_| {},
         |_| {},
         |p| p.closure.registry.push(b'\n'),
     );
-    refused(
+    refused_c(
         "closure policy",
         |_| {},
         |_| {},
         |p| std::mem::swap(&mut p.closure.admin_host, &mut p.closure.admin_fleet),
     );
-    refused(
+    refused_c(
         "closure policy",
         |_| {},
         |_| {},
         |p| p.closure.continuation.bearer = d(b"other"),
     );
-    refused(
+    refused_c(
         "closure policy",
         |_| {},
         |_| {},
         |p| p.closure.continuation.roots.reverse(),
     );
-    refused(
+    refused_c(
         "closure policy",
         |_| {},
         |_| {},
         |p| p.closure.continuation.url = text("https://api.example.test/other"),
     );
-    refused(
+    refused_c(
         "closure policy",
         |_| {},
         |_| {},
         |p| p.closure.peers.swap(4, 5),
     );
-    refused(
+    refused_c(
         "closure policy",
         |_| {},
         |_| {},
@@ -787,13 +800,13 @@ fn closure_pins_are_compared_with_their_independent_owners() {
             p.closure.peers[1].client = s;
         },
     );
-    refused(
+    refused_c(
         "closure policy",
         |_| {},
         |_| {},
         |p| p.closure.peers[2].endpoint = text("https://other.example.test:7541"),
     );
-    refused(
+    refused_c(
         "closure policy",
         |_| {},
         |_| {},
@@ -804,43 +817,43 @@ fn closure_pins_are_compared_with_their_independent_owners() {
             })
         },
     );
-    refused(
+    refused_c(
         "closure policy",
         |_| {},
         |_| {},
         |p| p.closure.backup_s3 = Some(d(b"s3")),
     );
-    refused(
+    refused_c(
         "closure policy",
         |_| {},
         |_| {},
         |p| p.closure.file_key = Some(Hex32::new("a".repeat(32)).unwrap()),
     );
-    refused(
+    refused_c(
         "closure policy",
         |v| v["closure"]["backup_s3"] = json!("1".repeat(64)),
         |_| {},
         |_| {},
     );
-    refused(
+    refused_c(
         "support policy",
         |_| {},
         |_| {},
         |p| p.closure.support.image_root = d(b"other root"),
     );
-    refused(
+    refused_c(
         "support policy",
         |_| {},
         |_| {},
         |p| p.closure.support.release_policy = b"other".to_vec(),
     );
-    refused(
+    refused_c(
         "support policy",
         |_| {},
         |_| {},
         |p| p.closure.support.profile = b"other".to_vec(),
     );
-    refused(
+    refused_c(
         "support policy",
         |_| {},
         |_| {},
@@ -851,7 +864,7 @@ fn closure_pins_are_compared_with_their_independent_owners() {
             );
         },
     );
-    refused(
+    refused_c(
         "support policy",
         |_| {},
         |_| {},
@@ -870,7 +883,7 @@ fn optional_closure_members_bind_only_when_both_owners_agree() {
     };
     let s3 = d(b"synthetic s3 pair commitment");
     let key = Hex32::new("b".repeat(32)).unwrap();
-    let bound = bound(
+    let bound = companion::bound(
         |v| {
             v["closure"]["admin_tls"] =
                 json!({"leaf": pair.leaf.as_str(), "spki": pair.spki.as_str()});
@@ -908,4 +921,42 @@ fn a_manifest_cannot_name_a_second_candidate_or_a_successor_process() {
         |_| {},
         |_| {},
     );
+}
+
+#[test]
+fn the_four_processes_have_four_distinct_pids() {
+    // Slots: daemon original, daemon custodian, authority original, authority custodian. Each
+    // case moves one slot onto another's pid across the manifest and the operand that pins it,
+    // so every other comparison still agrees and only the pid rule can refuse.
+    let slots: [(&str, &str); 4] = [
+        ("daemon", "pre"),
+        ("daemon", "custodian"),
+        ("authority", "pre"),
+        ("authority", "custodian"),
+    ];
+    let pid = |role: &str, kind: &str| match (role, kind) {
+        ("daemon", "pre") => 123,
+        ("daemon", _) => 4300,
+        (_, "pre") => 124,
+        _ => 4301,
+    };
+    for (i, (role, kind)) in slots.iter().enumerate() {
+        for (other_role, other_kind) in &slots[..i] {
+            let shared = PosInt::new(pid(other_role, other_kind)).unwrap();
+            refused_c(
+                "process identities",
+                |v| v[*role][*kind]["pid"] = json!(shared.get()),
+                |p| match (*role, *kind) {
+                    ("daemon", "pre") => p.pre_d.pid = shared,
+                    ("authority", "pre") => p.pre_a.pid = shared,
+                    _ => {}
+                },
+                |policy| match (*role, *kind) {
+                    ("daemon", "custodian") => policy.daemon.custodian.pid = shared,
+                    ("authority", "custodian") => policy.authority.custodian.pid = shared,
+                    _ => {}
+                },
+            );
+        }
+    }
 }
