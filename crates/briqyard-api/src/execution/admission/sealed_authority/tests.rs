@@ -387,6 +387,41 @@ fn guarded_issuer_accepts_only_the_pinned_actual_ordinary_key_before_any_journal
 }
 
 #[test]
+fn guarded_issuer_needs_the_actual_key_to_match_both_plan_publics_before_any_journal_write() {
+    let variants: [(&str, ChangePlan); 2] = [
+        ("plan ordinary key", |p| {
+            p.ordinary_key = KeyBytes::from_array([9; 32])
+        }),
+        ("registered public key", |p| {
+            p.pre_record.public_key[0] ^= 1;
+            p.pre = p.pre_record.ctx(&p.x.host);
+        }),
+    ];
+    for (name, change) in variants {
+        let mut f = Fixture::new();
+        change(&mut f.plan);
+        f.hash = h(&f.plan).unwrap();
+        f.launch.plan = f.hash.clone();
+        let mut cut = f.receipt.body.cut.clone();
+        cut.plan = f.hash.clone();
+        cut.old = f.plan.pre.clone();
+        cut.retired_epoch = f.plan.pre.epoch.clone();
+        f.receipt = Sig::sign(Tag::Retired, ReceiptBody::new(cut), &f.hk).unwrap();
+        let file = f.path.join("journal.json");
+        let before = std::fs::read(&file).unwrap();
+        assert!(
+            matches!(f.issuer(), Err(Error::Binding)),
+            "{name} differing from the actual key was accepted"
+        );
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            before,
+            "{name} changed the journal"
+        );
+    }
+}
+
+#[test]
 fn ack_after_an_ambiguous_rename_is_not_ready_after_the_journal_owner_is_gone() {
     let f = Fixture::new();
     let mut owner = f.journal().unwrap();
