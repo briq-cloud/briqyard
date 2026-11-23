@@ -3,11 +3,11 @@ use super::super::*;
 use super::fixtures::*;
 use std::os::unix::fs::{symlink, PermissionsExt};
 
-fn fail_at(point: Fail) {
+pub(super) fn fail_at(point: Fail) {
     FAIL.set(Some(point));
 }
 
-struct Clear;
+pub(super) struct Clear;
 
 impl Drop for Clear {
     fn drop(&mut self) {
@@ -43,15 +43,15 @@ fn a_failure_before_the_rename_leaves_the_old_attempt_and_no_temporary_file() {
     }
 }
 
-fn raw_attempt(world: &World) -> Attempt {
+pub(super) fn raw_attempt(world: &World) -> Attempt {
     decode(&std::fs::read(world.path().join("active.json")).unwrap()).unwrap()
 }
 
-fn intent(world: &World) -> std::path::PathBuf {
+pub(super) fn intent(world: &World) -> std::path::PathBuf {
     world.path().join("commit.intent")
 }
 
-fn reopened(world: &World) -> LocalOwner<std::sync::Arc<Host>> {
+pub(super) fn reopened(world: &World) -> LocalOwner<std::sync::Arc<Host>> {
     LocalOwner::rooted_at(
         &world.path(),
         unsafe { libc::geteuid() },
@@ -60,7 +60,7 @@ fn reopened(world: &World) -> LocalOwner<std::sync::Arc<Host>> {
     .unwrap()
 }
 
-fn sha(bytes: &[u8]) -> String {
+pub(super) fn sha(bytes: &[u8]) -> String {
     HexDigest::of(bytes).to_string()
 }
 

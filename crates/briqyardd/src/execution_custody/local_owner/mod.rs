@@ -49,6 +49,15 @@ pub enum OwnerError {
     Stale,
     #[error("the commit outcome is unknown; read the attempt, never repeat the effect")]
     CommitUnknown,
+    #[error(
+        "the commit is durable and known, but {operation} failed: {source}; stop this turn, \
+         do not retry it and do not release its next effect"
+    )]
+    CommittedCleanupFailed {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("sealed owner {operation} failed: {source}")]
     Io {
         operation: &'static str,

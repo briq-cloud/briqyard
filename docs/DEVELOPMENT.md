@@ -490,3 +490,374 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   set while suspended and in force after the resume; throttling on `/metrics`), host ports (on
   the host, when its config lists `network.host_ports`: one reached from a machine with egress,
   dropped for `none` and `via`, the API dropped), snapshots (files on the volume and the root
+  disk back after a restore, a running machine booted again, a fork made after the snapshot
+  still working, a backup after the restore continuing from the one before the snapshot and
+  restoring to the machine's content, the newer snapshot restored and the next backup whole, a
+  snapshot with memory resumed with `/tmp` and the uptime kept, and its disk the snapshot's
+  after a cold boot), encryption at rest (the pool and every dataset under it encrypted,
+  records, runs, images and jails on it, the key in none of the daemon's files nor its log; the daemon stopped and the pool locked as a reboot leaves
+  it: without its key file no API and the reason logged, the file back and it starts, a machine
+  of before runs again), exec sessions (`-i` streaming stdin, stderr apart and the code; `-it`
+  driven by `hack/exec-tty.py`: a terminal of the size sent, a resize followed, the exit code;
+  the client's close hanging up a tty command and killing a piped one; the `session_opened`
+  event; a machine with a session open kept awake past its window, asleep once it closed),
+  versions and a hand-over (status and the init say the build, `vmm_version` the host's;
+  SIGUSR2 then a start: still running, adopted, no second boot; a stop then a start: running
+  again unasked, resumed), a registry mirror (a pull through fc's Zot, the mirror then holding
+  the digest; with Zot stopped, the same image and digest from Docker Hub and the fallback
+  logged), raw backups (ADR 0035: the record names the key's id, never the key; no plaintext
+  marker of a file or the env in the stream or the record, while the same snapshot sent in
+  clear shows it; a raw restore with the marker back and its disk on the pool's key; a backup
+  in clear, as made before, restored), Firecracker 1.17 (256 MiB deleted on a volume and on a
+  root disk given back to the pool, exec after a bare pause and resume), a volume grown (ADR
+  0040: the disk at once, the running guest's filesystem unchanged, the same size no change, a
+  smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
+  data kept, the next backup incremental and its restore at the grown size), a hand-over
+  through systemd's store (ADR 0051: a connection held across it ends whole, the new ones made
+  during it all answered, the gap logged; with a unit that has a store, and python3), a move
+  into another namespace and a fork into one (ADR 0056: a rename with the address, the
+  uptime marker and the disk kept; into a namespace that exists a new address, a boot and the
+  neighbour reached by name; a `moved` event in each namespace; the fork on a network of its own
+  with its source's disk), runtime classes (ADR 0088: the status lists them, an unknown class is refused by name, the default class shown; where the daemon serves `nested`, 8 more: `/dev/kvm` and `vmx|svm` in the guest, its modules mounted read-only, a memory snapshot refused, a suspend a plain stop, a cold wake, a fork in the class). 290 checks when the first crash control detects loss, up to 4 additional timed trials; 286 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
+  key file's checks).
+  Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
+  calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
+  port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7). The mirror section
+  runs only where a `briqyard-mirror` unit is active: on a host without one, 5 checks fewer.
+- `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
+  daemon in the VM), the capacity signals on `/metrics` (ADR 0042), an exec session and a tty
+  relayed, drain and undrain, and a `host upgrade` of the VM's own host to this build with a
+  machine running (back `ready`, a new start of this version that adopted it, the machine
+  answering, never booted again), a volume's growth forwarded, a namespace's watch streamed with
+  its bookmark. 33 checks. With `BRIQYARD_TOKEN`
+  against a real fleet: it drains only the dev fleet's host `local`, so it leaves real hosts
+  alone (21 checks then: `/metrics` refused without a token over `https://`;
+  `BRIQYARD_METRICS_TOKEN` when the fleet has a `metrics_token`).
+- `hack/native-mixed-authority.py`: after upgrade continuity checks and workload cleanup, the runner exercises the selected
+  candidate standalone authority against the published source daemon, using the
+  existing scoped driver. The safe receipt verifies running executable digests,
+  driver/source binding and restored daemon configuration. The runner reactivates checksum-verified source assets and finishes on that source
+  daemon. Exact-artifact sealed-sibling checks run before source reactivation and retain
+  their candidate binary and configuration checks. Source refusal fails qualification. Retained protection is never deleted;
+  its legacy restart drain is at least 60 seconds. Source reactivation and total
+  fixture durations are reported separately from clean-upgrade outage bounds. It excludes renewable callbacks and
+  higher-level gateway traffic. Failure artifacts retain only bounded fixed phases
+  and allowlisted refusal categories. Nine offline regressions:
+  `python3 -m unittest discover -s hack -p test_native_mixed_authority.py`.
+- `hack/native-mixed-contract.py`: before upgrading the daemon, the disposable upgrade
+  runner sends real requests through the candidate fleet to the previous daemon.
+  It checks raw/default and explicit sizes (128 MiB to 16 GiB, 250 to 8000 CPU millis),
+  CPU defaults, omitted/zero/2 GiB volumes, default/nested class handling, named init
+  inheritance when advertised, registered source discovery, and stop/start.
+  The 16 GiB request must refuse for capacity; an 8 GiB request may be accepted or
+  refuse for capacity on this small fixture. Acceptance does not qualify guest boot.
+  Before any contract request, source binaries must match the previous release and
+  candidate fleet/CLI binaries must match the candidate checksum manifest and files.
+  Running daemon/fleet executable hashes must match their installed binaries; the
+  fleet hash must change while daemon and configuration hashes stay fixed.
+  Both APIs authenticate before the source baseline is captured. Placement admission
+  checks gateway/consumer requirements on the existing namespace, matching gateway
+  and consumer dispatch, conflicting bodies/regions, cancellation, and individual
+  every size above, omitted/zero/2 GiB volume, omitted/default/nested class and
+  advertised-profile changes, each from a valid baseline. Admission requires a size:
+  omitted/empty sizes return 422 (including plain-text extractor responses); zero
+  sizes return 400 `invalid`. Its zero-volume estimate is accepted; direct create
+  still refuses a zero-volume disk. Paired admission includes the gateway's memory
+  and per-VMM overhead; 16 GiB must refuse, while 8 GiB may refuse for capacity.
+  An unavailable class/profile
+  on this pinned namespace must refuse with capacity. An authenticated seed admission
+  dispatches the existing sealed seed with its actual generation and registered host.
+  Separate consumer-only admissions dispatch 250 CPU millis, a 2 GiB volume with
+  500 CPU millis, and a nested guest with a 2 GiB volume when enabled. Each first
+  refuses changed CPU, memory, volume and class with 409, then dispatches once with
+  matching resources and waits for running; the nested case checks guest KVM.
+  Four offline regressions in `test_native_mixed_dispatch.py` check these bindings,
+  unexpected mismatch acceptance, lost replies without replay and disabled nested coverage.
+  A sealed init template refuses a foreign namespace with 400 `invalid`. Cleanup owns
+  that unique namespace only after checking its absence, and deletes machines only by
+  exact namespace, name, qualification metadata and recorded ID. Gateway/consumer
+  dispatch then serves real local HTTP traffic: strict consumers reach their gateway
+  and time out on a healthy sibling; explicit sibling opt-in reaches that server and
+  the gateway, while a healthy foreign namespace server remains unreachable. Servers
+  use the immutable Python image from `qualify.sh` and readiness probes; wget uses
+  that suite's four-second timeout with a healthy control, with no external target.
+  A pending admission reserves the remaining physical memory without booting guests.
+  Another admission must refuse for capacity; cancellation must allow a new small
+  admission. The advertised versioned memory policy supplies the per-VMM allowance.
+  Independent holds also check aggregate accounting: a gateway/consumer pair reserves
+  128/256 MB, and another consumer reserves 512 MB, plus 256 MB per machine. Cancelling
+  the pair must preserve the other consumer's charge through a fresh heartbeat.
+  Dispatching that survivor must replace its hold exactly once; another fresh heartbeat
+  and deletion must return usage to baseline. Each observation records expected/actual
+  memory and whether a new heartbeat was observed. This checks externally visible charges,
+  not serialization of individual ledger holds.
+  Physical admission then fills the remaining accounted memory with one owned sleeping
+  VM, including its 256 MB overhead. The host must report `memory_pressure`, and a
+  create in its bound namespace must refuse specifically for that condition. Deleting
+  only the owned fill VM must clear the condition and permit another small create.
+  Existing upgrade controls remain running; this measures committed memory, not RSS.
+  An attempted zero-desired warm pool refuses with 409 `capability_unsupported` while
+  the host advertises no warm profile. The fixture leaves `templates.warm_pools` off,
+  so supported warm claims remain unqualified. Cleanup audits the bounded persisted
+  ledger for exact run-owned pending admissions. Every mutation records its intent
+  before its single submission; creates and dispatches are never replayed. A lost
+  create answer leaves cleanup `unconfirmed`, even if a discovered owned ID is deleted.
+  A new namespace is deleted only after its owned machines are gone, its list is empty,
+  and no submission in it remains uncertain.
+  `native-logs/mixed-contract.json` retains bounded requests, response fields, binary
+  versions/hashes, configuration hashes and explicit gaps. It contains no configuration,
+  credentials, error text or guest output. Denial probes retain only a fixed refusal
+  classification; unexpected success, unreachable targets and other errors still fail
+  the timeout-only isolation predicate. This single-host check does not qualify
+  multi-host authority, interruption or rollback. Exact-artifact runs additionally require
+  direct and admitted nested guests to execute with `/dev/kvm`, virtualization flags and
+  read-only modules; PR-built default-only runs retain the nested gap (ADR 0107). Disk pressure remains unqualified because the fixture retains its protected volume. Boot-pressure
+  spill also remains unqualified: this fixture has one host and no controlled boot
+  queue or second region. These gaps remain explicit in the receipt.
+  Offline transport, identity, ordering and uncertainty tests do not qualify a native host.
+- `hack/native-clone-contract.py`: the disposable native-upgrade runner checks named
+  init/service clones through the installed fleet and daemon (ADR 0140). It covers
+  omitted/default/matching size inheritance, mismatched and invalid resource refusals,
+  registered versus intrinsic host IDs, active memory origin and guest execution.
+  It also drains the disposable fleet's only host: a cold create in an existing pinned
+  namespace must execute, while a fresh namespace must be refused for capacity. Admission
+  is restored on exit; an uncertain restoration is observed without resending it.
+  Seventeen offline tests cover caller, CI selection and cleanup failure semantics; they do not qualify
+  native behavior. The contract phase restores temporary configuration before rollback.
+- `hack/native-mixed-two-host-contract.py`: the native-upgrade job routes requests through
+  candidate fleet and CLI binaries to two daemons from the same previous published release.
+  It checks region selection, existing namespace placement, running machines and exec, then
+  checks unchanged daemon/process/configuration hashes and restores the one-host fixture.
+  Seven offline tests cover routing, lost replies, CLI checks, capture bounds, artifact binding
+  and preservation of the explicit plain-HTTP setting;
+  they do not qualify native behavior. ADR 0107 records the remaining matrix gaps.
+- `hack/upgrade-probe.sh`: traffic through a machine's TCP and HTTP endpoints and against both APIs
+  while the fleet upgrades the VM's host and then restarts, each attempt counted `ok`, `refused`,
+  `reset`, `timeout` or `failed` (`hack/upgrade-probe.py`; ADR 0051 keeps the numbers). A
+  measure, not a suite: it prints counts and passes nothing.
+- `hack/qualify.sh`: includes real-helper SIGKILL recovery, timeout endpoint availability,
+  automatic restart and a SIGUSR2 drain control with bounded create acceptance (ADR 0102),
+  then chaos, isolation and OOM on a disposable host only (it kills every Firecracker and
+  fills the pool); native CI job `qualification`. Recovery readiness requires a non-null
+  current runtime observation and a successful protected machine list within 90 seconds;
+  unrelated host conditions do not delay it. Failure ends dependent checks before cleanup
+  and writes `recovery-readiness.json` under `QUAL_LOGS` for the native artifact upload.
+  The bounded post-crash journal summary contains only fixed predicate hints, trusted source
+  positions, errno enums, counts and explicit unknown/truncated fields. Hints do not prove
+  an initiating predicate. What it covers and what needs real hardware: ADR 0095.
+- `hack/stress.py` with `hack/stress-invariants.sh`: N namespaces through every feature in parallel,
+  a daemon SIGKILL, then the races (a client that hangs up mid-create, a start and a
+  snapshot's delete against a destroy, more starts at once than the host has memory for), host
+  invariants between phases (ADR 0010; one is no record on disk the daemon does not hold).
+  `--namespaces 6 --per-namespace 4 --rounds 2 --crash`. `--churn N` then runs N cycles per namespace of
+  create, files, an endpoint, a snapshot restored, a backup restored, a fork, suspend and
+  resume, destroy, and reads the daemon's `process_resident_memory_bytes` until it stops dropping (every 5 s, 4 to 8 readings) once it has been idle
+  12 s: the least is the cycle's floor. The fitted growth of the floors over cycles 2..N
+  past `--rss-growth-mb` (40) is a break (ADR 0052); so is growth of the daemon's open files or
+  threads past `--handle-growth` (2). The log prints the series and the slope (`hack/stress_trend.py`).
+  CI runs 8 cycles. Through a
+  fleet it needs `--invariants-url` (the daemon's), else the check is skipped and says so.
+  The capacity race fails on missing start responses, worker or sampler errors, no valid
+  sample, or interruption after the phase begins. Its maximum is sampled guest quota
+  across the host, not continuous physical RAM usage.
+  Against a daemon on TLS, the invariants' curl trusts the daemon's certificate with
+  `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
+- `hack/owner-qualify.sh` (disposable Linux host, root, `BRIQYARD_DISPOSABLE=1`; [ADR 0149](adr/0149-native-owner-local-state.md), [OWNER-QUALIFICATION.md](OWNER-QUALIFICATION.md)): the shared owner golden, the unit vectors hash (63 rows), the wire tests (6), the preimage tests (9), the unit-vector tests (9), the target asset identity tests (3), the `local_owner` suite (40) and ordinary-path parity. The live joint B/native phase is listed as not run.
+- `hack/chaos.py`: owners keep a machine each and a counter on its disks through writes, stops,
+  restarts, forks, snapshots (a restore with memory read again after a cold boot) and backups,
+  while racers stop, start, restart, snapshot and back up any machine at once. It fails on a
+  counter that is not what it should be, or an answer a race does not explain. A write cut
+  short by a stop (409 `not_running`) may have run: its owner reads it back once the machine
+  runs. `--namespaces 4 --racers 4 --minutes 10`; `--backups` with a store; a fleet with `--url`.
+- `hack/fleet-two-hosts.sh`: a fleet with two hosts: namespaces placed on different hosts, calls
+  forwarded to each, a host that stops answering marked down with its namespace's calls refused
+  (`host_down`) and its listings refused rather than partial unless `partial=true` asks (ADR 0114), while the other host goes on, and the host back;
+  with `SECOND_HOST_SH`, its pool locked while it is down and back encrypted and unlocked with
+  the fleet's key, the key on none of its files, in its log or in the fleet's host list; and a
+  backup there (a directory store for the run when it has none): its key's id, no plaintext in
+  its stream, restored through the fleet onto it, its disk on the host's pool key, and its own
+  key served to it by its id with no restore forwarded (ADR 0045). The key is asked from the
+  second host itself, as the fleet checks a host's calls by its address; and a move into a
+  namespace on the other host (refused, the machine untouched; not supported yet) and a fork
+  across hosts (refused into a namespace of the other host, on its source's host into a new
+  one; ADR 0056). 29 checks.
+- `hack/fleet-restore.sh` (from the Mac, `FLEET_SH="limactl shell fc sudo" SECOND_HOST_SH="limactl
+  shell fc2 sudo"`): the dev fleet backed up to `file:///var/lib/briqyard-fleet-backup` for the
+  run (an identity in `/etc/briqyard/fleet-backup.key` on fc, development only), the backup
+  sealed (no key, no token in it), a restore refused over a registry, the registry lost and
+  restored `0600` with the same key for fc2, then fc2's pool locked and fc2 back with the key
+  of the restored registry; the config and the registry put back. 10 checks.
+- `hack/monitoring-check.sh` (in fc, as root, after `hack/install-monitoring.sh`, ADR 0054): the
+  fleet's targets (one per host that may run a daemon, each through its relay, at the address
+  asked), each ready host's metrics relayed, a down host 503, an unknown one 404; with
+  `PROMETHEUS_URL`, every target scraped and up exactly when its host answers; with
+  `GRAFANA_URL` and `GRAFANA_PASSWORD_FILE`, every query of the three dashboards returning data
+  (`CHECK_HOST=local`). 18 checks with fc and fc2 and the stack installed. Changes
+  nothing: start a few machines on `local` first so the per-machine panels have data.
+
+Before the live monitoring checks, qualify the capacity and backup-failure expressions
+with the already installed, checksum-verified Prometheus 3.15.1 tool (ADR 0054):
+
+```bash
+python3 hack/monitoring-alert-check.py --promtool /opt/briqyard-monitoring/prometheus/promtool
+```
+
+Requires Python 3 and PyYAML (`python3-yaml` on the native host). This runs
+`promtool test rules hack/monitoring/alert-tests.yaml` after binding every fixture
+expression and threshold to the Grafana source. The tool has a 30-second execution
+timeout; a timeout is a failed check. No download or running service is needed.
+The 12 synthetic scenarios have 26 expectations: CPU, memory and disk refusals,
+pressure excluded, zero/first-sample baselines, window expiration, the first backup
+failure and second unchanged sample, reset, stale/absent series and other event reasons.
+Only fixed synthetic labels are used. The CPU case must fail with the old
+`memory|disk` selector; the second backup observation must fail if `increase()` takes
+precedence over the no-baseline branch. `--check-source` checks binding alone (also in
+CI); it does not execute PromQL. On a Mac without PyYAML or the pinned promtool, run the
+expression checks on the native monitoring host. These query tests do not qualify
+Grafana firing/resolution, operator notification delivery or physical saturation;
+those remain separate live checks.
+
+### Fuzzing
+
+`fuzz/` holds `cargo fuzz` targets for what an untrusted party writes (ADR 0033): its own
+workspace, nightly only, never run by `cargo test --workspace` or CI (CI checks they build).
+
+| Target | Input |
+|---|---|
+| `guest_frames` | what an init sends over vsock: exec output to its exit, the exit report, an answer |
+| `session_input` | an exec session's query and its client messages |
+| `layer_extract` | an image layer's tar entries (any name, type, link), extracted into a root; nothing may change beside it or its parent, nothing outside get a link |
+| `dns_query` | a guest's DNS query; every answer must parse back with the query's id and question |
+| `ingress_head` | a public request head at the HTTP ingress; past 64 KiB never more to read |
+
+In the VM, as the Lima user (never root: `layer_extract` writes and removes files). The
+mount is read-only and `cargo fuzz run` writes into `fuzz/`, so build with cargo-fuzz and run
+the binaries with the build, corpus and crashes in `$HOME`:
+
+```bash
+rustup toolchain install nightly --profile minimal && cargo install cargo-fuzz
+cd fuzz
+CARGO_TARGET_DIR=$HOME/target-fuzz cargo +nightly fuzz build
+t=dns_query; mkdir -p $HOME/fuzz-corpus/$t $HOME/fuzz-artifacts/$t $HOME/fuzz-tmp
+TMPDIR=$HOME/fuzz-tmp $HOME/target-fuzz/$(rustc -vV | sed -n 's/^host: //p')/release/$t \
+  $HOME/fuzz-corpus/$t -max_total_time=600 -artifact_prefix=$HOME/fuzz-artifacts/$t/
+```
+
+A crash leaves its input in the artifact directory; the binary given that file replays it.
+Every fix gets a unit test from that input. Last run in ADR 0033.
+
+## Layout
+
+```
+crates/briqyard-api      the API types and the host–guest protocol (shared by everything)
+crates/briqyardd         the daemon: config, state, zfs, netw (bridges, nft, dns), fc, image,
+                         guestc (vsock client), machine (the manager), ingress, api
+crates/briqyard-init     PID 1 inside the guest
+crates/briqyard          the CLI
+crates/briqyard-fleet    the orchestrator across hosts
+crates/briqyard-objstore the object store (S3 or a directory), shared by the daemon and the fleet
+api/openapi/         the API description, served at /v1/openapi.yaml
+hack/                    dev VM, systemd units, dev configs, the shell suites, the stress driver
+docs/adr                 every technical decision; docs/research the numbers behind them
+```
+
+### Namespace peer packet fixture
+
+After building `cargo build -p briqyardd --example siblings-rules` on Linux, run
+`sudo python3 hack/network-siblings.py target/debug/examples/siblings-rules`. It uses disposable
+network namespaces and local endpoints; it needs iproute2, nftables and Python 3, changes no
+host nft table and removes its own namespaces/processes on every exit. Hold `hack/vm-lock.sh`
+when running it in the shared development VM. The microVM suite also sources
+`hack/e2e-siblings.sh` (14 checks, plus adoption when the daemon's unit is available). Run both
+before pushing a network change. The normal workspace, fleet and stress gates still apply.
+
+Local preparation for ADR 0064: macOS workspace tests passed **780**, with **3 ignored**;
+all-target clippy and formatting passed. The packet fixture's rules generator built and
+produced valid JSON. Linux packet, microVM, fleet and stress checks remain pending before
+push; these native checks do not establish nft kernel semantics.
+
+ADR 0064 follow-up adds barrier regressions for move allocation/rollback and source-counter
+cleanup, capability checks for inherited restores, and bounded conntrack diagnostics with
+kill/reap coverage. Each reviewed failure was reproduced before its fix; Linux network and
+microVM gates remain required before push.
+
+Native e2e additionally runs `hack/e2e-seals.sh` (32 checks, disposable CI host only): both sandbox seed disk shapes seal,
+create siblings with distinct network identities and vsock nonces, execute their first commands,
+check restored wall clocks and retain the source exec barrier. The positive-DATA source supplies an observed recipe
+for a test-only unbound catalog, validated by the installed configuration parser. Desired zero
+restores the selected seed; warm acceptance requires the actual paused slot ID, unchanged
+kernel process incarnation, credentials, boot identity and open root/DATA devices. It checks
+the physical VMM memory ceiling, independent root and DATA budget refusal, exact replay, changed-body
+conflict and bounded refill with independent DATA. Destination environment and boot files must
+be visible to the first command exactly once. Cleanup drains the pool and destroys owned
+namespaces before the conservative maintenance observation permits configuration restoration
+and handover. A missing process/device observation fails; cold restore cannot pass a warm
+claim. These added native gates require a native run; offline fixture tests do not qualify them.
+
+Restoration failures print only fixed categories for configuration validation/copy,
+previous incarnation, PID queries/change, signal, start, readiness and the outer timeout.
+Restored readiness uses `briqyard status` with the original CLI authentication, including
+an originally empty token. Its observation must carry a new nonempty incarnation and the
+exact restored configuration identity. Recovery faults omit the observation and fail this
+check. The pre-handover maintenance query still requires the fixture token.
+Readiness exhaustion distinguishes query failure, query timeout and identity mismatch. The
+90-second ownership drain and 10-second file restore bounds remain. Handover has one
+128-second budget: 22 seconds for bounded preflight calls, the runtime's five-second admission
+and 60-second shutdown, five seconds for PID observation, seven for start, 25 for readiness
+and four for failure evidence. Command allowances include kill grace. Calls consume the
+remaining phase budget; PID polling reserves restoration time and readiness never resets the
+shared deadline.
+After an attempted SIGUSR2, a failure also projects journal evidence from the recorded daemon
+PID since that attempt. Only disposable CI reads it: at most 129 entries to detect a 128-entry
+limit, 128 KiB and a three-second reader deadline (one-second kill grace). Exact structured
+refusal reasons distinguish maintenance and compatibility; accepted shutdown, shutdown timeout
+and completion remain separate. Missing, malformed, mismatched, conflicting or over-limit
+evidence is unknown. Raw journal messages and errors are suppressed. Only the recorded PID is
+signaled; these diagnostics never retry handover or relax restoration identity checks.
+`python3 -m unittest hack/test_native_seals.py` exercises the exported Bash caller with offline,
+authentication-aware command fakes. A fake clock covers accepted shutdown beyond 15 seconds,
+including full preflight/admission/shutdown allowances, then restored readiness. Refusal,
+expiry and configuration/incarnation mismatches still fail. These tests do not establish the
+cause of a native failure or qualify native handover.
+
+The init root-only `--ignored run_as` filter includes loopback ext4 sync, freeze rollback, thaw, deadline and connection-close tests (ADR 0092).
+
+ADR 0092 checks achieved consistency and two timed unsynced 27-byte regressions
+(snapshot restore and running-source disk fork), plus up to five crash opt-out controls.
+Copy completion must be within one second; a slower trial is inconclusive and fails.
+At least one crash control must lose bytes; the summary counts include each timed trial.
+`hack/measure-freeze.sh`, dispatched with native workflow input `measure_freeze=true`,
+records relative latency and stalls on shared hosted x86_64; its artifacts include all raw samples.
+
+`BRIQYARD_TEST_SERVICE=1 hack/service-template.sh e2e` (ADR 0127, disposable host only) turns on
+`templates.service_ready` and runs `hack/service_template.py`: seal refusal with an open socket, seal, three clones with
+distinct identity, template deletion fencing, and a resume failure that quarantines one clone. `... bench` times cold
+start against clone on a busybox fixture (interleaved, p50 and max) and eight simultaneous clones. Its checks are not
+in the `e2e.sh` counts.
+`... qualify [--clones N] [--age-seconds S] [--sequential] [--memory-mb M] [--allow-unsupported]` (default 3 clones, 2 to 64; template aged 30 s, at least 5; 512 MB) is the
+check behind ADR 0127's VMGenID, MAC and clock gate: it seals one template, starts the clones together (`--sequential` for one
+by one; `--clones 8` is the simultaneous run) and reports create-to-ready p50 and max, host free memory and `host_firecracker_rss_mb` (host-wide: every Firecracker process on the host, not only the clones) before and after, and
+`pass`, `fail` or `unsupported` for each of the checks below. It runs on the daemon host only (it refuses a `BRIQYARD_URL`
+that is not this machine; a port forward to loopback passes that check, so run it on the host itself) and records the host: hostname and whether it is itself a guest (`nested`, from the `hypervisor` CPU
+flag or `/sys/hypervisor/type`). What each check proves differs:
+- **VMGenID** tests the hypervisor and the kernel: the guest has the device and logged `crng reseeded due to virtual machine fork`
+  more often than before the seal (the park hook records that count), which the driver does only when the ID changed.
+  `unsupported` when the kernel config has no `CONFIG_VMGENID`.
+- **Host MAC** (`mac_host`) is an outside observation of the activation path, not a hypervisor check: the guest init sets the MAC
+  and the host learns it from the guest's ARP reply. The run flushes the host's entry (`ip neigh flush to <ip>`), makes one request,
+  then `ip neigh show <ip>` must show the assigned MAC (`06:b1:` and the address), distinct per clone. `unsupported` when the
+  flush fails (it needs root or passwordless `sudo`) or the entry cannot be read.
+- **MAC, clock and RNG** test the activation path only. `clone_configure_v1` writes the daemon's per-clone MAC, wall clock and
+  entropy into the guest before the clone is ready, so they pass whenever that path works, whatever the hypervisor restores.
+  They catch a regression of that path: the guest `eth0` MAC against the daemon's rule and across clones, the wall clock (the
+  skew is a lower bound: the guest read its clock somewhere between the host's start and end of the exec, so the exec round trip is
+  inside the window, and a guest clock without sub-second digits is truncated and counts as a second wide; the check passes when
+  that lower bound is at most 1 s, so the true skew can be up to 2 s) although the template is `--age-seconds` old, and fresh kernel randomness across clones.
+
+Whether a VMClock device is present is reported across all clones, not judged. The last line is always one JSON summary, also
+after an error. `ok` is true and the exit status 0 only when every check is `pass`: a `fail`, an `unsupported` check or a clone error
+makes it false and the status 1; `--allow-unsupported` excuses only `unsupported` checks (recorded in the summary). A usage error (`--clones` below 2 or
+above 64, `--age-seconds` below 5, `--memory-mb` not positive) exits 2 without JSON. A `BRIQYARD_URL` that is not this machine
+exits 1 with the JSON line and the error; it makes no call to the daemon, so there is no teardown. The run fails too if its machines or namespace are not all destroyed afterwards. On a nested
+host the timings are relative only; the gate counts only a run on a native host with `ok` true and `allow_unsupported` false.

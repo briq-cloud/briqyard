@@ -26,6 +26,10 @@ pub(super) enum Fail {
     Temporary,
     FileSync,
     Rename,
+    ReadBack,
+    ReadBackMismatch,
+    UnlinkIntent,
+    SyncAfterUnlink,
 }
 
 #[cfg(test)]
@@ -146,8 +150,17 @@ impl Store {
     }
 
     /// Replace the attempt iff the file still holds exactly `expected` (no file when `None`)
-    /// and `next` is its one successor. `Ok` is a known commit: file and parent are synced and
-    /// the bytes read back. After the rename a failure is `CommitUnknown`, never a retry.
+    /// and `next` is its one successor. Three outcomes after the rename, never conflated:
+    ///
+    /// * `Ok`: the file and the parent directory are synced, the bytes read back exactly, and the
+    ///   intent is gone and that removal synced.
+    /// * `CommitUnknown`: the parent sync or the read-back failed. The intent stays and fences
+    ///   every load, here and after a restart.
+    /// * `CommittedCleanupFailed`: the parent sync and the read-back both succeeded, so the new
+    ///   version is known and durable, but removing the intent (or syncing that removal) failed.
+    ///   The caller stops this turn: it retries nothing and releases no outward effect. If the
+    ///   intent survives, it fences every load; if its removal reached the directory, the next
+    ///   load reads the known version.
     pub(super) fn commit(
         &self,
         guard: &Guard<'_>,
@@ -242,24 +255,50 @@ impl Store {
         if after_rename().is_err() {
             return Err(OwnerError::CommitUnknown);
         }
-        let read_back = {
-            let mut file = File::open(self.root.join(ACTIVE));
-            let mut read = Vec::new();
-            match file.as_mut() {
-                Ok(file) => file.read_to_end(&mut read).ok().map(|_| read),
-                Err(_) => None,
+        let read_back = || -> Result<Vec<u8>, std::io::Error> {
+            #[cfg(test)]
+            if FAIL.get() == Some(Fail::ReadBack) {
+                return Err(std::io::Error::other(
+                    "injected failure reading the attempt back",
+                ));
             }
+            #[allow(unused_mut)]
+            let mut read = Vec::new();
+            File::open(self.root.join(ACTIVE))?.read_to_end(&mut read)?;
+            #[cfg(test)]
+            if FAIL.get() == Some(Fail::ReadBackMismatch) {
+                read.push(b' ');
+            }
+            Ok(read)
         };
-        if read_back.as_deref() != Some(bytes.as_slice()) {
+        if read_back().ok().as_deref() != Some(bytes.as_slice()) {
             return Err(OwnerError::CommitUnknown);
         }
-        let clear = || -> Result<(), std::io::Error> {
-            std::fs::remove_file(&intent)?;
+        let cleanup = |operation: &'static str| {
+            move |source| OwnerError::CommittedCleanupFailed { operation, source }
+        };
+        let unlinked = || -> Result<(), std::io::Error> {
+            #[cfg(test)]
+            if FAIL.get() == Some(Fail::UnlinkIntent) {
+                return Err(std::io::Error::other(
+                    "injected failure removing the intent",
+                ));
+            }
+            std::fs::remove_file(&intent)
+        };
+        unlinked().map_err(cleanup("removing the commit intent"))?;
+        let synced = || -> Result<(), std::io::Error> {
+            #[cfg(test)]
+            if FAIL.get() == Some(Fail::SyncAfterUnlink) {
+                return Err(std::io::Error::other(
+                    "injected failure syncing after the unlink",
+                ));
+            }
             File::open(&self.root)?.sync_all()
         };
-        if clear().is_err() {
-            return Err(OwnerError::CommitUnknown);
-        }
+        synced().map_err(cleanup(
+            "syncing the store after removing the commit intent",
+        ))?;
         Ok(())
     }
 }

@@ -71,26 +71,54 @@ the accepted `native.inputs/v1` fixture's guard is not the target asset.
 
 ## Uncertain commits fence the attempt
 
-A failure after the rename (directory sync, read-back, or clearing the marker) used to leave the
-new bytes visible, so the next load treated them as known and could project receipts from them.
-Now every commit first writes `commit.intent`, durably (file and directory synced), holding
-`previous=<sha256 of the old canonical attempt, or none>` and `next=<sha256 of the new one>`.
-It removes the marker only after the rename, the directory sync and a byte-for-byte read-back
-all succeeded. A failure before the rename removes the temporary file and the marker, so the old
-attempt stands and nothing is fenced.
+A failure after the rename used to leave the new bytes visible, so the next load treated them as
+known and could project receipts from them. Now every commit first writes `commit.intent`,
+durably (file and directory synced), holding `previous=<sha256 of the old canonical attempt, or
+none>` and `next=<sha256 of the new one>`. Everything after that point has exactly one of
+three outcomes, and a caller can tell them apart:
+
+| Outcome | What happened | What is on disk | The caller |
+|---|---|---|---|
+| `Ok` | file synced, rename, **parent directory synced**, exact byte read-back, intent removed and that removal synced | the new version, no marker | continues |
+| `CommitUnknown` | the parent directory sync or the read-back failed or differed | the new bytes may be visible; the marker stays | stops; every load refuses |
+| `CommittedCleanupFailed` | the parent sync and the exact read-back both succeeded (the version is known and durable), then removing the marker, or syncing that removal, failed | the new version; the marker is present (removal failed) or absent (only its sync failed) | stops this turn: no retry, no second effect, no outward payload |
+
+The parent directory sync after the rename, followed by the exact read-back under the exclusive
+lock, is what makes the active file known. The cleanup that follows never decides the active
+file's durability: its failure cannot make a known commit unknown. It also never becomes plain
+`Ok`: `mutate` returns the error, so `consume` cannot hand out its `Launch` and no caller
+can release a receipt or outward effect on it. The error keeps the failing operation and the I/O
+error and carries no attempt bytes. No caller of `LocalOwner` exists outside its tests yet; the
+first must stop on this variant and must not turn it into a generic I/O error or a retry.
+
+Before the rename the failure removes the temporary file and the marker and the old attempt
+stands. A crash between the marker and the rename leaves the marker alone: the next load refuses.
 
 `load` refuses while any entry named `commit.intent` exists, whatever it is: a regular file, a
 link, a directory, or something that cannot be examined. That one check covers observation,
-`PlanReadOwner` capture, every mutation and an install, in this process and after a restart or a
-crash between the marker and the rename. A later commit never reinterprets the ambiguous bytes.
+`PlanReadOwner` capture, every mutation and an install, in this process and after a restart. A
+later commit never reinterprets the ambiguous bytes. After a crash in the cleanup either result
+is safe: a surviving marker refuses every load, an absent one lets the next load read the known
+version, and neither releases anything by itself. A later read classifies the local active state;
+it is never proof that a caller got success or may dispatch again. There is no extra in-memory
+fence and no global kill switch.
 
-Recovery is an explicit operator act and is not automatic: compare `sha256(active.json)` with
-`previous` (the rename did not happen, the old attempt stands) and `next` (the commit landed
-but was not confirmed); any other value stays fenced. Only then is the marker removed by hand.
-Equal hashes show which write won; they do not make the operation's uncertain effect known, which
-a human decides. There is no timer, retry or compare-and-set path that clears it. The store stays
-local and private; no R or B wire changes. A failure to clear the marker after a confirmed commit
-also fences, which is conservative and visible.
+Recovery is an explicit operator act and is not automatic. Under the exclusive lock compare
+`sha256(active.json)` with `previous` (the rename did not happen and the old attempt stands; for
+a first install `previous` is `none` and the file is absent) and with `next` (the commit
+landed); any other value stays fenced. Only then is the marker removed by hand. A matching hash
+shows which write won; it does not make the operation's uncertain effect known, which a human
+decides. There is no timer, retry or compare-and-set path that clears the marker, and no receipt
+is permitted on a match. The store stays local and private; no R or B wire changes.
+
+Tests (`local_owner::tests::cleanup`, with test-only injection at the parent sync, the
+read-back as a failure and as a mismatch, the marker unlink and the sync after the unlink): the
+first three points are `CommitUnknown`, leave the marker byte for byte, show the new version on
+disk, and fence observation, install and every mutation on the original and a reopened handle.
+The last two are `CommittedCleanupFailed`: the version is visible and later calls do not change
+it, a second `consume` refuses, and the marker is present or absent as the point of failure
+dictates. A modeled crash covers both restart results. Both cleanup cases failed on the previous
+classification, which returned `CommitUnknown` for them.
 
 Rejected: a flag stored inside `active.json`. Writing it needs the same rename that is uncertain,
 so the failure it records could lose it.
