@@ -144,11 +144,8 @@ fn root_positive_same_description_and_independent_negative_after_exit() {
     let child = ChildGuard::sleep();
     let floor = DescriptorFloor::preserving(&[]).unwrap();
     let original = OriginalPidFd::from_owned(raw_pidfd(child.pid()));
-    let same = CandidatePidFd::from_owned(
-        raw_pidfd(child.pid()).as_fd().try_clone_to_owned().unwrap(),
-        &floor,
-    )
-    .unwrap();
+    let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(original.as_raw_fd()) };
+    let same = CandidatePidFd::from_owned(borrowed.try_clone_to_owned().unwrap(), &floor).unwrap();
     assert_eq!(
         compare_open_descriptions(&original, &same).unwrap(),
         Comparison::SameOpenFileDescription
