@@ -128,6 +128,16 @@ so the failure it records could lose it.
 * An exit needs the enrolled original's retained identity, not only a readable descriptor: an
   unknown or failing identity refuses, for the daemon exit and the authority exit and handoff.
   No post-exit evidence is invented; a real descriptor that cannot say refuses.
+* A reaped original is identified by the snapshot pinned to its own retained pidfd, not by a
+  reread. `RetainedProcess::identity` for `CustodianProcess` reuses `verify_pinned`: while the
+  descriptor reports the process running it reads `/proc` again and refuses any change; once the
+  same descriptor reports the exit, nothing can be read from the reaped process and the stored
+  `MeasuredProc` answers. A descriptor or identity error still refuses, `has_exited` is still
+  required of every caller, and no other PID evidence is accepted. The earlier reread refused every
+  genuine exit (`No such process`). The regression
+  (`review::a_reaped_original_keeps_its_stored_identity_on_its_own_retained_pidfd`) pins a real
+  child, kills and reaps it, and checks `has_exited`, the failing reread and the stored identity;
+  it needs root and runs only with `BRIQYARD_CUSTODY_TEST_REAL_UID=1`, like the other real-UID fixtures.
 * The daemon's retirement also needs the custodian's own final I/O through `TargetFacts`. A typed
   Launch and Death agreeing is not that record; the production host still refuses it.
 * A placeholder token is exactly `{"x":"op"}` or `{"x":"serial"}`.

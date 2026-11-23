@@ -60,7 +60,9 @@ impl TryFrom<&OpaqueKernelProcess> for MeasuredProc {
 /// The retained descriptor of one original process: the only source of an exit. A PID that
 /// cannot be found proves nothing; the retained pidfd turning readable does.
 pub trait RetainedProcess {
-    /// The process the descriptor names, after checking its identity did not change.
+    /// The process the descriptor names. While it runs its identity is read again and must not
+    /// have changed; once the descriptor reports the exit, the snapshot pinned to that same
+    /// descriptor answers, because nothing can be read from a reaped process.
     fn identity(&self) -> Result<MeasuredProc, OwnerError>;
     /// Whether the retained descriptor reports that exact process has exited.
     fn has_exited(&self) -> Result<bool, OwnerError>;
@@ -68,7 +70,7 @@ pub trait RetainedProcess {
 
 impl RetainedProcess for CustodianProcess {
     fn identity(&self) -> Result<MeasuredProc, OwnerError> {
-        self.verify_unchanged()?;
+        self.verify_pinned()?;
         MeasuredProc::try_from(self.process())
     }
 

@@ -176,3 +176,33 @@ fn the_authority_exit_and_handoff_need_the_enrolled_originals_retained_identity(
         .unwrap();
     let _ = (start_guard, Launch::hash);
 }
+
+#[test]
+#[ignore = "explicit root environment fixture: BRIQYARD_CUSTODY_TEST_REAL_UID=1"]
+fn a_reaped_original_keeps_its_stored_identity_on_its_own_retained_pidfd() {
+    use crate::execution_custody::tests::ChildGuard;
+    use crate::execution_custody::CustodianProcess;
+
+    assert_eq!(
+        std::env::var("BRIQYARD_CUSTODY_TEST_REAL_UID").as_deref(),
+        Ok("1")
+    );
+    assert_eq!(unsafe { libc::geteuid() }, 0);
+    let child = ChildGuard::sleep();
+    let retained = CustodianProcess::open_live(child.pid()).unwrap();
+    let stored = MeasuredProc::try_from(retained.process()).unwrap();
+    assert_eq!(retained.identity().unwrap(), stored);
+    assert!(!retained.has_exited().unwrap());
+
+    child.kill();
+    assert!(retained.has_exited().unwrap(), "the pidfd reports the exit");
+    assert!(
+        retained.verify_unchanged().is_err(),
+        "a reread of the reaped process cannot succeed, which is why identity must not use it"
+    );
+    assert_eq!(
+        retained.identity().unwrap(),
+        stored,
+        "a reaped original answers with the snapshot pinned to its own descriptor"
+    );
+}
