@@ -363,13 +363,18 @@ impl Attempt {
     }
 
     /// Both leases are the target's own random identities, daemon first, each once.
-    pub(super) fn allocate_lease(&self, resource: Resource) -> Result<Attempt, OwnerError> {
+    pub(super) fn allocate_lease(
+        &self,
+        resource: Resource,
+        facts: &dyn TargetFacts,
+    ) -> Result<Attempt, OwnerError> {
         if self.record(resource).lease.is_some() {
             return Err(OwnerError::Refused("lease already allocated"));
         }
         if resource == Resource::Authority && self.daemon.lease.is_none() {
             return Err(OwnerError::Refused("lease order is daemon then authority"));
         }
+        self.check_continuity(facts, None)?;
         let mut next = self.next()?;
         next.record_mut(resource).lease = Some(random_digest()?);
         Ok(next)
@@ -395,26 +400,10 @@ impl Attempt {
         if facts.fragment(resource)? != FragmentState::Guarded {
             return Err(OwnerError::Refused("the guarded fragment is not on disk"));
         }
-        self.require_originals_running(facts)?;
+        self.check_continuity(facts, None)?;
         let mut next = self.next()?;
         next.record_mut(resource).fragment = FragmentState::Guarded;
         Ok(next)
-    }
-
-    fn require_originals_running(&self, facts: &dyn TargetFacts) -> Result<(), OwnerError> {
-        for resource in [Resource::Daemon, Resource::Authority] {
-            let record = self.record(resource);
-            if record.exit.is_some() {
-                continue;
-            }
-            let running = facts.process(record.original.pid.get())?;
-            if !running.is_some_and(|process| process.matches(&record.original)) {
-                return Err(OwnerError::Refused(
-                    "an original changed without a witnessed exit",
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// The retained original's own pidfd names the process the Plan does, and it still runs.
@@ -424,6 +413,7 @@ impl Attempt {
         launch: &Launch,
         capture: &Capture,
         retained: &dyn RetainedProcess,
+        facts: &dyn TargetFacts,
     ) -> Result<Attempt, OwnerError> {
         let record = self.record(resource);
         let (rk, _, _) = self.keys()?;
@@ -445,6 +435,7 @@ impl Attempt {
                 "capture is not this resource's retained original",
             ));
         }
+        self.check_continuity(facts, None)?;
         let mut next = self.next()?;
         next.record_mut(resource).captured = Some(LaunchCapture {
             launch: launch.clone(),

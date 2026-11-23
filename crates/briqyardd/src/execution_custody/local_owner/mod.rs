@@ -150,7 +150,7 @@ impl<F: TargetFacts> LocalOwner<F> {
     }
 
     pub fn allocate_lease(&self, resource: Resource) -> Result<(), OwnerError> {
-        self.mutate(|attempt| Ok((attempt.allocate_lease(resource)?, ())))
+        self.mutate(|attempt| Ok((attempt.allocate_lease(resource, &self.facts)?, ())))
     }
 
     pub fn install_fragment(&self, resource: Resource) -> Result<(), OwnerError> {
@@ -166,7 +166,7 @@ impl<F: TargetFacts> LocalOwner<F> {
     ) -> Result<(), OwnerError> {
         self.mutate(|attempt| {
             Ok((
-                attempt.record_capture(resource, launch, capture, retained)?,
+                attempt.record_capture(resource, launch, capture, retained, &self.facts)?,
                 (),
             ))
         })

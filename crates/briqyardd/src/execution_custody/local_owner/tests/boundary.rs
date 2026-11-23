@@ -322,6 +322,38 @@ fn gate(name: &str) -> (World, Act, &'static str) {
             world.stage_capture(Resource::Daemon);
             (world, Box::new(|w| w.owner.commit_enrollment()), custodian)
         }
+        "lease" => {
+            let world = World::new();
+            world.install().unwrap();
+            (
+                world,
+                Box::new(|w| w.owner.allocate_lease(Resource::Daemon)),
+                custodian,
+            )
+        }
+        "fragment" => {
+            let world = World::new();
+            world.install().unwrap();
+            world.owner.allocate_lease(Resource::Daemon).unwrap();
+            world.host.0.lock().unwrap().fragments[0] = FragmentState::Guarded;
+            (
+                world,
+                Box::new(|w| w.owner.install_fragment(Resource::Daemon)),
+                custodian,
+            )
+        }
+        "capture" => {
+            let world = World::new();
+            world.install().unwrap();
+            world.owner.allocate_lease(Resource::Daemon).unwrap();
+            let launch = world.launch(Resource::Daemon);
+            let capture = world.capture(&launch, &Key::rk());
+            let act: Act = Box::new(move |w| {
+                w.owner
+                    .record_capture(Resource::Daemon, &launch, &capture, &w.retained[DAEMON])
+            });
+            (world, act, custodian)
+        }
         "daemon handoff" => {
             let world = World::new();
             let (launch, capture) = world.enroll();
@@ -457,7 +489,10 @@ fn gate(name: &str) -> (World, Act, &'static str) {
     }
 }
 
-const GATES: [&str; 13] = [
+const GATES: [&str; 16] = [
+    "lease",
+    "fragment",
+    "capture",
     "enrollment",
     "daemon handoff",
     "daemon exit",
@@ -473,6 +508,9 @@ const GATES: [&str; 13] = [
     "authority consume",
 ];
 
+/// Every durable `Attempt` write after genesis, which measures all four processes itself: the 12
+/// users of `Attempt::next`. One gate each, and a gate per role for the four that serve both
+/// (handoff, exit, guard start, consume); lease, fragment and capture run for the daemon.
 #[test]
 fn every_authorizing_write_refuses_a_lost_or_replaced_custodian_and_writes_nothing() {
     type Change = (&'static str, fn(&mut HostState, u64));
