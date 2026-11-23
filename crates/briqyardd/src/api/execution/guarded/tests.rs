@@ -76,12 +76,34 @@ async fn refused_registration_leaves_an_owned_active_lease_running() {
     assert!(lease.observe(&evidence, &sample).is_err());
 }
 
-fn fill_near_capacity(path: &std::path::Path, permit: &Permit) {
+fn near_capacity_journal(path: &std::path::Path) -> (Journal, HostRegistration) {
     const MAX_BYTES: usize = 16 * 1024 * 1024;
     const MAX_RECORDS: usize = 16_384;
     let journal_path = path.join("journal.json");
+    let journal = Journal::open(path, Role::Host("host-1".into())).unwrap();
     let mut next: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
+    drop(journal);
+    let permit: Permit = serde_json::from_value(
+        serde_json::from_str::<serde_json::Value>(include_str!(
+            "../../../../../briqyard-api/tests/fixtures/execution-v1.json"
+        ))
+        .unwrap()["permit"]
+            .clone(),
+    )
+    .unwrap();
+    let current = HostRegistration {
+        authority: permit.authority.clone(),
+        epoch: permit.authority_epoch.clone(),
+        key_id: "authority-test".into(),
+        public_key: [7; 32],
+        host_instance: next["instance"].as_str().unwrap().into(),
+        generation: 1,
+    };
+    next["registration"] = serde_json::to_value(&current).unwrap();
+    next["registration_highwater"] = serde_json::json!(1);
+    next["fences"][&current.authority] = serde_json::to_value(&current.epoch).unwrap();
+    next["clock_floor"] = serde_json::json!(crate::api::execution::test_fixtures::CLOCK.now);
     let mut padded = permit.clone();
     let allocation = padded.allocations[0].clone();
     padded.allocations = (0..access::MAX_ALLOCATIONS)
@@ -105,12 +127,12 @@ fn fill_near_capacity(path: &std::path::Path, permit: &Permit) {
         used += bytes;
         admissions.insert(padded.admission.clone(), item);
     }
-    let mut epochs = Vec::new();
     assert!(!next["retired"]
         .as_object()
         .unwrap()
         .contains_key("other-authority"));
     next["retired"]["other-authority"] = serde_json::Value::Array(Vec::new());
+    let mut epochs = Vec::new();
     let mut free = MAX_BYTES - 64 - serde_json::to_vec(&next).unwrap().len() + 1;
     while free > 131 {
         let width = (free - 10).min(128);
@@ -119,9 +141,24 @@ fn fill_near_capacity(path: &std::path::Path, permit: &Permit) {
     }
     epochs.push(format!("{:04}{}", epochs.len(), "x".repeat(free - 7)));
     next["retired"]["other-authority"] = serde_json::to_value(epochs).unwrap();
-    let bytes = serde_json::to_vec(&next).unwrap();
-    assert_eq!(MAX_BYTES - bytes.len(), 64);
-    std::fs::write(journal_path, bytes).unwrap();
+    assert_eq!(MAX_BYTES - serde_json::to_vec(&next).unwrap().len(), 64);
+    next["registration"] = serde_json::Value::Null;
+    next["registration_highwater"] = serde_json::json!(0);
+    next["fences"] = serde_json::json!({});
+    next["clock_floor"] = serde_json::json!(0);
+    std::fs::write(&journal_path, serde_json::to_vec(&next).unwrap()).unwrap();
+    let mut journal = Journal::open(path, Role::Host("host-1".into())).unwrap();
+    let current = HostRegistration {
+        host_instance: journal.instance().into(),
+        ..current
+    };
+    journal
+        .register_host(current.clone(), crate::api::execution::test_fixtures::CLOCK)
+        .unwrap();
+    journal.publish();
+    assert_eq!(MAX_BYTES - std::fs::read(journal_path).unwrap().len(), 64);
+    assert_eq!(journal.registration().unwrap(), Some(&current));
+    (journal, current)
 }
 
 #[tokio::test]
@@ -137,19 +174,20 @@ async fn refused_near_capacity_registration_preserves_every_guarded_effect() {
     use tower::ServiceExt;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("host");
-    let fixture = crate::api::execution::test_fixtures::active_operation(&path);
-    let current = fixture.registration.clone();
-    let active_operation = fixture.active.clone();
+    let (journal, current) = near_capacity_journal(&path);
+    let reader = journal.reader();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../briqyard-api/tests/fixtures/execution-continuation-v1.json"
+    ))
+    .unwrap();
+    let active_operation: ActiveOperation =
+        serde_json::from_value(fixture["active"].clone()).unwrap();
     let refused = HostRegistration {
         epoch: "epoch-2".into(),
         key_id: "n".repeat(128),
         generation: 2,
         ..current.clone()
     };
-    drop(fixture.journal);
-    fill_near_capacity(&path, &fixture.permit);
-    let journal = Journal::open(&path, Role::Host("host-1".into())).unwrap();
-    let reader = journal.reader();
     let manager = GuardedManager::new(crate::machine::tests::channel_manager().await);
     let channel = Arc::new(
         GuardedHostExecutionChannel::new(
@@ -190,7 +228,8 @@ async fn refused_near_capacity_registration_preserves_every_guarded_effect() {
         .active
         .register(&active_operation.binding.admission, lease.clone())
         .unwrap();
-    let before = std::fs::read(path.join("journal.json")).unwrap();
+    let before_bytes = std::fs::read(path.join("journal.json")).unwrap();
+    let before: serde_json::Value = serde_json::from_slice(&before_bytes).unwrap();
     let response = router(channel.clone())
         .oneshot(
             Request::builder()
@@ -204,14 +243,14 @@ async fn refused_near_capacity_registration_preserves_every_guarded_effect() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    let after = std::fs::read(path.join("journal.json")).unwrap();
-    assert!(after == before, "capacity refusal changed journal.json");
-    let stored: serde_json::Value = serde_json::from_slice(&after).unwrap();
-    assert_eq!(stored["fences"][&refused.authority], current.epoch);
-    assert!(!stored["retired"][&refused.authority]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::Value::String(current.epoch.clone())));
+    let after_bytes = std::fs::read(path.join("journal.json")).unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&after_bytes).unwrap();
+    assert!(
+        after_bytes == before_bytes,
+        "capacity refusal changed journal.json"
+    );
+    assert_eq!(after["fences"], before["fences"]);
+    assert_eq!(after["retired"], before["retired"]);
     let journal = channel.journal.lock().await;
     assert_eq!(journal.registration().unwrap(), Some(&current));
     drop(journal);
