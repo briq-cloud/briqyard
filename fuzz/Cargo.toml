@@ -28,6 +28,13 @@ url = "2"
 debug = 1
 
 [[bin]]
+name = "plan_read_pair"
+path = "fuzz_targets/plan_read_pair.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "guest_frames"
 path = "fuzz_targets/guest_frames.rs"
 test = false

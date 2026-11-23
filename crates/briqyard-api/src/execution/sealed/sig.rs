@@ -105,6 +105,10 @@ pub enum Tag {
     Trial3Archive,
     #[serde(rename = "trial3.archive.reply")]
     Trial3ArchiveReply,
+    #[serde(rename = "plan.read.receiver")]
+    PlanReadReceiver,
+    #[serde(rename = "plan.read.api")]
+    PlanReadApi,
 }
 
 impl Tag {
@@ -148,6 +152,8 @@ impl Tag {
             Tag::Trial3Observe => "trial3.observe",
             Tag::Trial3Archive => "trial3.archive",
             Tag::Trial3ArchiveReply => "trial3.archive.reply",
+            Tag::PlanReadReceiver => "plan.read.receiver",
+            Tag::PlanReadApi => "plan.read.api",
         }
     }
 
@@ -208,6 +214,8 @@ impl Tag {
             Tag::Trial3Observe => &[Role::Rk, Role::Bk],
             Tag::Trial3Archive => &[Role::Rk],
             Tag::Trial3ArchiveReply => &[Role::Bk],
+            Tag::PlanReadReceiver => &[Role::Rk],
+            Tag::PlanReadApi => &[Role::Bk],
         }
     }
 }

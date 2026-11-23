@@ -9,7 +9,7 @@ use crate::execution::sealed::transition::*;
 #[test]
 fn the_tag_table_is_exactly_the_contract() {
     use Role::*;
-    let table: [(Tag, &str, &[Role]); 38] = [
+    let table: [(Tag, &str, &[Role]); 40] = [
         (Tag::QueryHost, "query.host", &[Ak, Rk, Bk]),
         (Tag::QueryAuthority, "query.authority", &[Hk, Rk, Bk]),
         (Tag::QueryApi, "query.api", &[Hk, Ak, Rk]),
@@ -48,6 +48,8 @@ fn the_tag_table_is_exactly_the_contract() {
         (Tag::Trial3Observe, "trial3.observe", &[Rk, Bk]),
         (Tag::Trial3Archive, "trial3.archive", &[Rk]),
         (Tag::Trial3ArchiveReply, "trial3.archive.reply", &[Bk]),
+        (Tag::PlanReadReceiver, "plan.read.receiver", &[Rk]),
+        (Tag::PlanReadApi, "plan.read.api", &[Bk]),
     ];
     let mut seen = std::collections::HashSet::new();
     for (tag, text, signers) in table {

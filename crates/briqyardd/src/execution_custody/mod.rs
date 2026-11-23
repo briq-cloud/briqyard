@@ -5,6 +5,7 @@ mod process;
 mod transport;
 
 pub mod artifacts;
+pub mod plan_reader;
 pub mod sealed_input;
 
 #[cfg(test)]

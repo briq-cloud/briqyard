@@ -152,3 +152,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 - [0143: Read a gateway's loaded policy back before bound machines reach it](0143-gateway-loaded-policy-readback.md)
 
 - [0145: Private pinned transport for the protected authority](0145-protected-private-transport.md)
+
+- [0146: Read the two prior Plan commitments from root custody](0146-root-plan-pin-reader.md)
