@@ -23,6 +23,7 @@ use std::{
 use tokio::sync::Barrier;
 
 mod custody_boot;
+mod private_transport;
 mod review;
 
 const NOW: u64 = 3_000;

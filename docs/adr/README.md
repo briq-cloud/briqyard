@@ -150,3 +150,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 - [0141: Serve installer reads from committed snapshots](0141-installer-reads-from-committed-snapshots.md)
 
 - [0143: Read a gateway's loaded policy back before bound machines reach it](0143-gateway-loaded-policy-readback.md)
+
+- [0145: Private pinned transport for the protected authority](0145-protected-private-transport.md)

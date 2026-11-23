@@ -21,7 +21,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 axum = { workspace = true }
-hyper = { workspace = true }
+hyper = { workspace = true, features = ["http1", "client", "server"] }
 hyper-util = { workspace = true }
 clap = { workspace = true }
 reqwest = { workspace = true }
@@ -30,6 +30,13 @@ base64 = { workspace = true }
 rand = { workspace = true }
 futures = { workspace = true }
 zstd = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+http = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+zeroize = "1"
+ring = { workspace = true }
 
 [dev-dependencies]
 briqyard-testing = { workspace = true }
@@ -38,5 +45,4 @@ axum = { workspace = true, features = ["ws"] }
 tokio-tungstenite = { workspace = true }
 tempfile = "3"
 rcgen = { workspace = true }
-ring = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

@@ -31,6 +31,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod transport;
+
 #[cfg(test)]
 mod tests;
 
