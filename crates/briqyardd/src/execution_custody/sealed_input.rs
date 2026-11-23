@@ -6,7 +6,6 @@ use super::artifacts::{BoundAssets, Class, Descriptor, FrozenArtifact, Member as
 use super::{CustodyError, StageDeadline};
 
 mod suffix;
-pub use suffix::SuffixPins;
 use briqyard_api::execution::ordinary_key::OrdinaryAuthorityKey;
 use briqyard_api::execution::sealed::{
     custody::{Capture, LoadBody, Resource},
@@ -19,6 +18,7 @@ use briqyard_api::execution::sealed::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+pub use suffix::SuffixPins;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

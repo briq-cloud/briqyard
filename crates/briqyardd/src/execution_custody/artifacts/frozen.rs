@@ -212,7 +212,7 @@ impl FrozenArtifact {
         digest: Option<&HexDigest>,
         deadline: StageDeadline,
     ) -> Result<(), CustodyError> {
-        if self.class == Class::OrdinaryAuthorityKey {
+        if self.class.is_secret() && digest.is_none() {
             return deadline.check();
         }
         let hash = hash_exact(&self.file, self.bytes, deadline, |_| Ok(()))?;

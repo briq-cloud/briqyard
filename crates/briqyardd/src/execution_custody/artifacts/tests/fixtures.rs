@@ -3,7 +3,6 @@
 
 use super::super::*;
 use briqyard_api::execution::sealed::custody::Resource;
-use std::os::unix::fs::MetadataExt;
 use briqyard_api::execution::{
     private_cert::{self, Name, Usage},
     sealed::prim::KeyBytes,
@@ -13,6 +12,7 @@ use rcgen::{
     PKCS_ECDSA_P256_SHA256,
 };
 use std::io::Write;
+use std::os::unix::fs::MetadataExt;
 use std::sync::OnceLock;
 
 pub(crate) fn source(bytes: &[u8]) -> (tempfile::NamedTempFile, File) {
@@ -99,7 +99,8 @@ pub(crate) fn b64(text: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(text)
 }
 
-pub(crate) const POOL_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+pub(crate) const POOL_KEY: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 pub(crate) const BEARER: &[u8] = b"continuation~Bearer.0123456789!";
 
 pub(crate) fn s3_pair() -> Vec<u8> {
@@ -120,7 +121,12 @@ pub(crate) fn evidence_seed(role: Signer) -> [u8; 32] {
 
 pub(crate) fn public_of(seed: &[u8; 32]) -> KeyBytes {
     let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(seed).unwrap();
-    KeyBytes::from_array(ring::signature::KeyPair::public_key(&pair).as_ref().try_into().unwrap())
+    KeyBytes::from_array(
+        ring::signature::KeyPair::public_key(&pair)
+            .as_ref()
+            .try_into()
+            .unwrap(),
+    )
 }
 
 pub(crate) fn evidence_public(role: Signer) -> KeyBytes {
@@ -130,7 +136,9 @@ pub(crate) fn evidence_public(role: Signer) -> KeyBytes {
 pub(crate) fn registry_json(authority: (&str, &str, [u8; 32])) -> Vec<u8> {
     let central = |seed: u8| -> Vec<u8> {
         let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap();
-        ring::signature::KeyPair::public_key(&pair).as_ref().to_vec()
+        ring::signature::KeyPair::public_key(&pair)
+            .as_ref()
+            .to_vec()
     };
     serde_json::to_vec(&serde_json::json!([
         {"kid": "central-1", "role": "central", "issuer": "central", "authority": null,

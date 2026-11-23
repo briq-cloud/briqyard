@@ -1,10 +1,12 @@
+mod delivery;
 pub(crate) mod fixtures;
 mod native_image;
+mod secrets;
+mod vectors;
 
 use super::*;
-use briqyard_api::execution::sealed::{canonical::MAX_MESSAGE_BYTES, custody::Resource};
-use std::os::unix::fs::MetadataExt;
 use briqyard_api::execution::sealed::CodecError;
+use briqyard_api::execution::sealed::{canonical::MAX_MESSAGE_BYTES, custody::Resource};
 use fixtures::*;
 use native_image::native_image;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -152,7 +154,10 @@ fn assets_require_every_exact_field_and_resource_array_order() {
                 .collect::<Vec<_>>(),
             classes(resource)
         );
-        assert_eq!(AssetOffer::encode(requirements(resource), offer.assets).unwrap(), wire);
+        assert_eq!(
+            AssetOffer::encode(requirements(resource), offer.assets).unwrap(),
+            wire
+        );
         let refuses = |alter: fn(&mut Vec<serde_json::Value>)| {
             let mut invalid = fields.clone();
             alter(&mut invalid);
@@ -205,8 +210,9 @@ fn authority_slot_fifteen_is_mandatory_last_unique_and_closed() {
     let fields = authority_fields();
     assert_eq!(fields.len(), 22);
     assert_eq!(fields[15]["class"], "ordinary-authority-key");
-    let decode =
-        |fields: Vec<serde_json::Value>| AssetOffer::decode(requirements(Resource::Authority), &envelope(fields));
+    let decode = |fields: Vec<serde_json::Value>| {
+        AssetOffer::decode(requirements(Resource::Authority), &envelope(fields))
+    };
     let offer = decode(fields.clone()).unwrap();
     assert_eq!(offer.descriptors()[15].class(), Class::OrdinaryAuthorityKey);
     let mutate = |alter: fn(&mut Vec<serde_json::Value>)| {
@@ -324,7 +330,7 @@ fn delivery_refuses_truncation_queuing_wrong_count_inode_and_transfer_order() {
         let (offer, mut packet) = delivery(false);
         mutation(&mut packet);
         let result = BoundAssets::bind(
-        requirements(Resource::Daemon),
+            requirements(Resource::Daemon),
             offer,
             packet,
             &listeners,
@@ -443,7 +449,10 @@ fn actual_scm_rights_delivery_preserves_asset_order() {
             assert!(artifact.read_small(deadline).is_err(), "{class:?}");
             continue;
         }
-        assert_eq!(artifact.read_small(deadline).unwrap(), payload(class, index));
+        assert_eq!(
+            artifact.read_small(deadline).unwrap(),
+            payload(class, index)
+        );
     }
 }
 
@@ -808,7 +817,7 @@ fn authority_delivery_refuses_missing_extra_misordered_and_aliased_key_descripto
     packet.fds[14] = packet.fds[15].try_clone().unwrap();
     assert!(matches!(
         BoundAssets::bind(
-        requirements(Resource::Authority),
+            requirements(Resource::Authority),
             offer,
             packet,
             &no_listeners(),
@@ -904,7 +913,7 @@ fn native_asset_child() {
             let (offer, packet) = delivery(false);
             let listeners = no_listeners();
             let assets = BoundAssets::bind(
-        requirements(Resource::Daemon),
+                requirements(Resource::Daemon),
                 offer,
                 packet,
                 &listeners,
@@ -920,7 +929,7 @@ fn native_asset_child() {
             let (offer, packet) = delivery_for(Resource::Authority, false);
             let listeners = no_listeners();
             let assets = BoundAssets::bind(
-        requirements(Resource::Authority),
+                requirements(Resource::Authority),
                 offer,
                 packet,
                 &listeners,
@@ -933,6 +942,7 @@ fn native_asset_child() {
             panic!("real kernel execveat failed: {error}");
         }
         "stage" => fixture_stage(),
+        "suffix" => delivery::fixture_suffix_close(),
         "listeners" => fixture_listeners(),
         _ => panic!("unknown fixture mode"),
     }

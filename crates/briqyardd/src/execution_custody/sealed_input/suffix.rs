@@ -74,7 +74,9 @@ impl SealedInput {
         };
         let pinned = PinnedKey::new(role, *pin.as_array())
             .map_err(|_| refuse("invalid startup evidence key pin"))?;
-        let signer = self.suffix(Class::Signer(class))?.evidence_signer(deadline)?;
+        let signer = self
+            .suffix(Class::Signer(class))?
+            .evidence_signer(deadline)?;
         let advertised = match self.descriptor(Class::Signer(class))? {
             Descriptor::Signer { public, .. } => public,
             _ => return Err(refuse("missing startup signer descriptor")),
@@ -165,7 +167,10 @@ impl SealedInput {
 
     /// Everything that needs only the Plan: run once at decode so a bundle with a wrong seed
     /// or registry is refused before any consumer sees it.
-    pub(super) fn check_suffix_bindings(&self, deadline: StageDeadline) -> Result<(), CustodyError> {
+    pub(super) fn check_suffix_bindings(
+        &self,
+        deadline: StageDeadline,
+    ) -> Result<(), CustodyError> {
         self.evidence_signer(deadline)?;
         self.verification_registry(deadline)?;
         Ok(())
@@ -212,8 +217,7 @@ impl SealedInput {
         }
         let identity = |cert, key, pair: &Pair, usage| -> Result<_, CustodyError> {
             let artifact = self.suffix(cert)?;
-            let der = artifact
-                .read_small(StageDeadline::frame("startup identity pins"))?;
+            let der = artifact.read_small(StageDeadline::frame("startup identity pins"))?;
             let leaf = private_cert::verify(&der, pair, usage)
                 .map_err(|_| refuse("startup transition identity pin"))?;
             match self.descriptor(key)? {

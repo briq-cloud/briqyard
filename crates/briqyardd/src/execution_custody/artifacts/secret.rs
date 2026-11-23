@@ -221,9 +221,7 @@ fn s3_pair(bytes: &[u8]) -> Result<BackupS3Credentials, CustodyError> {
 fn pool_key(bytes: &[u8]) -> Result<PoolFileKey, CustodyError> {
     let invalid = || refuse("invalid local pool key");
     if bytes.len() as u64 != POOL_KEY_BYTES
-        || !bytes
-            .iter()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        || !bytes.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     {
         return Err(invalid());
     }

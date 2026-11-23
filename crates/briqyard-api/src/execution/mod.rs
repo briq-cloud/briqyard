@@ -22,10 +22,10 @@ pub use issuer::*;
 pub mod clock;
 #[cfg(feature = "execution-admission")]
 mod continuation;
-#[cfg(feature = "execution-admission")]
-pub mod private_cert;
 #[cfg(feature = "execution-verifier")]
 mod file_request;
+#[cfg(feature = "execution-admission")]
+pub mod private_cert;
 #[cfg(all(feature = "execution-admission", feature = "tls"))]
 pub mod provision;
 #[cfg(feature = "execution-verifier")]

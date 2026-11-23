@@ -224,9 +224,12 @@ impl BoundAssets {
             let artifact = self
                 .artifact(cert)
                 .ok_or(CustodyError::Protocol("missing transition certificate"))?;
-            private_cert::parse(&read_exact(&artifact.file, artifact.bytes, deadline)?, usage)
-                .map(|leaf| leaf.spki_digest())
-                .map_err(|_| CustodyError::Protocol("invalid transition certificate"))
+            private_cert::parse(
+                &read_exact(&artifact.file, artifact.bytes, deadline)?,
+                usage,
+            )
+            .map(|leaf| leaf.spki_digest())
+            .map_err(|_| CustodyError::Protocol("invalid transition certificate"))
         };
         let key = |class| {
             self.offer.descriptors().iter().find_map(|d| match d {

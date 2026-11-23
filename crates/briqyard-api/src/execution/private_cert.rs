@@ -164,8 +164,9 @@ pub fn verify(der: &[u8], pin: &Pair, usage: Usage) -> Result<Leaf, CertError> {
 /// and trailing bytes are refused, and the digest is of the derived public key, never of a
 /// private byte.
 pub fn key_spki_digest(pkcs8: &[u8]) -> Result<HexDigest, CertError> {
-    let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8, &SystemRandom::new())
-        .map_err(|_| CertError::Profile)?;
+    let pair =
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8, &SystemRandom::new())
+            .map_err(|_| CertError::Profile)?;
     let point = pair.public_key().as_ref();
     if point.len() != SPKI_LEN - SPKI_PREFIX.len() + 1 {
         return Err(CertError::Profile);

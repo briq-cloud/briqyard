@@ -1,8 +1,8 @@
 use super::*;
 use crate::execution_custody::artifacts::{
     tests::fixtures::{self, identities, spki},
-    AssetOffer, Class, Descriptor, FrozenArtifact, ListenerEnv, Member as AssetMember,
-    PoolKeyId, ReceivedAssetFds, Requirements, Signer as AssetSigner,
+    AssetOffer, Class, Descriptor, FrozenArtifact, ListenerEnv, Member as AssetMember, PoolKeyId,
+    ReceivedAssetFds, Requirements, Signer as AssetSigner,
 };
 use briqyard_api::execution::sealed::{
     custody::{CaptureBody, CustodyWire, Slot},
@@ -16,6 +16,8 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use std::{
     fs::File, io::Write, os::fd::AsFd, os::fd::OwnedFd, os::unix::fs::MetadataExt, path::PathBuf,
 };
+
+mod suffix;
 
 const INPUTS: &[u8] = b"synthetic opaque inputs, intentionally not a manifest codec";
 const CANDIDATE: &[u8] = b"\x7fELFsynthetic candidate bytes, not an executable";
@@ -290,6 +292,16 @@ impl Fixture {
         tweak: impl FnOnce(&mut Vec<(Descriptor, Vec<u8>)>),
         deadline: StageDeadline,
     ) -> BoundAssets {
+        self.try_bind(grant, capture_load, tweak, deadline).unwrap()
+    }
+
+    fn try_bind(
+        &self,
+        grant: &LGrant,
+        capture_load: &CaptureLoad,
+        tweak: impl FnOnce(&mut Vec<(Descriptor, Vec<u8>)>),
+        deadline: StageDeadline,
+    ) -> Result<BoundAssets, CustodyError> {
         let mut assets = Vec::new();
         let mut add = |parts: fn(Uint, HexDigest) -> Descriptor, bytes: Vec<u8>| {
             assets.push((
@@ -389,7 +401,6 @@ impl Fixture {
             self.plan.pre_record.authority.as_str(),
             self.plan.pre_record.public_key,
         ));
-        let identities = identities();
         for class in self.requirements.classes().into_iter().skip(assets.len()) {
             let bytes = match class {
                 Class::VerificationRegistry => registry.clone(),
@@ -398,24 +409,51 @@ impl Fixture {
             let length = Uint::new(bytes.len() as u64).unwrap();
             let digest = HexDigest::of(&bytes);
             let descriptor = match class {
-                Class::VerificationRegistry => Descriptor::VerificationRegistry { bytes: length, digest },
-                Class::TransitionServerCert => Descriptor::TransitionServerCert { bytes: length, digest },
-                Class::TransitionClientCert => Descriptor::TransitionClientCert { bytes: length, digest },
-                Class::ContinuationBearer => Descriptor::ContinuationBearer { bytes: length, digest },
-                Class::DaemonApiCert => Descriptor::DaemonApiCert { bytes: length, digest },
-                Class::BackupS3Pair => Descriptor::BackupS3Pair { bytes: length, digest },
-                Class::TransitionServerKey => Descriptor::TransitionServerKey { bytes: length, spki: spki(&bytes) },
-                Class::TransitionClientKey => Descriptor::TransitionClientKey { bytes: length, spki: spki(&bytes) },
-                Class::DaemonApiKey => Descriptor::DaemonApiKey { bytes: length, spki: spki(&bytes) },
+                Class::VerificationRegistry => Descriptor::VerificationRegistry {
+                    bytes: length,
+                    digest,
+                },
+                Class::TransitionServerCert => Descriptor::TransitionServerCert {
+                    bytes: length,
+                    digest,
+                },
+                Class::TransitionClientCert => Descriptor::TransitionClientCert {
+                    bytes: length,
+                    digest,
+                },
+                Class::ContinuationBearer => Descriptor::ContinuationBearer {
+                    bytes: length,
+                    digest,
+                },
+                Class::DaemonApiCert => Descriptor::DaemonApiCert {
+                    bytes: length,
+                    digest,
+                },
+                Class::BackupS3Pair => Descriptor::BackupS3Pair {
+                    bytes: length,
+                    digest,
+                },
+                Class::TransitionServerKey => Descriptor::TransitionServerKey {
+                    bytes: length,
+                    spki: spki(&bytes),
+                },
+                Class::TransitionClientKey => Descriptor::TransitionClientKey {
+                    bytes: length,
+                    spki: spki(&bytes),
+                },
+                Class::DaemonApiKey => Descriptor::DaemonApiKey {
+                    bytes: length,
+                    spki: spki(&bytes),
+                },
                 Class::LocalPoolKey => Descriptor::LocalPoolKey {
                     bytes: length,
-                    key_id: PoolKeyId::new(briqyard_api::poolkey::id(fixtures::POOL_KEY).unwrap()).unwrap(),
+                    key_id: PoolKeyId::new(briqyard_api::poolkey::id(fixtures::POOL_KEY).unwrap())
+                        .unwrap(),
                 },
                 _ => unreachable!("every remaining class is a suffix class"),
             };
             assets.push((descriptor, bytes));
         }
-        let _ = identities;
         tweak(&mut assets);
         let mut fds = Vec::new();
         let descriptors = assets
@@ -472,7 +510,6 @@ impl Fixture {
             &listeners,
             deadline,
         )
-        .unwrap()
     }
 
     fn decode(
