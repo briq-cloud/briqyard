@@ -107,6 +107,8 @@ impl Link {
 
     /// One POST and its single response. A response larger than `limit`, a missing or
     /// wrong content type, a wrong length, a redirect or any status but 200 and 204 fails.
+    /// Tokio polls the exchange before its timer, so a reply observed at or after the
+    /// deadline is rechecked against the clock and is unavailable.
     pub(super) async fn post(
         &self,
         path: &'static str,
@@ -114,9 +116,13 @@ impl Link {
         limit: usize,
         deadline: Instant,
     ) -> Result<Reply, Failure> {
-        timeout_at(deadline.into(), self.exchange(path, body, limit))
+        let outcome = timeout_at(deadline.into(), self.exchange(path, body, limit))
             .await
-            .map_err(|_| Failure::Unavailable)?
+            .map_err(|_| Failure::Unavailable)?;
+        if Instant::now() >= deadline {
+            return Err(Failure::Unavailable);
+        }
+        outcome
     }
 
     async fn exchange(

@@ -61,6 +61,8 @@ to enrolled actors; it is the narrowest reading and one line per route to change
   one-response stream: Hyper stops at a 204 or a declared length whatever follows, so the
   client keeps the connection driver (`without_shutdown`), requires no byte left in its read
   buffer, then a clean TLS close with nothing further, all under the freshness deadline.
+  Tokio polls the exchange before its timer, so `Link::post` also rechecks the clock after
+  the await: a reply observed at or after the deadline is unavailable.
   A late byte, an early close or one without `close_notify` is unavailable. Anything
   else, a redirect, a retry or a truncated reply is unavailable and never counts as a
   mutation success. Only 400/401/403/409/507

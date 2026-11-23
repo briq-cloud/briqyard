@@ -527,3 +527,80 @@ async fn a_success_reply_waits_for_the_graceful_end_of_the_connection() {
     }
     assert_eq!(wrong, Vec::<String>::new());
 }
+
+/// One post against a server that has written the whole reply and then holds the
+/// connection. With `expire` the runtime thread is blocked past the deadline right after the
+/// release, so the server's close and the timer become ready in the same turn: the real
+/// scheduling that polls the exchange before its timer. Returns the outcome and the number
+/// of connections the server saw.
+async fn released_at(
+    whole: Vec<u8>,
+    deadline: Duration,
+    expire: bool,
+) -> (Result<Reply, Failure>, usize) {
+    let net = Net::new();
+    let gate = Arc::new(Notify::new());
+    let server = scripted(
+        &net,
+        vec![Step::Write(whole), Step::Gate(gate.clone()), Step::Shutdown],
+        true,
+    )
+    .await;
+    let link = link(&net);
+    let deadline = Instant::now() + deadline;
+    let mut call = tokio::spawn(async move {
+        link.post(Route::HostClock.path(), b"{}".to_vec(), 64, deadline)
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut call)
+            .await
+            .is_err(),
+        "the reply was returned before the end of the connection"
+    );
+    gate.notify_one();
+    if expire {
+        std::thread::sleep(
+            deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(50),
+        );
+    }
+    let outcome = call.await.unwrap();
+    (outcome, server.count.load(Ordering::SeqCst))
+}
+
+#[tokio::test]
+async fn a_reply_ready_at_the_deadline_is_unavailable_and_one_before_it_is_not() {
+    for (name, whole, expected) in [
+        ("204", bare_204(), Reply::NoContent),
+        ("200", json_200(&[]), Reply::Body(b"{}".to_vec())),
+    ] {
+        let (outcome, count) = released_at(whole.clone(), Duration::from_secs(5), false).await;
+        assert_eq!(outcome, Ok(expected), "{name} before the deadline");
+        assert_eq!(count, 1, "{name} before the deadline");
+
+        let (outcome, count) = released_at(whole.clone(), Duration::from_millis(600), true).await;
+        assert_eq!(outcome, Err(Failure::Unavailable), "{name} at the deadline");
+        assert_eq!(count, 1, "{name} at the deadline");
+    }
+}
+
+#[tokio::test]
+async fn a_reply_that_never_ends_is_unavailable_at_the_deadline() {
+    let net = Net::new();
+    let server = scripted(
+        &net,
+        vec![Step::Write(bare_204()), Step::Gate(Arc::new(Notify::new()))],
+        true,
+    )
+    .await;
+    let outcome = link(&net)
+        .post(
+            Route::HostClock.path(),
+            b"{}".to_vec(),
+            64,
+            Instant::now() + Duration::from_millis(300),
+        )
+        .await;
+    assert_eq!(outcome, Err(Failure::Unavailable));
+    assert_eq!(server.count.load(Ordering::SeqCst), 1);
+}
