@@ -1,6 +1,7 @@
 mod native_image;
 
 use super::*;
+use briqyard_api::execution::sealed::{prim::KeyBytes, CodecError};
 use native_image::native_image;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
