@@ -1,11 +1,15 @@
 mod native_image;
 
 use super::*;
-use briqyard_api::execution::sealed::{prim::KeyBytes, CodecError};
+use briqyard_api::execution::sealed::{canonical::MAX_MESSAGE_BYTES, prim::KeyBytes, CodecError};
 use native_image::native_image;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::{fs::PermissionsExt, net::UnixStream, process::CommandExt};
+use std::os::unix::{
+    fs::{MetadataExt, PermissionsExt},
+    net::UnixStream,
+    process::CommandExt,
+};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 

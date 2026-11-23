@@ -3,9 +3,7 @@
 
 use super::fd::open_descriptors;
 use super::{io_error, CustodyError, DescriptorFloor, StageDeadline};
-use briqyard_api::execution::sealed::{
-    canonical::MAX_MESSAGE_BYTES, custody::Resource, prim::HexDigest,
-};
+use briqyard_api::execution::sealed::{custody::Resource, prim::HexDigest};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::convert::Infallible;
@@ -13,7 +11,7 @@ use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::{FileExt, MetadataExt};
+use std::os::unix::fs::FileExt;
 
 const IMAGE_LIMIT: u64 = 256 * 1024 * 1024;
 const SEALS: libc::c_int =
