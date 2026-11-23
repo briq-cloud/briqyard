@@ -528,6 +528,147 @@ fn a_stale_custodian_or_changed_process_is_refused() {
 }
 
 #[test]
+fn both_custodians_run_the_source_daemon_binary_even_when_manifest_and_policy_agree_otherwise() {
+    for role in ["daemon", "authority"] {
+        let other = d(b"self-consistent but wrong image");
+        refused(
+            "custodian image",
+            |v| v[role]["custodian"]["exe"] = json!(other.as_str()),
+            |_| {},
+            |p| resource_mut(p, role).custodian.exe = other.clone(),
+        );
+        let fleet = d(&assets(0)[1]);
+        refused(
+            "custodian image",
+            |v| v[role]["custodian"]["exe"] = json!(fleet.as_str()),
+            |_| {},
+            |p| resource_mut(p, role).custodian.exe = fleet.clone(),
+        );
+        refused(
+            "custodian build",
+            |v| v[role]["custodian"]["build"] = json!("custodian-v1"),
+            |_| {},
+            |p| resource_mut(p, role).custodian.build = Build::new("custodian-v1").unwrap(),
+        );
+    }
+}
+
+#[test]
+fn the_source_daemon_build_is_independently_approved_and_is_the_plans() {
+    refused(
+        "source daemon build",
+        |_| {},
+        |_| {},
+        |p| p.source_daemon_build = Build::new("daemon-v0-build").unwrap(),
+    );
+    let other = "daemon-v2-build";
+    refused(
+        "source daemon build",
+        |v| {
+            v["daemon"]["pre"]["build"] = json!(other);
+            v["daemon"]["custodian"]["build"] = json!(other);
+            v["authority"]["custodian"]["build"] = json!(other);
+        },
+        |p| p.pre_d.build = Build::new(other).unwrap(),
+        |p| {
+            for role in ["daemon", "authority"] {
+                resource_mut(p, role).custodian.build = Build::new(other).unwrap();
+            }
+        },
+    );
+}
+
+#[test]
+fn custodian_ownership_is_a_measured_root_observation_and_never_assumed() {
+    let measured = |uid, gid| {
+        Some(ProcessOwner::measured(
+            Uint::new(uid).unwrap(),
+            Uint::new(gid).unwrap(),
+        ))
+    };
+    for role in ["daemon", "authority"] {
+        for (uid, gid) in [(1000, 0), (0, 1000), (1000, 1000), (1, 1)] {
+            refused(
+                "custodian owner",
+                |_| {},
+                |_| {},
+                |p| resource_mut(p, role).custodian_owner = measured(uid, gid),
+            );
+        }
+        refused(
+            "custodian owner",
+            |_| {},
+            |_| {},
+            |p| resource_mut(p, role).custodian_owner = None,
+        );
+    }
+}
+
+/// Every non-null old or new member digest of the Plan, for the closure credential checks.
+fn plan_members(plan: &mut Plan) -> Vec<&mut HexDigest> {
+    let (old, new) = (&mut plan.old, &mut plan.new);
+    let mut slots = vec![
+        &mut old.hi,
+        &mut old.he,
+        &mut old.ni,
+        &mut old.ng,
+        &mut new.hi,
+        &mut new.he,
+        &mut new.ni,
+        &mut new.ng,
+    ];
+    slots.extend(old.tr.as_mut());
+    slots.extend(new.tr.as_mut());
+    slots
+}
+
+#[test]
+fn the_plans_members_are_distinct_before_anything_is_compared() {
+    refused(
+        "plan members",
+        |_| {},
+        |p| p.new.hi = p.old.he.clone(),
+        |_| {},
+    );
+}
+
+#[test]
+fn no_old_or_new_member_equals_a_closure_credential_commitment() {
+    let admin_host = d(b"synthetic host administrator commitment");
+    let admin_fleet = d(b"synthetic fleet administrator commitment");
+    let bearer = d(b"synthetic continuation commitment");
+    for target in [&admin_host, &admin_fleet, &bearer] {
+        for slot in 0..10 {
+            refused(
+                "closure credential reuse",
+                |_| {},
+                |p| *plan_members(p)[slot] = target.clone(),
+                |_| {},
+            );
+        }
+    }
+    refused(
+        "closure credential reuse",
+        |_| {},
+        |p| p.old.hi = admin_host.clone(),
+        |_| {},
+    );
+    refused(
+        "closure credential reuse",
+        |_| {},
+        |p| p.new.hi = bearer.clone(),
+        |_| {},
+    );
+}
+
+fn resource_mut<'a>(policy: &'a mut DeploymentPolicy<'_>, role: &str) -> &'a mut ResourcePolicy {
+    match role {
+        "daemon" => &mut policy.daemon,
+        _ => &mut policy.authority,
+    }
+}
+
+#[test]
 fn listener_count_order_and_names_are_compared_in_delivery_order() {
     refused(
         "listener table",

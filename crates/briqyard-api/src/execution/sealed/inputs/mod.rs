@@ -23,8 +23,8 @@ use super::prim::{nullable, BootId, Build, HexDigest, Ident, LitU, PosInt, Uint}
 use serde::{Deserialize, Serialize};
 
 pub use policy::{
-    ActorObservation, BoundInputs, ClosurePolicy, DeploymentPolicy, ProcessIdentity, RegionFloor,
-    ResourcePolicy, SupportPolicy, TopologyPolicy,
+    ActorObservation, BoundInputs, ClosurePolicy, DeploymentPolicy, ProcessIdentity, ProcessOwner,
+    RegionFloor, ResourcePolicy, SupportPolicy, TopologyPolicy,
 };
 pub use release::{ReleaseAssets, VerifiedRelease};
 pub use scalars::{DerBytes, Git, Hex32, Path, Text, Version};

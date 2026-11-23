@@ -43,7 +43,13 @@ fn plan() -> Plan {
         next_a: dg('5'),
         dbuild: Build::new("d+build").unwrap(),
         abuild: Build::new("a+build").unwrap(),
-        old: members(None),
+        old: Members {
+            hi: dg('0'),
+            he: dg('1'),
+            ni: dg('2'),
+            ng: dg('3'),
+            tr: None,
+        },
         new: members(Some(dg('e'))),
         hk: key(1),
         ak: key(2),
@@ -118,6 +124,50 @@ fn plan_refuses_an_inconsistent_context_and_shared_keys() {
             "{a} {b}"
         );
     }
+}
+
+fn member_slots(plan: &mut Plan) -> Vec<&mut HexDigest> {
+    let (old, new) = (&mut plan.old, &mut plan.new);
+    vec![
+        &mut old.hi,
+        &mut old.he,
+        &mut old.ni,
+        &mut old.ng,
+        old.tr.as_mut().unwrap(),
+        &mut new.hi,
+        &mut new.he,
+        &mut new.ni,
+        &mut new.ng,
+        new.tr.as_mut().unwrap(),
+    ]
+}
+
+#[test]
+fn plan_member_digests_are_unique_across_every_role_and_both_generations() {
+    let mut full = plan();
+    full.old.tr = Some(dg('4'));
+    assert!(decode::<Plan>(&encode(&full).unwrap()).is_ok());
+    for a in 0..10 {
+        for b in a + 1..10 {
+            let mut shared = full.clone();
+            let copy = member_slots(&mut shared)[a].clone();
+            *member_slots(&mut shared)[b] = copy;
+            assert!(
+                decode::<Plan>(&encode(&shared).unwrap()).is_err(),
+                "slots {a} and {b} share a digest"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_legacy_predecessor_without_a_transition_member_stays_valid() {
+    let legacy = plan();
+    assert!(legacy.old.tr.is_none());
+    assert!(decode::<Plan>(&encode(&legacy).unwrap()).is_ok());
+    let mut both_absent = plan();
+    both_absent.new.tr = None;
+    assert!(decode::<Plan>(&encode(&both_absent).unwrap()).is_ok());
 }
 
 fn dims(fits: bool) -> Dims {

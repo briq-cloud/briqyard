@@ -7,6 +7,8 @@ use super::*;
 use crate::execution::sealed::canonical::CodecError;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::net::Ipv6Addr;
+use std::str::FromStr;
 
 const DAEMON_GUARD: &str = "/usr/local/bin/briqyardd";
 const AUTHORITY_GUARD: &str = "/usr/local/bin/briqyard-fleet";
@@ -35,30 +37,36 @@ fn strictly_ascending<'a, T, K: Ord>(rows: &'a [T], key: impl Fn(&'a T) -> K) ->
     rows.windows(2).all(|pair| key(&pair[0]) < key(&pair[1]))
 }
 
-/// `https://host:port` with an explicit nonzero port, no userinfo, path, query or fragment.
+/// An explicit port: ASCII digits only, no padding, 1..=65535.
+fn parse_port(port: &str) -> Option<u16> {
+    if port.starts_with('0') || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    port.parse().ok()
+}
+
+/// A DNS-style name or IPv4 text. Nothing is resolved or normalized.
+fn plain_host(host: &str) -> bool {
+    !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+}
+
+/// `https://host:port` with an explicit port, no userinfo, path, query or fragment. A
+/// bracketed host must be an IPv6 literal that parses and is already in its canonical text,
+/// so the endpoint is compared as written and no alias is accepted or rewritten.
 fn origin_port(text: &Text) -> Option<u16> {
     let authority = text.as_str().strip_prefix("https://")?;
     let (host, port) = authority.rsplit_once(':')?;
     let host_ok = match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
-        Some(v6) => {
-            !v6.is_empty()
-                && v6
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
-        }
-        None => {
-            !host.is_empty()
-                && host
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-        }
+        Some(v6) => Ipv6Addr::from_str(v6).is_ok_and(|addr| addr.to_string() == v6),
+        None => plain_host(host),
     };
-    let port_ok =
-        !port.is_empty() && !port.starts_with('0') && port.bytes().all(|b| b.is_ascii_digit());
-    if !host_ok || !port_ok {
+    if !host_ok {
         return None;
     }
-    port.parse().ok()
+    parse_port(port)
 }
 
 /// The callback is an exact HTTPS URL: no userinfo, query or fragment, and a host.
@@ -68,13 +76,13 @@ fn valid_continuation_url(text: &Text) -> bool {
     };
     let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
     let host = match authority.rsplit_once(':') {
-        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
-        _ => authority,
+        Some((host, port)) => match parse_port(port) {
+            Some(_) => host,
+            None => return false,
+        },
+        None => authority,
     };
-    !host.is_empty()
-        && host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    plain_host(host)
         && path
             .bytes()
             .all(|b| b.is_ascii_graphic() && !b"?#@\\".contains(&b))

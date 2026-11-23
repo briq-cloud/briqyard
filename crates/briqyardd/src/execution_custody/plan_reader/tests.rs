@@ -110,9 +110,9 @@ fn proc(pid: u64) -> Proc {
 fn members(byte: u8) -> Members {
     Members {
         hi: digest(byte),
-        he: digest(byte),
-        ni: digest(byte),
-        ng: digest(byte),
+        he: digest(byte + 2),
+        ni: digest(byte + 4),
+        ng: digest(byte + 6),
         tr: None,
     }
 }

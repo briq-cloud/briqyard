@@ -20,7 +20,10 @@ missing or unsorted fields refused, plus every invariant a field type cannot hol
 version, commit, path, text and DER forms; strictly sorted unique regions, hosts, actors and
 peers; the one-to-one registered/intrinsic map; the single host row matching `registered` and
 `x.host`; the fixed guard and control socket per role; one shared boot for the native processes;
-distinct TLS identities; the serving floor surviving the target leaving; the closure's
+distinct TLS identities; a peer endpoint's bracketed host is an IPv6 literal that `Ipv6Addr` parses
+and that is already in its canonical text (aliases such as `[::A]` or `[0:0:0:0:0:0:0:1]` refuse, none is
+rewritten); a port, in a peer or in the continuation URL, is explicit unpadded decimal in
+1..=65535; the serving floor surviving the target leaving; the closure's
 `x` equal to the manifest's. Actors sort by lexical wire name (`A,B,H,R,gateway,installer`), not
 by Rust enum order.
 
@@ -31,6 +34,21 @@ the exact manifest bytes, then compares each field with the independent owner of
 resource policies, topology and closure policy). A fact has one owner: a swap between the daemon
 and the authority, a stale custodian, a second candidate or a changed listener order refuses.
 Nothing is defaulted from the manifest, a path, DNS or the environment.
+
+**Both custodians are the source daemon binary (v3.6 §3).** Each `Resource.custodian` must equal
+the caller's custodian observation, run `source_release.daemon`, and carry the independently
+approved `DeploymentPolicy.source_daemon_build`, which must also be `Plan.pre_d.build`. The
+custodian's owner is a `ProcessOwner`: a typed value whose only constructor takes the measured
+uid and gid and keeps them. The reader compares both to 0; a missing observation or any other
+owner refuses. The caller is the independently trusted OS observer and owns that measurement;
+nothing here reads `/proc`, infers an owner from a Plan, or defaults to root. A manifest, policy
+and Plan that agree with one another on the wrong image or build still refuse.
+
+**Member digests are unique and never a closure credential (v3.1 §34, v3.3 §1).**
+`Plan.validate` refuses any repeated non-null digest among the old and new `hi, he, ni, ng, tr`.
+The absent legacy `tr` stays valid. `bind` also refuses any old or new member equal to
+`continuation.bearer`, `admin_host` or `admin_fleet`, besides the three being distinct from
+one another. This is a comparison of the digests in hand; it is not a credential ledger.
 
 **Release bytes are checked over supplied bytes only.** `VerifiedRelease::validate` takes the pin
 file, the checksum list and the three assets as slices. The pin file is the closed five-field
@@ -49,11 +67,15 @@ consume `H(Death) = h(C(Death))`. Two tests in the existing transition suites sh
 equals an independent SHA-256 of the canonical bytes and that `h(C({"wire": Death}))` differs and is
 refused by `Cut::check_death` and `Launch::check_death`. Neither check changed.
 
+Narrow reading: v3.3 compares endpoints as literal text, so this reader keeps exact-input
+equality and rejects malformed or non-canonical syntax. It adds no normalization and no
+fallback. The continuation host stays a DNS-style name; it takes no bracketed literal.
+
 ## Test scope
 
 Fixtures are synthetic (`testdata/native_inputs_v1`; `assemble.py` is a simple public reference
 assembler, run twice with identical output, `inputs.json` SHA-256
-f8340683e6adbbe04e295fed815b7421014b3ed5c1c00aebeff458532cbdac4b). The historical pin is a
+c23eb41a9b34458d92c9983de496604fb622dca38912b84813914880f09e0d1c). The historical pin is a
 shape reference only. This is not native qualification, an independent cross-language writer
 run or proof of any real host fact.
 

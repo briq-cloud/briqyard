@@ -188,8 +188,9 @@ pub struct Plan {
 }
 
 impl Wire for Plan {
-    /// The derived context must be the registration's own, and the five signing keys must
-    /// be pairwise distinct (no key shared across roles or with the ordinary signing key).
+    /// The derived context must be the registration's own, the five signing keys must be
+    /// pairwise distinct (no key shared across roles or with the ordinary signing key), and
+    /// every non-null member digest must be unique across all roles and both generations.
     fn validate(&self) -> Result<(), CodecError> {
         if self.pre != self.pre_record.ctx(&self.x.host) {
             return Err(CodecError::Value("plan context"));
@@ -198,6 +199,24 @@ impl Wire for Plan {
         for (i, a) in keys.iter().enumerate() {
             if keys[i + 1..].iter().any(|b| a == b) {
                 return Err(CodecError::Value("plan keys"));
+            }
+        }
+        let members: Vec<&HexDigest> = [&self.old, &self.new]
+            .into_iter()
+            .flat_map(|m| {
+                [
+                    Some(&m.hi),
+                    Some(&m.he),
+                    Some(&m.ni),
+                    Some(&m.ng),
+                    m.tr.as_ref(),
+                ]
+            })
+            .flatten()
+            .collect();
+        for (i, a) in members.iter().enumerate() {
+            if members[i + 1..].iter().any(|b| a == b) {
+                return Err(CodecError::Value("plan members"));
             }
         }
         Ok(())

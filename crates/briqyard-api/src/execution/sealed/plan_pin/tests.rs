@@ -13,11 +13,13 @@ const REGISTERED_TEST_HASH: &str =
     "d1db6793cf9c14050f6ae171addb1400565c1187095b4b579ba804c31ea1bb96";
 
 fn members(k: char) -> Members {
+    let base = k.to_digit(10).unwrap();
+    let member = |role: u32| dg(char::from_digit(base + 2 * role, 10).unwrap());
     Members {
-        hi: dg(k),
-        he: dg(k),
-        ni: dg(k),
-        ng: dg(k),
+        hi: member(0),
+        he: member(1),
+        ni: member(2),
+        ng: member(3),
         tr: None,
     }
 }

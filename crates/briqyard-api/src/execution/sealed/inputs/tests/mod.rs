@@ -41,7 +41,7 @@ pub(super) const TARGET_SUMS: &[u8] = include_bytes!(concat!(
 ));
 /// The SHA-256 of `INPUTS` the reference assembler printed, copied here as a named constant.
 pub(super) const INPUTS_SHA256: &str =
-    "f8340683e6adbbe04e295fed815b7421014b3ed5c1c00aebeff458532cbdac4b";
+    "c23eb41a9b34458d92c9983de496604fb622dca38912b84813914880f09e0d1c";
 
 const BOOT: &str = "00000000-0000-4000-8000-000000000004";
 const OTHER_BOOT: &str = "00000000-0000-4000-8000-000000000005";
@@ -126,12 +126,15 @@ pub(super) fn plan(inputs: HexDigest) -> Plan {
     };
     let pre: Ctx = record.ctx(&x.host);
     let digest = |c: char| HexDigest::new(c.to_string().repeat(64)).unwrap();
-    let members = |c: char| Members {
-        hi: digest(c),
-        he: digest(c),
-        ni: digest(c),
-        ng: digest(c),
-        tr: Some(digest(c)),
+    let members = |generation: &str| {
+        let member = |role: &str| d(format!("synthetic {generation} member {role}").as_bytes());
+        Members {
+            hi: member("hi"),
+            he: member("he"),
+            ni: member("ni"),
+            ng: member("ng"),
+            tr: Some(member("tr")),
+        }
     };
     let key = |k: u8| Bytes::from_array([k; 32]);
     Plan {
@@ -146,8 +149,8 @@ pub(super) fn plan(inputs: HexDigest) -> Plan {
         next_a: d(&assets(1)[1]),
         dbuild: Build::new("candidate-d").unwrap(),
         abuild: Build::new("candidate-a").unwrap(),
-        old: members('1'),
-        new: members('2'),
+        old: members("old"),
+        new: members("new"),
         hk: key(1),
         ak: key(2),
         bk: key(3),
@@ -204,12 +207,11 @@ fn resource_policy(role: &str) -> ResourcePolicy {
     let daemon = role == "daemon";
     let custodian_pid = if daemon { 30 } else { 40 };
     ResourcePolicy {
-        custodian: proc(
-            custodian_pid,
-            d(b"synthetic custodian image"),
-            "custodian-v1",
-            BOOT,
-        ),
+        custodian: proc(custodian_pid, d(&assets(0)[0]), "daemon-v1-build", BOOT),
+        custodian_owner: Some(ProcessOwner::measured(
+            Uint::new(0).unwrap(),
+            Uint::new(0).unwrap(),
+        )),
         guard_build: Build::new("guard-v1").unwrap(),
         guard_bytes: format!("synthetic {role} guard").into_bytes(),
         candidate_path: path(&format!("/var/lib/briq-sealed/candidates/{role}")),
@@ -260,6 +262,7 @@ pub(super) fn policy(releases: &Releases) -> DeploymentPolicy<'_> {
     DeploymentPolicy {
         source_release: &releases.source,
         target_release: &releases.target,
+        source_daemon_build: Build::new("daemon-v1-build").unwrap(),
         topology: TopologyPolicy {
             inventory: b"synthetic topology inventory\n".to_vec(),
             order: vec![id("h17-eu"), id("h16"), id("h15")],

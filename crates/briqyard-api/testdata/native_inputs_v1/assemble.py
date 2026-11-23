@@ -49,8 +49,8 @@ source, target = releases
 
 pre_d = proc(10, source['daemon'], 'daemon-v1-build')
 pre_a = proc(20, source['fleet'], 'fleet-v1-build')
-cust_d = proc(30, D(b'synthetic custodian image'), 'custodian-v1')
-cust_a = proc(40, D(b'synthetic custodian image'), 'custodian-v1')
+cust_d = proc(30, source['daemon'], 'daemon-v1-build')
+cust_a = proc(40, source['daemon'], 'daemon-v1-build')
 
 
 def resource(pre, custodian, role):

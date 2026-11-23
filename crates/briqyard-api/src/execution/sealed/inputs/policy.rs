@@ -44,9 +44,36 @@ pub struct TopologyPolicy {
     pub reader_floors: Vec<(Ident, Vec<u8>)>,
 }
 
+/// The owner of a live process as the independently trusted OS observer measured it. This
+/// reader only compares: the caller that builds it owns the observation (for example the
+/// kernel's credentials of the retained process), and nothing here reads or infers one. There
+/// is no default, and no constructor takes a verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessOwner {
+    uid: Uint,
+    gid: Uint,
+}
+
+impl ProcessOwner {
+    pub fn measured(uid: Uint, gid: Uint) -> Self {
+        Self { uid, gid }
+    }
+
+    pub fn uid(&self) -> Uint {
+        self.uid
+    }
+
+    pub fn gid(&self) -> Uint {
+        self.gid
+    }
+}
+
 /// What root's deployment profile and the live owners hold about one resource.
 pub struct ResourcePolicy {
     pub custodian: Proc,
+    /// The measured owner of that custodian process. `None` is a missing observation and
+    /// refuses; the custodian must be measured as root:root (uid 0, gid 0).
+    pub custodian_owner: Option<ProcessOwner>,
     pub guard_build: Build,
     pub guard_bytes: Vec<u8>,
     pub candidate_path: Path,
@@ -91,6 +118,9 @@ pub struct ClosurePolicy {
 pub struct DeploymentPolicy<'a> {
     pub source_release: &'a VerifiedRelease,
     pub target_release: &'a VerifiedRelease,
+    /// The independently approved build of the source daemon binary. Both resource
+    /// custodians run that binary, and it is the build of `Plan.pre_d`.
+    pub source_daemon_build: Build,
     pub topology: TopologyPolicy,
     pub actors: Vec<ActorObservation>,
     pub daemon: ResourcePolicy,
@@ -145,17 +175,20 @@ impl Inputs {
         inputs.check_releases(plan, policy)?;
         inputs.check_topology(&policy.topology)?;
         inputs.check_actors(&policy.actors)?;
+        let custodian = (&inputs.source_release.daemon, &policy.source_daemon_build);
         check_resource(
             &inputs.daemon,
             &policy.daemon,
             policy.target_release.daemon_asset_bytes(),
+            custodian,
         )?;
         check_resource(
             &inputs.authority,
             &policy.authority,
             policy.target_release.fleet_asset_bytes(),
+            custodian,
         )?;
-        inputs.check_closure(&policy.closure)?;
+        inputs.check_closure(plan, &policy.closure)?;
         Ok(BoundInputs {
             inputs,
             bytes: bytes.to_vec(),
@@ -176,6 +209,9 @@ impl Inputs {
             || authority.pre.exe != self.source_release.fleet
         {
             return mismatch("predecessor pins");
+        }
+        if plan.pre_d.build != policy.source_daemon_build {
+            return mismatch("source daemon build");
         }
         if daemon.candidate.file.sha256 != plan.next_d
             || authority.candidate.file.sha256 != plan.next_a
@@ -254,8 +290,29 @@ impl Inputs {
         Ok(())
     }
 
-    fn check_closure(&self, policy: &ClosurePolicy) -> Result<(), CodecError> {
+    fn check_closure(&self, plan: &Plan, policy: &ClosurePolicy) -> Result<(), CodecError> {
         let closure = &self.closure;
+        let credentials = [
+            &closure.admin_host,
+            &closure.admin_fleet,
+            &closure.continuation.bearer,
+        ];
+        for members in [&plan.old, &plan.new] {
+            let members = [
+                Some(&members.hi),
+                Some(&members.he),
+                Some(&members.ni),
+                Some(&members.ng),
+                members.tr.as_ref(),
+            ];
+            if members
+                .into_iter()
+                .flatten()
+                .any(|m| credentials.contains(&m))
+            {
+                return mismatch("closure credential reuse");
+            }
+        }
         let support = &policy.support;
         if closure.registry != HexDigest::of(&policy.registry)
             || closure.admin_host != policy.admin_host
@@ -283,9 +340,21 @@ fn check_resource(
     actual: &Resource,
     policy: &ResourcePolicy,
     candidate_asset_bytes: u64,
+    (daemon_exe, daemon_build): (&HexDigest, &Build),
 ) -> Result<(), CodecError> {
     if actual.custodian != policy.custodian {
         return mismatch("custodian process");
+    }
+    if actual.custodian.exe != *daemon_exe {
+        return mismatch("custodian image");
+    }
+    if actual.custodian.build != *daemon_build {
+        return mismatch("custodian build");
+    }
+    let root = Uint::new(0)?;
+    match &policy.custodian_owner {
+        Some(owner) if owner.uid() == root && owner.gid() == root => {}
+        _ => return mismatch("custodian owner"),
     }
     if actual.guard.build != policy.guard_build
         || !same_bytes(

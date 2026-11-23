@@ -413,6 +413,66 @@ fn continuation_url_is_an_exact_https_url_without_userinfo_query_or_fragment() {
 }
 
 #[test]
+fn a_continuation_port_when_present_is_unpadded_canonical_decimal_in_range() {
+    for good in [
+        "https://api.example.test:443/x",
+        "https://api.example.test:8443/x",
+        "https://api.example.test:65535/x",
+        "https://api.example.test:1",
+    ] {
+        mutated(|v| v["closure"]["continuation"]["url"] = t(good)).unwrap();
+    }
+    for bad in [
+        "https://api.example.test:99999/x",
+        "https://api.example.test:65536/x",
+        "https://api.example.test:000443/x",
+        "https://api.example.test:0443/x",
+        "https://api.example.test:0/x",
+        "https://api.example.test:00/x",
+        "https://api.example.test:+443/x",
+        "https://api.example.test:4 43/x",
+        "https://api.example.test:99999999999999999999/x",
+    ] {
+        refused("continuation url", |v| {
+            v["closure"]["continuation"]["url"] = t(bad)
+        });
+    }
+}
+
+#[test]
+fn bracketed_peer_hosts_are_canonical_ipv6_literals_and_never_normalized() {
+    for good in [
+        "https://[::1]:9000",
+        "https://[2001:db8::7]:9000",
+        "https://[fe80::1:2]:65535",
+    ] {
+        mutated(|v| v["closure"]["peers"][1]["endpoint"] = t(good)).unwrap();
+    }
+    for bad in [
+        "https://[....]:9000",
+        "https://[:::1]:9000",
+        "https://[::1::2]:9000",
+        "https://[::g]:9000",
+        "https://[]:9000",
+        "https://[::1%eth0]:9000",
+        "https://[1:2:3:4:5:6:7:8:9]:9000",
+        "https://[::1]",
+        "https://[::1]:",
+        "https://[::1]:99999",
+        "https://[::1]:09000",
+        "https://[::A]:9000",
+        "https://[0:0:0:0:0:0:0:1]:9000",
+        "https://[::0001]:9000",
+        "https://[2001:db8::7]x:9000",
+        "https://[::1]]:9000",
+    ] {
+        refused("peer endpoint", |v| {
+            v["closure"]["peers"][1]["endpoint"] = t(bad)
+        });
+    }
+}
+
+#[test]
 fn peers_are_sorted_unique_exact_private_https_origins_on_their_ports() {
     refused("peer order", |v| {
         v["closure"]["peers"].as_array_mut().unwrap().reverse()
