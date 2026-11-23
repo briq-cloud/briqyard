@@ -312,6 +312,19 @@ impl<F: TargetFacts> LocalOwner<F> {
         if !allowed {
             return Err(OwnerRefusal("point is not available in this attempt state"));
         }
+        let rebooted = self
+            .facts
+            .boot()
+            .map_err(|_| OwnerRefusal("the target's boot is unreadable"))?
+            != attempt.boot;
+        if rebooted {
+            return Err(OwnerRefusal("the target rebooted"));
+        }
+        for role in [Resource::Daemon, Resource::Authority] {
+            attempt.check_processes(role, &self.facts).map_err(|_| {
+                OwnerRefusal("an original or custodian is not the enrolled process")
+            })?;
+        }
         let original = OriginalOwner::from_local_owner(
             scope.resource(),
             attempt.registered.clone(),

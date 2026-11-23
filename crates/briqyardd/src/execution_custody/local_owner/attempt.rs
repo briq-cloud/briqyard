@@ -331,11 +331,11 @@ impl Attempt {
             custodians[1],
             &guards.authority,
         )?;
-        if daemon.custodian.pid == authority.custodian.pid
-            || daemon.custodian.pid == authority.original.pid
-            || authority.custodian.pid == daemon.original.pid
-            || daemon.original.pid == authority.original.pid
-        {
+        let pids: std::collections::BTreeSet<u64> = [&daemon, &authority]
+            .iter()
+            .flat_map(|record| [record.original.pid.get(), record.custodian.pid.get()])
+            .collect();
+        if pids.len() != 4 {
             return Err(OwnerError::Refused(
                 "custodians and originals must be distinct processes",
             ));
@@ -604,10 +604,12 @@ impl Attempt {
                 "turn does not bind this target version and evidence",
             ));
         }
-        let unit = self.unit_unchanged(
-            resource,
-            &self.measure_pair(facts)?[resource_index(resource)],
-        )?;
+        let pair = self.measure_pair(facts)?;
+        let units = [
+            self.unit_unchanged(Resource::Daemon, &pair[0])?,
+            self.unit_unchanged(Resource::Authority, &pair[1])?,
+        ];
+        let unit = units[resource_index(resource)].clone();
         match resource {
             Resource::Daemon => {
                 if record.retirement.is_some() || record.exit.is_some() {
@@ -873,7 +875,12 @@ impl Attempt {
         } else {
             &authority
         });
-        if current != handoff.unit {
+        let peer = if resource == Resource::Daemon {
+            (Resource::Authority, &authority)
+        } else {
+            (Resource::Daemon, &daemon)
+        };
+        if current != handoff.unit || self.unit_unchanged(peer.0, peer.1).is_err() {
             return Err(OwnerError::Refused("units changed since the handoff"));
         }
         let mut launch = captured.launch.clone();
@@ -907,6 +914,7 @@ impl Attempt {
         if record.retirement.is_some()
             || record.consumed.is_none()
             || record.exit.is_none()
+            || launch.resource != Resource::Daemon
             || launch.stage != LaunchStage::Retired
             || launch.nonce != captured.launch.nonce
             || launch.owner != captured.launch.owner
@@ -940,7 +948,8 @@ impl Attempt {
             .as_ref()
             .ok_or(OwnerError::Refused("daemon is not retired"))?;
         let cut = &receipt.verify(Tag::Retired, &hk)?.cut;
-        if self.seal_receipt.is_some()
+        if cut.check_plan(&self.plan, &self.plan()?).is_err()
+            || self.seal_receipt.is_some()
             || self.daemon.seal.is_none()
             || cut.x != self.x
             || cut.plan != self.plan
@@ -963,27 +972,17 @@ impl Attempt {
         Ok(next)
     }
 
-    /// The collector's answer. The projection follows from the target's own state, the resource
-    /// and the point; a point the state does not allow refuses.
-    pub(super) fn collect(
+    /// The target's own process facts for one role: its original runs as enrolled, or its exit
+    /// was witnessed and nothing runs as it, and its custodian is the live enrolled process.
+    /// Boot, pid, start ticks and image must all match; any error refuses.
+    pub(super) fn check_processes(
         &self,
-        request: &ObserveRequest,
+        resource: Resource,
         facts: &dyn TargetFacts,
-    ) -> Result<briqyard_api::execution::sealed::owner::Collected, OwnerError> {
-        use briqyard_api::execution::sealed::owner::Collected;
-        if request.x != self.x || request.registered != self.registered {
-            return Err(OwnerError::Refused(
-                "observation is not for the active operation",
-            ));
-        }
-        let resource = request.resource;
+    ) -> Result<(), OwnerError> {
         let record = self.record(resource);
-        if facts.boot()? != self.boot {
-            return Err(OwnerError::Refused("the target rebooted"));
-        }
-        let own = facts.process(record.original.pid.get())?;
-        let running = own
-            .as_ref()
+        let running = facts
+            .process(record.original.pid.get())?
             .is_some_and(|process| process.matches(&record.original));
         let exited = record.exit.is_some();
         if exited && running {
@@ -1002,6 +1001,29 @@ impl Attempt {
                 "custodian is not the live enrolled process",
             ));
         }
+        Ok(())
+    }
+
+    /// The collector's answer. The projection follows from the target's own state, the resource
+    /// and the point; a point the state does not allow refuses.
+    pub(super) fn collect(
+        &self,
+        request: &ObserveRequest,
+        facts: &dyn TargetFacts,
+    ) -> Result<briqyard_api::execution::sealed::owner::Collected, OwnerError> {
+        use briqyard_api::execution::sealed::owner::Collected;
+        if request.x != self.x || request.registered != self.registered {
+            return Err(OwnerError::Refused(
+                "observation is not for the active operation",
+            ));
+        }
+        let resource = request.resource;
+        let record = self.record(resource);
+        if facts.boot()? != self.boot {
+            return Err(OwnerError::Refused("the target rebooted"));
+        }
+        self.check_processes(resource, facts)?;
+        let exited = record.exit.is_some();
         let unit = facts.unit(resource)?;
         if facts.guard_image(resource)? != record.guard_image
             || unit.job != JobState::None

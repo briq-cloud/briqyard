@@ -148,6 +148,8 @@ pub(super) struct HostState {
     pub guards: [HexDigest; 2],
     pub unit_procs: [Option<MeasuredProc>; 2],
     pub final_io: [bool; 2],
+    /// Process and boot measurement fail, as an unreadable /proc would.
+    pub unreadable: bool,
 }
 
 pub(super) struct Host(pub Mutex<HostState>);
@@ -161,10 +163,18 @@ fn index(resource: Resource) -> usize {
 
 impl TargetFacts for Arc<Host> {
     fn boot(&self) -> Result<BootId, OwnerError> {
-        Ok(self.0.lock().unwrap().boot.clone())
+        let state = self.0.lock().unwrap();
+        if state.unreadable {
+            return Err(OwnerError::Refused("fixture boot is unreadable"));
+        }
+        Ok(state.boot.clone())
     }
     fn process(&self, pid: u64) -> Result<Option<MeasuredProc>, OwnerError> {
-        Ok(self.0.lock().unwrap().procs.get(&pid).cloned())
+        let state = self.0.lock().unwrap();
+        if state.unreadable {
+            return Err(OwnerError::Refused("fixture processes are unreadable"));
+        }
+        Ok(state.procs.get(&pid).cloned())
     }
     fn fragment(&self, resource: Resource) -> Result<FragmentState, OwnerError> {
         Ok(self.0.lock().unwrap().fragments[index(resource)])
@@ -249,6 +259,7 @@ impl World {
             guards: [digest(0x71), digest(0x72)],
             unit_procs: [None, None],
             final_io: [false; 2],
+            unreadable: false,
         })));
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("owner");

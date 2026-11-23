@@ -922,3 +922,41 @@ fn a_manifest_cannot_name_a_second_candidate_or_a_successor_process() {
         |_| {},
     );
 }
+
+#[test]
+fn the_four_processes_have_four_distinct_pids() {
+    // Slots: daemon original, daemon custodian, authority original, authority custodian. Each
+    // case moves one slot onto another's pid across the manifest and the operand that pins it,
+    // so every other comparison still agrees and only the pid rule can refuse.
+    let slots: [(&str, &str); 4] = [
+        ("daemon", "pre"),
+        ("daemon", "custodian"),
+        ("authority", "pre"),
+        ("authority", "custodian"),
+    ];
+    let pid = |role: &str, kind: &str| match (role, kind) {
+        ("daemon", "pre") => 123,
+        ("daemon", _) => 4300,
+        (_, "pre") => 124,
+        _ => 4301,
+    };
+    for (i, (role, kind)) in slots.iter().enumerate() {
+        for (other_role, other_kind) in &slots[..i] {
+            let shared = PosInt::new(pid(other_role, other_kind)).unwrap();
+            refused_c(
+                "process identities",
+                |v| v[*role][*kind]["pid"] = json!(shared.get()),
+                |p| match (*role, *kind) {
+                    ("daemon", "pre") => p.pre_d.pid = shared,
+                    ("authority", "pre") => p.pre_a.pid = shared,
+                    _ => {}
+                },
+                |policy| match (*role, *kind) {
+                    ("daemon", "custodian") => policy.daemon.custodian.pid = shared,
+                    ("authority", "custodian") => policy.authority.custodian.pid = shared,
+                    _ => {}
+                },
+            );
+        }
+    }
+}

@@ -66,8 +66,9 @@ Every expected digest in the tests comes from an independent Python computation,
 code under test. `local_owner::read_fragment` is the byte source for `fragment`: descriptor walk,
 owner and writer checks on every component, no links, one hard link, bounded size, stable while
 read. `Inputs::check_target_asset_identity` checks that guard and candidate are the target
-release asset at distinct paths with the same approved build; `bind` does not call it, because
-the accepted `native.inputs/v1` fixture's guard is not the target asset.
+release asset at distinct paths with the same approved build; `bind` calls it for both roles (see
+"Release identity in the bind" below). The accepted `native.inputs/v1` fixture's guard is not the
+target asset, so it is a codec-only fixture and no longer binds.
 
 ## Uncertain commits fence the attempt
 
@@ -228,3 +229,23 @@ producer rather than a codec:
 A joint run needs those producers. The qualification procedure is in
 `docs/OWNER-QUALIFICATION.md`. The version bump on main changes no pinned label here: build
 labels come from the plan's pins, and the tests use the synthetic label `fence-3`.
+
+## Boundaries a self-consistent input used to cross
+
+Review of 24fa812 found inputs and observations that were consistent with themselves but wrong.
+Each is now refused, with a test that fails without the fix:
+
+* **Capture:** the snapshot is built only from a fresh read of the target: the same boot, each
+  original running as enrolled (or its exit witnessed with no process running as it) and each
+  custodian live as enrolled. An unreadable or changed fact refuses and changes nothing; the stored
+  Attempt alone is never evidence of the target.
+* **Candidate paths:** a candidate path differs from both fixed role guard paths, not only its own,
+  by comparing paths lexically. It does not depend on mount or live evidence.
+* **Process identities:** the four processes of a boot (both originals, both custodians) have four
+  distinct pids, at `bind` and at genesis. Genesis used to compare four of the six pairs.
+* **Retirement:** the retired launch is the daemon's (`Launch.resource`), even when a launch and a
+  death of another resource agree with each other.
+* **Seal receipt:** the signed receipt's cut is the pinned Plan's whole cut (`Cut::check_plan`: scope,
+  plan, predecessor context and process, old member set), as well as the stored death and custody.
+* **Unit commitments:** a handoff and a consume compare both roles' four commitments (fragment,
+  argv, sandbox, fdstore) to the enrolled receipts, not only the selected role's.

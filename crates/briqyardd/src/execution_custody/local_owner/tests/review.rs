@@ -79,7 +79,7 @@ fn a_daemon_retirement_needs_the_custodians_final_io_not_a_typed_launch_and_deat
 
 /// The authority's launch gate: the daemon retired and sealed, the authority's original
 /// exited with its final I/O recorded. Returns the launch_a grant and turn.
-fn authority_ready() -> (
+pub(super) fn authority_ready() -> (
     World,
     briqyard_api::execution::sealed::transition::LGrant,
     Turn,
@@ -105,7 +105,7 @@ fn authority_ready() -> (
         x: x(),
         plan: launch.plan.clone(),
         old: world.plan.pre.clone(),
-        old_set: digest(0xa0),
+        old_set: world.plan.old.set().unwrap(),
         new_instance: id("new-instance"),
         old_proc: death.old.clone(),
         new_proc: death.next.clone(),

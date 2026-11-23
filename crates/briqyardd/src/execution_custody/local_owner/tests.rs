@@ -7,6 +7,7 @@
 //! logic over those inputs: the persisted rows and files, the version arithmetic and the
 //! refusals. Real-kernel and real-unit measurement is the disposable qualification's.
 
+mod boundary;
 mod cleanup;
 mod fixtures;
 mod flow;

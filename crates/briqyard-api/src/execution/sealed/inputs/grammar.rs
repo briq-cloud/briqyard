@@ -10,8 +10,8 @@ use std::collections::BTreeSet;
 use std::net::Ipv6Addr;
 use std::str::FromStr;
 
-const DAEMON_GUARD: &str = "/usr/local/bin/briqyardd";
-const AUTHORITY_GUARD: &str = "/usr/local/bin/briqyard-fleet";
+pub(super) const DAEMON_GUARD: &str = "/usr/local/bin/briqyardd";
+pub(super) const AUTHORITY_GUARD: &str = "/usr/local/bin/briqyard-fleet";
 const DAEMON_CONTROL: &str = "/run/briqyard-sealed/daemon/control";
 const AUTHORITY_CONTROL: &str = "/run/briqyard-sealed/authority/control";
 /// 0600 and 0660 (companion): permission bits only.

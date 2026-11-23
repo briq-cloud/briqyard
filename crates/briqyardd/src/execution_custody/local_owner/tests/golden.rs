@@ -67,6 +67,7 @@ fn golden() -> Golden {
         ],
         unit_procs: [None, None],
         final_io: [false; 2],
+        unreadable: false,
     })));
     Golden {
         arm: record("arm"),

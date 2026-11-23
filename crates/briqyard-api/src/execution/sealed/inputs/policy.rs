@@ -9,6 +9,7 @@ use super::*;
 use crate::execution::sealed::canonical::{decode, CodecError};
 use crate::execution::sealed::objects::Plan;
 use crate::execution::sealed::unit_policy::same_target_asset;
+use std::collections::BTreeSet;
 
 /// The independently bound identity of one actor row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,6 +191,7 @@ impl Inputs {
             custodian,
         )?;
         inputs.check_target_asset_identity(plan, policy.target_release)?;
+        inputs.check_distinct_processes()?;
         inputs.check_closure(plan, &policy.closure)?;
         Ok(BoundInputs {
             inputs,
@@ -263,6 +265,30 @@ impl Inputs {
                 asset_bytes,
                 build,
             )?;
+        }
+        for resource in [&self.daemon, &self.authority] {
+            let candidate = resource.candidate.file.path.as_str();
+            if candidate == grammar::DAEMON_GUARD || candidate == grammar::AUTHORITY_GUARD {
+                return mismatch("candidate is a role's guard path");
+            }
+        }
+        Ok(())
+    }
+
+    /// The four processes of one boot (both originals, both custodians) are four processes:
+    /// a pid names one of them, so no two roles or kinds may share it.
+    fn check_distinct_processes(&self) -> Result<(), CodecError> {
+        let pids: BTreeSet<u64> = [
+            &self.daemon.pre,
+            &self.daemon.custodian,
+            &self.authority.pre,
+            &self.authority.custodian,
+        ]
+        .iter()
+        .map(|process| process.pid.get())
+        .collect();
+        if pids.len() != 4 {
+            return mismatch("process identities");
         }
         Ok(())
     }

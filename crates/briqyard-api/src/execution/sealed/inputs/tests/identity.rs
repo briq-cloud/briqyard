@@ -2,6 +2,8 @@
 //! The control gives each guard the candidate's bytes and build; each case changes one side.
 
 use super::*;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use serde_json::json;
 
 fn control() -> (Inputs, Plan) {
     let mut inputs: Inputs = decode(INPUTS).unwrap();
@@ -92,4 +94,32 @@ fn every_difference_in_bytes_build_path_or_release_refuses() {
         check(&inputs, &plan, &releases).unwrap_err(),
         value_err("target release")
     );
+}
+
+#[test]
+fn a_candidate_path_is_neither_role_guard_path() {
+    for role in ["daemon", "authority"] {
+        for guard in ["/usr/local/bin/briqyardd", "/usr/local/bin/briqyard-fleet"] {
+            let encoded = URL_SAFE_NO_PAD.encode(guard);
+            let locator = path(guard);
+            assert_eq!(
+                companion::bound(
+                    |v| v[role]["candidate"]["file"]["path"] = json!(encoded),
+                    |_| {},
+                    |p| match role {
+                        "daemon" => p.daemon.candidate_path = locator.clone(),
+                        _ => p.authority.candidate_path = locator.clone(),
+                    },
+                )
+                .map(|_| ())
+                .unwrap_err(),
+                if guard.ends_with("briqyardd") == (role == "daemon") {
+                    value_err("candidate locator")
+                } else {
+                    value_err("candidate is a role's guard path")
+                },
+                "{role} candidate at {guard}"
+            );
+        }
+    }
 }
