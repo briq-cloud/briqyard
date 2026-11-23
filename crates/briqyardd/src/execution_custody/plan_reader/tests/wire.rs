@@ -38,7 +38,7 @@ fn the_fixed_socket_is_the_one_contract_path() {
     assert!(Deadline::start().remaining("start").unwrap() <= Duration::from_secs(5));
     if unsafe { libc::geteuid() } != 0 {
         says(
-            &refused(ReaderEndpoint::fixed(EnrolledHelper::new([0; 32]))),
+            &refused(ReaderEndpoint::fixed(own_helper().enrolled())),
             "only root",
         );
     }
@@ -158,7 +158,7 @@ fn an_attached_descriptor_is_refused() {
     let world = World::new();
     let local = world.local();
     let error = run(&world, move |request| {
-        Reply::Fd(framed(&valid(&local, request)))
+        Reply::Fds(1, framed(&valid(&local, request)))
     });
     says(&error, "ancillary data");
 }
@@ -311,23 +311,18 @@ fn a_missing_listener_fails_closed() {
     assert!(matches!(error, PlanReadError::Io { .. }), "{error}");
 }
 
-fn restarting_probe(peer: &PeerIdentity) -> Result<ObservedHelper, PlanReadError> {
+fn restarting_probe(pid: i32) -> Result<ObservedHelper, PlanReadError> {
     static CALLS: AtomicUsize = AtomicUsize::new(0);
-    let mut observed = test_probe(peer)?;
+    let mut observed = test_probe(pid)?;
     observed.start_ticks += CALLS.fetch_add(1, Ordering::SeqCst) as u64;
     Ok(observed)
 }
 
 #[test]
-fn a_helper_that_changes_during_the_exchange_is_refused() {
+fn a_helper_whose_start_differs_from_the_enrolled_one_is_refused() {
     let world = World::new();
     let _helper = serve(&world.sock_dir(), honest(&world));
-    let endpoint = ReaderEndpoint::rooted_at(
-        &world.sock_dir(),
-        own(),
-        EnrolledHelper::new(TEST_HELPER_IMAGE),
-        restarting_probe,
-    );
+    let endpoint = world.endpoint_with(own(), own_helper().enrolled(), restarting_probe);
     let reader = PlanReader::for_test(world.loader(), endpoint);
     let owner = SyntheticOwner::new(&world, "enrolled");
     says(
@@ -338,7 +333,7 @@ fn a_helper_that_changes_during_the_exchange_is_refused() {
             Resource::Daemon,
             ReadPoint::Launch,
         )),
-        "helper process changed",
+        "not the enrolled helper",
     );
     assert_eq!(owner.locks.load(Ordering::SeqCst), 0);
 }

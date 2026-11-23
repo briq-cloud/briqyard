@@ -12,8 +12,7 @@ use crate::execution_custody::process::ProcessDir;
 use crate::execution_custody::PeerIdentity;
 use briqyard_api::execution::sealed::canonical::MAX_MESSAGE_BYTES;
 use nix::sys::socket::{
-    connect, recvmsg, sendmsg, socket, AddressFamily, ControlMessageOwned, MsgFlags, SockFlag,
-    SockType, UnixAddr,
+    connect, recvmsg, sendmsg, socket, AddressFamily, MsgFlags, SockFlag, SockType, UnixAddr,
 };
 use rustix::fs::{fstat, statat, AtFlags, FileType, Stat, CWD};
 use std::io::{IoSlice, IoSliceMut};
@@ -26,16 +25,30 @@ const SOCKET_LEAF: &str = "plan-reader.sock";
 const MAX_FRAME: usize = MAX_MESSAGE_BYTES;
 
 /// The independently enrolled identity of the root-owned target helper that serves the socket:
-/// the SHA-256 of its mapped executable, supplied by the root provisioning path and never read
-/// from the peer, the Plan or the trust record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// the SHA-256 of its mapped executable and its live process (PID, kernel start ticks, host
+/// boot), supplied by the root provisioning path that started it. Nothing here comes from the
+/// peer, the Plan or the trust record.
+///
+/// Qualification still owed: the helper is a fixed, dedicated, non-delegating process, and
+/// whoever starts it must supply this identity for the helper it started. This module proves
+/// the connected peer is that process, alive around the exchange; it does not prove how the
+/// process came to exist, and nothing here forwards for another caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnrolledHelper {
     executable: [u8; 32],
+    pid: i32,
+    start_ticks: u64,
+    boot: String,
 }
 
 impl EnrolledHelper {
-    pub fn new(executable: [u8; 32]) -> Self {
-        Self { executable }
+    pub fn new(executable: [u8; 32], pid: i32, start_ticks: u64, boot: String) -> Self {
+        Self {
+            executable,
+            pid,
+            start_ticks,
+            boot,
+        }
     }
 }
 
@@ -49,13 +62,17 @@ pub(super) struct ObservedHelper {
     pub(super) executable: [u8; 32],
 }
 
-pub(super) type HelperProbe = fn(&PeerIdentity) -> Result<ObservedHelper, PlanReadError>;
+pub(super) type HelperProbe = fn(i32) -> Result<ObservedHelper, PlanReadError>;
 
-/// The kernel's view of the peer: its start ticks and the hash of its mapped executable.
-fn kernel_probe(peer: &PeerIdentity) -> Result<ObservedHelper, PlanReadError> {
-    let process = ProcessDir::open(peer.pid())?.profile()?;
+/// Obtains a pidfd for the process at the other end of a connected stream.
+pub(super) type PeerPidfdOpener = fn(&OwnedFd, &PeerIdentity) -> Result<OwnedFd, PlanReadError>;
+
+/// The kernel's view of a process: its start ticks and the hash of its mapped executable. It
+/// is only meaningful bracketed by [`PeerBinding::alive`], which pins the PID to the process.
+fn kernel_probe(pid: i32) -> Result<ObservedHelper, PlanReadError> {
+    let process = ProcessDir::open(pid)?.profile()?;
     Ok(ObservedHelper {
-        pid: peer.pid(),
+        pid,
         start_ticks: process.start_ticks(),
         boot: process.boot_id().to_string(),
         executable: *process.executable(),
@@ -68,6 +85,7 @@ pub struct ReaderEndpoint {
     ownership: Ownership,
     helper: EnrolledHelper,
     probe: HelperProbe,
+    peer_pidfd: PeerPidfdOpener,
 }
 
 impl ReaderEndpoint {
@@ -84,18 +102,21 @@ impl ReaderEndpoint {
             ownership: Ownership::ROOT,
             helper,
             probe: kernel_probe,
+            peer_pidfd: kernel_peer_pidfd,
         })
     }
 
-    /// Test scope only: a socket in a synthetic directory owned by the test's own user, and a
-    /// probe that stands in for hashing the (over-limit) test binary. It is not a production
-    /// override and does not replace the qualified real-peer proof.
+    /// Test scope only: a socket in a synthetic directory owned by the test's own user, a probe
+    /// that stands in for hashing the (over-limit) test binary, and a pidfd opener. The opener
+    /// stands in for SO_PEERPIDFD on kernels older than 6.5 and is not a production override;
+    /// it does not replace the qualified real-peer proof.
     #[cfg(test)]
     pub(super) fn rooted_at(
         anchor: &std::path::Path,
         ownership: Ownership,
         helper: EnrolledHelper,
         probe: HelperProbe,
+        peer_pidfd: PeerPidfdOpener,
     ) -> Self {
         Self {
             anchor: anchor.to_path_buf(),
@@ -103,6 +124,7 @@ impl ReaderEndpoint {
             ownership,
             helper,
             probe,
+            peer_pidfd,
         }
     }
 
@@ -124,7 +146,8 @@ impl ReaderEndpoint {
         if peer.uid() != self.ownership.uid || peer.gid() != self.ownership.gid {
             return Err(PlanReadError::Peer("peer is not the enrolled owner"));
         }
-        let observed = self.observe_helper(&peer)?;
+        let binding = PeerBinding::bind(self.peer_pidfd, &stream, &peer)?;
+        self.observe_helper(&binding)?;
 
         send_all(&stream, &frame, deadline)?;
         let mut header = [0u8; 4];
@@ -136,20 +159,28 @@ impl ReaderEndpoint {
         let mut reply = vec![0u8; length];
         recv_exact(&stream, &mut reply, deadline)?;
         expect_eof(&stream, deadline)?;
-        if self.observe_helper(&peer)? != observed {
-            return Err(PlanReadError::Peer(
-                "helper process changed during the exchange",
-            ));
-        }
+        self.observe_helper(&binding)?;
         Ok(reply)
     }
 
-    fn observe_helper(&self, peer: &PeerIdentity) -> Result<ObservedHelper, PlanReadError> {
-        let observed = (self.probe)(peer)?;
-        if observed.executable != self.helper.executable {
+    /// Sample the peer process and require it to be the enrolled helper, with the pidfd proving
+    /// the process is alive before and after the sample. A PID that is alive across the
+    /// sample cannot have been reused, so the sample describes the connected peer. Two samples
+    /// around an exchange do not prove uninterrupted execution of one image; that is the
+    /// helper lifecycle's qualification, not this check's claim.
+    fn observe_helper(&self, binding: &PeerBinding) -> Result<(), PlanReadError> {
+        binding.alive()?;
+        let observed = (self.probe)(binding.pid)?;
+        binding.alive()?;
+        let enrolled = &self.helper;
+        if observed.executable != enrolled.executable
+            || observed.pid != enrolled.pid
+            || observed.start_ticks != enrolled.start_ticks
+            || observed.boot != enrolled.boot
+        {
             return Err(PlanReadError::Peer("peer is not the enrolled helper"));
         }
-        Ok(observed)
+        Ok(())
     }
 
     /// Walk to the socket's directory one descriptor at a time and require a private socket
@@ -204,6 +235,102 @@ impl ReaderEndpoint {
             .map_err(|e| io("connect plan reader socket", e.into()))?;
         Ok(fd)
     }
+}
+
+/// The connected peer's retained kernel pidfd and the PID it names. The pidfd is the proof of
+/// identity and liveness; the PID is only how the probe addresses /proc.
+struct PeerBinding {
+    pidfd: OwnedFd,
+    pid: i32,
+}
+
+impl PeerBinding {
+    fn bind(
+        open: PeerPidfdOpener,
+        stream: &OwnedFd,
+        peer: &PeerIdentity,
+    ) -> Result<Self, PlanReadError> {
+        let pidfd = open(stream, peer)?;
+        let pid = pidfd_pid(&pidfd)?;
+        if pid != peer.pid() {
+            return Err(PlanReadError::Peer(
+                "peer pidfd does not name the credentialed process",
+            ));
+        }
+        let binding = Self { pidfd, pid };
+        binding.alive()?;
+        Ok(binding)
+    }
+
+    /// A pidfd becomes readable when its process exits. A zombie or a process whose
+    /// executable is still readable through /proc is dead, and is refused here.
+    fn alive(&self) -> Result<(), PlanReadError> {
+        let mut descriptor = libc::pollfd {
+            fd: self.pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
+        if ready < 0 {
+            return Err(io("poll peer pidfd", std::io::Error::last_os_error()));
+        }
+        if ready > 0 {
+            return Err(PlanReadError::Peer("peer process has exited"));
+        }
+        Ok(())
+    }
+}
+
+/// The PID a pidfd names in this PID namespace, from its fdinfo; -1 once the process is gone.
+pub(super) fn pidfd_pid(pidfd: &OwnedFd) -> Result<i32, PlanReadError> {
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", pidfd.as_raw_fd()))
+        .map_err(|source| io("read peer pidfd info", source))?;
+    let pid = info
+        .lines()
+        .find_map(|line| line.strip_prefix("Pid:"))
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .ok_or(PlanReadError::Peer("peer pidfd carries no process"))?;
+    if pid <= 0 {
+        return Err(PlanReadError::Peer("peer process has exited"));
+    }
+    Ok(pid)
+}
+
+/// SO_PEERPIDFD: the kernel's own pidfd for the process that connected or listened, created
+/// for this socket. Linux 6.5 or newer. Where it is unavailable the read fails closed: there
+/// is no fallback to a numeric PID.
+pub(super) fn kernel_peer_pidfd(
+    stream: &OwnedFd,
+    _peer: &PeerIdentity,
+) -> Result<OwnedFd, PlanReadError> {
+    let mut raw: libc::c_int = -1;
+    let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERPIDFD,
+            (&mut raw as *mut libc::c_int).cast(),
+            &mut length,
+        )
+    };
+    if result < 0 {
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOPROTOOPT | libc::EINVAL | libc::ENOTSOCK) => Err(PlanReadError::Peer(
+                "kernel peer pidfd is unavailable, so the plan reader fails closed",
+            )),
+            _ => Err(io("read the peer pidfd", error)),
+        };
+    }
+    if length as usize != std::mem::size_of::<libc::c_int>() || raw < 0 {
+        return Err(PlanReadError::Peer("kernel returned no peer pidfd"));
+    }
+    let pidfd = unsafe { OwnedFd::from_raw_fd(raw) };
+    if unsafe { libc::fcntl(pidfd.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC == 0 {
+        return Err(PlanReadError::Peer("peer pidfd is inheritable"));
+    }
+    Ok(pidfd)
 }
 
 /// Four-byte big-endian payload length, then exactly that many bytes; 1..=65536.
@@ -264,7 +391,8 @@ fn send_all(stream: &OwnedFd, mut bytes: &[u8], deadline: Deadline) -> Result<()
     Ok(())
 }
 
-/// One receive. No descriptor and no truncated ancillary data is ever accepted.
+/// One receive with no ancillary buffer: the kernel closes any descriptor a peer attaches and
+/// flags the receive, so no right is ever held, adopted or leaked on the way to refusing it.
 fn recv_some(
     stream: &OwnedFd,
     buffer: &mut [u8],
@@ -274,36 +402,14 @@ fn recv_some(
     loop {
         wait_for(stream.as_raw_fd(), libc::POLLIN, deadline, stage)?;
         let mut iov = [IoSliceMut::new(buffer)];
-        let mut control = nix::cmsg_space!([RawFd; 4]);
-        let received = match recvmsg::<()>(
-            stream.as_raw_fd(),
-            &mut iov,
-            Some(&mut control),
-            MsgFlags::MSG_CMSG_CLOEXEC,
-        ) {
+        let received = match recvmsg::<()>(stream.as_raw_fd(), &mut iov, None, MsgFlags::empty()) {
             Ok(received) => received,
             Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => continue,
             Err(error) => return Err(io("receive plan read reply", error.into())),
         };
-        let mut descriptors = Vec::new();
-        let mut other = false;
-        for message in received
-            .cmsgs()
-            .map_err(|_| PlanReadError::Frame("malformed ancillary data"))?
-        {
-            match message {
-                ControlMessageOwned::ScmRights(raw) => descriptors.extend(
-                    raw.into_iter()
-                        .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) }),
-                ),
-                _ => other = true,
-            }
-        }
-        if !descriptors.is_empty()
-            || other
-            || received
-                .flags
-                .intersects(MsgFlags::MSG_CTRUNC | MsgFlags::MSG_TRUNC)
+        if received
+            .flags
+            .intersects(MsgFlags::MSG_CTRUNC | MsgFlags::MSG_TRUNC)
         {
             return Err(PlanReadError::Frame("reply carries ancillary data"));
         }

@@ -6,7 +6,9 @@
 //! enrollment, native qualification, a real root peer, or a real operation owner; the
 //! ownership policy is test-scoped and production is fixed at root:root.
 
+mod fds;
 mod flow;
+mod peer;
 mod proof;
 mod trust;
 mod wire;
@@ -255,11 +257,23 @@ impl World {
     }
 
     fn endpoint_for(&self, ownership: Ownership, helper_exe: [u8; 32]) -> ReaderEndpoint {
+        let mut helper = own_helper();
+        helper.executable = helper_exe;
+        self.endpoint_with(ownership, helper.enrolled(), test_probe)
+    }
+
+    fn endpoint_with(
+        &self,
+        ownership: Ownership,
+        helper: EnrolledHelper,
+        probe: super::wire::HelperProbe,
+    ) -> ReaderEndpoint {
         ReaderEndpoint::rooted_at(
             &self.sock_dir(),
             ownership,
-            EnrolledHelper::new(helper_exe),
-            test_probe,
+            helper,
+            probe,
+            pidfd_open_by_pid,
         )
     }
 
@@ -319,16 +333,63 @@ impl World {
 /// production probe hashes the real mapped executable; qualification uses the real helper.
 const TEST_HELPER_IMAGE: [u8; 32] = [0x77; 32];
 
-fn test_probe(peer: &PeerIdentity) -> Result<ObservedHelper, PlanReadError> {
-    let stat = std::fs::read_to_string(format!("/proc/{}/stat", peer.pid()))
+fn kernel_start_ticks(pid: i32) -> Result<u64, PlanReadError> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .map_err(|source| io("read test peer stat", source))?;
-    let (pid, start_ticks) = crate::execution_custody::process::parse_stat(&stat)?;
+    Ok(crate::execution_custody::process::parse_stat(&stat)?.1)
+}
+
+fn test_probe(pid: i32) -> Result<ObservedHelper, PlanReadError> {
     Ok(ObservedHelper {
         pid,
-        start_ticks,
+        start_ticks: kernel_start_ticks(pid)?,
         boot: "test".to_string(),
         executable: TEST_HELPER_IMAGE,
     })
+}
+
+/// What a test helper enrolls as: the process, as the test knows it.
+struct HelperFixture {
+    executable: [u8; 32],
+    pid: i32,
+    start_ticks: u64,
+    boot: String,
+}
+
+impl HelperFixture {
+    fn enrolled(&self) -> EnrolledHelper {
+        EnrolledHelper::new(
+            self.executable,
+            self.pid,
+            self.start_ticks,
+            self.boot.clone(),
+        )
+    }
+}
+
+/// The helper threads of these tests live in the test process.
+fn own_helper() -> HelperFixture {
+    let pid = std::process::id() as i32;
+    HelperFixture {
+        executable: TEST_HELPER_IMAGE,
+        pid,
+        start_ticks: kernel_start_ticks(pid).unwrap(),
+        boot: "test".to_string(),
+    }
+}
+
+/// TEST SCOPE ONLY. Stands in for SO_PEERPIDFD, which this kernel (and any before 6.5) lacks,
+/// by opening a pidfd for the credentialed PID. Production never does this: it asks the socket.
+fn pidfd_open_by_pid(
+    _stream: &std::os::fd::OwnedFd,
+    peer: &PeerIdentity,
+) -> Result<std::os::fd::OwnedFd, PlanReadError> {
+    use std::os::fd::FromRawFd;
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, peer.pid(), 0) };
+    if raw < 0 {
+        return Err(io("open a test pidfd", std::io::Error::last_os_error()));
+    }
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw as i32) })
 }
 
 fn framed(bytes: &[u8]) -> Vec<u8> {
@@ -375,7 +436,7 @@ fn says(error: &PlanReadError, text: &str) {
 enum Reply {
     Send(Vec<u8>),
     SendThenHold(Vec<u8>),
-    Fd(Vec<u8>),
+    Fds(usize, Vec<u8>),
     Silent,
 }
 
@@ -437,9 +498,11 @@ fn serve(sock_dir: &Path, behave: impl Fn(&[u8]) -> Reply + Send + 'static) -> H
                         std::thread::sleep(Duration::from_millis(2));
                     }
                 }
-                Reply::Fd(bytes) => {
-                    let null = std::fs::File::open("/dev/null").unwrap();
-                    let fds = [null.as_raw_fd()];
+                Reply::Fds(count, bytes) => {
+                    let nulls: Vec<_> = (0..count)
+                        .map(|_| std::fs::File::open("/dev/null").unwrap())
+                        .collect();
+                    let fds: Vec<_> = nulls.iter().map(|null| null.as_raw_fd()).collect();
                     let rights = [nix::sys::socket::ControlMessage::ScmRights(&fds)];
                     nix::sys::socket::sendmsg::<()>(
                         stream.as_raw_fd(),
@@ -553,7 +616,7 @@ impl SyntheticOwner {
             Resource::Daemon => plan.pre_d,
             Resource::Authority => plan.pre_a,
         };
-        let original = OriginalOwner::new(
+        let original = OriginalOwner::synthetic(
             resource,
             plan.registered,
             plan.x.host,

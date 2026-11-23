@@ -1,3 +1,4 @@
+use super::super::owner::{production_ledger, ReadLedger};
 use super::*;
 
 const _: fn() = || {
@@ -23,15 +24,15 @@ fn an_exact_read_is_observation_only_and_changes_nothing() {
     let _helper = serve(&world.sock_dir(), honest(&world));
     let before = world.tree();
     let trust_before = std::fs::read(world.trust_file()).unwrap();
-    {
-        let rejoined =
-            observe(&world, &reader, &owner, Resource::Daemon, ReadPoint::Launch).unwrap();
-        let (observation, held) = rejoined.fresh().unwrap();
-        assert_eq!(observation.pin(), &world.local().pin());
-        assert_eq!(observation.read().resource, Resource::Daemon);
-        assert_eq!(observation.read().point, ReadPoint::Launch);
-        assert_eq!(held.facts.floor, 1);
-    }
+    observe(&world, &reader, &owner, Resource::Daemon, ReadPoint::Launch)
+        .unwrap()
+        .consume(|observation, held| {
+            assert_eq!(observation.pin(), &world.local().pin());
+            assert_eq!(observation.read().resource, Resource::Daemon);
+            assert_eq!(observation.read().point, ReadPoint::Launch);
+            assert_eq!(held.facts.floor, 1);
+        })
+        .unwrap();
     assert_eq!(world.tree(), before);
     assert_eq!(std::fs::read(world.trust_file()).unwrap(), trust_before);
     let state = owner.state.lock().unwrap();
@@ -57,12 +58,15 @@ fn every_defined_resource_and_point_reads_and_authority_seal_cannot_be_asked() {
     ] {
         let (world, owner, reader) = rig(phase);
         let _helper = serve(&world.sock_dir(), honest(&world));
-        let rejoined = observe(&world, &reader, &owner, resource, point).unwrap();
-        let (observation, _) = rejoined.fresh().unwrap();
-        assert_eq!(
-            (observation.read().resource, observation.read().point),
-            (resource, point)
-        );
+        observe(&world, &reader, &owner, resource, point)
+            .unwrap()
+            .consume(|observation, _| {
+                assert_eq!(
+                    (observation.read().resource, observation.read().point),
+                    (resource, point)
+                );
+            })
+            .unwrap();
     }
     let world = World::new();
     let error = refused(ReadScope::new(
@@ -295,7 +299,7 @@ fn the_original_owner_must_be_the_plans_registered_mapping_and_predecessor() {
     let world = World::new();
     let plan = &world.plan;
     let original = |resource, registered: &str, intrinsic: &str, pre: Proc| {
-        OriginalOwner::new(resource, id(registered), id(intrinsic), pre, proc(77))
+        OriginalOwner::synthetic(resource, id(registered), id(intrinsic), pre, proc(77))
     };
     let snapshot = |original| OwnerSnapshot::new(&world.plan_bytes, original, ());
     let daemon = original(
@@ -357,4 +361,67 @@ fn the_original_owner_must_be_the_plans_registered_mapping_and_predecessor() {
         let error = refused(snapshot(bad));
         assert!(matches!(error, PlanReadError::Owner(_)), "{name}: {error}");
     }
+}
+
+#[test]
+fn independent_reader_handles_share_one_reservation_per_resource() {
+    let world = World::new();
+    let _helper = serve(&world.sock_dir(), honest(&world));
+    let handles = |ledger: Arc<ReadLedger>| {
+        let build = || {
+            PlanReader::for_test_sharing(
+                world.loader(),
+                world.endpoint_for(own(), TEST_HELPER_IMAGE),
+                Arc::clone(&ledger),
+            )
+        };
+        (build(), build())
+    };
+    for ledger in [Arc::new(ReadLedger::default()), production_ledger()] {
+        let (first, second) = handles(ledger);
+        let (held_by, other_owner) = (
+            SyntheticOwner::new(&world, "enrolled"),
+            SyntheticOwner::new(&world, "enrolled"),
+        );
+        let held = observe(
+            &world,
+            &first,
+            &held_by,
+            Resource::Daemon,
+            ReadPoint::Launch,
+        )
+        .unwrap();
+        says(
+            &refused(observe(
+                &world,
+                &second,
+                &other_owner,
+                Resource::Daemon,
+                ReadPoint::Launch,
+            )),
+            "outstanding",
+        );
+        drop(
+            observe(
+                &world,
+                &second,
+                &other_owner,
+                Resource::Authority,
+                ReadPoint::Launch,
+            )
+            .unwrap(),
+        );
+        drop(held);
+        drop(
+            observe(
+                &world,
+                &second,
+                &other_owner,
+                Resource::Daemon,
+                ReadPoint::Launch,
+            )
+            .unwrap(),
+        );
+    }
+    assert!(Arc::ptr_eq(&production_ledger(), &production_ledger()));
 }

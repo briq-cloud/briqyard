@@ -92,9 +92,14 @@ impl From<OwnerRefusal> for PlanReadError {
 
 /// The original owner of one resource as the v3.6 base manifest names it: the single Host
 /// row's registered and intrinsic IDs, and the resource's pre (predecessor) and custodian
-/// (already started, inactive) processes. It is the lock/CAS identity of the owner across the
-/// read: any change in it, including a restarted custodian, refuses the observation. The
-/// manifest is a public assembly, never trust; it enrolls no key and approves nothing.
+/// (already started, inactive) processes.
+///
+/// These are the owner's assertions. This type does not establish that the rows were
+/// validated, that the processes are live, or that the owner holds the lease; the real owner
+/// does, under its own locks, before it builds the snapshot. What the reader adds is the
+/// comparison: the Plan's pre and registered mapping must match, and every captured field,
+/// including a restarted custodian, must be unchanged after the read. The manifest is a public
+/// assembly, never trust.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OriginalOwner {
     resource: Resource,
@@ -105,7 +110,12 @@ pub struct OriginalOwner {
 }
 
 impl OriginalOwner {
-    pub fn new(
+    /// An owner-supplied assertion with nothing behind it, for tests only. A production
+    /// constructor must project this from the separately validated native.inputs target Host
+    /// row and the selected Resource row (the manifest package owns that projection), and the
+    /// processes from the live, retained owner. Equality of two assertions is never approval.
+    #[cfg(test)]
+    pub(super) fn synthetic(
         resource: Resource,
         registered: Ident,
         intrinsic: Ident,
@@ -190,7 +200,7 @@ pub trait PlanReadOwner {
 /// At most one outstanding read per resource, held from the request until the observation
 /// is dropped, so a nonce is never in two uses and a proof is consumed once.
 #[derive(Default)]
-struct ReadLedger {
+pub(super) struct ReadLedger {
     outstanding: Mutex<Vec<(Resource, Nonce)>>,
 }
 
@@ -286,11 +296,31 @@ pub struct RejoinedObservation<H> {
 }
 
 impl<H> RejoinedObservation<H> {
-    /// The observation and the held owner state, only while the five seconds last.
-    pub fn fresh(&self) -> Result<(&VerifiedPlanObservation, &H), PlanReadError> {
+    /// The one presentation at the gate. It checks the five-second bound immediately, then
+    /// hands the observation (data, by reference) and the held owner state (by value) to
+    /// `gate` exactly once, and the nonce stays reserved until `gate` returns. Past the bound
+    /// `gate` never runs and the owner's locks are released.
+    ///
+    /// The observation is data, not a freshness capability: nothing returned from here can be
+    /// shown to a later gate. This type cannot make an effect single. The owner's gate must
+    /// still compare-and-set its own state under `H` and perform at most one action. Today no
+    /// real gate consumes this type.
+    pub fn consume<R>(
+        self,
+        gate: impl FnOnce(&VerifiedPlanObservation, H) -> R,
+    ) -> Result<R, PlanReadError> {
         self.observation.deadline.check("local use")?;
-        Ok((&self.observation, &self.held))
+        let Self { observation, held } = self;
+        Ok(gate(&observation, held))
     }
+}
+
+/// The reservation every production handle in this process shares. Two readers over the same
+/// resource are one reservation, whichever handle holds it. It is in-process bookkeeping only:
+/// the cross-process guarantee is the operation owner's sole lease, not a nonce store.
+pub(super) fn production_ledger() -> Arc<ReadLedger> {
+    static LEDGER: std::sync::OnceLock<Arc<ReadLedger>> = std::sync::OnceLock::new();
+    Arc::clone(LEDGER.get_or_init(Arc::default))
 }
 
 pub struct PlanReader {
@@ -305,16 +335,27 @@ impl PlanReader {
         Ok(Self {
             trust: TrustLoader::system()?,
             endpoint: ReaderEndpoint::fixed(helper)?,
-            ledger: Arc::default(),
+            ledger: production_ledger(),
         })
     }
 
+    /// Test scope only: a private reservation, so parallel tests do not share one.
     #[cfg(test)]
-    pub(crate) fn for_test(trust: TrustLoader, endpoint: ReaderEndpoint) -> Self {
+    pub(super) fn for_test(trust: TrustLoader, endpoint: ReaderEndpoint) -> Self {
+        Self::for_test_sharing(trust, endpoint, Arc::default())
+    }
+
+    /// Test scope only: handles built over the same reservation, as production handles are.
+    #[cfg(test)]
+    pub(super) fn for_test_sharing(
+        trust: TrustLoader,
+        endpoint: ReaderEndpoint,
+        ledger: Arc<ReadLedger>,
+    ) -> Self {
         Self {
             trust,
             endpoint,
-            ledger: Arc::default(),
+            ledger,
         }
     }
 
@@ -416,23 +457,31 @@ mod tests {
         let ledger = Arc::new(ReadLedger::default());
         let live = RejoinedObservation {
             observation: observation(&ledger, Deadline::within(Duration::from_secs(60))),
-            held: (),
+            held: 7u8,
         };
-        assert!(live.fresh().is_ok());
-        assert!(ledger
-            .begin(Resource::Daemon, Nonce::from_array([2; 32]))
-            .is_err());
-        drop(live);
+        let seen = live
+            .consume(|observed, held| {
+                assert!(ledger
+                    .begin(Resource::Daemon, Nonce::from_array([2; 32]))
+                    .is_err());
+                assert_eq!(observed.read().resource, Resource::Daemon);
+                held
+            })
+            .unwrap();
+        assert_eq!(seen, 7);
+        assert!(ledger.outstanding.lock().unwrap().is_empty());
 
         let expired = RejoinedObservation {
             observation: observation(&ledger, Deadline::within(Duration::ZERO)),
             held: (),
         };
+        let mut ran = false;
+        let outcome = expired.consume(|_, _| ran = true);
         assert!(matches!(
-            expired.fresh(),
+            outcome,
             Err(PlanReadError::Deadline { stage: "local use" })
         ));
-        drop(expired);
+        assert!(!ran, "an expired observation reached the gate");
         assert!(ledger.outstanding.lock().unwrap().is_empty());
     }
 
