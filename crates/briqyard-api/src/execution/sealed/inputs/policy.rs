@@ -8,6 +8,7 @@ use super::release::VerifiedRelease;
 use super::*;
 use crate::execution::sealed::canonical::{decode, CodecError};
 use crate::execution::sealed::objects::Plan;
+use crate::execution::sealed::unit_policy::same_target_asset;
 
 /// The independently bound identity of one actor row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -255,16 +256,11 @@ impl Inputs {
         ];
         for (resource, asset, asset_bytes, build) in roles {
             for program in [&resource.guard, &resource.candidate] {
-                if program.file.sha256 != *asset
-                    || program.file.bytes.get() != asset_bytes
-                    || program.build != *build
-                {
+                if program.file.bytes.get() != asset_bytes {
                     return mismatch("program is not the target release asset");
                 }
             }
-            if resource.guard.file.path == resource.candidate.file.path {
-                return mismatch("guard and candidate share a path");
-            }
+            same_target_asset(&resource.guard, &resource.candidate, asset, build)?;
         }
         Ok(())
     }

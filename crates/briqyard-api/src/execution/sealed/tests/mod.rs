@@ -9,6 +9,7 @@ mod objects;
 mod owner;
 mod preimage;
 mod trial;
+mod unit_vectors;
 mod vectors;
 
 use super::objects::{Proc, X};

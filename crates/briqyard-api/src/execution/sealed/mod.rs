@@ -13,6 +13,7 @@
 //! * [`inputs`]: the closed v3.6 base manifest and v3.3 closure reader, with no I/O or approval.
 //! * [`owner`]: the owner layer's target-side collector, arm receipt, enrollment and `owner.turn` wire.
 //! * [`preimage`]: the closed preimages of the four unit commitments an owner observation reports.
+//! * [`unit_policy`]: the typed unit preimages an approval holds and what each phase of the campaign shows.
 //! * [`plan_pin`]: the two prior Plan commitments, the root custody read and its trust record.
 //! * [`trial`]: the single sealed-trial ABI and its native command/result commitments.
 //! * [`custody`]: the custody frame ABI's wire and signed bodies.
@@ -30,6 +31,7 @@ pub mod prim;
 pub mod sig;
 pub mod transition;
 pub mod trial;
+pub mod unit_policy;
 
 pub use canonical::{decode, decode_with, encode, encode_with, h, CodecError, Limits, Wire};
 

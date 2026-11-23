@@ -69,6 +69,19 @@ read. `Inputs::check_target_asset_identity` checks that guard and candidate are 
 release asset at distinct paths with the same approved build; `bind` does not call it, because
 the accepted `native.inputs/v1` fixture's guard is not the target asset.
 
+## Shared unit vectors
+
+The API's `sealed_owner_units_v1.vectors` (57 rows, SHA-256 `21371a4f…bdf3`) is the shared source of
+the four commitments for R, B and native. `unit_policy` holds the typed policy (`UnitPolicy`:
+legacy and guarded unit with placeholders `op` and `serial`), sorts sets into canonical order, and
+computes what each phase shows (`prearm`: legacy file and legacy loaded unit; `armed`: guarded file,
+legacy loaded unit; `launch`, `seal`, `launch_a`: guarded file and guarded loaded unit). Native reproduces all 57 rows:
+37 digests or accepts, 20 refusals, each with its own reason. No row conflicts with erratum 2.
+Native is stricter than the API's reader in places the rows do not exercise: address families must be
+`AF_*` names, state directories one component, environment names variable names, permission bits
+within 07777, the transition's `op` a digest and `serial` positive, and a listener count of zero
+exactly when the names digest is the empty one.
+
 ## Still unprovisioned
 
 `LiveHost` measures processes only and refuses everything else. What is missing, and each is a

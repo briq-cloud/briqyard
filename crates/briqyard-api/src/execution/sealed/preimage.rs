@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 /// The raw unit file bound: the inherited 64 KiB message limit.
 pub const MAX_FRAGMENT_BYTES: usize = 64 * 1024;
-const MAX_ENTRIES: usize = 64;
+pub(super) const MAX_ENTRIES: usize = 64;
 
 macro_rules! literal {
     ($(#[$meta:meta])* $name:ident, $text:literal) => {
@@ -344,6 +344,20 @@ impl Wire for FdStore {
 }
 
 impl FdStore {
+    /// The inner v3.6 object as an approval or a measurement states it.
+    pub fn from_parts(
+        listeners: Listeners,
+        preserve: Preserve,
+        notify_access: NotifyAccess,
+    ) -> Self {
+        Self {
+            format: FdStoreFormat::V1,
+            listeners,
+            preserve,
+            notify_access,
+        }
+    }
+
     /// `names` are the retained ordinary vector in qualified delivery order.
     pub fn new(
         names: &[&str],

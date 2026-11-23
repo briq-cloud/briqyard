@@ -14,6 +14,7 @@ service and no daemon.
 | golden hash, and B's copy with `OWNER_B_GOLDEN` | R, B and native hold the same 15 records |
 | `sealed::tests::owner` | each record decodes, re-encodes to the same bytes and hash, signatures verify under the public keys |
 | `local_owner` | one private attempt replaced by version compare-and-set; both arm receipts at one version; collector projections per point; the first handoff compares version and every binding before anything changes; exit, then guard start, then one consumption; every break in that lineage refuses and writes nothing; store failures before and after the rename |
+| `unit_vectors` | all 57 rows of the shared unit vectors: exact digests, and each refusal for its own reason |
 | `preimage` and `inputs::tests::identity` | the four commitment preimages match an independent computation; the arm receipts built from them hash to the independent values; guard and candidate are the target asset at distinct paths |
 | ordinary parity | only the three wiring files differ from the base outside `local_owner`; `execution_custody` and `guarded` suites pass unchanged |
 
