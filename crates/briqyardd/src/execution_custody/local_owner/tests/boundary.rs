@@ -4,13 +4,15 @@
 
 use super::super::*;
 use super::fixtures::*;
-use super::flow::{daemon_at_guard, guard_proc, retired_daemon, start_guard};
+use super::flow::{
+    daemon_at_guard, exit_original, guard_proc, handed_off, retired_daemon, start_guard,
+};
 use super::review::authority_ready;
 use crate::execution_custody::plan_reader::PlanReadOwner;
 use briqyard_api::execution::sealed::{
     canonical::h,
     custody::Resource,
-    owner::UnitState,
+    owner::{FragmentState, UnitState},
     plan_pin::ReadPoint,
     prim::BootId,
     sig::{Sig, Tag},
@@ -299,4 +301,280 @@ fn a_custodian_sharing_its_own_originals_pid_is_refused_at_genesis() {
             "custodian {custodian}: nothing was written"
         );
     }
+}
+
+type Act = Box<dyn Fn(&World) -> Result<(), OwnerError>>;
+
+/// The daemon is retired and its seal and receipt are staged one gate at a time. Each stage
+/// returns the world at the gate and the one write that gate authorizes.
+fn gate(name: &str) -> (World, Act, &'static str) {
+    let custodian = "custodian is not the live enrolled process";
+    match name {
+        "enrollment" => {
+            let world = World::new();
+            world.install().unwrap();
+            for resource in [Resource::Daemon, Resource::Authority] {
+                world.owner.allocate_lease(resource).unwrap();
+                world.host.0.lock().unwrap().fragments
+                    [usize::from(resource == Resource::Authority)] = FragmentState::Guarded;
+                world.owner.install_fragment(resource).unwrap();
+            }
+            world.stage_capture(Resource::Daemon);
+            (world, Box::new(|w| w.owner.commit_enrollment()), custodian)
+        }
+        "daemon handoff" => {
+            let world = World::new();
+            let (launch, capture) = world.enroll();
+            let grant = world.grant(&launch, LKind::LaunchD, launch.old.clone(), &Key::bk());
+            let turn = world.turn(world.turn_body(&grant, &launch, &capture), &Key::bk());
+            let act: Act =
+                Box::new(move |w| w.owner.accept_handoff(&grant, &turn, &w.retained[DAEMON]));
+            (world, act, custodian)
+        }
+        "daemon exit" => {
+            let (world, ..) = handed_off();
+            exit_original(&world, Resource::Daemon);
+            let act: Act = Box::new(|w| w.owner.record_exit(Resource::Daemon, &w.retained[DAEMON]));
+            (world, act, custodian)
+        }
+        "daemon guard start" => {
+            let (world, ..) = handed_off();
+            exit_original(&world, Resource::Daemon);
+            world
+                .owner
+                .record_exit(Resource::Daemon, &world.retained[DAEMON])
+                .unwrap();
+            start_guard(&world, Resource::Daemon, &guard_proc());
+            (
+                world,
+                Box::new(|w| w.owner.record_guard_start(Resource::Daemon)),
+                custodian,
+            )
+        }
+        "daemon consume" => {
+            let (world, ..) = daemon_at_guard();
+            let act: Act = Box::new(|w| {
+                w.owner
+                    .consume(Resource::Daemon, &measured(&guard_proc()))
+                    .map(|_| ())
+            });
+            (world, act, "processes changed since the handoff")
+        }
+        "retirement" | "seal" | "receipt" | "authority exit" | "authority final I/O" => {
+            let (world, launch, _) = daemon_at_guard();
+            world
+                .owner
+                .consume(Resource::Daemon, &measured(&guard_proc()))
+                .unwrap();
+            let (retired, death, profile) = retired_daemon(&world, &launch);
+            world.host.0.lock().unwrap().final_io[0] = true;
+            if name == "retirement" {
+                let act: Act =
+                    Box::new(move |w| w.owner.record_retirement(&retired, &death, &profile));
+                return (world, act, custodian);
+            }
+            world
+                .owner
+                .record_retirement(&retired, &death, &profile)
+                .unwrap();
+            let seal_grant = world.grant(&retired, LKind::Seal, death.next.clone(), &Key::bk());
+            let mut body =
+                world.turn_body(&seal_grant, &launch, &world.capture(&launch, &Key::rk()));
+            body.captured_launch = None;
+            body.capture = None;
+            let seal_turn = world.turn(body, &Key::bk());
+            if name == "seal" {
+                let act: Act = Box::new(move |w| w.owner.accept_seal(&seal_grant, &seal_turn));
+                return (world, act, custodian);
+            }
+            world.owner.accept_seal(&seal_grant, &seal_turn).unwrap();
+            let cut = Cut {
+                x: x(),
+                plan: launch.plan.clone(),
+                old: world.plan.pre.clone(),
+                old_set: world.plan.old.set().unwrap(),
+                new_instance: id("new-instance"),
+                old_proc: death.old.clone(),
+                new_proc: death.next.clone(),
+                custody: h(&death).unwrap(),
+                profile,
+                retired_epoch: world.plan.pre.epoch.clone(),
+                prior_host_water: world.plan.pre.generation,
+            };
+            let receipt = Sig::sign(Tag::Retired, ReceiptBody::new(cut), &Key::hk()).unwrap();
+            if name == "receipt" {
+                let act: Act = Box::new(move |w| w.owner.bind_seal_receipt(&receipt));
+                return (world, act, custodian);
+            }
+            world.owner.bind_seal_receipt(&receipt).unwrap();
+            world.stage_capture(Resource::Authority);
+            exit_original(&world, Resource::Authority);
+            world.host.0.lock().unwrap().units[1].state = UnitState::Inactive;
+            if name == "authority exit" {
+                let act: Act = Box::new(|w| {
+                    w.owner
+                        .record_exit(Resource::Authority, &w.retained[AUTHORITY])
+                });
+                return (world, act, custodian);
+            }
+            world
+                .owner
+                .record_exit(Resource::Authority, &world.retained[AUTHORITY])
+                .unwrap();
+            world.host.0.lock().unwrap().final_io[1] = true;
+            (
+                world,
+                Box::new(|w| w.owner.record_final_io(Resource::Authority)),
+                custodian,
+            )
+        }
+        "authority handoff" | "authority guard start" | "authority consume" => {
+            let (world, grant, turn) = authority_ready();
+            let handoff: Act = Box::new(move |w| {
+                w.owner
+                    .accept_handoff(&grant, &turn, &w.retained[AUTHORITY])
+            });
+            if name == "authority handoff" {
+                return (world, handoff, custodian);
+            }
+            handoff(&world).unwrap();
+            let guard = proc(50, 0x72);
+            world.host.0.lock().unwrap().units[1].state = UnitState::Active;
+            start_guard(&world, Resource::Authority, &guard);
+            if name == "authority guard start" {
+                let act: Act = Box::new(|w| w.owner.record_guard_start(Resource::Authority));
+                return (world, act, custodian);
+            }
+            world.owner.record_guard_start(Resource::Authority).unwrap();
+            let act: Act = Box::new(move |w| {
+                w.owner
+                    .consume(Resource::Authority, &measured(&guard))
+                    .map(|_| ())
+            });
+            (world, act, "processes changed since the handoff")
+        }
+        _ => unreachable!("{name}"),
+    }
+}
+
+const GATES: [&str; 13] = [
+    "enrollment",
+    "daemon handoff",
+    "daemon exit",
+    "daemon guard start",
+    "daemon consume",
+    "retirement",
+    "seal",
+    "receipt",
+    "authority handoff",
+    "authority exit",
+    "authority final I/O",
+    "authority guard start",
+    "authority consume",
+];
+
+#[test]
+fn every_authorizing_write_refuses_a_lost_or_replaced_custodian_and_writes_nothing() {
+    type Change = (&'static str, fn(&mut HostState, u64));
+    let changes: [Change; 3] = [
+        ("lost", |s, pid| {
+            s.procs.remove(&pid);
+        }),
+        ("another start", |s, pid| {
+            s.procs.get_mut(&pid).unwrap().start += 1
+        }),
+        ("another image", |s, pid| {
+            s.procs.get_mut(&pid).unwrap().exe = digest(0xfd)
+        }),
+    ];
+    let mut failures = Vec::new();
+    for name in GATES {
+        for pid in [20u64, 22] {
+            for (what, change) in &changes {
+                let (world, act, why) = gate(name);
+                let stored = std::fs::read(world.path().join("active.json")).unwrap();
+                let saved = world
+                    .host
+                    .0
+                    .lock()
+                    .unwrap()
+                    .procs
+                    .get(&pid)
+                    .cloned()
+                    .unwrap();
+                change(&mut world.host.0.lock().unwrap(), pid);
+                let wanted = format!("{name}: custodian {pid} {what}");
+                match act(&world) {
+                    Err(OwnerError::Refused(got)) if got.contains(why) => {}
+                    other => {
+                        failures.push(format!("{wanted}: wanted a refusal, got {other:?}"));
+                        continue;
+                    }
+                }
+                assert_eq!(
+                    std::fs::read(world.path().join("active.json")).unwrap(),
+                    stored,
+                    "{wanted}: nothing was written"
+                );
+                world.host.0.lock().unwrap().procs.insert(pid, saved);
+                act(&world).unwrap_or_else(|e| panic!("{wanted}: restored write failed: {e:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn a_consumed_launch_is_returned_once_and_a_second_use_refuses() {
+    let (world, ..) = gate("daemon consume");
+    let guard = measured(&guard_proc());
+    world.owner.consume(Resource::Daemon, &guard).unwrap();
+    refused(
+        world.owner.consume(Resource::Daemon, &guard),
+        "already consumed",
+    );
+}
+
+#[test]
+fn the_exiting_original_may_be_absent_but_never_another_live_process() {
+    let (world, ..) = gate("daemon exit");
+    let stored = std::fs::read(world.path().join("active.json")).unwrap();
+    {
+        let mut state = world.host.0.lock().unwrap();
+        let mut other = state.procs.get(&12).cloned().unwrap();
+        other.pid = 10.try_into().unwrap_or(other.pid);
+        state.procs.insert(10, other);
+    }
+    refused(
+        world
+            .owner
+            .record_exit(Resource::Daemon, &world.retained[DAEMON]),
+        "another process",
+    );
+    assert_eq!(
+        std::fs::read(world.path().join("active.json")).unwrap(),
+        stored
+    );
+    world.host.0.lock().unwrap().procs.remove(&10);
+    world
+        .owner
+        .record_exit(Resource::Daemon, &world.retained[DAEMON])
+        .unwrap();
+}
+
+#[test]
+fn a_peer_original_that_vanished_blocks_an_exit_record() {
+    let (world, ..) = gate("daemon exit");
+    let stored = std::fs::read(world.path().join("active.json")).unwrap();
+    world.host.0.lock().unwrap().procs.remove(&12);
+    refused(
+        world
+            .owner
+            .record_exit(Resource::Daemon, &world.retained[DAEMON]),
+        "vanished without a witnessed exit",
+    );
+    assert_eq!(
+        std::fs::read(world.path().join("active.json")).unwrap(),
+        stored
+    );
 }

@@ -663,7 +663,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   across the host, not continuous physical RAM usage.
   Against a daemon on TLS, the invariants' curl trusts the daemon's certificate with
   `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
-- `hack/owner-qualify.sh` (disposable Linux host, root, `BRIQYARD_DISPOSABLE=1`; [ADR 0149](adr/0149-native-owner-local-state.md), [OWNER-QUALIFICATION.md](OWNER-QUALIFICATION.md)): the shared owner golden, the unit vectors hash (63 rows), the wire tests (6), the preimage tests (9), the unit-vector tests (9), the bind and positive-profile tests (71), the `local_owner` suite (48 passed, 1 ignored), the one gated real-kernel regression run on its own (`--ignored --exact`, `BRIQYARD_CUSTODY_TEST_REAL_UID=1`) and ordinary-path parity. The live joint B/native phase is listed as not run.
+- `hack/owner-qualify.sh` (disposable Linux host, root, `BRIQYARD_DISPOSABLE=1`; [ADR 0149](adr/0149-native-owner-local-state.md), [OWNER-QUALIFICATION.md](OWNER-QUALIFICATION.md)): the shared owner golden, the unit vectors hash (63 rows), the wire tests (6), the preimage tests (9), the unit-vector tests (9), the bind and positive-profile tests (71), the `local_owner` suite (52 passed, 1 ignored), the one gated real-kernel regression run on its own (`--ignored --exact`, `BRIQYARD_CUSTODY_TEST_REAL_UID=1`) and ordinary-path parity. The live joint B/native phase is listed as not run.
 - `hack/chaos.py`: owners keep a machine each and a counter on its disks through writes, stops,
   restarts, forks, snapshots (a restore with memory read again after a cold boot) and backups,
   while racers stop, start, restart, snapshot and back up any machine at once. It fails on a

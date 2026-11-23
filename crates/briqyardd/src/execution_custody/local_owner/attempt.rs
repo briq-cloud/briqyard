@@ -497,7 +497,7 @@ impl Attempt {
         {
             return Err(OwnerError::Refused("enrollment preconditions are not met"));
         }
-        self.require_originals_running(target_facts)?;
+        self.check_continuity(target_facts, None)?;
         let [daemon, authority] = self.measure_pair(target_facts)?;
         let mut next = self.next()?;
         for (resource, unit) in [(Resource::Daemon, daemon), (Resource::Authority, authority)] {
@@ -604,6 +604,7 @@ impl Attempt {
                 "turn does not bind this target version and evidence",
             ));
         }
+        self.check_continuity(facts, None)?;
         let pair = self.measure_pair(facts)?;
         let units = [
             self.unit_unchanged(Resource::Daemon, &pair[0])?,
@@ -694,6 +695,7 @@ impl Attempt {
                 "seal turn does not bind this target version",
             ));
         }
+        self.check_continuity(facts, None)?;
         let unit = self.unit_unchanged(Resource::Daemon, &facts.unit(Resource::Daemon)?)?;
         let mut next = self.next()?;
         next.daemon.seal = Some(Handoff {
@@ -716,6 +718,7 @@ impl Attempt {
         &self,
         resource: Resource,
         retained: &dyn RetainedProcess,
+        facts: &dyn TargetFacts,
     ) -> Result<Attempt, OwnerError> {
         let record = self.record(resource);
         if record.exit.is_some() || record.captured.is_none() || self.enrolled.is_none() {
@@ -740,6 +743,7 @@ impl Attempt {
                 "the retained descriptor does not report this exit",
             ));
         }
+        self.check_continuity(facts, Some(resource))?;
         let mut next = self.next()?;
         next.record_mut(resource).exit = Some(next.version);
         if resource == Resource::Daemon {
@@ -758,6 +762,7 @@ impl Attempt {
         if resource != Resource::Authority || record.exit.is_none() || record.final_io {
             return Err(OwnerError::Refused("final I/O is not expected"));
         }
+        self.check_continuity(facts, None)?;
         let _completed: FinalIo = facts.final_io(resource)?;
         let mut next = self.next()?;
         next.record_mut(resource).final_io = true;
@@ -779,6 +784,7 @@ impl Attempt {
         if record.guard.is_some() || (resource == Resource::Daemon && record.exit.is_none()) {
             return Err(OwnerError::Refused("guard start is not expected"));
         }
+        self.check_continuity(facts, None)?;
         let guard = facts
             .unit_process(resource)?
             .ok_or(OwnerError::Refused("the unit runs no process"))?;
@@ -867,6 +873,8 @@ impl Attempt {
                 "lineage since the handoff is not the authorized one",
             ));
         }
+        self.check_continuity(facts, None)
+            .map_err(|_| OwnerError::Refused("processes changed since the handoff"))?;
         let [daemon, authority] = self
             .measure_pair(facts)
             .map_err(|_| OwnerError::Refused("units changed since the handoff"))?;
@@ -929,6 +937,7 @@ impl Attempt {
             ));
         }
         launch.check_death(death)?;
+        self.check_continuity(facts, None)?;
         let _completed: FinalIo = facts.final_io(Resource::Daemon)?;
         let mut next = self.next()?;
         next.daemon.retirement = Some(DaemonRetirement {
@@ -940,7 +949,11 @@ impl Attempt {
     }
 
     /// The host's sealed Receipt for the daemon's own Cut, bound to the authority's gate.
-    pub(super) fn bind_seal_receipt(&self, receipt: &Receipt) -> Result<Attempt, OwnerError> {
+    pub(super) fn bind_seal_receipt(
+        &self,
+        receipt: &Receipt,
+        facts: &dyn TargetFacts,
+    ) -> Result<Attempt, OwnerError> {
         let (_, _, hk) = self.keys()?;
         let retirement = self
             .daemon
@@ -967,39 +980,56 @@ impl Attempt {
                 "receipt is not this daemon's sealed cut",
             ));
         }
+        self.check_continuity(facts, None)?;
         let mut next = self.next()?;
         next.seal_receipt = Some(h(receipt)?);
         Ok(next)
     }
 
-    /// The target's own process facts for one role: its original runs as enrolled, or its exit
-    /// was witnessed and nothing runs as it, and its custodian is the live enrolled process.
-    /// Boot, pid, start ticks and image must all match; any error refuses.
-    pub(super) fn check_processes(
+    /// The target's own process facts for both roles, read now, under the caller's lock: the
+    /// same boot, every original running as enrolled or its exit witnessed with nothing running
+    /// as it, and every custodian the live enrolled process. Boot, pid, start ticks and image
+    /// must all match; any error refuses. `pending_exit` names the one original whose exit is
+    /// being recorded: its absence is allowed there (a reaped process has no entry), a live
+    /// process that is not the enrolled one never is, and the caller still needs the retained
+    /// descriptor's own report.
+    pub(super) fn check_continuity(
         &self,
-        resource: Resource,
         facts: &dyn TargetFacts,
+        pending_exit: Option<Resource>,
     ) -> Result<(), OwnerError> {
-        let record = self.record(resource);
-        let running = facts
-            .process(record.original.pid.get())?
-            .is_some_and(|process| process.matches(&record.original));
-        let exited = record.exit.is_some();
-        if exited && running {
-            return Err(OwnerError::Refused(
-                "an original runs after its witnessed exit",
-            ));
+        if facts.boot()? != self.boot {
+            return Err(OwnerError::Refused("the target rebooted"));
         }
-        if !running && !exited {
-            return Err(OwnerError::Refused(
-                "an original vanished without a witnessed exit",
-            ));
-        }
-        let custodian = facts.process(record.custodian.pid.get())?;
-        if !custodian.is_some_and(|process| process.matches(&record.custodian)) {
-            return Err(OwnerError::Refused(
-                "custodian is not the live enrolled process",
-            ));
+        for resource in [Resource::Daemon, Resource::Authority] {
+            let record = self.record(resource);
+            let live = facts.process(record.original.pid.get())?;
+            let running = live
+                .as_ref()
+                .is_some_and(|process| process.matches(&record.original));
+            let exited = record.exit.is_some();
+            if exited && running {
+                return Err(OwnerError::Refused(
+                    "an original runs after its witnessed exit",
+                ));
+            }
+            if pending_exit == Some(resource) {
+                if live.is_some() && !running {
+                    return Err(OwnerError::Refused(
+                        "the exiting original's pid is another process",
+                    ));
+                }
+            } else if !running && !exited {
+                return Err(OwnerError::Refused(
+                    "an original vanished without a witnessed exit",
+                ));
+            }
+            let custodian = facts.process(record.custodian.pid.get())?;
+            if !custodian.is_some_and(|process| process.matches(&record.custodian)) {
+                return Err(OwnerError::Refused(
+                    "custodian is not the live enrolled process",
+                ));
+            }
         }
         Ok(())
     }
@@ -1022,7 +1052,7 @@ impl Attempt {
         if facts.boot()? != self.boot {
             return Err(OwnerError::Refused("the target rebooted"));
         }
-        self.check_processes(resource, facts)?;
+        self.check_continuity(facts, None)?;
         let exited = record.exit.is_some();
         let unit = facts.unit(resource)?;
         if facts.guard_image(resource)? != record.guard_image

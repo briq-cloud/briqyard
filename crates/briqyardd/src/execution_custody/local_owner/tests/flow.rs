@@ -625,7 +625,7 @@ fn the_exit_and_the_guard_must_be_the_enrolled_ones_and_in_order() {
             .record_exit(Resource::Daemon, &world.retained[DAEMON]),
         "does not report this exit",
     );
-    world.retained[DAEMON].exit.store(true, Ordering::SeqCst);
+    exit_original(&world, Resource::Daemon);
     refused(
         world
             .owner

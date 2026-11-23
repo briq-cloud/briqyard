@@ -200,7 +200,7 @@ impl<F: TargetFacts> LocalOwner<F> {
         resource: Resource,
         retained: &dyn RetainedProcess,
     ) -> Result<(), OwnerError> {
-        self.mutate(|attempt| Ok((attempt.record_exit(resource, retained)?, ())))
+        self.mutate(|attempt| Ok((attempt.record_exit(resource, retained, &self.facts)?, ())))
     }
 
     pub fn record_final_io(&self, resource: Resource) -> Result<(), OwnerError> {
@@ -235,7 +235,7 @@ impl<F: TargetFacts> LocalOwner<F> {
     }
 
     pub fn bind_seal_receipt(&self, receipt: &Receipt) -> Result<(), OwnerError> {
-        self.mutate(|attempt| Ok((attempt.bind_seal_receipt(receipt)?, ())))
+        self.mutate(|attempt| Ok((attempt.bind_seal_receipt(receipt, &self.facts)?, ())))
     }
 
     /// `sealed-owner-observe`: one strict request in, one canonical answer out. Read-only: the
@@ -312,19 +312,9 @@ impl<F: TargetFacts> LocalOwner<F> {
         if !allowed {
             return Err(OwnerRefusal("point is not available in this attempt state"));
         }
-        let rebooted = self
-            .facts
-            .boot()
-            .map_err(|_| OwnerRefusal("the target's boot is unreadable"))?
-            != attempt.boot;
-        if rebooted {
-            return Err(OwnerRefusal("the target rebooted"));
-        }
-        for role in [Resource::Daemon, Resource::Authority] {
-            attempt.check_processes(role, &self.facts).map_err(|_| {
-                OwnerRefusal("an original or custodian is not the enrolled process")
-            })?;
-        }
+        attempt
+            .check_continuity(&self.facts, None)
+            .map_err(|_| OwnerRefusal("the target is not the enrolled one"))?;
         let original = OriginalOwner::from_local_owner(
             scope.resource(),
             attempt.registered.clone(),

@@ -249,3 +249,12 @@ Each is now refused, with a test that fails without the fix:
   plan, predecessor context and process, old member set), as well as the stored death and custody.
 * **Unit commitments:** a handoff and a consume compare both roles' four commitments (fragment,
   argv, sandbox, fdstore) to the enrolled receipts, not only the selected role's.
+* **Continuity at every write:** one `check_continuity` runs under the lock that already holds the
+  Attempt, before any `next`, at enrollment, handoff, consume, seal, receipt binding, exit, guard
+  start, final I/O and retirement, and the capture snapshot and the collector use the same one. It
+  needs the same boot, each custodian the live exact enrolled process, and each original running
+  as enrolled or its recorded exit with nothing running as it. A target whose unit files and
+  `active.json` are unchanged but whose peer custodian is gone or replaced is refused. The one
+  exception is the original whose exit is being recorded: a reaped process has no entry, so its
+  absence is allowed, a live process with another identity is refused, and the retained
+  descriptor must still report the exit and name the enrolled process.
