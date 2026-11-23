@@ -14,6 +14,8 @@ use briqyard_api::execution::{
     private_cert::{self, Usage},
     provision,
     sealed::{
+        decode,
+        objects::Plan,
         prim::{HexDigest, KeyBytes},
         sig::{PinnedKey, Role, Signer as SigSigner},
         CodecError, Wire,
@@ -481,6 +483,10 @@ impl FrozenArtifact {
                         return Err(mismatch());
                     }
                 }
+            }
+            (Class::Plan, _) => {
+                decode::<Plan>(&super::read_exact(&self.file, self.bytes, deadline)?)
+                    .map_err(|_| refuse("invalid native plan record"))?;
             }
             (Class::ContinuationBearer, _) => drop(self.continuation_bearer(deadline)?),
             (Class::BackupS3Pair, _) => drop(self.backup_s3(deadline)?),

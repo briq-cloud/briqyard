@@ -31,6 +31,7 @@ struct Tails {
     eku_inner: &'static [u8],
     basic_outer: &'static [u8],
     basic_inner: &'static [u8],
+    empty_validity: bool,
 }
 
 struct Built {
@@ -83,13 +84,17 @@ fn build(usage: Usage, tails: Tails, with_basic: bool) -> Built {
             &der(INTEGER, &[0x01]),
             &algorithm,
             &der(SEQUENCE, &[]),
-            &der(
-                SEQUENCE,
-                &cat(&[
-                    &der(UTC_TIME, b"250101000000Z"),
-                    &der(UTC_TIME, b"350101000000Z"),
-                ]),
-            ),
+            &if tails.empty_validity {
+                der(SEQUENCE, &[])
+            } else {
+                der(
+                    SEQUENCE,
+                    &cat(&[
+                        &der(UTC_TIME, b"250101000000Z"),
+                        &der(UTC_TIME, b"350101000000Z"),
+                    ]),
+                )
+            },
             &der(SEQUENCE, &[]),
             &spki,
             &der(
@@ -235,4 +240,29 @@ fn an_ordinary_leaf_yields_its_spki_digest_only_as_one_complete_object() {
     ] {
         assert!(leaf_spki_digest(&bytes).is_err(), "{case}");
     }
+}
+
+#[test]
+fn a_validly_signed_leaf_with_an_empty_validity_is_not_a_certificate_at_all() {
+    let tails = Tails {
+        empty_validity: true,
+        ..Tails::default()
+    };
+    let built = build(Usage::Server, tails, true);
+    assert_eq!(
+        parse(&built.der, Usage::Server).map(|_| ()),
+        Err(CertError::Encoding),
+        "the profile parser refuses it"
+    );
+    assert_eq!(
+        leaf_spki_digest(&built.der),
+        Err(CertError::Encoding),
+        "so does the ordinary schema decode"
+    );
+    let control = build(Usage::Server, Tails::default(), true);
+    assert_eq!(
+        leaf_spki_digest(&control.der).unwrap(),
+        key_spki_digest(&control.pkcs8).unwrap(),
+        "the same builder without the defect is accepted and carries its key"
+    );
 }

@@ -43,7 +43,8 @@ fn prepare_is_exact_and_has_no_slot_field() {
 
 #[test]
 fn exact_snapshot_requires_size_digest_and_a_trusted_read_only_source() {
-    let bytes = b"only synthetic immutable fixture data";
+    let plan = plan_bytes();
+    let bytes = plan.as_slice();
     let (_temporary, source) = source(bytes);
     let uid = unsafe { libc::geteuid() };
     let digest = HexDigest::of(bytes);
@@ -353,7 +354,7 @@ fn delivery_refuses_truncation_queuing_wrong_count_inode_and_transfer_order() {
     ] {
         refuse(mutation, "invalid native asset packet delivery");
     }
-    refuse(|p| p.fds.swap(0, 1), "native artifact digest mismatch");
+    refuse(|p| p.fds.swap(1, 2), "native artifact digest mismatch");
     refuse(
         |p| p.fds[0] = TcpListener::bind("127.0.0.1:0").unwrap().into(),
         "unexpected sealed native artifact metadata",
@@ -368,7 +369,7 @@ fn delivery_refuses_truncation_queuing_wrong_count_inode_and_transfer_order() {
         "native artifact arrived inheritable",
     );
     let (offer, mut packet) = delivery(true);
-    packet.fds[1] = packet.fds[0].try_clone().unwrap();
+    packet.fds[2] = packet.fds[1].try_clone().unwrap();
     let result = BoundAssets::bind(
         requirements(Resource::Daemon),
         offer,

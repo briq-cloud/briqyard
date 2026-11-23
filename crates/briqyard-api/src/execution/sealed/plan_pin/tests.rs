@@ -29,7 +29,7 @@ fn plan() -> Plan {
         authority: id("auth"),
         epoch: id("ep"),
         key_id: id("k"),
-        public_key: TestSigner::rk().public_key(),
+        public_key: *key(5).as_array(),
         host_instance: id("hi"),
         generation: pos(2),
     };

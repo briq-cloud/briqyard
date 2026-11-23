@@ -74,15 +74,17 @@ imports compile. This is an API boundary, not isolation from malicious code in t
 | X.509 profile, `Name`, `Pair` | `briqyard_api::execution::private_cert` | relocated verbatim from the fleet transport, which re-exports it; its tests still run against it |
 | `key_spki_digest` | same | new: the transport's own `ring` PKCS#8 parse, then the SPKI of the derived point |
 | registry JSON, ordinary file | `briqyard_api::execution::provision::registry` | the parse inside `Config::load`, extracted unchanged and still tolerant (a missing `authority` is none; a positional row is accepted) |
-| registry JSON, sealed | `provision::sealed_registry` | a dedicated grammar: an array of one to 32 objects of exactly `kid`, `role`, `issuer`, `authority`, `public_key`; `authority` explicit (a missing field is not a null), no positional row, no unknown or duplicate field. Same `VerificationKey`; the closed profile stays in `secret.rs` |
-| DER readers | `private_cert` | every temporary or nested reader (extension list, SAN, EKU, basic constraints) now has to be exhausted at both levels; `leaf_spki_digest` reads one complete ordinary leaf |
+| registry JSON, sealed | `provision::sealed_registry` | a dedicated grammar: an array of one to 32 objects of exactly `kid`, `role`, `issuer`, `authority`, `public_key`; `authority` explicit (a missing field is not a null), `role` only the string scalar `"authority"` or `"central"` (serde's object form is refused), no positional row, no unknown or duplicate field. Same `VerificationKey`; the closed profile stays in `secret.rs` |
+| DER readers | `private_cert` | every temporary or nested reader (extension list, SAN, EKU, basic constraints) now has to be exhausted at both levels; `leaf_spki_digest` is the typed schema decode of `x509-cert` (pinned `=0.3.0`, `default-features = false`, the newest release that builds on the workspace compiler) for one complete ordinary leaf: no trailing byte, every X.509 field present (an empty validity is refused), and no trust, chain, name, usage or clock check. The profile parser stays the transition one |
 | pool key id | `briqyard_api::poolkey::id` | used as is, after the exact lowercase check |
 
 **Where pins are compared.** Bind (receipt) checks length, metadata, digest and profile, that each
 transition leaf and key form one identity, that the two are distinct, and, with admin TLS, that
 the daemon API leaf's SPKI is the actual private key's and equals neither transition SPKI.
-`SealedInput::decode` then requires `Plan.ordinary_key == Plan.pre_record.public_key` for both
-resources before any other artifact is read, adds the Plan pins and the Hk/Ak derivation, and
+`Plan::validate` requires `Plan.ordinary_key == Plan.pre_record.public_key` (v3.2 §17), so every
+canonical decode of a Plan, including the profile check of the Plan descriptor at slot zero of
+the receipt, refuses a violation before any private payload is read. `SealedInput::decode` then
+adds the Plan pins and the Hk/Ak derivation, and
 requires that the registry's one authority entry is the registered predecessor and that no
 central key equals the Plan's Hk, Ak, Bk or Rk. `check_suffix_pins` compares the closure's
 digests, pairs, server name and optional rights.

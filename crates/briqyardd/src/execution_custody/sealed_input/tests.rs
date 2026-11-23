@@ -457,7 +457,10 @@ impl Fixture {
         let descriptors = assets
             .into_iter()
             .map(|(descriptor, bytes)| {
-                if descriptor.class() == Class::OrdinaryAuthorityKey {
+                if matches!(
+                    descriptor.class(),
+                    Class::OrdinaryAuthorityKey | Class::Plan
+                ) {
                     fds.push(sealed_key_fd(&bytes));
                     return descriptor;
                 }
@@ -627,10 +630,15 @@ fn the_actual_key_must_derive_the_advertised_and_independently_pinned_public_key
         "startup asset plan pins",
     );
     let predecessor = Fixture::with_predecessor_key(Resource::Authority, 4);
-    rejected(
-        decode_with_key(&predecessor, |_| {}),
-        "startup ordinary key public binding",
-    );
+    assert!(matches!(
+        predecessor.try_bind(
+            &predecessor.grant(),
+            &predecessor.capture_load(),
+            |_| {},
+            StageDeadline::frame("synthetic startup fixtures"),
+        ),
+        Err(CustodyError::Protocol("invalid native plan record"))
+    ));
 }
 
 #[test]

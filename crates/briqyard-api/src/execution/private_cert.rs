@@ -177,28 +177,20 @@ pub fn key_spki_digest(pkcs8: &[u8]) -> Result<HexDigest, CertError> {
     Ok(HexDigest::of(&spki))
 }
 
-/// The SPKI digest of one complete DER certificate of any profile: exactly one object, every
-/// element well formed, no trailing byte. Neither names, usages nor the signature are
-/// interpreted; the caller compares this digest with the key it expects and pins the bytes.
+/// The SPKI digest of one complete DER X.509 certificate of any profile, from the typed
+/// schema decode of `x509-cert`: exactly one object, every field of its structure present and
+/// well formed (a validity has both times, for one), no trailing byte. Neither names, usages,
+/// validity, trust nor the signature are interpreted; the caller compares this digest with the
+/// key it expects and pins the bytes. The profile parser below stays the transition one.
 pub fn leaf_spki_digest(der: &[u8]) -> Result<HexDigest, CertError> {
-    let mut cert = sequence(der)?;
-    let mut tbs = sequence(cert.take_raw(SEQUENCE)?)?;
-    cert.take(SEQUENCE)?;
-    cert.take(BIT_STRING)?;
-    cert.end()?;
-    if tbs.peek() == Some(VERSION) {
-        tbs.take(VERSION)?;
-    }
-    tbs.take(INTEGER)?;
-    tbs.take(SEQUENCE)?;
-    tbs.take(SEQUENCE)?;
-    tbs.take(SEQUENCE)?;
-    tbs.take(SEQUENCE)?;
-    let spki = tbs.take_raw(SEQUENCE)?;
-    while !tbs.0.is_empty() {
-        tbs.take_any()?;
-    }
-    Ok(HexDigest::of(spki))
+    use x509_cert::der::{Decode, Encode};
+    let cert = x509_cert::Certificate::from_der(der).map_err(|_| CertError::Encoding)?;
+    let spki = cert
+        .tbs_certificate()
+        .subject_public_key_info()
+        .to_der()
+        .map_err(|_| CertError::Encoding)?;
+    Ok(HexDigest::of(&spki))
 }
 
 pub fn parse(der: &[u8], usage: Usage) -> Result<Leaf, CertError> {

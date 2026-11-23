@@ -165,11 +165,34 @@ pub fn registry(bytes: &[u8]) -> Result<Vec<VerificationKey>, &'static str> {
 #[serde(deny_unknown_fields)]
 struct SealedKey {
     kid: String,
+    #[serde(deserialize_with = "role_literal")]
     role: KeyRole,
     issuer: String,
     #[serde(deserialize_with = "super::sealed::prim::nullable")]
     authority: Option<String>,
     public_key: [u8; 32],
+}
+
+/// Only the string scalar `"authority"` or `"central"`: serde's enum form would also take
+/// `{"authority":null}` and normalize it.
+fn role_literal<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<KeyRole, D::Error> {
+    struct Literal;
+    impl serde::de::Visitor<'_> for Literal {
+        type Value = KeyRole;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("the string \"authority\" or \"central\"")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<KeyRole, E> {
+            match text {
+                "authority" => Ok(KeyRole::Authority),
+                "central" => Ok(KeyRole::Central),
+                _ => Err(E::invalid_value(serde::de::Unexpected::Str(text), &self)),
+            }
+        }
+    }
+    deserializer.deserialize_str(Literal)
 }
 
 struct SealedRow(SealedKey);
@@ -306,12 +329,21 @@ mod tests {
         let missing = CENTRAL.replace(r#","authority":null"#, "");
         let positional = r#"["c","central","i",null,[32,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1]]"#;
         let duplicate = CENTRAL.replace(r#""kid":"c""#, r#""kid":"c","kid":"d""#);
+        let object_central = CENTRAL.replace(r#""role":"central""#, r#""role":{"central":null}"#);
+        let object_authority = KEY.replace(r#""role":"authority""#, r#""role":{"authority":null}"#);
+        assert_ne!(object_central, CENTRAL);
+        assert_ne!(object_authority, KEY);
+        assert!(
+            registry(format!("[{object_central},{KEY}]").as_bytes()).is_ok(),
+            "the ordinary grammar keeps accepting serde's object form"
+        );
         let unknown = CENTRAL.replace(r#""kid":"c""#, r#""kid":"c","extra":1"#);
         let missing_field = CENTRAL.replace(r#""kid":"c","#, "");
         for (case, row) in [
             ("missing authority", missing.as_str()),
             ("positional row", positional),
             ("duplicate field", duplicate.as_str()),
+            ("central role as an object", object_central.as_str()),
             ("unknown field", unknown.as_str()),
             ("missing kid", missing_field.as_str()),
             ("a bare string", "\"c\""),
@@ -319,6 +351,9 @@ mod tests {
             let json = format!("[{row},{KEY}]");
             assert!(sealed_registry(json.as_bytes()).is_err(), "{case}");
         }
+        let object_authority_registry = format!("[{CENTRAL},{object_authority}]");
+        assert!(sealed_registry(object_authority_registry.as_bytes()).is_err());
+        assert!(registry(object_authority_registry.as_bytes()).is_ok());
         assert!(sealed_registry(b"[]").is_err());
         assert!(sealed_registry(CENTRAL.as_bytes()).is_err(), "not an array");
         let many = format!("[{}]", vec![KEY; 33].join(","));

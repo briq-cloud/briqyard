@@ -285,18 +285,57 @@ fn a_central_key_may_not_be_any_key_the_plan_already_names() {
     }
 }
 
+fn wrong_signer(assets: &mut [(Descriptor, Vec<u8>)]) {
+    for (descriptor, _) in assets.iter_mut() {
+        if let Descriptor::Signer { public, .. } = descriptor {
+            *public = fixtures::public_of(&[0x66; 32]);
+        }
+    }
+}
+
+fn bound(
+    fixture: &Fixture,
+    tweak: fn(&mut [(Descriptor, Vec<u8>)]),
+) -> Result<BoundAssets, CustodyError> {
+    fixture.try_bind(
+        &fixture.grant(),
+        &fixture.capture_load(),
+        |assets| tweak(assets),
+        deadline(),
+    )
+}
+
 #[test]
-fn the_ordinary_key_is_the_registered_predecessor_for_both_resources_before_any_other_read() {
+fn the_plan_relation_is_refused_at_the_first_receipt_read_before_any_private_payload() {
+    const PLAN: &str = "invalid native plan record";
     for resource in [Resource::Daemon, Resource::Authority] {
         let mut fixture = Fixture::new(resource);
-        fixture.verify().expect("positive control");
+        assert!(bound(&fixture, |_| {}).is_ok(), "positive control");
+        assert!(
+            matches!(
+                bound(&fixture, wrong_signer),
+                Err(CustodyError::Protocol(
+                    "native artifact differs from its advertised descriptor"
+                ))
+            ),
+            "a wrong private payload alone is refused only by its own profile"
+        );
         fixture.plan.pre_record.public_key = *fixtures::public_of(&[0x77; 32]).as_array();
         fixture.plan.pre = fixture.plan.pre_record.ctx(&fixture.plan.x.host);
-        rejected(fixture.verify(), "startup ordinary key public binding");
+        assert!(
+            matches!(
+                bound(&fixture, wrong_signer),
+                Err(CustodyError::Protocol(PLAN))
+            ),
+            "{resource:?}: the plan relation comes before the later wrong signer"
+        );
     }
     let mut fixture = Fixture::new(Resource::Daemon);
     fixture.plan.ordinary_key = fixtures::public_of(&[0x78; 32]);
-    rejected(fixture.verify(), "startup ordinary key public binding");
+    assert!(matches!(
+        bound(&fixture, wrong_signer),
+        Err(CustodyError::Protocol(PLAN))
+    ));
 }
 
 #[test]

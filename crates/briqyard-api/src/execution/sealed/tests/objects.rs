@@ -13,7 +13,7 @@ fn reg() -> Reg {
         authority: id("auth"),
         epoch: id("ep"),
         key_id: id("k"),
-        public_key: TestSigner::rk().public_key(),
+        public_key: *key(5).as_array(),
         host_instance: id("hi"),
         generation: pos(2),
     }
@@ -73,6 +73,20 @@ fn bind() -> Bind {
         record: reg,
         set: members(Some(dg('e'))).set().unwrap(),
     }
+}
+
+#[test]
+fn the_ordinary_key_is_the_registered_predecessors_public_key() {
+    let good = plan();
+    assert_eq!(good.ordinary_key.as_array(), &good.pre_record.public_key);
+    decode::<Plan>(&encode(&good).unwrap()).expect("positive control");
+    let mut other = plan();
+    other.ordinary_key = key(9);
+    assert!(decode::<Plan>(&encode(&other).unwrap()).is_err());
+    let mut other = plan();
+    other.pre_record.public_key = *key(9).as_array();
+    other.pre = other.pre_record.ctx(&id("host.test"));
+    assert!(decode::<Plan>(&encode(&other).unwrap()).is_err());
 }
 
 #[test]

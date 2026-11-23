@@ -122,7 +122,7 @@ fn plan_with(x: X, registered: &str, rk: KeyBytes, bk: KeyBytes, inputs: u8) -> 
         authority: id("auth"),
         epoch: id("ep"),
         key_id: id("k"),
-        public_key: [7; 32],
+        public_key: [5; 32],
         host_instance: id("hi"),
         generation: PosInt::new(2).unwrap(),
     };

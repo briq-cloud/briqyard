@@ -188,12 +188,16 @@ pub struct Plan {
 }
 
 impl Wire for Plan {
-    /// The derived context must be the registration's own, the five signing keys must be
+    /// The derived context must be the registration's own, the ordinary key must be the
+    /// registered predecessor's public key (v3.2 §17), the five signing keys must be
     /// pairwise distinct (no key shared across roles or with the ordinary signing key), and
     /// every non-null member digest must be unique across all roles and both generations.
     fn validate(&self) -> Result<(), CodecError> {
         if self.pre != self.pre_record.ctx(&self.x.host) {
             return Err(CodecError::Value("plan context"));
+        }
+        if self.ordinary_key.as_array() != &self.pre_record.public_key {
+            return Err(CodecError::Value("plan ordinary key"));
         }
         let keys = [&self.hk, &self.ak, &self.bk, &self.rk, &self.ordinary_key];
         for (i, a) in keys.iter().enumerate() {

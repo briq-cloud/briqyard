@@ -523,6 +523,14 @@ fn the_registry_grammar_is_five_named_fields_with_authority_explicit() {
         registry_with(|e| e[0]["public_key"] = e[2]["public_key"].clone());
     for (name, bytes) in [
         ("authority missing, not null", missing_authority),
+        (
+            "central role as an object",
+            registry_with(|e| e[0]["role"] = serde_json::json!({"central": null})),
+        ),
+        (
+            "authority role as an object",
+            registry_with(|e| e[2]["role"] = serde_json::json!({"authority": null})),
+        ),
         ("positional row", positional),
         ("duplicate kid", duplicate_field),
         ("duplicate authority", duplicate_authority),

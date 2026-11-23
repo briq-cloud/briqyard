@@ -123,11 +123,6 @@ impl SealedInput {
         if plan_hash != *expected_plan_hash {
             return Err(CustodyError::Protocol("startup plan commitment"));
         }
-        if plan.ordinary_key.as_array() != &plan.pre_record.public_key {
-            return Err(CustodyError::Protocol(
-                "startup ordinary key public binding",
-            ));
-        }
         if directory.op != plan.x.op || directory.serial != plan.x.serial {
             return Err(CustodyError::Protocol("startup operation directory scope"));
         }

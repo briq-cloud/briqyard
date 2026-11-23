@@ -187,11 +187,75 @@ pub(crate) fn key_public(seed: u8) -> KeyBytes {
 }
 
 /// The valid payload of a class; generic prefix classes are distinct synthetic text by index.
+/// A canonical Plan that passes its own validation: distinct keys, distinct members, and the
+/// ordinary key equal to the registered predecessor's. Nothing here authorizes anything.
+pub(crate) fn plan_bytes() -> Vec<u8> {
+    use briqyard_api::execution::sealed::{
+        encode,
+        objects::{Members, Plan, Proc, Reg, X},
+        prim::{BootId, Build, Env, HexDigest, Ident, KeyBytes, PosInt},
+    };
+    let id = |text| Ident::new(text).unwrap();
+    let proc = |pid| Proc {
+        boot: BootId::new("00000000-0000-4000-8000-000000000004").unwrap(),
+        pid: PosInt::new(pid).unwrap(),
+        start: PosInt::new(912).unwrap(),
+        exe: HexDigest::from_raw([0x33; 32]),
+        build: Build::new("fence-3").unwrap(),
+    };
+    let members = |base: u8| Members {
+        hi: HexDigest::from_raw([base; 32]),
+        he: HexDigest::from_raw([base + 1; 32]),
+        ni: HexDigest::from_raw([base + 2; 32]),
+        ng: HexDigest::from_raw([base + 3; 32]),
+        tr: Some(HexDigest::from_raw([base + 4; 32])),
+    };
+    let x = X {
+        aud: Env::Staging,
+        host: id("host.test"),
+        op: HexDigest::from_raw([0; 32]),
+        serial: PosInt::new(1).unwrap(),
+    };
+    let key = |byte: u8| KeyBytes::from_array([byte; 32]);
+    let pre_record = Reg {
+        authority: id("auth"),
+        epoch: id("ep"),
+        key_id: id("k"),
+        public_key: [5; 32],
+        host_instance: id("hi"),
+        generation: PosInt::new(2).unwrap(),
+    };
+    encode(&Plan {
+        pre: pre_record.ctx(&x.host),
+        x,
+        registered: id("hi"),
+        pre_record,
+        pre_intent: id("original.intent"),
+        pre_d: proc(12),
+        pre_a: proc(13),
+        next_d: HexDigest::from_raw([0x61; 32]),
+        next_a: HexDigest::from_raw([0x62; 32]),
+        dbuild: Build::new("next-daemon").unwrap(),
+        abuild: Build::new("next-authority").unwrap(),
+        old: members(80),
+        new: members(0),
+        hk: key(1),
+        ak: key(2),
+        bk: key(3),
+        rk: key(4),
+        ordinary_key: key(5),
+        exception: HexDigest::from_raw([0x63; 32]),
+        inputs: HexDigest::from_raw([0x64; 32]),
+    })
+    .unwrap()
+}
+
 pub(crate) fn payload(class: Class, index: usize) -> Vec<u8> {
     let identities = identities();
     match class {
         Class::OrdinaryAuthorityKey => key_profile(KEY_SEED),
         Class::Signer(role) => evidence_seed(role).to_vec(),
+        Class::Plan => plan_bytes(),
         Class::VerificationRegistry => default_registry(),
         Class::TransitionServerCert => identities.server.cert.clone(),
         Class::TransitionServerKey => identities.server.key.clone(),
