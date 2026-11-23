@@ -106,7 +106,12 @@ fn fill_near_capacity(path: &std::path::Path, permit: &Permit) {
         admissions.insert(padded.admission.clone(), item);
     }
     let mut epochs = Vec::new();
-    let mut free = MAX_BYTES - 64 - used - r#""other-authority":[]"#.len() + 1;
+    assert!(!next["retired"]
+        .as_object()
+        .unwrap()
+        .contains_key("other-authority"));
+    next["retired"]["other-authority"] = serde_json::Value::Array(Vec::new());
+    let mut free = MAX_BYTES - 64 - serde_json::to_vec(&next).unwrap().len() + 1;
     while free > 131 {
         let width = (free - 10).min(128);
         epochs.push(format!("{:04}{}", epochs.len(), "x".repeat(width - 4)));
