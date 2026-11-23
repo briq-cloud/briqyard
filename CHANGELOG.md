@@ -2,6 +2,13 @@
 
 ## 0.2.16 — 2026-11-23
 
+### Upgrade notes
+
+- The authority now compacts fully acknowledged, expired raw credentials on qualified writes, which keeps journal headroom (#274). The on-disk journal stays format v1, and its read-only projection is `authority journal-project`. 0.2.14 and 0.2.15 binaries still read a compacted journal, but they don't maintain headroom.
+- Cold-born loaded-policy admission for hostname allowlists (#272) is available only where the deployment opts into gateway policy; otherwise behavior is unchanged.
+- Guest-init source, dependencies and toolchain are unchanged. Confirm the candidate init checksum against 0.2.15 before reusing existing seeds.
+- No wire format change. Roll the fleet and every host in the usual order.
+
 ### Features
 
 - cold-born loaded-policy admission for hostname allowlists (#272) ([caec5d3e](https://github.com/briq-cloud/briqyard/commit/caec5d3e852a8b163c173b827b88091ffcec76e8))
