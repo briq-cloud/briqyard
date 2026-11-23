@@ -24,8 +24,8 @@ mod wire;
 mod tests;
 
 pub use owner::{
-    OwnerRefusal, OwnerSnapshot, PlanReadOwner, PlanReader, ReadScope, RejoinedObservation,
-    VerifiedPlanObservation,
+    OriginalOwner, OwnerRefusal, OwnerSnapshot, PlanReadOwner, PlanReader, ReadScope,
+    RejoinedObservation, VerifiedPlanObservation,
 };
 pub use trust::{EnrolledTrust, TrustLoader};
 pub use wire::{EnrolledHelper, ReaderEndpoint, SOCKET_PATH};

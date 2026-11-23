@@ -154,7 +154,8 @@ fn the_read_runs_outside_the_owners_lock() {
 #[test]
 fn an_owner_that_changed_during_the_read_is_refused() {
     type Change = fn(&mut State);
-    let cases: [(&str, Change); 7] = [
+    let cases: [(&str, Change); 8] = [
+        ("custodian restarted", |s| s.custodian = proc(78)),
         ("owner", |s| s.facts.owner += 1),
         ("boot", |s| s.facts.boot += 1),
         ("serial", |s| s.facts.serial += 1),
@@ -269,4 +270,91 @@ fn a_missing_trust_record_fails_the_read_without_touching_the_peer() {
 #[test]
 fn the_production_five_second_bound_is_the_default() {
     assert_eq!(READ_BOUND, Duration::from_secs(5));
+}
+
+#[test]
+fn an_owner_snapshot_for_another_resource_is_refused_before_any_exchange() {
+    let (world, owner, reader) = rig("enrolled");
+    let helper = serve(&world.sock_dir(), honest(&world));
+    owner.mutate(|s| s.snapshot_resource = Some(Resource::Authority));
+    says(
+        &refused(observe(
+            &world,
+            &reader,
+            &owner,
+            Resource::Daemon,
+            ReadPoint::Launch,
+        )),
+        "another resource",
+    );
+    assert_eq!(helper.accepted(), 0);
+}
+
+#[test]
+fn the_original_owner_must_be_the_plans_registered_mapping_and_predecessor() {
+    let world = World::new();
+    let plan = &world.plan;
+    let original = |resource, registered: &str, intrinsic: &str, pre: Proc| {
+        OriginalOwner::new(resource, id(registered), id(intrinsic), pre, proc(77))
+    };
+    let snapshot = |original| OwnerSnapshot::new(&world.plan_bytes, original, ());
+    let daemon = original(
+        Resource::Daemon,
+        "registered.test",
+        "host.test",
+        plan.pre_d.clone(),
+    );
+    assert!(snapshot(daemon).is_ok());
+    let authority = original(
+        Resource::Authority,
+        "registered.test",
+        "host.test",
+        plan.pre_a.clone(),
+    );
+    assert!(snapshot(authority).is_ok());
+    for (name, bad) in [
+        (
+            "alias",
+            original(
+                Resource::Daemon,
+                "alias.test",
+                "host.test",
+                plan.pre_d.clone(),
+            ),
+        ),
+        (
+            "intrinsic",
+            original(
+                Resource::Daemon,
+                "registered.test",
+                "other.test",
+                plan.pre_d.clone(),
+            ),
+        ),
+        (
+            "authority pre for the daemon",
+            original(
+                Resource::Daemon,
+                "registered.test",
+                "host.test",
+                plan.pre_a.clone(),
+            ),
+        ),
+        (
+            "daemon pre for the authority",
+            original(
+                Resource::Authority,
+                "registered.test",
+                "host.test",
+                plan.pre_d.clone(),
+            ),
+        ),
+        (
+            "another pre",
+            original(Resource::Daemon, "registered.test", "host.test", proc(99)),
+        ),
+    ] {
+        let error = refused(snapshot(bad));
+        assert!(matches!(error, PlanReadError::Owner(_)), "{name}: {error}");
+    }
 }

@@ -17,7 +17,7 @@ use super::{Deadline, PlanReadError};
 use briqyard_api::execution::sealed::{
     canonical::encode,
     custody::Resource,
-    objects::X,
+    objects::{Proc, X},
     plan_pin::{LocalPlan, Pin, Read, ReadFormat, ReadPoint},
     prim::{Ident, Nonce},
 };
@@ -90,20 +90,76 @@ impl From<OwnerRefusal> for PlanReadError {
     }
 }
 
+/// The original owner of one resource as the v3.6 base manifest names it: the single Host
+/// row's registered and intrinsic IDs, and the resource's pre (predecessor) and custodian
+/// (already started, inactive) processes. It is the lock/CAS identity of the owner across the
+/// read: any change in it, including a restarted custodian, refuses the observation. The
+/// manifest is a public assembly, never trust; it enrolls no key and approves nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OriginalOwner {
+    resource: Resource,
+    registered: Ident,
+    intrinsic: Ident,
+    pre: Proc,
+    custodian: Proc,
+}
+
+impl OriginalOwner {
+    pub fn new(
+        resource: Resource,
+        registered: Ident,
+        intrinsic: Ident,
+        pre: Proc,
+        custodian: Proc,
+    ) -> Self {
+        Self {
+            resource,
+            registered,
+            intrinsic,
+            pre,
+            custodian,
+        }
+    }
+}
+
 /// The owner's immutable facts at one instant: the exact canonical Plan bytes from its own
-/// durable record (never an offer's) and whatever else must not change across the read
-/// (owner, boot, phase, serial, holds, floors, freshness).
+/// durable record (never an offer's), the original owner's identity and whatever else must
+/// not change across the read (owner, boot, phase, serial, holds, floors, freshness).
 #[derive(Debug, PartialEq, Eq)]
 pub struct OwnerSnapshot<F> {
     plan: LocalPlan,
+    original: OriginalOwner,
     facts: F,
 }
 
 impl<F> OwnerSnapshot<F> {
-    pub fn new(plan_bytes: &[u8], facts: F) -> Result<Self, PlanReadError> {
+    /// The original owner must be this Plan's: its registered and intrinsic IDs, and its pre
+    /// process equal to the Plan's pre_d (daemon) or pre_a (authority).
+    pub fn new(
+        plan_bytes: &[u8],
+        original: OriginalOwner,
+        facts: F,
+    ) -> Result<Self, PlanReadError> {
         let plan = LocalPlan::decode(plan_bytes)
             .map_err(|_| PlanReadError::Owner("owner Plan is not canonical"))?;
-        Ok(Self { plan, facts })
+        let local = plan.plan();
+        let pre = match original.resource {
+            Resource::Daemon => &local.pre_d,
+            Resource::Authority => &local.pre_a,
+        };
+        if original.registered != local.registered || original.intrinsic != local.x.host {
+            return Err(PlanReadError::Owner(
+                "owner host is not the Plan's registered mapping",
+            ));
+        }
+        if original.pre != *pre {
+            return Err(PlanReadError::Owner("owner predecessor is not the Plan's"));
+        }
+        Ok(Self {
+            plan,
+            original,
+            facts,
+        })
     }
 }
 
@@ -277,6 +333,11 @@ impl PlanReader {
         deadline: Deadline,
     ) -> Result<RejoinedObservation<O::Held<'o>>, PlanReadError> {
         let before = owner.capture(scope)?;
+        if before.original.resource != scope.resource {
+            return Err(PlanReadError::Scope(
+                "owner snapshot is for another resource",
+            ));
+        }
         let plan = before.plan.plan();
         if plan.x != scope.x || plan.registered != scope.registered {
             return Err(PlanReadError::Scope(

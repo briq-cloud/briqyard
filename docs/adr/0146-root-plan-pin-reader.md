@@ -35,7 +35,10 @@ big-endian length, 1..65536, no descriptors; the peer must close after its one f
 **The reader compares, the owner supplies state.** `PlanReadOwner` has `capture` (locks released on
 return) and `lock_and_capture` (locks kept). The read happens between them, outside every
 lock, and the reader compares all facts and the exact Plan bytes. An owner reporting "unchanged"
-for itself would be an `is_owned` flag.
+for itself would be an `is_owned` flag. The snapshot carries the v3.6 original-owner identity
+(registered and intrinsic IDs from the one Host row, and the resource's `pre` and `custodian`
+processes); `pre` must equal the Plan's `pre_d` or `pre_a`, and a changed or restarted
+custodian refuses. The manifest is public assembly, never trust.
 
 **Nonce lineage lasts through local use.** Each exchange draws 32 bytes from the OS source;
 one read per resource is outstanding (at most two), held until the observation is dropped. The

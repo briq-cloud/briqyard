@@ -19,7 +19,7 @@ use crate::execution_custody::PeerIdentity;
 use briqyard_api::execution::sealed::{
     canonical::{decode, encode},
     custody::Resource,
-    objects::{Members, Plan, Reg, X},
+    objects::{Members, Plan, Proc, Reg, X},
     plan_pin::{
         reg_hash, LocalPlan, Read, ReadBody, ReadFormat, ReadPair, ReadPoint, TrustFormat,
         TrustRecord,
@@ -95,8 +95,8 @@ fn x(serial: u64) -> X {
     }
 }
 
-fn proc(pid: u64) -> briqyard_api::execution::sealed::objects::Proc {
-    briqyard_api::execution::sealed::objects::Proc {
+fn proc(pid: u64) -> Proc {
+    Proc {
         boot: BootId::new("00000000-0000-4000-8000-000000000004").unwrap(),
         pid: PosInt::new(pid).unwrap(),
         start: PosInt::new(912).unwrap(),
@@ -487,6 +487,8 @@ struct Facts {
 struct State {
     plan: Vec<u8>,
     facts: Facts,
+    custodian: Proc,
+    snapshot_resource: Option<Resource>,
     terminal: bool,
     missing: bool,
 }
@@ -513,6 +515,8 @@ impl SyntheticOwner {
                     hold: true,
                     phase,
                 },
+                custodian: proc(77),
+                snapshot_resource: None,
                 terminal: false,
                 missing: false,
             }),
@@ -542,8 +546,22 @@ impl SyntheticOwner {
         if state.facts.phase != wanted {
             return Err(OwnerRefusal("phase does not allow this point"));
         }
-        OwnerSnapshot::new(&state.plan, state.facts.clone())
-            .map_err(|_| OwnerRefusal("owner Plan is not canonical"))
+        let plan: Plan =
+            decode(&state.plan).map_err(|_| OwnerRefusal("owner Plan is not canonical"))?;
+        let resource = state.snapshot_resource.unwrap_or(scope.resource());
+        let pre = match resource {
+            Resource::Daemon => plan.pre_d,
+            Resource::Authority => plan.pre_a,
+        };
+        let original = OriginalOwner::new(
+            resource,
+            plan.registered,
+            plan.x.host,
+            pre,
+            state.custodian.clone(),
+        );
+        OwnerSnapshot::new(&state.plan, original, state.facts.clone())
+            .map_err(|_| OwnerRefusal("owner snapshot is inconsistent"))
     }
 }
 
