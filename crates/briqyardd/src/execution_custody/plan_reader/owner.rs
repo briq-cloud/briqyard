@@ -6,9 +6,9 @@
 //! again before the observation may be used. The owner supplies the state; this module owns
 //! the comparison, so an owner cannot answer "unchanged" for itself.
 //!
-//! No concrete root operation owner exists at this boundary yet. [`PlanReadOwner`] is
-//! the exact interface the next package implements; nothing here substitutes an
-//! `is_owned` flag, a trusted callback, a hash argument or a synthetic owner state.
+//! [`PlanReadOwner`] is the exact interface an operation owner implements; the target's
+//! `local_owner` is the concrete one. Nothing here substitutes an `is_owned` flag, a trusted
+//! callback, a hash argument or a synthetic owner state.
 
 use super::trust::TrustLoader;
 use super::verify::verify_pair;
@@ -110,6 +110,27 @@ pub struct OriginalOwner {
 }
 
 impl OriginalOwner {
+    /// The projection of the target's local owner (`local_owner`): its enrolled attempt's
+    /// registered and intrinsic IDs, the resource's Plan predecessor and its retained
+    /// custodian. Callable only inside `execution_custody`, after the owner has compared
+    /// these processes with the live kernel under its own lock; there is no public scalar
+    /// constructor, and equality of two assertions is never approval.
+    pub(in crate::execution_custody) fn from_local_owner(
+        resource: Resource,
+        registered: Ident,
+        intrinsic: Ident,
+        pre: Proc,
+        custodian: Proc,
+    ) -> Self {
+        Self {
+            resource,
+            registered,
+            intrinsic,
+            pre,
+            custodian,
+        }
+    }
+
     /// An owner-supplied assertion with nothing behind it, for tests only. A production
     /// constructor must project this from the separately validated native.inputs target Host
     /// row and the selected Resource row (the manifest package owns that projection), and the
@@ -245,7 +266,7 @@ impl Drop for NonceSlot {
     }
 }
 
-fn fresh_nonce() -> Result<Nonce, PlanReadError> {
+pub(in crate::execution_custody) fn fresh_nonce() -> Result<Nonce, PlanReadError> {
     let mut raw = [0u8; 32];
     let mut filled = 0;
     while filled < raw.len() {
