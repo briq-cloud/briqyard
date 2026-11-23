@@ -2,7 +2,7 @@ use super::pki::*;
 use crate::execution_service::protected::{
     transport::{
         routes::{Caller, HostService, Mount, PrivateServer, Scope},
-        tls::client_config,
+        tls::{client_config, server_config},
         Actor,
     },
     Error,
@@ -28,9 +28,10 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
+    task::JoinHandle,
 };
-use tokio_rustls::TlsConnector;
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 pub(crate) struct TestKey(Ed25519KeyPair);
 
@@ -190,6 +191,7 @@ pub(crate) fn host_server(net: &Net, keys: &Keys, service: Arc<FakeHost>) -> Pri
         keys.scope(),
         Mount::Host(service),
         net.listener(Actor::H),
+        None,
         net.clock.clone(),
     )
     .unwrap()
@@ -244,4 +246,88 @@ pub(crate) fn parse(reply: &[u8]) -> (u16, Vec<u8>) {
         .position(|w| w == b"\r\n\r\n")
         .map_or_else(Vec::new, |at| reply[at + 4..].to_vec());
     (code, body)
+}
+
+/// An H-side server that reads one request and writes `response` verbatim.
+pub(crate) struct Canned {
+    pub(crate) count: Arc<AtomicUsize>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for Canned {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+pub(crate) async fn canned(net: &Net, response: Vec<u8>, alpn: bool) -> Canned {
+    let local = net.local(Actor::H);
+    let mut config =
+        (*server_config(&local, &net.inventory, &[Actor::A], net.clock.clone()).unwrap()).clone();
+    if !alpn {
+        config.alpn_protocols.clear();
+    }
+    let listener = net.listener(Actor::H);
+    listener.set_nonblocking(true).unwrap();
+    let listener = TcpListener::from_std(listener).unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let (tcp, _) = listener.accept().await.unwrap();
+            seen.fetch_add(1, Ordering::SeqCst);
+            let Ok(mut tls) = acceptor.accept(tcp).await else {
+                continue;
+            };
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while let Ok(read) = tls.read(&mut chunk).await {
+                buffer.extend_from_slice(&chunk[..read]);
+                let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    if read == 0 {
+                        break;
+                    }
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&buffer[..end]).to_lowercase();
+                let length: usize = head
+                    .split("content-length: ")
+                    .nth(1)
+                    .and_then(|rest| rest.split("\r\n").next())
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
+                if buffer.len() >= end + 4 + length || read == 0 {
+                    break;
+                }
+            }
+            let _ = tls.write_all(&response).await;
+            let _ = tls.shutdown().await;
+        }
+    });
+    Canned { count, task }
+}
+
+pub(crate) fn response(status: &str, headers: &[&str], body: &[u8]) -> Vec<u8> {
+    let mut text = format!("HTTP/1.1 {status}\r\n");
+    for header in headers {
+        text.push_str(header);
+        text.push_str("\r\n");
+    }
+    text.push_str("\r\n");
+    let mut bytes = text.into_bytes();
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+pub(crate) fn ok(body: &[u8]) -> Vec<u8> {
+    response(
+        "200 OK",
+        &[
+            "Content-Type: application/json",
+            &format!("Content-Length: {}", body.len()),
+            "Connection: close",
+        ],
+        body,
+    )
 }

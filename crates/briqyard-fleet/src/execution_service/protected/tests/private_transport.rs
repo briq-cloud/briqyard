@@ -36,6 +36,7 @@ impl AuthorityService for Auth {
 struct PeerHost {
     peer: Arc<Peer>,
     lose_reply: AtomicBool,
+    captured: Mutex<Option<RegisterRequest>>,
 }
 
 impl HostService for PeerHost {
@@ -62,6 +63,7 @@ impl HostService for PeerHost {
         _: Instant,
     ) -> BoxFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            *self.captured.lock().unwrap() = Some(request.clone());
             let cohort = AdoptedCohort {
                 bind: request.packet.p.body.bind.clone(),
                 members: members("new"),
@@ -108,6 +110,7 @@ impl Deployment {
         let host = Arc::new(PeerHost {
             peer: f.peer.clone(),
             lose_reply: AtomicBool::new(lose_reply),
+            captured: Mutex::new(None),
         });
         let start = |actor, mount| {
             PrivateServer::start(
@@ -116,6 +119,7 @@ impl Deployment {
                 scope.clone(),
                 mount,
                 net.listener(actor),
+                None,
                 net.clock.clone(),
             )
             .unwrap()
@@ -399,4 +403,113 @@ fn a_plan_of_another_operation_cannot_scope_the_inventory() {
     assert!(Scope::new(&f.service.plan, f.service.plan_hash.clone(), &net.inventory).is_err());
     let own = Net::for_x(f.service.plan.x.clone(), |_, _| ());
     assert!(Scope::new(&f.service.plan, f.service.plan_hash.clone(), &own.inventory).is_ok());
+}
+
+#[tokio::test]
+async fn only_a_bare_204_is_a_registration_success_and_nothing_makes_a_second_send() {
+    use crate::execution_service::protected::transport::tests::harness::{canned, response};
+    let d = Deployment::new(false);
+    assert_eq!(
+        d.crossing(Actor::B, Route::AuthorityAdopt, ClaimKind::Adopt)
+            .await,
+        204
+    );
+    let register = d.f.packet(ClaimKind::Register).await.encode().unwrap();
+    assert_eq!(
+        d.send(Actor::Installer, Route::AuthorityRegister, &register)
+            .await
+            .0,
+        204
+    );
+    let request = d.host.captured.lock().unwrap().clone().unwrap();
+    let cohort = || AdoptedCohort {
+        bind: request.packet.p.body.bind.clone(),
+        members: members("new"),
+        guard: request.witness.body.guard.clone(),
+    };
+
+    let replies = [
+        (
+            "encoded",
+            response(
+                "204 No Content",
+                &["Content-Encoding: gzip", "Connection: close"],
+                b"",
+            ),
+            false,
+        ),
+        (
+            "typed",
+            response(
+                "204 No Content",
+                &["Content-Type: application/json", "Connection: close"],
+                b"",
+            ),
+            false,
+        ),
+        (
+            "length",
+            response(
+                "204 No Content",
+                &["Content-Length: 5", "Connection: close"],
+                b"",
+            ),
+            false,
+        ),
+        (
+            "zero length",
+            response(
+                "204 No Content",
+                &["Content-Length: 0", "Connection: close"],
+                b"",
+            ),
+            false,
+        ),
+        (
+            "200 with a body",
+            response(
+                "200 OK",
+                &[
+                    "Content-Type: application/json",
+                    "Content-Length: 2",
+                    "Connection: close",
+                ],
+                b"{}",
+            ),
+            false,
+        ),
+        (
+            "server error",
+            response(
+                "503 Service Unavailable",
+                &["Content-Length: 0", "Connection: close"],
+                b"",
+            ),
+            false,
+        ),
+        (
+            "bare",
+            response("204 No Content", &["Connection: close"], b""),
+            true,
+        ),
+    ];
+    for (name, bytes, success) in replies {
+        let net = Net::for_x(d.f.service.plan.x.clone(), |_, _| ());
+        let server = canned(&net, bytes, true).await;
+        let peers =
+            AuthorityPeers::new(&net.local(Actor::A), &net.inventory, net.clock.clone()).unwrap();
+        let first = peers.register_once(&cohort(), request.clone()).await;
+        assert_eq!(first.is_ok(), success, "{name}: {first:?}");
+        if !success {
+            assert!(matches!(first, Err(Error::Unavailable)), "{name}");
+        }
+        assert_eq!(server.count.load(Ordering::SeqCst), 1, "{name}");
+        let second = peers.register_once(&cohort(), request.clone()).await;
+        assert!(matches!(second, Err(Error::Unavailable)), "{name}");
+        assert_eq!(
+            server.count.load(Ordering::SeqCst),
+            1,
+            "{name}: no second send"
+        );
+    }
 }

@@ -43,14 +43,20 @@ to enrolled actors; it is the narrowest reading and one line per route to change
   caller already validated; nothing reads a file, URL or environment variable. A listener
   admits only the client leaves of the actors its routes list.
 - **Origins.** `https://host:port` exactly; H is 7541, A is 7542, no other actor uses them;
-  7441, 7442, 3003, 80 and 443 are refused. A DNS endpoint is resolved once and its first
-  address used; the pin, not DNS, authenticates it.
+  7441, 7442, 3003, 80 and 443 are refused. A client resolves a DNS endpoint once and
+  uses its first address; the pin, not DNS, authenticates it. A listener's actual socket
+  address must be the row's IP and port, or, for a DNS row, the explicit address the
+  dedicated owner provisions (no lookup); a wildcard or other address is refused.
 - **HTTP.** One request per connection, no keep-alive. Checks before any handler: POST,
   origin-form path, exact `Host`, `Content-Type`, one `Content-Length`, no chunked,
   compressed, upgrade, expect, trailer, proxy or forwarding headers, a route and caller ACL
   before the body is read, then the body bound (64 KiB; 1 MiB for the packet and register
-  wrapper only). A reply is complete typed JSON with a matching length, or a bare 204; a
-  redirect, retry, other status or truncated reply is unavailable. Only 400/401/403/409/507
+  wrapper only). A success head has one fixed shape: no header name repeats and none of
+  transfer-encoding, content-encoding, content-language, content-location, content-range,
+  trailer, upgrade, location or refresh appears. A 200 has exactly one
+  §application/json§ type and one canonical length equal to its nonempty body; a 204 has
+  neither type nor length and no body. Anything else, a redirect, a retry or a truncated
+  reply is unavailable and never counts as a mutation success. Only 400/401/403/409/507
   count as a definite refusal.
 - **Binding.** The signed query must carry the signer key of the caller's actor, this
   operation's X and Plan digest, and its own tag; a packet must carry the API and receiver

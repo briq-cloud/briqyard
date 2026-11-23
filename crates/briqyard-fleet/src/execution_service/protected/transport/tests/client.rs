@@ -28,90 +28,6 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
-/// An H-side server that reads one request and writes `response` verbatim.
-struct Canned {
-    count: Arc<AtomicUsize>,
-    task: JoinHandle<()>,
-}
-
-impl Drop for Canned {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-async fn canned(net: &Net, response: Vec<u8>, alpn: bool) -> Canned {
-    let local = net.local(Actor::H);
-    let mut config =
-        (*server_config(&local, &net.inventory, &[Actor::A], net.clock.clone()).unwrap()).clone();
-    if !alpn {
-        config.alpn_protocols.clear();
-    }
-    let listener = net.listener(Actor::H);
-    listener.set_nonblocking(true).unwrap();
-    let listener = TcpListener::from_std(listener).unwrap();
-    let acceptor = TlsAcceptor::from(Arc::new(config));
-    let count = Arc::new(AtomicUsize::new(0));
-    let seen = count.clone();
-    let task = tokio::spawn(async move {
-        loop {
-            let (tcp, _) = listener.accept().await.unwrap();
-            seen.fetch_add(1, Ordering::SeqCst);
-            let Ok(mut tls) = acceptor.accept(tcp).await else {
-                continue;
-            };
-            let mut buffer = Vec::new();
-            let mut chunk = [0u8; 4096];
-            while let Ok(read) = tls.read(&mut chunk).await {
-                buffer.extend_from_slice(&chunk[..read]);
-                let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") else {
-                    if read == 0 {
-                        break;
-                    }
-                    continue;
-                };
-                let head = String::from_utf8_lossy(&buffer[..end]).to_lowercase();
-                let length: usize = head
-                    .split("content-length: ")
-                    .nth(1)
-                    .and_then(|rest| rest.split("\r\n").next())
-                    .and_then(|n| n.parse().ok())
-                    .unwrap_or(0);
-                if buffer.len() >= end + 4 + length || read == 0 {
-                    break;
-                }
-            }
-            let _ = tls.write_all(&response).await;
-            let _ = tls.shutdown().await;
-        }
-    });
-    Canned { count, task }
-}
-
-fn response(status: &str, headers: &[&str], body: &[u8]) -> Vec<u8> {
-    let mut text = format!("HTTP/1.1 {status}\r\n");
-    for header in headers {
-        text.push_str(header);
-        text.push_str("\r\n");
-    }
-    text.push_str("\r\n");
-    let mut bytes = text.into_bytes();
-    bytes.extend_from_slice(body);
-    bytes
-}
-
-fn ok(body: &[u8]) -> Vec<u8> {
-    response(
-        "200 OK",
-        &[
-            "Content-Type: application/json",
-            &format!("Content-Length: {}", body.len()),
-            "Connection: close",
-        ],
-        body,
-    )
-}
-
 fn link(net: &Net) -> Link {
     let local = net.local(Actor::A);
     let config = client_config(&local, net.row(Actor::H), net.clock.clone()).unwrap();
@@ -381,5 +297,119 @@ async fn adapters_exist_only_for_the_actor_whose_identity_they_use() {
             )
             .is_err()
         );
+    }
+}
+
+fn bare_204() -> Vec<u8> {
+    response("204 No Content", &["Connection: close"], b"")
+}
+
+fn json_200(extra: &[&str]) -> Vec<u8> {
+    let mut headers = vec![
+        "Content-Type: application/json",
+        "Content-Length: 2",
+        "Connection: close",
+    ];
+    headers.extend_from_slice(extra);
+    response("200 OK", &headers, b"{}")
+}
+
+#[tokio::test]
+async fn a_success_head_is_one_fixed_shape_without_duplicates_or_representation_fields() {
+    let net = Net::new();
+    assert_eq!(
+        post(&net, json_200(&[]), 64).await.0,
+        Ok(Reply::Body(b"{}".to_vec()))
+    );
+    let net = Net::new();
+    assert_eq!(post(&net, bare_204(), 64).await.0, Ok(Reply::NoContent));
+
+    for (name, bytes) in [
+        (
+            "duplicate type, same value",
+            json_200(&["Content-Type: application/json"]),
+        ),
+        (
+            "duplicate type, other value",
+            json_200(&["Content-Type: text/plain"]),
+        ),
+        (
+            "type with a parameter",
+            response(
+                "200 OK",
+                &[
+                    "Content-Type: application/json; charset=utf-8",
+                    "Content-Length: 2",
+                    "Connection: close",
+                ],
+                b"{}",
+            ),
+        ),
+        ("duplicate length", json_200(&["Content-Length: 2"])),
+        ("language", json_200(&["Content-Language: en"])),
+        ("location", json_200(&["Content-Location: /elsewhere"])),
+        ("range", json_200(&["Content-Range: bytes 0-1/2"])),
+        ("trailer", json_200(&["Trailer: x"])),
+        (
+            "duplicated unrelated field",
+            json_200(&["X-Extra: a", "X-Extra: a"]),
+        ),
+        (
+            "204 encoding",
+            response(
+                "204 No Content",
+                &["Content-Encoding: gzip", "Connection: close"],
+                b"",
+            ),
+        ),
+        (
+            "204 type",
+            response(
+                "204 No Content",
+                &["Content-Type: application/json", "Connection: close"],
+                b"",
+            ),
+        ),
+        (
+            "204 length",
+            response(
+                "204 No Content",
+                &["Content-Length: 5", "Connection: close"],
+                b"",
+            ),
+        ),
+        (
+            "204 zero length",
+            response(
+                "204 No Content",
+                &["Content-Length: 0", "Connection: close"],
+                b"",
+            ),
+        ),
+        (
+            "204 language",
+            response(
+                "204 No Content",
+                &["Content-Language: en", "Connection: close"],
+                b"",
+            ),
+        ),
+        (
+            "204 trailer",
+            response("204 No Content", &["Trailer: x", "Connection: close"], b""),
+        ),
+        (
+            "204 duplicated field",
+            response(
+                "204 No Content",
+                &["X-Extra: a", "X-Extra: a", "Connection: close"],
+                b"",
+            ),
+        ),
+    ] {
+        let net = Net::new();
+        let (outcome, count) = post(&net, bytes, 64).await;
+        assert_eq!(outcome, Err(Failure::Unavailable), "{name}");
+        assert_eq!(count, 1, "{name}");
     }
 }

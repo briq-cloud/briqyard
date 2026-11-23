@@ -1,8 +1,9 @@
 use super::{harness::*, pki::*};
+use crate::execution_service::protected::transport::{cert::Usage, Name};
 use crate::execution_service::protected::{
     transport::{
         http::{self, Admitted, Handler, Reply},
-        routes::{AuthorityPeers, Route},
+        routes::{AuthorityPeers, Mount, PrivateServer, Route},
         Actor, PeerId,
     },
     Error, Peers,
@@ -365,4 +366,99 @@ async fn a_failing_peer_is_asked_exactly_once() {
     let refused = peers.host_read(query).await;
     assert!(matches!(refused, Err(Error::Binding)));
     assert_eq!(service.calls(), 1);
+}
+
+fn start_on(
+    net: &Net,
+    bound: std::net::TcpListener,
+    provisioned: Option<std::net::SocketAddr>,
+) -> Result<PrivateServer, crate::execution_service::protected::transport::ConfigError> {
+    let keys = Keys::new();
+    PrivateServer::start(
+        &net.local(Actor::H),
+        net.inventory.clone(),
+        keys.scope(),
+        Mount::Host(FakeHost::new(TestKey::new())),
+        bound,
+        provisioned,
+        net.clock.clone(),
+    )
+}
+
+#[tokio::test]
+async fn a_listener_must_be_bound_to_the_enrolled_address_and_not_only_its_port() {
+    let net = Net::new();
+    let port = net.row(Actor::H).endpoint.port();
+    drop(net.listener(Actor::H));
+    let at = |ip: &str| {
+        std::net::TcpListener::bind((ip.parse::<std::net::IpAddr>().unwrap(), port)).unwrap()
+    };
+    let socket = |ip: &str| std::net::SocketAddr::new(ip.parse().unwrap(), port);
+    assert!(
+        start_on(&net, at("0.0.0.0"), None).is_err(),
+        "wildcard on the right port"
+    );
+    assert!(
+        start_on(&net, at("127.0.0.2"), None).is_err(),
+        "another address, right port"
+    );
+    assert!(start_on(&net, at("127.0.0.1"), Some(socket("127.0.0.2"))).is_err());
+    assert!(start_on(&net, at("0.0.0.0"), Some(socket("0.0.0.0"))).is_err());
+    assert!(
+        start_on(&net, at("127.0.0.2"), Some(socket("127.0.0.2"))).is_err(),
+        "an IP row accepts no other address"
+    );
+    assert!(start_on(
+        &net,
+        at("127.0.0.1"),
+        Some(std::net::SocketAddr::new(LOOPBACK, port + 1))
+    )
+    .is_err());
+    assert!(start_on(&net, at("127.0.0.1"), Some(socket("127.0.0.1"))).is_ok());
+    let net = Net::new();
+    assert!(start_on(&net, net.listener(Actor::H), None).is_ok());
+}
+
+#[tokio::test]
+async fn a_dns_row_needs_the_explicit_provisioned_socket_address_and_never_resolves() {
+    let name = Name::dns("h.private.test").unwrap();
+    let net = Net::build(|actor, peer| {
+        if actor == Actor::H {
+            peer.dns = Some("h.private.test".into());
+            peer.server = issue(&name, Usage::Server);
+        }
+    });
+    let port = net.row(Actor::H).endpoint.port();
+    drop(net.listener(Actor::H));
+    let at = |ip: &str| {
+        std::net::TcpListener::bind((ip.parse::<std::net::IpAddr>().unwrap(), port)).unwrap()
+    };
+    let socket = |ip: &str| std::net::SocketAddr::new(ip.parse().unwrap(), port);
+    assert!(
+        start_on(&net, at("127.0.0.1"), None).is_err(),
+        "no provisioned address"
+    );
+    assert!(
+        start_on(&net, at("127.0.0.1"), Some(socket("127.0.0.2"))).is_err(),
+        "a different address"
+    );
+    assert!(
+        start_on(&net, at("127.0.0.2"), Some(socket("127.0.0.1"))).is_err(),
+        "bound elsewhere"
+    );
+    assert!(
+        start_on(&net, at("0.0.0.0"), Some(socket("0.0.0.0"))).is_err(),
+        "wildcard"
+    );
+    assert!(start_on(&net, at("0.0.0.0"), Some(socket("127.0.0.1"))).is_err());
+    assert!(
+        start_on(
+            &net,
+            at("127.0.0.1"),
+            Some(std::net::SocketAddr::new(LOOPBACK, port + 1))
+        )
+        .is_err(),
+        "a port that is not the enrolled one"
+    );
+    assert!(start_on(&net, at("127.0.0.1"), Some(socket("127.0.0.1"))).is_ok());
 }

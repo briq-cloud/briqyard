@@ -48,6 +48,19 @@ const FORBIDDEN: [&str; 12] = [
     "proxy-authorization",
 ];
 
+/// Fields a success reply never carries.
+const SUCCESS_FORBIDDEN: [&str; 9] = [
+    "transfer-encoding",
+    "content-encoding",
+    "content-language",
+    "content-location",
+    "content-range",
+    "trailer",
+    "upgrade",
+    "location",
+    "refresh",
+];
+
 /// What a route answered.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Reply {
@@ -161,33 +174,45 @@ impl Link {
             .map_err(|_| Failure::Unavailable)?
             .to_bytes();
         match head.status {
-            StatusCode::OK => {
-                let declared = length(&head.headers);
-                let typed = head
-                    .headers
-                    .get(header::CONTENT_TYPE)
-                    .is_some_and(|value| value == JSON);
-                if !typed
-                    || declared != Some(collected.len())
-                    || head.headers.contains_key(header::CONTENT_ENCODING)
-                    || collected.is_empty()
-                {
-                    return Err(Failure::Unavailable);
-                }
-                Ok(Reply::Body(collected.to_vec()))
-            }
-            StatusCode::NO_CONTENT => {
-                if !collected.is_empty() || head.headers.contains_key(header::TRANSFER_ENCODING) {
-                    return Err(Failure::Unavailable);
-                }
-                Ok(Reply::NoContent)
-            }
+            StatusCode::OK => success(&head.headers, Some(&collected)),
+            StatusCode::NO_CONTENT => success(&head.headers, None).map(|_| Reply::NoContent),
             status if matches!(status.as_u16(), 400 | 401 | 403 | 409 | 507) => {
                 Err(Failure::Status(status.as_u16()))
             }
             _ => Err(Failure::Unavailable),
         }
     }
+}
+
+/// The one success shape of this surface, applied before either reply is returned. No header
+/// name may repeat and no transfer, encoding, representation or redirect field may appear.
+/// A 200 (`Some` body) has exactly one `application/json` content type and exactly one
+/// canonical content length equal to its nonempty body; a 204 (`None`) is bare: neither a
+/// content type nor a content length, and an empty body.
+fn success(headers: &HeaderMap, body: Option<&Bytes>) -> Result<Reply, Failure> {
+    if headers.len() != headers.keys().len()
+        || SUCCESS_FORBIDDEN
+            .iter()
+            .any(|name| headers.contains_key(*name))
+    {
+        return Err(Failure::Unavailable);
+    }
+    let Some(body) = body else {
+        return if headers.contains_key(header::CONTENT_TYPE)
+            || headers.contains_key(header::CONTENT_LENGTH)
+        {
+            Err(Failure::Unavailable)
+        } else {
+            Ok(Reply::NoContent)
+        };
+    };
+    let typed = headers
+        .get(header::CONTENT_TYPE)
+        .is_some_and(|value| value == JSON);
+    if !typed || body.is_empty() || length(headers) != Some(body.len()) {
+        return Err(Failure::Unavailable);
+    }
+    Ok(Reply::Body(body.to_vec()))
 }
 
 fn length(headers: &HeaderMap) -> Option<usize> {

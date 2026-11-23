@@ -123,6 +123,7 @@ pub(crate) fn ca_flags(params: &mut CertificateParams) {
 }
 
 pub(crate) struct Peer {
+    pub dns: Option<String>,
     pub id: PeerId,
     pub server: Issued,
     pub client: Issued,
@@ -164,6 +165,7 @@ impl Net {
                 id: Ident::new(format!("{}-1", actor.as_str())).unwrap(),
             };
             let mut peer = Peer {
+                dns: None,
                 id: id.clone(),
                 server: issue(&Name::Ip(LOOPBACK), Usage::Server),
                 client: issue(
@@ -172,10 +174,14 @@ impl Net {
                 ),
             };
             edit(actor, &mut peer);
+            let (host, server_name) = match &peer.dns {
+                Some(dns) => (dns.clone(), Name::dns(dns).unwrap()),
+                None => ("127.0.0.1".to_owned(), Name::Ip(LOOPBACK)),
+            };
             rows.push(PeerRow {
                 peer: id,
-                endpoint: Endpoint::parse_any_port(&format!("https://127.0.0.1:{port}")).unwrap(),
-                server_name: Name::Ip(LOOPBACK),
+                endpoint: Endpoint::parse_any_port(&format!("https://{host}:{port}")).unwrap(),
+                server_name,
                 server: peer.server.pair(),
                 client: peer.client.pair(),
             });

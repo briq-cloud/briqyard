@@ -9,7 +9,7 @@
 
 use super::{
     http::{self, Admitted, Failure, Handler, Link, Reply, DEADLINE},
-    tls, Actor, ConfigError, Inventory, LocalIdentity, PeerId,
+    tls, Actor, ConfigError, Inventory, LocalIdentity, Name, PeerId,
 };
 use crate::execution_service::protected::{AdoptedCohort, Error, Peers, Protected};
 use briqyard_api::execution::{
@@ -28,7 +28,7 @@ use briqyard_api::execution::{
 };
 use futures::future::BoxFuture;
 use std::{
-    net::TcpListener,
+    net::{SocketAddr, TcpListener},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -466,25 +466,38 @@ pub(crate) struct PrivateServer {
 }
 
 impl PrivateServer {
-    /// `listener` is the owner's already-bound dedicated socket; its port must be the one
-    /// the local row pins. The TLS layer admits only the enrolled clients of the actors
-    /// some route of this mount lists.
+    /// `listener` is the owner's already-bound dedicated socket. Its actual address and port
+    /// must be the enrolled listener policy exactly: the row's IP literal and port, or, for a
+    /// DNS row, the explicit `provisioned` socket address the dedicated owner supplies (this
+    /// never resolves a name, and an IP row accepts no other address). A wildcard or any other
+    /// address on the right port is refused. The TLS layer admits only the enrolled clients of
+    /// the actors some route of this mount lists.
     pub(crate) fn start(
         local: &LocalIdentity,
         inventory: Arc<Inventory>,
         scope: Scope,
         mount: Mount,
         listener: TcpListener,
+        provisioned: Option<SocketAddr>,
         clock: Arc<dyn ClockSource>,
     ) -> Result<Self, ConfigError> {
         let row = inventory
             .row(local.peer())
             .ok_or(ConfigError("unenrolled peer"))?;
-        let port = listener
-            .local_addr()
-            .map_err(|_| ConfigError("listener"))?
-            .port();
-        if local.peer().actor != mount.actor() || row.endpoint.port() != port {
+        let actual = listener.local_addr().map_err(|_| ConfigError("listener"))?;
+        let expected = match (&row.endpoint.host, provisioned) {
+            (Name::Ip(ip), None) => SocketAddr::new(*ip, row.endpoint.port()),
+            (Name::Ip(ip), Some(address)) if address.ip() == *ip => address,
+            (Name::Dns(_), Some(address)) => address,
+            _ => return Err(ConfigError("listener address")),
+        };
+        if local.peer().actor != mount.actor()
+            || expected.port() != row.endpoint.port()
+            || expected.ip().is_unspecified()
+            || expected.ip().is_multicast()
+            || actual.ip() != expected.ip()
+            || actual.port() != expected.port()
+        {
             return Err(ConfigError("mount or listener is not this peer's"));
         }
         let mut callers = Vec::new();
