@@ -590,3 +590,28 @@ pub(super) async fn with_volume(h: &Harness, id: &str, state: &str, gb: u32) -> 
 pub(super) fn grow_to(size_gb: u32) -> api::UpdateMachineRequest {
     spec(|s| s.volume = Some(api::VolumeSize { size_gb }))
 }
+
+#[cfg(test)]
+tokio::task_local! {
+    static COLLECTED_FRAME_BARRIER: Arc<CollectedFrameBarrier>;
+}
+
+#[cfg(test)]
+struct CollectedFrameBarrier {
+    reached: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+pub(in crate::machine) async fn after_collected_frame() {
+    let Ok(barrier) = COLLECTED_FRAME_BARRIER.try_with(Clone::clone) else {
+        return;
+    };
+    barrier.reached.notify_one();
+    barrier.resume.notified().await;
+}
+
+#[cfg(test)]
+pub(crate) async fn channel_manager() -> Manager {
+    harness("10.64.0.0/22", 4096).await.m
+}

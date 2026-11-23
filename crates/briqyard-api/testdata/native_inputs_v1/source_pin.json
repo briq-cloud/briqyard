@@ -1,0 +1,12 @@
+{
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "release": "0.1.9",
+  "releaseId": 1009,
+  "sha256": {
+    "SHA256SUMS-x86_64": "c7abc75f9b566f4ae004da93c4cb022ad6e067d51332eb90c9cdb7508be28f09",
+    "briqyard-fleet-linux-x86_64": "7e1f5bea9f7292fd74770eb000506dcf0ca2c57fbfdd6c97dd2ceee663a564d1",
+    "briqyard-linux-x86_64": "412b60bb3b8282d4d06b0a48a5abcdb3246ca17929f8b901584cba823b2467f2",
+    "briqyardd-linux-x86_64": "92f0dbcf5ee41246d9aaf89b6e5f29e7a159e286d54608eea8d1b2b71c39aa6e"
+  },
+  "source": "https://github.com/briq-cloud/briqyard/releases/tag/v0.1.9"
+}

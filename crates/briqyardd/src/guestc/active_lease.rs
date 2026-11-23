@@ -27,6 +27,7 @@ struct State {
     operation_deadline: tokio::time::Instant,
     ended: bool,
     running: bool,
+    collected: bool,
 }
 
 fn narrowed_deadline(
@@ -62,6 +63,7 @@ impl ActiveLease {
                     operation_deadline,
                     ended: false,
                     running: false,
+                    collected: false,
                 }),
                 changed: Notify::new(),
             }),
@@ -163,6 +165,7 @@ impl ActiveLease {
             "active execution revocation binding"
         );
         state.ended = true;
+        state.collected = false;
         drop(state);
         self.inner.changed.notify_waiters();
         Ok(())
@@ -182,8 +185,35 @@ impl ActiveLease {
         Ok(())
     }
     pub fn end(&self) {
-        self.inner.state.lock().unwrap().ended = true;
+        let mut state = self.inner.state.lock().unwrap();
+        state.ended = true;
+        state.collected = false;
+        drop(state);
         self.inner.changed.notify_waiters();
+    }
+
+    pub(crate) fn check_terminal(
+        &self,
+        expected: &ActiveOperation,
+        sample: &ClockSample,
+    ) -> anyhow::Result<()> {
+        let state = self.inner.state.lock().unwrap();
+        let now = tokio::time::Instant::now();
+        anyhow::ensure!(
+            state.collected
+                && state.evidence == *expected
+                && now < state.deadline
+                && now < state.operation_deadline,
+            "active execution terminal evidence changed or expired"
+        );
+        narrowed_deadline(state.evidence.lease_expires_at * 1000, sample)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn collect_for_test(&self, sample: &ClockSample) -> anyhow::Result<()> {
+        self.run_qualified(std::future::ready(()), || Some(sample.clone()))
+            .await
     }
     pub fn check_io(&self) -> std::io::Result<()> {
         let check = || -> anyhow::Result<()> {
@@ -300,6 +330,7 @@ impl ActiveLease {
                         anyhow::ensure!(tokio::time::Instant::now() < state.deadline,
                             "active execution lease expired");
                         narrowed_deadline(state.evidence.lease_expires_at * 1000, &sample)?;
+                        state.collected = result.is_ok();
                         return result;
                     }
                 }

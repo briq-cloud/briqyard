@@ -69,7 +69,7 @@ mod startup;
 mod stopped_update;
 mod templates;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod tick;
 mod update;
 mod views;
@@ -1030,3 +1030,6 @@ where
         Err(err) => Err(MError::Other(anyhow!("transition task: {err}"))),
     }
 }
+
+/// Guarded execution coordinator. It is not part of the ordinary host HTTP dispatch path.
+pub mod guarded_exec;

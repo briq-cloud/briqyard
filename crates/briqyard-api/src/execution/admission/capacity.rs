@@ -2,6 +2,68 @@ use super::compaction::{collection_lengths, compact_authority_at_lower_bound};
 use super::*;
 use serde::Serialize;
 
+pub(in crate::execution) fn transition_projection_target(
+    action: sealed::objects::ProjectionAction,
+    bind: &sealed::objects::Bind,
+) -> Result<sealed::prim::HexDigest, Error> {
+    #[derive(Serialize)]
+    struct Target<'a> {
+        action: sealed::objects::ProjectionAction,
+        bind: &'a sealed::objects::Bind,
+    }
+    if action == sealed::objects::ProjectionAction::Seal {
+        return Err(Error::Binding);
+    }
+    sealed::h(&Target { action, bind }).map_err(|_| Error::Binding)
+}
+
+pub(super) fn dimensions(state: &State) -> Result<sealed::objects::Dims, Error> {
+    use sealed::prim::Uint;
+    let bytes = field_bytes(state)?;
+    let native_counts = collection_lengths(state);
+    let mut counts = [Uint::new(0).expect("safe zero"); 21];
+    for (to, from) in counts.iter_mut().zip(native_counts) {
+        *to = Uint::new(from as u64).map_err(|_| Error::Full)?;
+    }
+    Ok(sealed::objects::Dims {
+        bytes: Uint::new(bytes as u64).map_err(|_| Error::Full)?,
+        counts,
+        fits: bytes as u64 <= MAX_BYTES && native_counts.iter().all(|n| *n <= MAX_RECORDS),
+    })
+}
+
+pub(super) fn qualified_candidates(
+    next: State,
+    mut reserve: State,
+    clock: Clock,
+) -> Result<(State, State), Error> {
+    if !near_capacity(&next) && !over_capacity(&reserve) {
+        return Ok((next, reserve));
+    }
+    let (compacted, _) = compact_authority(&next, clock)?;
+    compact_reserve(&next, &compacted, &mut reserve)?;
+    Ok((compacted, reserve))
+}
+
+pub(super) fn compact_reserve(
+    next: &State,
+    compacted: &State,
+    reserve: &mut State,
+) -> Result<(), Error> {
+    for (id, original) in &next.delegation_intents {
+        if !original.request.grant.is_empty()
+            && compacted.delegation_intents[id].request.grant.is_empty()
+        {
+            let reserved = reserve
+                .delegation_intents
+                .get_mut(id)
+                .ok_or(Error::Binding)?;
+            reserved.request.grant.clear();
+            reserved.request.allocations.clear();
+        }
+    }
+    Ok(())
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CollectionProjection {
     pub before: usize,
@@ -98,6 +160,9 @@ pub fn project(path: &Path, qualified_lower_bound_ms: u64) -> Result<CapacityPro
                 + field_bytes(&after.clock_floor)?,
         ),
     ]);
+    if let Some(guarded) = &after.sealed_authority {
+        retained.insert("sealed_authority", field_bytes(guarded)?);
+    }
     let category_bytes = retained.values().sum::<usize>();
     retained.insert("document_overhead", bytes_after - category_bytes);
     let collection_names = [

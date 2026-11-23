@@ -1,4 +1,11 @@
 //! Host installation and dispatch on a dedicated opt-in authenticated TLS listener.
+
+pub mod context;
+pub mod guarded;
+#[cfg(test)]
+mod parity_tests;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 use crate::machine::{
     ExecutionProtectionRequest, ExecutionResourceScope, Manager, RenewableDispatch,
     ScopedCredentials, ScopedExecutionContext,
@@ -62,6 +69,11 @@ pub struct HostExecutionChannel {
 }
 
 impl HostExecutionChannel {
+    #[cfg(test)]
+    async fn hold_ordinary_admission_for_test(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+        self.admission.write().await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         manager: Manager,

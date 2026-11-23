@@ -801,6 +801,8 @@ impl Manager {
         // Cleanup of detached work is not inferred from closing this connection.
         drop(conn);
         drop(in_use);
+        #[cfg(test)]
+        crate::machine::tests::after_collected_frame().await;
         journal
             .lock()
             .await

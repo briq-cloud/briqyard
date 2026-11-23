@@ -168,6 +168,169 @@ fn host(path: &Path, fixture: &Fixture) -> Journal {
 }
 
 #[test]
+fn registration_near_capacity_fences_before_refusing_the_second_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host");
+    let mut journal = Journal::open(&path, Role::Host("host-1".into())).unwrap();
+    let original = HostRegistration {
+        authority: "authority-1".into(),
+        epoch: "epoch-1".into(),
+        key_id: "key-1".into(),
+        public_key: [7; 32],
+        host_instance: journal.instance().into(),
+        generation: 1,
+    };
+    journal.register_host(original.clone(), clock()).unwrap();
+    let mut next = State::clone(&journal.state);
+    let mut permit = Fixture::new(&original.epoch).permit;
+    let allocation = permit.allocations[0].clone();
+    permit.allocations = (0..MAX_ALLOCATIONS)
+        .map(|n| AllocationRef {
+            id: format!("allocation-{n}"),
+            ..allocation.clone()
+        })
+        .collect();
+    let mut used = serde_json::to_vec(&next).unwrap().len() - 1;
+    for n in 0..MAX_RECORDS {
+        permit.admission = format!("{n:05}{}", "x".repeat(123));
+        let item = Admission {
+            permit: permit.clone(),
+            status: Status::Finished,
+        };
+        let bytes = serde_json::to_vec(&item).unwrap().len() + 4 + permit.admission.len();
+        if MAX_BYTES as usize - 64 - used < bytes + 30 {
+            break;
+        }
+        used += bytes;
+        next.admissions.insert(permit.admission.clone(), item);
+    }
+    let mut epochs = Vec::new();
+    let mut free = MAX_BYTES as usize - 64 - used - r#""other-authority":[]"#.len() + 1;
+    while free > 131 {
+        let width = (free - 10).min(128);
+        epochs.push(format!("{:04}{}", epochs.len(), "x".repeat(width - 4)));
+        free -= width + 3;
+    }
+    epochs.push(format!("{:04}{}", epochs.len(), "x".repeat(free - 7)));
+    next.retired.insert("other-authority".into(), epochs);
+    journal.persist(next).unwrap();
+    journal.publish();
+    let before = std::fs::read(path.join("journal.json")).unwrap();
+    assert_eq!(MAX_BYTES as usize - before.len(), 64);
+
+    let refused = HostRegistration {
+        epoch: "epoch-2".into(),
+        key_id: "n".repeat(128),
+        generation: 2,
+        ..original.clone()
+    };
+    assert!(matches!(
+        journal.register_host(refused, clock()),
+        Err(Error::Full)
+    ));
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(path.join("journal.json")).unwrap()).unwrap();
+    assert!(std::fs::read(path.join("journal.json")).unwrap() != before);
+    assert_eq!(
+        state["registration"],
+        serde_json::to_value(&original).unwrap()
+    );
+    assert_eq!(
+        state["fences"][&original.authority].as_str(),
+        Some("epoch-2")
+    );
+    assert_eq!(
+        state["retired"][&original.authority],
+        serde_json::json!(["epoch-1"])
+    );
+    assert_eq!(journal.registration().unwrap(), Some(&original));
+}
+
+#[test]
+fn registration_with_ambiguous_durability_never_reads_as_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host");
+    let mut journal = Journal::open(&path, Role::Host("host-1".into())).unwrap();
+    let reader = journal.reader();
+    let record = HostRegistration {
+        authority: "authority-1".into(),
+        epoch: "epoch-1".into(),
+        key_id: "key-1".into(),
+        public_key: [7; 32],
+        host_instance: journal.instance().into(),
+        generation: 1,
+    };
+    journal
+        .fence(
+            &record.authority,
+            &record.epoch,
+            &record.host_instance,
+            clock(),
+        )
+        .unwrap();
+    let mut next = State::clone(&journal.state);
+    next.registration_highwater = record.generation;
+    next.registration = Some(record.clone());
+    assert!(reader.view().registration().unwrap().is_none());
+    assert!(matches!(
+        journal.persist_inner(next, &mut |stage| stage == "directory_fsync"),
+        Err(Error::Persistence)
+    ));
+    assert_eq!(
+        read_state(&path.join("journal.json"))
+            .unwrap()
+            .unwrap()
+            .registration,
+        Some(record)
+    );
+    journal.publish();
+    assert!(matches!(
+        reader.view().registration(),
+        Err(Error::Persistence)
+    ));
+}
+
+#[test]
+fn sealed_snapshot_is_recognized_but_legacy_open_does_not_rotate_it() {
+    use crate::execution::sealed::prim::KeyBytes;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("authority");
+    let role = Role::Authority("authority-1".into());
+    let journal = Journal::open(&path, role.clone()).unwrap();
+    let file = path.join("journal.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert!(state.get("sealed_authority").is_none());
+    let key = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+    let key = Ed25519KeyPair::from_pkcs8(key.as_ref()).unwrap();
+    let key_bytes = KeyBytes::from_array(key.public_key().as_ref().try_into().unwrap());
+    let hash = "a".repeat(64);
+    state["sealed_authority"] = json!({"guard": {
+        "x": {"aud": "staging", "host": "host-1", "op": hash, "serial": 1},
+        "plan": hash, "phase": "started", "launch": hash,
+        "proc": {"boot": "00000000-0000-4000-8000-000000000001", "pid": 13, "start": 3,
+                 "exe": hash, "build": "candidate"},
+        "epoch": journal.instance(), "ordinary_kid": "key-1", "ordinary_key": key_bytes,
+        "set": hash, "bind": null, "armed_gate": null, "adoption": null
+    }});
+    drop(journal);
+    let bytes = serde_json::to_vec(&state).unwrap();
+    std::fs::write(&file, &bytes).unwrap();
+    assert!(
+        read_state(&file).is_ok(),
+        "guarded snapshots must be recognized"
+    );
+    assert!(matches!(Journal::open(&path, role), Err(Error::Binding)));
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    state["sealed_authority"]["guard"]["armed_gate"] = json!(hash);
+    std::fs::write(&file, serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(
+        matches!(read_state(&file), Err(Error::Binding)),
+        "a started Guard with adoption fields must not decode as persisted state"
+    );
+}
+
+#[test]
 fn installation_highwater_and_restart_retire_old_epoch() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("host");

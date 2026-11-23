@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::Value;
+use std::fs::OpenOptions;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 fn only_static_keys_and_numbers(value: &Value) {

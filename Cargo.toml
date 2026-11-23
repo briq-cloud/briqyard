@@ -72,8 +72,13 @@ humantime = "2"
 # TLS on the API (ADR 0020): ring, the provider reqwest already uses; no aws-lc.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+# Schema-only DER decoding of a daemon API leaf: no trust anchors, chain, name, usage or clock.
+# Pinned: 0.3.1 needs a newer compiler than the workspace's.
+x509-cert = { version = "=0.3.0", default-features = false }
 # A backup record's seal (ADR 0035): AES-256-GCM and HKDF from the ring TLS already uses.
 ring = "0.17"
+# Clears the transient copy of a sealed private key after it is parsed (ADR 0124).
+zeroize = "1"
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 # DNS wire format for the namespace resolver (ADR 0033): the protocol crate only, no resolver or server.
 hickory-proto = { version = "0.26.3", default-features = false }

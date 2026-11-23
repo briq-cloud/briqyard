@@ -150,3 +150,11 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 - [0141: Serve installer reads from committed snapshots](0141-installer-reads-from-committed-snapshots.md)
 
 - [0143: Read a gateway's loaded policy back before bound machines reach it](0143-gateway-loaded-policy-readback.md)
+
+- [0145: Private pinned transport for the protected authority](0145-protected-private-transport.md)
+
+- [0146: Read the two prior Plan commitments from root custody](0146-root-plan-pin-reader.md)
+
+- [0147: A closed, non-authorizing reader for native.inputs/v1](0147-native-inputs-reader.md)
+
+- [0148: Native asset delivery v3, the suffix and typed secret acquisition](0148-native-asset-delivery-v3.md)

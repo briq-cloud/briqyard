@@ -1,0 +1,152 @@
+{
+  "_comment": "Conformance vectors copied from SYL-268 interface revision 3.1 (document SHA-256 de7b14d3517090f537d01d0f6effc566337ed863cf9f88871bea7304d967f5ac). Every expected value is the contract's, never computed by a consumer. The seeds are RFC 8032 section 7.1 test vectors 1-3: public test material, only ever used to reproduce the contract's published signatures. They are not provisioning defaults and sign nothing real.",
+  "contract_sha256": "de7b14d3517090f537d01d0f6effc566337ed863cf9f88871bea7304d967f5ac",
+  "domain": "BRIQ-SEAL/2",
+  "keys": {
+    "rk": {
+      "rfc8032_test": 1,
+      "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+      "public": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+      "kid": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9"
+    },
+    "bk": {
+      "rfc8032_test": 2,
+      "seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+      "public": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+    },
+    "ak": {
+      "rfc8032_test": 3,
+      "seed_hex": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+      "public": "_FHNjmIYoaONpH7QAjDwWAgW7RO6MwOsXeuRFUiQgCU"
+    }
+  },
+  "proc": {
+    "boot": "00000000-0000-4000-8000-000000000004",
+    "pid": 18,
+    "start": 912,
+    "exe_digit": "3",
+    "build": "fence-3"
+  },
+  "query": {
+    "tag": "query.host",
+    "body": "{\"plan\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"preview\":null,\"q\":{\"nonce\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"x\":{\"aud\":\"staging\",\"host\":\"host.test\",\"op\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"serial\":1}}}",
+    "preimage_hash": "250a1e17ca1d8c9c86e807d3b48529a9fe0dbe28a1e37840ee7fdaea42b4d689",
+    "sig": "oK7eDY0rsAdCXv-wt8cgL4I1u7xqbPUDQKBiSPsfHSUNpj5Tdeyq7t0b1D79_ZY8eBHeftc-ptF994vAXIS4AA",
+    "envelope_hash": "b905304fc3e6927deea1f38275b7b0b6e860fc07d82917e2b24c60346cac161b",
+    "signer": "rk",
+    "negatives": [
+      {
+        "id": "alternate_tag_unchanged_signature",
+        "find": "\"tag\":\"query.host\"",
+        "replace": "\"tag\":\"query.authority\"",
+        "expect": "tag_or_signature"
+      },
+      {
+        "id": "duplicated_nested_serial",
+        "find": "\"serial\":1}",
+        "replace": "\"serial\":1,\"serial\":1}",
+        "expect": "decode"
+      },
+      {
+        "id": "trailing_newline",
+        "append": "\n",
+        "expect": "decode"
+      },
+      {
+        "id": "base64_padding",
+        "find": "XIS4AA\"",
+        "replace": "XIS4AA=\"",
+        "expect": "decode"
+      },
+      {
+        "id": "nonzero_unused_base64_bits",
+        "find": "XIS4AA\"",
+        "replace": "XIS4AB\"",
+        "expect": "decode"
+      },
+      {
+        "id": "escape_u0068_in_host",
+        "find": "\"host\":\"host.test\"",
+        "replace": "\"host\":\"\\u0068ost.test\"",
+        "expect": "decode"
+      },
+      {
+        "id": "serial_one_point_zero",
+        "find": "\"serial\":1}",
+        "replace": "\"serial\":1.0}",
+        "expect": "decode"
+      }
+    ],
+    "keys_swapped_on_wire": "verifying under the Bk public key must refuse: the envelope kid is the Rk kid"
+  },
+  "native_reg": {
+    "text": "{\"authority\":\"auth\",\"epoch\":\"ep\",\"key_id\":\"k\",\"public_key\":[215,90,152,1,130,177,10,183,213,75,254,211,201,100,7,58,14,225,114,243,218,166,35,37,175,2,26,104,247,7,81,26],\"host_instance\":\"hi\",\"generation\":2}",
+    "reg_hash": "dd89dfa1cbcdf3e2c47d1cf01eb18a177333aeac913dd29dc3d6ef390d69c832",
+    "ack_digest": "3YnfocvN8-LEfRzwHrGKF3MzrqyRPdKdw9bvOQ1pyDI",
+    "canonical_h_reg": "6bb4cd031db4a790afbb8e0340b1528210e84a1730a1ac41f82bb05cee9ac299",
+    "canonical_prefix": "{\"authority\":\"auth\",\"epoch\":\"ep\",\"generation\":2,\"host_instance\":\"hi\",\"key_id\":\"k\",\"public_key\":["
+  },
+  "trial": {
+    "c": "{\"bind_hash\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"briq\":\"bq_test\",\"command_hash\":\"2185b234c3057b055f3b29f9a70ff91c3bf02ecbfff0e68a4a23f30528e30287\",\"delegation_intent\":\"00000000-0000-4000-8000-000000000002\",\"gateway_origin_hash\":\"a22d921f8a3627f28785fddc967a13ef72b3895f66606e838fd5f9effae14c2f\",\"grant_id\":\"00000000-0000-4000-8000-000000000001\",\"key_id\":\"key.test\",\"machine\":\"machine.test\",\"namespace\":\"ns.test\",\"nonce\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"plan\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"run\":\"00000000-0000-4000-8000-000000000003\",\"stack\":\"stack.test\",\"team\":\"team.test\",\"x\":{\"aud\":\"staging\",\"host\":\"host.test\",\"op\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"serial\":1}}",
+    "hash": "19cb57255012b10e768c516d3b8db7bc30d45932a4612d63d5f9610d6f841b76",
+    "origin": "https://gw.staging.example",
+    "origin_hash": "a22d921f8a3627f28785fddc967a13ef72b3895f66606e838fd5f9effae14c2f",
+    "command_preimage_hex": "62726971796172642d657865632d726571756573742d7631000000000000000004000000000000000c2f62696e2f62757379626f7800000000000000067072696e746600000000000000022573000000000000002b4141414141414141414141414141414141414141414141414141414141414141414141414141414141414100000000000000000000000000000000000000000000000000000000000003e8",
+    "command_hash": "2185b234c3057b055f3b29f9a70ff91c3bf02ecbfff0e68a4a23f30528e30287",
+    "native_request_digest": "IYWyNMMFewVfOyn5pw_5HDvwLsv_8OaKSiPzBSjjAoc",
+    "request_json": "{\"cmd\":[\"/bin/busybox\",\"printf\",\"%s\",\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"],\"cwd\":\"\",\"env\":{},\"stdin\":\"\",\"timeout_ms\":1000,\"wake\":false}",
+    "ra_hash": "a4e73e6a0166235868acc5857c06413661d3b6bf1b6763d273d9120194a74ff9",
+    "ba_hash": "00125cb9bbc3ea646a6c8385034f80a1301b3e6a8680867bf74d8031b29b3eac",
+    "grant_text": "YWJj.ZGVm.Z2hp",
+    "grant_hash": "72ef7e4f5c3e51d52485efca7d2dafa0dc012ec85fcec59be88baebb241c2b84",
+    "projection_text": "{}",
+    "projection_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "issued_hash": "c6818565608b749c634b96c910a36f0e60c259473ef49fa075e84d02c057d8f3",
+    "job_hash": "9ec3d6ebeb778d6471822ac025593997c9602a7bf87d353e94f776f90369c6bd",
+    "outcome_preimage": "{\"stdout\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"stderr\":\"\",\"exit_code\":0,\"timed_out\":false}",
+    "outcome": "56b95774e301b14efdeb34933a1a1b56cb77b689dbeda4997df2fea5fdbb15cc",
+    "status_b_nonce_fill": 1,
+    "status_r_nonce_fill": 2,
+    "status_b_sig": "mfZG9eB4fJHNXs3x3t57HF7D7VpuMB6PKkfqsJ4cxd1QANhso-iRkGhHEMZx4YZ7dGQbJUdQJz6r9Ueh-Dn4Ag",
+    "status_b_hash": "c76d347393ec9b593327adfeddeaff66557525fe2cc9d2808c7052eb49cae137",
+    "status_r_hash": "349f372c0208ced612812f743064b99033f8ac9188756fd685b73ec124c77ac1",
+    "final_read_trial": "c76d347393ec9b593327adfeddeaff66557525fe2cc9d2808c7052eb49cae137",
+    "client_enable_trial": "19cb57255012b10e768c516d3b8db7bc30d45932a4612d63d5f9610d6f841b76",
+    "timeout": {
+      "exp": 2000000000,
+      "max_duration_seconds": 60,
+      "send": {
+        "now_ms": 1999999998000,
+        "allowed": 1000
+      },
+      "refuse": {
+        "now_ms": 1999999998001,
+        "room": 999
+      }
+    }
+  },
+  "custody": {
+    "capture": {
+      "resource": "authority",
+      "owner_fill": 3,
+      "custodian_pid": 10,
+      "old_pid": 12,
+      "challenge_fill": 4,
+      "slot": 27
+    },
+    "request": {
+      "next_pid": 18,
+      "challenge_fill": 5
+    },
+    "capture_hash": "a17581c93c2b8ef9a766f446d070dc71e6f0ae7f7586cdb75376fd6084788c8b",
+    "matched_hash": "5de8b02dd876d49af6755ca1a86cb9e6a2164fdf38f406edab64210a2529b389",
+    "exited_hash": "8f1437fe0ccb2f91ef872b92b70c37e8715649b13e88998d62ba57a446a5cf4c"
+  },
+  "plan_hash_fill": "1",
+  "x": {
+    "aud": "staging",
+    "host": "host.test",
+    "op_fill": "0",
+    "serial": 1
+  }
+}
