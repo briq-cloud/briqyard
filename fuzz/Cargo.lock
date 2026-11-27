@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "briqyard-objstore"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -305,11 +305,11 @@ dependencies = [
 
 [[package]]
 name = "briqyard-version"
-version = "0.2.16"
+version = "0.2.17"
 
 [[package]]
 name = "briqyardd"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "async-trait",
