@@ -165,6 +165,8 @@ fn typed_ack_plus_clock_loss_fits_exactly_the_reserved_bytes() {
     reserve
         .uncertain_installations
         .insert("authority:second".into());
+    // The commit retires the superseded first registration from the reserve too.
+    let (reserve, _) = crate::execution::admission::retirement::retire(&reserve, 99_000);
     let padding = MAX_BYTES as usize - serde_json::to_vec(&reserve).unwrap().len();
     Arc::make_mut(&mut journal.view.state)
         .uncertain_installations

@@ -187,6 +187,7 @@ impl Journal {
         let mut journal = Self {
             published: Arc::new(RwLock::new(view.clone())),
             view,
+            stored_bytes: 0,
         };
         journal.persist(State::clone(&journal.state))?;
         journal.publish();
@@ -216,6 +217,21 @@ impl Journal {
         if self.is_guarded_authority() {
             return Err(Error::Binding);
         }
+        let (next, reserve) = match clock {
+            Some(clock) if matches!(next.role, Role::Authority(_)) => {
+                self.check(clock)?;
+                let earliest = clock
+                    .now
+                    .checked_sub(clock.uncertainty)
+                    .and_then(|now| now.checked_mul(1000))
+                    .ok_or(Error::Binding)?;
+                (
+                    retirement::retire(&next, earliest).0,
+                    reserve.map(|reserve| retirement::retire(&reserve, earliest).0),
+                )
+            }
+            _ => (next, reserve),
+        };
         if matches!(next.role, Role::Authority(_))
             && (near_capacity(&next)
                 || over_capacity(&next)
@@ -294,6 +310,7 @@ impl Journal {
         }
         // Visible to readers only at `publish`, once the whole action has returned.
         self.view.state = Arc::new(next);
+        self.stored_bytes = bytes.len();
         Ok(())
     }
 }

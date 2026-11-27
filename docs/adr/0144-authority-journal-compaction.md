@@ -1,6 +1,6 @@
 # ADR 0144: Compact expired authority credentials
 
-Date: 2026-11-22 · Status: accepted
+Date: 2026-11-22 · Status: accepted · Intent retention superseded by [ADR 0149](0149-authority-journal-retirement.md)
 
 ## Decision
 

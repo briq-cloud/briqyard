@@ -279,6 +279,9 @@ impl DurableIssuer {
     pub fn publish(&self) {
         self.journal.publish();
     }
+    pub fn capacity_warning(&self) -> Option<usize> {
+        self.journal.capacity_warning()
+    }
     /// Trusted installation uses the same exclusive authority journal and epoch.
     /// Keep the issuer alive while borrowing it; this does not expose its key.
     pub fn installation_journal(&mut self) -> &mut admission::Journal {
