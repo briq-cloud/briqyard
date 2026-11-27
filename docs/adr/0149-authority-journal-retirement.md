@@ -64,9 +64,10 @@ v1, and every earlier runtime opens it (runtime rollback stays possible).
 | 1,000 install and revoke cycles, a registration every 10 | largest file under 48 KiB |
 | Staging-shaped full journal (1,410 chains, 16.5 MB), reopened, then registration N+1 | under 16 KiB |
 
-Bytes bind before the record cap. Expiring records stay about 1 h, so the journal fills at
-about 1,850 installation chains an hour with one operation each, or about 2.8 operations a
-second sharing one delegation; the warning comes at 75 % of those. A long renewable operation
+Bytes bind before the record cap. A fresh generation fills at about 1,400 installation chains
+within an hour (11.9 KB each: 9 KB leaves 1 h after its last expiry, 2.9 KB stays for the
+generation), or about 2.8 operations a second sharing one delegation. Each installation's
+residue lowers that rate for the rest of the generation; the warning comes at 75 %. A long renewable operation
 keeps one renewal attempt and protection per renewal for its whole life.
 
 Within one registration generation the residue is not reclaimed: about 5,700 installations
