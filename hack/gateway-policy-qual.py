@@ -447,7 +447,7 @@ def derive(all_obs, phase):
         add(f"{pre}.direct_while_closed", "C5", "limit", why)
     else:
         add(f"{pre}.direct_while_closed", "C5", "observed", False)
-    add(f"{pre}.closed_observed", "C5", "observed", any(g["value"] is True for g in gates if kill is not None and g["t0"] >= kill))
+    add(f"{pre}.closed_observed", "C5", "observed", any(g["value"] is True for g in gates if kill is not None and g["t0"] > kill))
     if phase == "gateway_kill":
         recv, rel = marks.get("hold_recv"), marks.get("release")
         held = [g for g in gates if recv is not None and rel is not None and recv <= g["t0"] <= rel]

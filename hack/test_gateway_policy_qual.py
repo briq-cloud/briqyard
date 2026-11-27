@@ -276,6 +276,13 @@ class Loop(unittest.TestCase):
         self.assertEqual(v["hold_gate_closed"], gpq.FAIL)
         self.assertEqual(v["closed_observed"], gpq.INCONCLUSIVE)
 
+    def test_a_closed_read_in_the_kills_millisecond_does_not_prove_it_followed_the_kill(self):
+        for phase in ("gateway_kill", "daemon_kill"):
+            obs = [x for x in self.phase(gate_hold=False, phase=phase) if x["cls"] != "gate"] + [gate(10_000, True, phase)]
+            self.assertEqual(self.derived(obs, phase)["closed_observed"], gpq.INCONCLUSIVE, phase)
+            obs.append(gate(10_001, True, phase))
+            self.assertEqual(self.derived(obs, phase)["closed_observed"], gpq.PASS, phase)
+
     def test_no_samples_at_all_is_not_a_pass(self):
         self.assertNotIn(gpq.PASS, self.derived([]).values())
 
