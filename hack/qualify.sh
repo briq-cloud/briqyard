@@ -911,7 +911,7 @@ gateway_policy() {
   gate_sampler gateway_kill & gp=$!; BGPIDS+=("$gp")
   wait_set gateway_kill_alive 90 "" 'loop_alive_since gateway_kill 0'
   oldinc=$(inc_of "$(readback "$GWP_NS" "$(challenge)" 2>/dev/null)"); nrecv=$(api_count recv "$GWIP")
-  if [ -n "$oldinc" ]; then mark gateway_kill kill; sudo kill -9 "${oldinc%%:*}"; fi
+  if [ -n "$oldinc" ]; then sudo kill -9 "${oldinc%%:*}" && mark gateway_kill kill; fi
   # The restarted gateway's address is read again on every poll: its CA registration names it.
   local oldip=$GWIP base
   if wait_set gateway_kill_recv 1200 "" 'newip=$(gw_view "$GWP_NS" ip); base=$([ "$newip" = "$oldip" ] && echo "$nrecv" || echo 0); [ -n "$newip" ] && [ "$(api_count recv "$newip")" -gt "$base" ]' true 0.2; then
