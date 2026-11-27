@@ -99,7 +99,7 @@ wait_api() {
 crash_daemon() {
   local pid i; pid=$(daemon_pid)
   RECOVERY_SINCE=$(date +%s)
-  sudo kill -9 "$pid"
+  sudo kill -9 "$pid" && KILLED_AT=$(date +%s%3N)
   for i in $(seq 1 50); do [ "$(daemon_pid)" != "$pid" ] && break; sleep 0.1; done
   # A `zfs send` paused by a check outlives the daemon; it must be gone before recovery runs.
   sudo pkill -KILL -f '[z]fs send -w' || true
@@ -602,10 +602,11 @@ refused() {
   obs "$c" "$k" measure control "" --set "value=$cause"
 }
 gate_sampler() { # PHASE: the gate set every 0.2 s, the gateway's address read again each time
-  local ip=$GWIP n
+  local ip=$GWIP n t
   while :; do
     n=$(gw_view "$GWP_NS" ip); [ -n "$n" ] && ip=$n
-    obs "gate.$1" "$([ "$1" = boot ] && echo C2 || echo C5)" gate sample "$1" --set "value=$(gate_read "$ip")" --set "t0=$(now_ms)"
+    t=$(now_ms)
+    obs "gate.$1" "$([ "$1" = boot ] && echo C2 || echo C5)" gate sample "$1" --set "value=$(gate_read "$ip")" --set "t0=$t"
     sleep 0.2
   done
 }
@@ -938,7 +939,8 @@ gateway_policy() {
   gate_sampler daemon_kill & gp=$!; BGPIDS+=("$gp")
   wait_set daemon_kill_alive 90 "" 'loop_alive_since daemon_kill 0'
   gate_burst "$burst" & bp=$!; BGPIDS+=("$bp")
-  mark daemon_kill kill; WAIT_API_RETURN=1 crash_daemon || echo "   the daemon did not recover: its checks stay unproven"
+  KILLED_AT=; WAIT_API_RETURN=1 crash_daemon || echo "   the daemon did not recover: its checks stay unproven"
+  [ -z "$KILLED_AT" ] || mark daemon_kill kill "$KILLED_AT"
   drb=; wait_set daemon_kill_readback 120 "" 'drb=$(readback "$GWP_NS" "$(challenge)" 2>/dev/null)' && { reopen=$(now_ms); mark daemon_kill reopen "$reopen"; }
   stop_bg "$bp"
   [ -z "$reopen" ] || wait_set daemon_kill_alive_after 120 "" 'loop_alive_since daemon_kill "$reopen"'
