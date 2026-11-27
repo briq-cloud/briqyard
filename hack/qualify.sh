@@ -609,6 +609,11 @@ gate_sampler() { # PHASE: the gate set every 0.2 s, the gateway's address read a
     sleep 0.2
   done
 }
+# gate_burst FILE: the gate set about every 20 ms, as "t0 value" lines; the daemon's restart closes
+# the gate for a fraction of a second, shorter than gate_sampler's period.
+gate_burst() { while :; do echo "$(now_ms) $(gate_read "$GWIP")" >>"$1"; sleep 0.02; done; }
+# gate_record PHASE FILE: each complete line gate_burst wrote, as a gate sample of PHASE.
+gate_record() { local t v; while read -r t v; do [ -n "$v" ] && obs "gate.$1" C5 gate sample "$1" --set "value=$v" --set "t0=$t"; done <"$2"; }
 admit_sampler() { # PHASE NAME NAMESPACE: a consumer's record (none when absent, unknown when unread)
   local st
   while :; do
@@ -928,13 +933,17 @@ gateway_policy() {
   # opens on adoption and a readback. Exec needs the daemon, so a probe that falls in the closed
   # stretch may not exist: that is a limit in the receipt, never a pass.
   reopen=
+  local burst=$GWP/gate-daemon-kill.txt bp; : >"$burst"
   probe_loop daemon_kill & lp=$!; BGPIDS+=("$lp")
   gate_sampler daemon_kill & gp=$!; BGPIDS+=("$gp")
   wait_set daemon_kill_alive 90 "" 'loop_alive_since daemon_kill 0'
+  gate_burst "$burst" & bp=$!; BGPIDS+=("$bp")
   mark daemon_kill kill; WAIT_API_RETURN=1 crash_daemon || echo "   the daemon did not recover: its checks stay unproven"
   drb=; wait_set daemon_kill_readback 120 "" 'drb=$(readback "$GWP_NS" "$(challenge)" 2>/dev/null)' && { reopen=$(now_ms); mark daemon_kill reopen "$reopen"; }
+  stop_bg "$bp"
   [ -z "$reopen" ] || wait_set daemon_kill_alive_after 120 "" 'loop_alive_since daemon_kill "$reopen"'
   stop_bg "$lp" "$gp"
+  gate_record daemon_kill "$burst"
   gq derive --file "$GWP_OBS" --phase daemon_kill
   obs c5.daemon_kill.readback_live_incarnation C5 assert subject "" --set "value=$(bool '[ -n "$drb" ] && live_inc "$(inc_of "$drb")"')"
   judged c5.daemon_kill.alive_before c5.daemon_kill.alive_after c5.daemon_kill.direct_never_open c5.daemon_kill.no_traffic_while_closed \
