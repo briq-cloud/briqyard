@@ -99,7 +99,7 @@ wait_api() {
 crash_daemon() {
   local pid i; pid=$(daemon_pid)
   RECOVERY_SINCE=$(date +%s)
-  sudo kill -9 "$pid"
+  sudo kill -9 "$pid" && KILLED_AT=$(date +%s%3N)
   for i in $(seq 1 50); do [ "$(daemon_pid)" != "$pid" ] && break; sleep 0.1; done
   # A `zfs send` paused by a check outlives the daemon; it must be gone before recovery runs.
   sudo pkill -KILL -f '[z]fs send -w' || true
@@ -602,13 +602,19 @@ refused() {
   obs "$c" "$k" measure control "" --set "value=$cause"
 }
 gate_sampler() { # PHASE: the gate set every 0.2 s, the gateway's address read again each time
-  local ip=$GWIP n
+  local ip=$GWIP n t
   while :; do
     n=$(gw_view "$GWP_NS" ip); [ -n "$n" ] && ip=$n
-    obs "gate.$1" "$([ "$1" = boot ] && echo C2 || echo C5)" gate sample "$1" --set "value=$(gate_read "$ip")" --set "t0=$(now_ms)"
+    t=$(now_ms)
+    obs "gate.$1" "$([ "$1" = boot ] && echo C2 || echo C5)" gate sample "$1" --set "value=$(gate_read "$ip")" --set "t0=$t"
     sleep 0.2
   done
 }
+# gate_burst FILE: the gate set about every 20 ms, as "t0 value" lines; the daemon's restart closes
+# the gate for a fraction of a second, shorter than gate_sampler's period.
+gate_burst() { while :; do echo "$(now_ms) $(gate_read "$GWIP")" >>"$1"; sleep 0.02; done; }
+# gate_record PHASE FILE: each complete line gate_burst wrote, as a gate sample of PHASE.
+gate_record() { local t v; while read -r t v; do [ -n "$v" ] && obs "gate.$1" C5 gate sample "$1" --set "value=$v" --set "t0=$t"; done <"$2"; }
 admit_sampler() { # PHASE NAME NAMESPACE: a consumer's record (none when absent, unknown when unread)
   local st
   while :; do
@@ -905,7 +911,7 @@ gateway_policy() {
   gate_sampler gateway_kill & gp=$!; BGPIDS+=("$gp")
   wait_set gateway_kill_alive 90 "" 'loop_alive_since gateway_kill 0'
   oldinc=$(inc_of "$(readback "$GWP_NS" "$(challenge)" 2>/dev/null)"); nrecv=$(api_count recv "$GWIP")
-  if [ -n "$oldinc" ]; then mark gateway_kill kill; sudo kill -9 "${oldinc%%:*}"; fi
+  if [ -n "$oldinc" ]; then sudo kill -9 "${oldinc%%:*}" && mark gateway_kill kill; fi
   # The restarted gateway's address is read again on every poll: its CA registration names it.
   local oldip=$GWIP base
   if wait_set gateway_kill_recv 1200 "" 'newip=$(gw_view "$GWP_NS" ip); base=$([ "$newip" = "$oldip" ] && echo "$nrecv" || echo 0); [ -n "$newip" ] && [ "$(api_count recv "$newip")" -gt "$base" ]' true 0.2; then
@@ -928,13 +934,18 @@ gateway_policy() {
   # opens on adoption and a readback. Exec needs the daemon, so a probe that falls in the closed
   # stretch may not exist: that is a limit in the receipt, never a pass.
   reopen=
+  local burst=$GWP/gate-daemon-kill.txt bp; : >"$burst"
   probe_loop daemon_kill & lp=$!; BGPIDS+=("$lp")
   gate_sampler daemon_kill & gp=$!; BGPIDS+=("$gp")
   wait_set daemon_kill_alive 90 "" 'loop_alive_since daemon_kill 0'
-  mark daemon_kill kill; WAIT_API_RETURN=1 crash_daemon || echo "   the daemon did not recover: its checks stay unproven"
+  gate_burst "$burst" & bp=$!; BGPIDS+=("$bp")
+  KILLED_AT=; WAIT_API_RETURN=1 crash_daemon || echo "   the daemon did not recover: its checks stay unproven"
+  [ -z "$KILLED_AT" ] || mark daemon_kill kill "$KILLED_AT"
   drb=; wait_set daemon_kill_readback 120 "" 'drb=$(readback "$GWP_NS" "$(challenge)" 2>/dev/null)' && { reopen=$(now_ms); mark daemon_kill reopen "$reopen"; }
+  stop_bg "$bp"
   [ -z "$reopen" ] || wait_set daemon_kill_alive_after 120 "" 'loop_alive_since daemon_kill "$reopen"'
   stop_bg "$lp" "$gp"
+  gate_record daemon_kill "$burst"
   gq derive --file "$GWP_OBS" --phase daemon_kill
   obs c5.daemon_kill.readback_live_incarnation C5 assert subject "" --set "value=$(bool '[ -n "$drb" ] && live_inc "$(inc_of "$drb")"')"
   judged c5.daemon_kill.alive_before c5.daemon_kill.alive_after c5.daemon_kill.direct_never_open c5.daemon_kill.no_traffic_while_closed \
