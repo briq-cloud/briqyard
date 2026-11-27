@@ -1474,9 +1474,16 @@ bound would reclaim credential bytes and how much history would remain.
 The authority retires evidence on every qualified write ([ADR 0149](adr/0149-authority-journal-retirement.md)):
 expiring records 1 h after their last expiry, the rest once the host's registration
 generation moved past theirs. Within one generation each installation still leaves about
-3 KB. Watch for these log lines on target `execution_journal`:
+3 KB. Watch for these log lines, `diagnostic = "execution_journal"`:
 
-| Line | Meaning | Action |
-| --- | --- | --- |
-| WARN `execution journal near capacity after retirement` (`percent`) | the fullest cap is at 75 % or more after the sweep | restart the authority: the new epoch needs a registration at the next generation, whose sweep frees the previous generation |
-| ERROR `execution journal full` | an installation was refused with `Full` | the same: a full journal recovers at its first registration after the restart, with no file edits |
+| Line | Meaning |
+| --- | --- |
+| WARN `execution journal near capacity after retirement` (`percent`) | the fullest cap is at 75 % or more after the sweep |
+| ERROR `execution journal full` | an installation was refused with `Full` |
+
+Expiring records leave within about an hour once installation churn drops. What stays is
+the residue of the host's current registration generation. Only the control plane's
+registration rollover to the next generation frees it, and its sweep recovers a full journal
+with no file edits. The rollover follows a runtime upgrade or a restart of the authority or
+the host, which voids every live installation on that host, and the control plane refuses it
+while anything is live or pending.

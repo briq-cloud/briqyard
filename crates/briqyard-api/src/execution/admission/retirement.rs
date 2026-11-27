@@ -46,7 +46,7 @@ pub(super) fn retire(state: &State, earliest_ms: u64) -> (State, usize) {
         .values()
         .map(|attempt| attempt.binding.grant_digest.as_str())
         .collect();
-    let delegations: BTreeMap<&String, &DelegationIntent> = state
+    let mut delegations: BTreeMap<&String, &DelegationIntent> = state
         .delegation_intents
         .iter()
         .filter(|(id, d)| {
@@ -64,6 +64,22 @@ pub(super) fn retire(state: &State, earliest_ms: u64) -> (State, usize) {
                     .all(|token| allocation_expired(token, horizon))
         })
         .collect();
+    // Readiness refuses an older version only while a newer one of its ID exists, so the
+    // newest version of every retained ID stays as its supersession evidence.
+    let kept_ids: BTreeSet<&str> = delegations
+        .values()
+        .map(|d| d.request.id.as_str())
+        .collect();
+    for id in kept_ids {
+        if let Some((key, newest)) = state
+            .delegation_intents
+            .iter()
+            .filter(|(_, d)| d.request.id == id)
+            .max_by_key(|(_, d)| d.request.version)
+        {
+            delegations.insert(key, newest);
+        }
+    }
     let used_protections: BTreeSet<&str> = delegations
         .values()
         .map(|d| d.protection.as_str())
@@ -100,6 +116,18 @@ pub(super) fn retire(state: &State, earliest_ms: u64) -> (State, usize) {
         })
         .map(|intent| (intent.host.as_str(), intent))
         .collect();
+    // A record without a registration generation (an invalidation, a revocation, a legacy
+    // ownership) is older than a current registration of this epoch whose host instance or
+    // epoch differs from its own. Before this epoch's registration, nothing is.
+    let before_registration = |intent: &AuthorityIntent| {
+        current_registrations
+            .get(intent.host.as_str())
+            .is_some_and(|r| {
+                r.authority_epoch == state.instance
+                    && (r.host_instance != intent.host_instance
+                        || r.authority_epoch != intent.authority_epoch)
+            })
+    };
     let used_ownerships: BTreeSet<&str> = delegations
         .values()
         .map(|d| d.ownership.as_str())
@@ -111,10 +139,10 @@ pub(super) fn retire(state: &State, earliest_ms: u64) -> (State, usize) {
         .filter(|(id, intent)| {
             matches!(intent.payload, AuthorityPayload::Ownership(_))
                 && (used_ownerships.contains(id.as_str())
-                    || !intent
-                        .registration_dependency
-                        .as_ref()
-                        .is_some_and(|d| superseded(&intent.host, d.generation)))
+                    || match &intent.registration_dependency {
+                        Some(d) => !superseded(&intent.host, d.generation),
+                        None => !before_registration(intent),
+                    })
         })
         .map(|(id, _)| id)
         .collect();
@@ -171,27 +199,16 @@ pub(super) fn retire(state: &State, earliest_ms: u64) -> (State, usize) {
     let authority: BTreeSet<&String> = state
         .authority_intents
         .iter()
-        .filter(|(id, intent)| {
-            // An invalidation or revocation is placed by the registration it was sent under.
-            let before_registration =
-                current_registrations
-                    .get(intent.host.as_str())
-                    .is_some_and(|r| {
-                        r.host_instance != intent.host_instance
-                            || r.authority_epoch != intent.authority_epoch
-                    });
-            match &intent.payload {
-                AuthorityPayload::Ownership(_) => ownerships.contains(id),
-                AuthorityPayload::Registration(r) => {
-                    !superseded(&intent.host, r.generation)
-                        || used_registrations.contains(id.as_str())
-                }
-                AuthorityPayload::Invalidate { installation, .. } => {
-                    !before_registration || installations.contains(installation.as_str())
-                }
-                AuthorityPayload::Revoke { id: revoked, .. } => {
-                    !before_registration || delegation_ids.contains(revoked.as_str())
-                }
+        .filter(|(id, intent)| match &intent.payload {
+            AuthorityPayload::Ownership(_) => ownerships.contains(id),
+            AuthorityPayload::Registration(r) => {
+                !superseded(&intent.host, r.generation) || used_registrations.contains(id.as_str())
+            }
+            AuthorityPayload::Invalidate { installation, .. } => {
+                !before_registration(intent) || installations.contains(installation.as_str())
+            }
+            AuthorityPayload::Revoke { id: revoked, .. } => {
+                !before_registration(intent) || delegation_ids.contains(revoked.as_str())
             }
         })
         .map(|(id, _)| id)

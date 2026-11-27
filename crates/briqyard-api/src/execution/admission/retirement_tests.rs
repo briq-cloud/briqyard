@@ -1,7 +1,8 @@
 use super::*;
 use crate::execution::{
     channel::{InstallDelegation, Protect, ProtectionAck},
-    DiscoveryReceipt, Limits, Operation, PublicResource, PublicSeed, ResourceSet, Source,
+    ActiveOperationBinding, DiscoveryReceipt, Limits, Operation, PublicResource, PublicSeed,
+    ResourceSet, Source,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use sha2::{Digest, Sha256};
@@ -455,9 +456,13 @@ fn a_full_journal_recovers_at_its_first_registration_after_upgrade() {
 
     let mut journal = open(&path);
     assert!(file_size(&path) > MAX_BYTES - 512 * 1024);
+    assert!(journal
+        .capacity_warning()
+        .is_some_and(|percent| percent >= 96));
     let now = 20_000;
     register(&mut journal, 2, now);
     assert!(file_size(&path) < 16 * 1024, "{} bytes", file_size(&path));
+    assert_eq!(journal.capacity_warning(), None);
     install(&mut journal, 2, 1_000_000, now, true);
     remove(&mut journal, 2, 1_000_000, now + 60);
     assert!(journal.state.discovery_intents.len() == 1);
@@ -627,4 +632,159 @@ fn a_reserve_retires_exactly_as_the_state_it_extends() {
         serde_json::to_vec(&retire(&reserve, later).0).unwrap(),
         serde_json::to_vec(&expected).unwrap()
     );
+}
+
+#[test]
+fn a_renewing_operation_keeps_its_chain_until_its_last_renewal_expires() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("authority");
+    let mut journal = open(&path);
+    register(&mut journal, 1, 10_000);
+    install(&mut journal, 1, 0, 10_000, false);
+    let mut state = State::clone(&journal.state);
+    let operation = state.operation_intents["operation-0"].clone();
+    let AuthorityPayload::Ownership(owner) = state.authority_intents["ownership-0"].payload.clone()
+    else {
+        unreachable!()
+    };
+    let renewed_until = 10_000 + 5 * RETENTION_SECONDS;
+    state.renewal_attempts.insert(
+        "renewal-0".into(),
+        RenewalAttempt {
+            id: "renewal-0".into(),
+            operation_id: operation.id.clone(),
+            previous_sequence: 0,
+            binding: ActiveOperationBinding {
+                operation_id: operation.id.clone(),
+                admission: operation.id.clone(),
+                grant_digest: operation.permit.grant_digest.clone(),
+                permit_digest: "permit".into(),
+                request_digest: "request".into(),
+                authority: "region".into(),
+                authority_epoch: operation.authority_epoch.clone(),
+                host_instance: instance(1),
+                ownership: "install-0".into(),
+                ownership_generation: 1,
+                policy_revision: "policy".into(),
+                delegation: "grant-0".into(),
+                delegation_version: 1,
+                principal: "principal".into(),
+                source: Source {
+                    kind: "source".into(),
+                    id: "source-0".into(),
+                    expires_at: 10_050,
+                },
+                team: "team".into(),
+                subject: "public-a".into(),
+                metadata_revision: "metadata-1".into(),
+                target: owner.primary.clone(),
+                resource_set: owner.resource_set.clone(),
+                limits: operation.permit.limits.clone(),
+                guest_timeout_ms: 60_000,
+                started_at_ms: 10_000_000,
+                operation_deadline_ms: renewed_until * 1000,
+            },
+            protection_intent: "protection-0".into(),
+            protection_admission: "idle-0".into(),
+            protection_expires_at_ms: renewed_until * 1000,
+            continuation_digest: None,
+        },
+    );
+    // Far past the permit, the grant and the first protection, but within the renewal.
+    let (kept, _) = retire(&state, (renewed_until + RETENTION_SECONDS) * 1000 - 1);
+    assert!(kept.operation_intents.contains_key("operation-0"));
+    assert!(kept.renewal_attempts.contains_key("renewal-0"));
+    assert!(kept.admissions.contains_key("operation-0"));
+    assert!(kept.delegation_intents.contains_key("delegation-0"));
+    assert!(kept.protection_intents.contains_key("protection-0"));
+    let (retired, _) = retire(&state, (renewed_until + RETENTION_SECONDS) * 1000);
+    assert!(retired.operation_intents.is_empty());
+    assert!(retired.renewal_attempts.is_empty());
+    assert!(retired.admissions.is_empty());
+    assert!(retired.delegation_intents.is_empty());
+    assert!(retired.protection_intents.is_empty());
+}
+
+#[test]
+fn a_removal_sent_in_a_new_epoch_waits_for_its_registration() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("authority");
+    let mut journal = open(&path);
+    register(&mut journal, 1, 10_000);
+    install(&mut journal, 1, 0, 10_000, true);
+    drop(journal);
+    let mut journal = open(&path);
+    let later = 10_000 + RETENTION_SECONDS + 100;
+    journal
+        .begin_authority_intent(
+            "revoke-new",
+            "host",
+            &instance(2),
+            AuthorityPayload::Revoke {
+                id: "grant-new".into(),
+                version: 1,
+            },
+            at(later),
+        )
+        .unwrap();
+    // Before this epoch's registration, the new revocation is not placed before it.
+    let (kept, _) = retire(&journal.state, later * 1000);
+    assert!(kept.authority_intents.contains_key("revoke-new"));
+    // A registration of this epoch at the revocation's host instance keeps it current.
+    register(&mut journal, 2, later + 10);
+    assert!(journal.state.authority_intents.contains_key("revoke-new"));
+    assert!(!journal
+        .state
+        .authority_intents
+        .contains_key("registration-1"));
+}
+
+#[test]
+fn the_newest_version_stays_while_an_older_one_is_retained() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("authority");
+    let mut journal = open(&path);
+    register(&mut journal, 1, 10_000);
+    install(&mut journal, 1, 0, 10_000, false);
+    let later = 10_000 + 5 * RETENTION_SECONDS;
+    let state = Arc::make_mut(&mut journal.view.state);
+    // Version 2 of the same delegation expired; version 1 is held by a live operation.
+    let mut newer = state.delegation_intents["delegation-0"].clone();
+    newer.request.version = 2;
+    newer.expected.version = 2;
+    newer.expected.grant_digest = "newer-grant".into();
+    state
+        .delegation_intents
+        .insert("delegation-0-v2".into(), newer);
+    state
+        .operation_intents
+        .get_mut("operation-0")
+        .unwrap()
+        .permit
+        .exp = later;
+    assert!(!journal.delegation_intent_ready("delegation-0").unwrap());
+    let (retired, _) = retire(&journal.state, later * 1000);
+    assert!(retired.delegation_intents.contains_key("delegation-0"));
+    assert!(retired.delegation_intents.contains_key("delegation-0-v2"));
+    Arc::make_mut(&mut journal.view.state).clone_from(&retired);
+    assert!(!journal.delegation_intent_ready("delegation-0").unwrap());
+}
+
+#[test]
+fn a_legacy_ownership_retires_once_its_host_registered_again() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("authority");
+    let mut journal = open(&path);
+    register(&mut journal, 1, 10_000);
+    install(&mut journal, 1, 0, 10_000, true);
+    Arc::make_mut(&mut journal.view.state)
+        .authority_intents
+        .get_mut("ownership-0")
+        .unwrap()
+        .registration_dependency = None;
+    let later = 10_000 + RETENTION_SECONDS + 100;
+    let (kept, _) = retire(&journal.state, later * 1000);
+    assert!(kept.authority_intents.contains_key("ownership-0"));
+    register(&mut journal, 2, later);
+    assert!(!journal.state.authority_intents.contains_key("ownership-0"));
 }
