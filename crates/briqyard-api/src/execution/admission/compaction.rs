@@ -1,7 +1,7 @@
 use super::*;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
-const COMPACTION_PERCENT: usize = 75;
+pub(super) const COMPACTION_PERCENT: usize = 75;
 
 pub struct Compaction {
     pub reclaimed_bytes: usize,
@@ -140,7 +140,7 @@ pub fn maximum_discovery_receipt(intent: &DiscoveryIntent) -> DiscoveryReceipt {
     }
 }
 
-fn allocation_expired(token: &str, earliest_ms: u64) -> bool {
+pub(super) fn allocation_expired(token: &str, earliest_ms: u64) -> bool {
     #[derive(Deserialize)]
     struct Expiry {
         exp: u64,

@@ -26,7 +26,7 @@ pub enum AuthorityPayload {
 }
 
 impl AuthorityPayload {
-    fn fence(&self) -> (String, u64) {
+    pub(super) fn fence(&self) -> (String, u64) {
         match self {
             Self::Registration(r) => (format!("registration:{}", r.host_instance), r.generation),
             Self::Ownership(r) => (format!("ownership:{}", r.installation), r.generation),

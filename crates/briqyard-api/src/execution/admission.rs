@@ -12,6 +12,7 @@ use compaction::{compact_authority, near_capacity, over_capacity};
 use storage::read_state;
 use storage::read_state_size;
 mod compaction;
+mod retirement;
 pub use active::{ActiveOperation, ActivePhase};
 mod authority_install;
 mod delegation_install;
@@ -244,6 +245,7 @@ pub enum Error {
 pub struct Journal {
     view: JournalView,
     published: Arc<RwLock<JournalView>>,
+    stored_bytes: usize,
 }
 
 /// What proves this process still owns the journal directory. Shared by the writer and
@@ -302,6 +304,19 @@ impl Journal {
         if !Arc::ptr_eq(&published.state, &self.view.state) {
             *published = self.view.clone();
         }
+    }
+
+    /// The fullest cap in percent, from the last durable write, once it reaches the
+    /// compaction threshold. Retirement runs before every qualified write, so this is
+    /// what remains after it: a journal heading for `Full`.
+    pub fn capacity_warning(&self) -> Option<usize> {
+        let records = compaction::collection_lengths(&self.state)
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+        let percent =
+            (self.stored_bytes * 100 / MAX_BYTES as usize).max(records * 100 / MAX_RECORDS);
+        (percent >= compaction::COMPACTION_PERCENT).then_some(percent)
     }
 
     /// Clock loss after a durable host ACK must never promote that uncertain

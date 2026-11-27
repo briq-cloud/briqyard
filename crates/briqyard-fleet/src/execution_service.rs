@@ -76,6 +76,9 @@ impl Drop for Held<'_> {
     /// Runs before the inner guard releases the lock, on success, refusal and early return.
     fn drop(&mut self) {
         self.0.publish();
+        if let Some(percent) = self.0.capacity_warning() {
+            tracing::warn!(target: "execution_journal", diagnostic = "execution_journal", percent, "execution journal near capacity after retirement");
+        }
     }
 }
 
@@ -407,6 +410,14 @@ fn value<T: Serialize>(v: T) -> Result<serde_json::Value, StatusCode> {
     serde_json::to_value(v).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 fn install_error(error: crate::execution_install::InstallError) -> StatusCode {
+    if matches!(
+        error,
+        crate::execution_install::InstallError::Journal(
+            briqyard_api::execution::admission::Error::Full
+        )
+    ) {
+        tracing::error!(target: "execution_journal", diagnostic = "execution_journal", stage = "authority_installation", "execution journal full");
+    }
     tracing::warn!(target: "execution_installation", diagnostic = "execution_installation", stage = "authority_installation", category = ?error, "execution installation refused");
     if matches!(
         error,
