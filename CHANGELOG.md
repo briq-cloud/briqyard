@@ -4,9 +4,9 @@
 
 ### Upgrade notes
 
-- The authority now retires operation, delegation, protection and allocation evidence 1 h after its last expiry. Registration, ownership, invalidation, revocation and discovery intents, and their highwater entries, retire once the host's registration generation has moved past them (#278, ADR 0149). The journal stays format v1, and 0.2.11, 0.2.14 and 0.2.16 binaries still read a retired journal.
+- The authority now retires operation, delegation, protection and allocation evidence 1 h after its last expiry. Registration, ownership, invalidation, revocation and discovery intents, and the `ownership:*` and `delegation:*` highwater entries, retire once the host's registration generation has moved past them; `registration:*` highwater stays (#278, ADR 0149). The journal stays format v1, and the 0.2.11, 0.2.14 and 0.2.16 readers open a retired journal (tested against their sources).
 - Nothing is swept at open. A journal that is already full recovers at the host's first registration at the next generation after the upgrade, with no hand edits.
-- New signals with target `execution_journal`: WARN `execution journal near capacity after retirement` at 75 % or more after an authority action, and ERROR `execution journal full` when an installation is refused (OPERATIONS.md).
+- New signals with target `execution_journal`: WARN `execution journal near capacity after retirement` at 75 % or more after an authority action, and ERROR `execution journal full` when an installation is refused. Residue within one registration generation is reclaimed only by the control plane's registration rollover (OPERATIONS.md).
 - The sealed v3.1 primitives (#275) add only refusal-only `briqyardd sealed-guard` and `sealed-custodian` commands; ordinary behavior is unchanged and nothing activates sealed execution.
 - Guest-init source and toolchain are unchanged. Confirm the candidate init checksum against 0.2.16 before reusing existing seeds.
 - No wire format change. Roll the fleet and every host in the usual order.
